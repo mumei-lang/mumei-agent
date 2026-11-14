@@ -5169,26 +5169,31 @@ def test_local_pointer_deref_read_named_pointee_is_admitted(
     assert result.effects == "unknown"
 
 
-def test_deref_write_stays_closed(go_types_helper):
-    # `*t = v` cannot be admitted: `p := &x` aliases a tracked local
-    # and dep sets carry indices, not identities, so an indirected
-    # store cannot be proven not to overwrite a tracked binding.
+def test_deref_write_is_admitted(go_types_helper):
+    # `*t = v` on a bound `*T` parameter — the store lands in memory
+    # the dep model does not track, so only the external mutation
+    # records against the declared pointee identity (`effects`
+    # reports `unknown`); the stored value's deps accumulate for any
+    # later dereference read to observe.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.T, v int64) int64 {\n"
         "\t*t = lib.T(v)\n"
-        "\treturn 0\n}\n"
+        "\treturn int64(v)\n}\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
 
 
-def test_deref_write_alias_case_stays_closed(go_types_helper):
-    # `p := &x; *p = y; return x` — the store lands exactly in a
-    # tracked binding, which the index-only dep model cannot map back.
+def test_deref_write_folds_into_escaped_binding(go_types_helper):
+    # `p := &x; *p = y; return x` — the store may land in `x`, so the
+    # escaped-binding fold unions the stored value's dependencies
+    # into every escaped binding, like `*lib.PV = v` does.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x lib.T, y lib.T) lib.T {\n"
@@ -5200,7 +5205,158 @@ def test_deref_write_alias_case_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_deref_write_no_escape_keeps_deps(go_types_helper):
+    # Without an escaped binding the fold is a no-op — other bindings
+    # keep their deps while the store still records its mutation.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, x lib.T, y int64) lib.T {\n"
+        "\t*t = lib.T(y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_deref_write_local_pointer_is_admitted(go_types_helper):
+    # `q := t; *q = v` — a bound local pointer admits the same way.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, x lib.T, v lib.T) lib.T {\n"
+        "\tq := t\n"
+        "\t*q = v\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_deref_write_unnamed_pointee_stays_closed(go_types_helper):
+    # `p := &b` on a builtin `int64` produces an unnamed `*int64`
+    # binding — no pointee identity to record the mutation against.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(b int64, v int64, z lib.T) int64 {\n"
+        "\tp := &b\n"
+        "\t*p = v\n"
+        "\treturn b\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
     assert not result.available
+
+
+def test_deref_write_then_deref_read_keeps_stored_deps(go_types_helper):
+    # `*t = v; return *t` — the store lands in memory no binding
+    # tracks, but the read may observe exactly that value: deps stored
+    # through any pointer write union back into a dereference read
+    # even when no `&x` escaped.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, v lib.T) lib.T {\n"
+        "\t*t = v\n"
+        "\treturn *t\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_deref_write_through_local_call_keeps_arg_deps(go_types_helper):
+    # `Set(&x, y); return x` — the local callee's `*p = v` store has
+    # unbounded effects, so `x` conservatively gains every argument's
+    # deps like an imported call's `&x` rule.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func Set(p *lib.T, v lib.T) int64 {\n"
+        "\t*p = v\n"
+        "\treturn 0\n}\n"
+        "func F(x lib.T, y lib.T) lib.T {\n"
+        "\tSet(&x, y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_double_deref_write_stays_closed(go_types_helper):
+    # `**t = v` — the operand is itself a dereference, not an
+    # identifier, matching the read side.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t **lib.T, v lib.T) lib.T {\n"
+        "\t**t = v\n"
+        "\treturn v\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_deref_inc_dec_is_admitted(go_types_helper):
+    # `(*p)++` — an increment through a bound pointer mutates the
+    # same untracked memory but is provenance-preserving: `x` keeps
+    # its dependencies across the store.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T) lib.T {\n"
+        "\tp := &x\n"
+        "\t(*p)++\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_deref_dec_unparenthesized_is_admitted(go_types_helper):
+    # `*t--` on a `*T` parameter parses as `(*t)--` and admits the
+    # same way.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, x lib.T) lib.T {\n"
+        "\t*t--\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
 
 
 def test_field_write_through_pointer_is_admitted(go_types_helper):
