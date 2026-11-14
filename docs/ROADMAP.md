@@ -1748,6 +1748,29 @@ was already unusable). True cross-file calls still cannot be made at
 all (single-unit snapshots); this maps invalidation for whatever calls
 the fragment does resolve.
 
+### C07 switch fallthrough
+
+Expression switches admit a terminal `fallthrough` as the final
+statement of a non-final clause, mirroring the C05 positional rule: the
+next clause's body is evaluated twice — once in the carried chain scope
+as a sequential continuation, and once as a fresh alternative from the
+switch scope, because the clause can also be matched directly without
+the preceding clause's writes (`case 1: y = 0; fallthrough; case 2:
+return y` still keeps `y`'s dependency on the switch's entry state).
+A conditional `break` before the fallthrough keeps the continuation's
+writes may-assignments — they execute only when the break was not
+taken. Guards of a fall-through clause are still evaluated
+unconditionally like every other clause's; the fragment already
+over-approximates guard evaluation, and fallthrough chains extend
+transitively across consecutive clauses.
+
+Boundaries: `fallthrough` remains admissible only as the terminal
+statement of a clause — Go rejects a trailing fallthrough in the final
+clause and a non-terminal one upstream at the type check (a defensive
+`unsupported_fallthrough`/`unsupported_statement` gap covers both
+shapes anyway). Type switches, `select`, labelled jumps and `goto`
+stay outside the fragment.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

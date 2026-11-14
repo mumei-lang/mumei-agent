@@ -751,35 +751,82 @@ class _Builder:
             frame = {"kind": "switch", "exited": False}
             self.frames.append(frame)
             try:
-                for clause in node.named_children:
-                    # Each clause is an alternative — a break in one does
-                    # not make another clause's tail unreachable.
-                    frame["exited"] = False
-                    if clause.type == "expression_case":
-                        for sub in clause.named_children:
-                            if sub.type == "expression_list":
-                                # Case guards are evaluated like the tag.
-                                for guard in _children(sub):
-                                    self.expression(
-                                        guard, fn, params, scope,
-                                        transfers, count, 0,
-                                    )
-                            elif sub.type == "statement_list":
-                                branch = dict(scope)
-                                self._sequence(
-                                    _children(sub), fn, params, branch,
-                                    transfers, count, deps, saw_return,
-                                    conditional,
+                clauses = [
+                    c for c in node.named_children
+                    if c.type in {"expression_case", "default_case"}
+                ]
+                branch: dict[str, frozenset[int]] | None = None
+                for index, clause in enumerate(clauses):
+                    body = next(
+                        (
+                            c for c in clause.named_children
+                            if c.type == "statement_list"
+                        ),
+                        None,
+                    )
+                    statements = (
+                        _children(body)
+                        if body is not None
+                        else (
+                            _children(clause)
+                            if clause.type == "default_case"
+                            else []
+                        )
+                    )
+                    falls = (
+                        bool(statements)
+                        and statements[-1].type == "fallthrough_statement"
+                    )
+                    if falls:
+                        if index == len(clauses) - 1:
+                            raise _Unsupported(
+                                "unsupported_fallthrough", _span(clause)
+                            )
+                        statements = statements[:-1]
+                    for sub in clause.named_children:
+                        if sub.type == "expression_list":
+                            # Case guards are evaluated like the tag.
+                            for guard in _children(sub):
+                                self.expression(
+                                    guard, fn, params, scope,
+                                    transfers, count, 0,
                                 )
-                                self._join(scope, branch, params)
-                    elif clause.type == "default_case":
+                    if branch is None:
+                        # Direct match, or the head of a new chain — the
+                        # same fresh alternative doubles as the chain's
+                        # first step when the clause falls through.
+                        frame["exited"] = False
                         branch = dict(scope)
                         self._sequence(
-                            _children(clause), fn, params, branch,
-                            transfers, count, deps, saw_return,
-                            conditional,
+                            statements, fn, params, branch, transfers,
+                            count, deps, saw_return, conditional,
                         )
+                        if not falls:
+                            self._join(scope, branch, params)
+                            branch = None
+                        continue
+                    # Fall-through target — the body runs twice: once in
+                    # the carried chain scope (the fallthrough path, with
+                    # `exited` preserved across the chain), once as a
+                    # fresh alternative (the direct-match path, which
+                    # skips the preceding clause's writes).
+                    self._sequence(
+                        statements, fn, params, branch, transfers,
+                        count, deps, saw_return, conditional,
+                    )
+                    chain_exited = frame["exited"]
+                    frame["exited"] = False
+                    fresh = dict(scope)
+                    self._sequence(
+                        statements, fn, params, fresh, transfers,
+                        count, deps, saw_return, conditional,
+                    )
+                    self._join(scope, fresh, params)
+                    if falls:
+                        frame["exited"] = chain_exited
+                    else:
                         self._join(scope, branch, params)
+                        branch = None
             finally:
                 self.frames.pop()
             if initializer is not None:
