@@ -673,7 +673,7 @@ class _Builder:
 
     def _imported_member_write(
         self, node: Any
-    ) -> tuple[PackageMember, tuple[Any, ...]] | None:
+    ) -> tuple[PackageMember, tuple[Any, ...], bool] | None:
         """The imported member an assignment LHS stores into, or None.
 
         `lib.V = v`, `lib.VA[i] = v`, `lib.VS.f = v` and
@@ -686,7 +686,8 @@ class _Builder:
         base's declared type identity. The returned extras are index
         sub-expressions inside the LHS (`lib.VA[f()] = v`); they must
         still be evaluated for anything that could record a transfer
-        or pin. A LHS that resolves to no
+        or pin; the third element reports whether a `*` deref
+        unwrapped the member. A LHS that resolves to no
         imported member — a bound local's field, a computed operand,
         an unknown name — returns None and keeps the statement
         closed.
@@ -709,7 +710,7 @@ class _Builder:
             )
             if member is None or member.name.encode("utf-8") != node.text:
                 return None
-            return member, ()
+            return member, (), False
         extras: list[Any] = []
         cur = node
         saw_deref = False
@@ -762,12 +763,20 @@ class _Builder:
             return None
         if member is None:
             return None
-        if saw_deref and member.type.kind != "pointer":
-            # `*lib.V = v` on a non-pointer member cannot compile; the
-            # pointer check keeps a tampered record from smuggling a
-            # store past the gate.
+        if saw_deref and (
+            member.type.kind != "pointer" or not member.type.type_id
+        ):
+            # `*lib.V = v` on a non-pointer member cannot compile —
+            # the pointer check keeps a tampered record from
+            # smuggling a store past the gate. The stored type's
+            # identity must also be named: the pointer fact's
+            # `type_id` IS the pointee's identity, so `*lib.PV = v`
+            # pins `T` — while `*lib.PU`, `(*lib.PA)[i]`, `*lib.PPV`
+            # and `**lib.PPV` store into unnamed pointees (`*int64`,
+            # `*[4]int64`, `*T`) whose contents the fact cannot name
+            # and a redeclaration would slip past `stale_dependents`.
             return None
-        return member, tuple(extras)
+        return member, tuple(extras), saw_deref
 
     def _record_member_write(
         self,
@@ -1407,7 +1416,7 @@ class _Builder:
                             raise _Unsupported(
                                 "binding_unavailable", _span(lhs)
                             )
-                        member, extras = member_write
+                        member, extras, _ = member_write
                         self._record_member_write(
                             lhs, member, extras,
                             fn, params, locals_, transfers, count,
@@ -1464,7 +1473,7 @@ class _Builder:
                 # tracks member contents.
                 member_write = self._imported_member_write(lhs)
                 if member_write is not None:
-                    member, extras = member_write
+                    member, extras, _ = member_write
                     self._record_member_write(
                         lhs, member, extras,
                         fn, params, locals_, transfers, count,
@@ -1772,7 +1781,7 @@ class _Builder:
                     else "unsupported_statement",
                     _span(node),
                 )
-            member, extras = member_write
+            member, extras, _ = member_write
             # `lib.V++` mutates package state like `lib.V = v` — the
             # stored amount is external, so only the mutation records.
             self._record_member_write(

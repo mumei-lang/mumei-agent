@@ -2281,12 +2281,16 @@ zero-argument imported transfer against the member's own identity
 (`effects` reports `unknown`, and the member's declared type
 identity — plus a container element's — pins for
 `stale_dependents`). A `*`-dereference operand unwraps the same
-way when it names a pointer-typed `var` member: `*lib.PV = v`,
-`(*lib.PA)[i] = v`, `**lib.PPV = v` and dot-imported `*PV = v`
-store through the member into package state — a non-pointer member
-behind a `*` stays closed (uncompilable), and any unary operator
-other than `*` never unwraps. The stored value's dependencies drop
-with the
+way when it names a pointer-typed `var` member whose pointee is
+named: `*lib.PV = v` and dot-imported `*PV = v` store through the
+member into package state and pin the pointee's identity through
+the pointer fact's `type_id`. A non-pointer member behind a `*`
+stays closed (uncompilable), any unary operator other than `*`
+never unwraps, and a pointer member whose pointee is unnamed
+(`*lib.PU = v` on `*int64`, `(*lib.PA)[i] = v` on `*[4]int64`,
+`*lib.PPV` or `**lib.PPV` on `**T`) stays closed because the fact
+carries no identity for the stored type a redeclaration would
+flag. The stored value's dependencies drop with the
 write because no binding tracks member contents, and a nested index
 expression still evaluates whenever it could record something — a
 call (`lib.VA[f()]`), a conversion, or an imported member read
@@ -2296,7 +2300,9 @@ Compilable closed cases: a computed operand
 (`g()[0] = v` or `*g() = v`) names no member, and a `const`, `func`
 or `type`
 member names no writable storage. Inc/dec statements
-(`lib.V++`, `(*lib.PU)++`) route through this same gate.
+(`lib.V++`, `(*lib.PV)++`) route through this same gate — the
+named-pointee requirement applies to them too (`(*lib.PU)++` stays
+closed).
 
 An index read of an imported container var — `lib.VA[i]` — admits
 through the member record's new element fact: slice and array type

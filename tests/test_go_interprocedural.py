@@ -6051,43 +6051,35 @@ def test_imported_deref_member_write_dot_import(go_types_helper):
     assert result.available
 
 
-def test_imported_deref_member_inc_is_admitted(go_types_helper):
-    # `(*lib.PU)++` — the deref's operand resolves the pointer var,
-    # so the inc/dec gate routes it like `lib.V++`.
+def test_imported_deref_member_inc_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `(*lib.PU)++` — PU is `*int64`; the unnamed pointee carries no
+    # identity the store could pin, so the inc stays closed even
+    # though the operand resolves the pointer var.
     files = _files_member_inc("(*lib.PU)++")
-    report = json.loads(
-        package_report_imports(go_types_helper, files, METHOD_LIB)
-    )
-    members = {m["name"]: m for m in report["imported_members"]}
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available
-    assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["PU"]["id"]
+    assert not result.available
 
 
-def test_imported_deref_index_write_is_admitted(go_types_helper):
-    # `(*lib.PA)[i] = v` — an index through an imported array pointer
-    # mutates the same package state; the index expression still
-    # evaluates for calls.
+def test_imported_deref_index_write_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `(*lib.PA)[i] = v` — PA is `*[4]int64`; the unnamed array
+    # pointee carries no identity the store could pin, so the write
+    # stays closed.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(i int64, v int64) int64 { (*lib.PA)[i] = v\n\treturn 0 }\n"
     }
-    report = json.loads(
-        package_report_imports(go_types_helper, files, METHOD_LIB)
-    )
-    members = {m["name"]: m for m in report["imported_members"]}
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["PA"]["id"]
+    assert not result.available
 
 
 def test_imported_deref_member_write_flags_stale_dependents(go_types_helper):
@@ -6115,45 +6107,55 @@ def test_imported_deref_member_write_flags_stale_dependents(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
-def test_imported_deref_pointer_write_is_admitted(go_types_helper):
-    # `*lib.PPV = lib.PV` — PPV is `**T`; storing a pointer into its
-    # pointee is the same external mutation. The RHS pointer read
-    # records its own transfer alongside the write.
+def test_imported_deref_pointer_write_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*lib.PPV = lib.PV` — PPV is `**T`; the stored `*T` is unnamed
+    # on the wire even though it names T inside, so nothing pins T
+    # against redeclaration and the write stays closed.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 { *lib.PPV = lib.PV\n\treturn 0 }\n"
     }
-    report = json.loads(
-        package_report_imports(go_types_helper, files, METHOD_LIB)
-    )
-    members = {m["name"]: m for m in report["imported_members"]}
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available
-    targets = {c.target for c in result.calls if c.imported}
-    assert targets == {members["PV"]["id"], members["PPV"]["id"]}
+    assert not result.available
 
 
-def test_imported_double_deref_member_write_is_admitted(go_types_helper):
-    # `**lib.PPV = v` — a double dereference still resolves the
-    # pointer member and mutates package state.
+def test_imported_double_deref_member_write_stays_closed(
+    go_types_helper,
+):
+    # `**lib.PPV = v` — PPV is `**T`; the fact's `type_id` is empty
+    # because the stored `*T` is unnamed, so `T` cannot be pinned and
+    # the write stays closed.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(v int64) int64 { **lib.PPV = lib.T(v)\n\treturn 0 }\n"
     }
-    report = json.loads(
-        package_report_imports(go_types_helper, files, METHOD_LIB)
-    )
-    members = {m["name"]: m for m in report["imported_members"]}
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["PPV"]["id"]
+    assert not result.available
+
+
+def test_imported_deref_member_write_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*lib.PU = v` — PU is `*int64`; the fact's `type_id` is empty
+    # because the pointee is unnamed, so the write cannot pin a
+    # stored-type identity and stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { *lib.PU = v\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
 
 
 def test_imported_deref_write_computed_pointer_stays_closed(go_types_helper):
