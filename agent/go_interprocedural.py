@@ -751,35 +751,53 @@ class _Builder:
             frame = {"kind": "switch", "exited": False}
             self.frames.append(frame)
             try:
-                for clause in node.named_children:
+                clauses = [
+                    c for c in node.named_children
+                    if c.type in {"expression_case", "default_case"}
+                ]
+                branch: dict[str, frozenset[int]] | None = None
+                for index, clause in enumerate(clauses):
                     # Each clause is an alternative — a break in one does
-                    # not make another clause's tail unreachable.
-                    frame["exited"] = False
-                    if clause.type == "expression_case":
-                        for sub in clause.named_children:
-                            if sub.type == "expression_list":
-                                # Case guards are evaluated like the tag.
-                                for guard in _children(sub):
-                                    self.expression(
-                                        guard, fn, params, scope,
-                                        transfers, count, 0,
-                                    )
-                            elif sub.type == "statement_list":
-                                branch = dict(scope)
-                                self._sequence(
-                                    _children(sub), fn, params, branch,
-                                    transfers, count, deps, saw_return,
-                                    conditional,
-                                )
-                                self._join(scope, branch, params)
-                    elif clause.type == "default_case":
+                    # not make another clause's tail unreachable — except
+                    # a clause reached by fallthrough, which continues the
+                    # previous clause's body in the same scope.
+                    if branch is None:
+                        frame["exited"] = False
                         branch = dict(scope)
-                        self._sequence(
-                            _children(clause), fn, params, branch,
-                            transfers, count, deps, saw_return,
-                            conditional,
-                        )
+                    statements = next(
+                        (
+                            _children(c)
+                            for c in clause.named_children
+                            if c.type == "statement_list"
+                        ),
+                        _children(clause),
+                    )
+                    falls = (
+                        bool(statements)
+                        and statements[-1].type == "fallthrough_statement"
+                    )
+                    if falls:
+                        if index == len(clauses) - 1:
+                            raise _Unsupported(
+                                "unsupported_fallthrough", _span(clause)
+                            )
+                        statements = statements[:-1]
+                    for sub in clause.named_children:
+                        if sub.type == "expression_list":
+                            # Case guards are evaluated like the tag.
+                            for guard in _children(sub):
+                                self.expression(
+                                    guard, fn, params, scope,
+                                    transfers, count, 0,
+                                )
+                    self._sequence(
+                        statements, fn, params, branch,
+                        transfers, count, deps, saw_return,
+                        conditional,
+                    )
+                    if not falls:
                         self._join(scope, branch, params)
+                        branch = None
             finally:
                 self.frames.pop()
             if initializer is not None:

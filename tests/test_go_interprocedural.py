@@ -642,8 +642,6 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
         # Unsupported switch initializer shapes stay outside the fragment.
         "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { switch v,w:=G(x); v { case 1: return v+w }; return x }",
         "func G(v int64) { _ = v }\nfunc F(x int64) int64 { switch G(x); x { case 1: return x }; return x }",
-        # fallthrough is unmodelled control flow.
-        "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
         # select is unmodelled concurrency.
         "func F(x int64) int64 { select {}; return x }",
         # A switch with an unsupported statement inside a clause is a gap.
@@ -654,6 +652,46 @@ def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
     assert result.gaps
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # A terminal fallthrough runs the next clause's body in the same
+        # scope — `y = z` executes unconditionally after `y = 0` here.
+        (
+            "func F(x, z int64) int64 { y := x; switch x { case 1: y = 0; fallthrough; case 2: y = z; default: }; return y }",
+            frozenset({0, 1}),
+        ),
+        # The fallthrough chain extends across several clauses.
+        (
+            "func F(x, z int64) int64 { y := x; switch x { case 1: fallthrough; case 2: y = x; fallthrough; case 3: y = z }; return y }",
+            frozenset({0, 1}),
+        ),
+        # A conditional break before fallthrough keeps the continuation's
+        # writes conditional — `y = z` may not replace `y = x`.
+        (
+            "func F(x, z int64) int64 { y := x; switch x { case 1: y = x; if x > 0 { break }; y = 0; fallthrough; case 2: y = z }; return y }",
+            frozenset({0, 1}),
+        ),
+        # Fallthrough into default is legal when default is not last —
+        # `case 2` alone leaves `y` at its entry dependency.
+        (
+            "func F(x, z int64) int64 { y := x; switch x { case 1: y = x; fallthrough; default: y = z; case 2: _ = x }; return y }",
+            frozenset({0, 1}),
+        ),
+        # A bare `fallthrough` clause falls straight into the next body.
+        (
+            "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_expression_switch_fallthrough(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
 
 
 @pytest.mark.parametrize(
