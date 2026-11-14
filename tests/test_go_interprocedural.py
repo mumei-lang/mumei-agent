@@ -2425,6 +2425,56 @@ def test_multi_result_unpack_discard_and_mixed_results(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+def test_multi_result_parenthesized_call_with_comment_unpacks(
+    go_types_helper,
+):
+    # `(/* c */ lib.G(x))` — a parenthesized RHS unwraps through any
+    # comments to the call: comments are named children in tree-sitter,
+    # so the unwrap must skip them like `expression()` does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, z := (/* pair */ lib.G(x))\n"
+        "\treturn y + z\n}\n"
+    }
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_results_zero_is_the_absent_equivalent(go_types_helper):
+    # An explicit `"results": 0` is the omitempty default — it validates
+    # on any call kind exactly like an omitted key (the same contract
+    # `method: false` already follows), and a `direct_import` call with
+    # arity zero behaves identically with or without it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.W(x, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    tampered = json.loads(json.dumps(report))
+    tampered["calls"][0]["results"] = 0
+    snapshot = load_go_package_snapshot(
+        json.dumps(tampered).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    tampered = json.loads(json.dumps(report))
+    for c in tampered["calls"]:
+        c["kind"] = "conversion"
+        c["target"] = ""
+        c["results"] = 0
+    load_go_package_snapshot(
+        json.dumps(tampered).encode(), files, target_arch="amd64"
+    )
+
+
 def test_multi_result_arity_mismatch_stays_closed(go_types_helper):
     # `a, b := f()` admits only when the record's declared arity equals
     # the tuple width — a forged `results: 3` on a two-wide unpack must
@@ -2470,6 +2520,7 @@ def test_results_field_rejected_on_non_import_kind(go_types_helper):
     tampered = json.loads(json.dumps(report))
     for c in tampered["calls"]:
         c["kind"] = "conversion"
+        c["target"] = ""
         c["results"] = 2
     with pytest.raises(SnapshotError):
         load_go_package_snapshot(
