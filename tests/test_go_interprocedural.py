@@ -4762,6 +4762,42 @@ def test_named_type_arg_pin_flags_stale_dependents(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
+def test_named_type_arg_only_position_pin_flags_stale(go_types_helper):
+    # `lib.GN[lib.T](0)` — `lib.T` appears ONLY in the type-argument
+    # position: not in `F`'s signature, not in an expression, so neither
+    # signature pinning nor the member-read path can flag `F`. Only the
+    # call record's `type_arg_type_ids` pins it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.GN[lib.T](0) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = {
+        "g.go": "package lib\ntype T2 int64\nfunc GI[T any](v T) T { return v }\n"
+        "func G2[A any, B any](a A, b B) A { return a }\n"
+        "func GV[T any](v T) {}\n"
+        "func GN[T any](v T2) int64 { return 0 }\n",
+        "t.go": "package lib\ntype T int32\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
 def test_named_type_arg_from_second_unit_is_pinned(go_types_helper):
     # `lib.GI[other.U](t)` — the type argument's identity lives in a
     # third unit's coordinate space; it still pins at the call site.
