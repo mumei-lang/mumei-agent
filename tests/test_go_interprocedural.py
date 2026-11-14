@@ -188,6 +188,43 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
 
 
 @pytest.mark.parametrize(
+    "declarations",
+    [
+        # A callee taking a pointer parameter has a non-scalar signature —
+        # the caller cannot pass an address-of without one too.
+        "func G(p *int64) int64 { return *p }; func F(x int64) int64 { return G(&x) }",
+        # An alias of a parameter cannot be bound — `&x` is non-scalar.
+        "func F(x int64) int64 { p := &x; return *p }",
+        # …and neither can it reach a callee through a bound alias.
+        "func G(p *int64) int64 { return *p }; func F(x int64) int64 { q := &x; return G(q) }",
+        # A callee mutating a slice's resource state has a non-scalar
+        # signature; the composite literal argument is unsupported anyway.
+        "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
+        # A callee reading or writing shared package state is opaque —
+        # the global is neither a parameter nor a local of the callee.
+        "var g int64; func G() int64 { g = 1; return g }; func F(x int64) int64 { return G() + x }",
+        "var g int64; func G(v int64) int64 { return g + v }; func F(x int64) int64 { return G(x) }",
+        # Constructor builtins produce non-scalar resource state.
+        "func G(p *int64) int64 { return *p }; func F(x int64) int64 { return G(new(int64)) }",
+        "func F(x int64) int64 { var s []int64; _ = s; return x }",
+        # A channel is resource state — `nil` has no binding either.
+        "func G(c chan int64) int64 { return <-c }; func F(x int64) int64 { return G(nil) }",
+        # A bound function value is non-scalar — indirect dispatch stays
+        # outside the resolved-call fragment.
+        "func G(v int64) int64 { return v }; func F(x int64) int64 { h := G; return h(x) }",
+        # A literal closure is a non-scalar binding too.
+        "func F(x int64) int64 { h := func() int64 { return x }; return h() }",
+    ],
+)
+def test_interprocedural_alias_and_resource_state_stay_unsupported(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available and result.return_dependencies is None
+    assert result.effects == "unknown" and result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations,expected",
     [
         # A let binding propagates its initializer's dependencies.
