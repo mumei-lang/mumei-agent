@@ -1617,6 +1617,18 @@ branch and loop joins already use; reachability is still not proven.
 Labelled `break`/`continue`, `goto`, `defer`, `go`, and non-identifier
 inc/dec operands stay `unsupported_statement`/`binding_unavailable`.
 
+### C07 statement initializers on if and switch
+
+`if` and expression `switch` statements accept a simple-statement
+`initializer` — `if v := f(); v > 0 { ... }` and `switch v := f(); v {
+... }` — handled by the same mechanism as a for-clause initializer: the
+statement is dispatched normally before the condition or tag is
+evaluated, and a bound name is scoped to the statement (a later
+out-of-scope reference simply never resolves). Initializer forms
+outside the fragment — multi-name declarations, compound assignments,
+expression/send statements — stay `unsupported_statement` /
+`binding_unavailable` through the same dispatch.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -6,14 +6,17 @@ explicit scalar return expressions; the result unions every syntactic return's
 dependencies (unreachable returns included — reachability is not proven). A
 ``for`` clause may hold one let-binding initializer, a supported condition and
 an inc/dec update on a bound scalar; ``range``, ``break``/``continue``,
-compound operators, tuples, ``if`` initializers and every other statement shape
+compound operators, tuples and every other statement shape
 stay unsupported. A scalar ``x = expression`` reassignment replaces the
 binding's dependencies — it never declares a new variable. Loop bodies are
 joined to a widening fixed point so dependencies propagating across
 iterations are captured (joins, not unrolls — trip counts are never
-modelled). Expression ``switch`` statements with neither initializer nor
-``fallthrough`` join the same way: the tag and every case guard are
-evaluated (effect-free), each clause body runs in its own scope and its
+modelled). ``if`` and expression ``switch`` statements accept a
+simple-statement ``initializer`` — the same mechanism as a for-clause
+init, with the bound name scoped to the statement (a later out-of-scope
+reference simply never resolves). ``switch`` without ``fallthrough``
+joins the same way: the tag and every case guard are evaluated
+(effect-free), each clause body runs in its own scope and its
 reassignments union back. ``var`` declarations bind like lets — one name
 per ``var_spec`` with at most one value; ``var x T`` is the dep-free zero
 value (grouped ``var (...)`` forms are a parser gap). ``x++``/``x--`` on a
@@ -423,12 +426,17 @@ class _Builder:
         if kind == "if_statement":
             condition = node.child_by_field_name("condition")
             consequence = node.child_by_field_name("consequence")
-            if (
-                node.child_by_field_name("initializer") is not None
-                or condition is None
-                or consequence is None
-            ):
+            if condition is None or consequence is None:
                 raise _Unsupported("unsupported_statement", _span(node))
+            initializer = node.child_by_field_name("initializer")
+            if initializer is not None:
+                # `if init; cond` runs a simple statement first — the
+                # same mechanism as a for-clause initializer, with the
+                # bound name scoped to the statement.
+                self.statement(
+                    initializer, fn, params, locals_, transfers, count,
+                    deps, saw_return, conditional,
+                )
             # The condition is evaluated but its dependencies cannot reach
             # the result: every fragment statement is effect-free.
             self.expression(
@@ -587,8 +595,14 @@ class _Builder:
             self._join(locals_, scope, params)
             return
         if kind == "expression_switch_statement":
-            if node.child_by_field_name("initializer") is not None:
-                raise _Unsupported("unsupported_statement", _span(node))
+            initializer = node.child_by_field_name("initializer")
+            if initializer is not None:
+                # `switch init; tag` runs a simple statement first — the
+                # bound name is scoped to the switch.
+                self.statement(
+                    initializer, fn, params, locals_, transfers, count,
+                    deps, saw_return, conditional,
+                )
             value = node.child_by_field_name("value")
             if value is not None:
                 # The tag is evaluated but its dependencies cannot reach the
