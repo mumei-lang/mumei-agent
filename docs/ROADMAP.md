@@ -2008,7 +2008,11 @@ equivalence), and a member whose type fact has no `type_id` (basic,
 unnamed or composite types) pins nothing. Pins attach only on
 admitted reads: a read of a member declared with a non-scalar named
 type stays closed before any pin applies, and an unavailable summary
-still records none. Package-level constant reads remain
+still records none. A *local* binding that merely names an imported
+type (`var x lib.T`) records no pin either — its admission never
+depends on the type's identity, so redeclaring `T` only reaches it
+through the consumer report's own regenerated type facts.
+Package-level constant reads remain
 dependency-free but their *values* are not modelled — the fragment
 tracks what a result depends on, not what a constant equals.
 Selector reads remain limited to a plain package-qualified name:
