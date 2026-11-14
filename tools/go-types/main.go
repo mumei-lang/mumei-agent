@@ -149,6 +149,13 @@ type member struct {
 	Kind             string   `json:"kind"`
 	Type             typeFact `json:"type"`
 	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
+	// PointeeTypeIDs declares the named/alias identities a pointer-typed
+	// var's pointee mentions, at any depth of pointer, slice, array, map
+	// or channel constructors — `**T` declares `[T]`; `*int64` declares
+	// `[]`. The key is present only when the pointee tree resolves
+	// fully (no signature, struct, interface or type parameter inside),
+	// so its absence — not just an empty list — means unpinnable.
+	PointeeTypeIDs *[]string `json:"pointee_type_ids,omitempty"`
 }
 
 type snapshot struct {
@@ -588,6 +595,21 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 				if eid := ix.typeID(elem); eid != "" {
 					ix.recordMember(elem, eid)
 				}
+			}
+			// Deeper pointees (`**T`, `*[]*T`) still name identities a
+			// dereference store needs pinned — collect them like type
+			// arguments do; a fully unnamed pointee (`*int64`) resolves
+			// to the empty list, which the member's own identity then
+			// covers completely.
+			var pointeeIDs []string
+			if ix.collectTypeArgIDs(ptr.Elem(), map[string]bool{}, &pointeeIDs) {
+				if pointeeIDs == nil {
+					pointeeIDs = []string{}
+				}
+				m.PointeeTypeIDs = &pointeeIDs
+				// `m` was stored by value above — put the updated
+				// record back so the key actually serializes.
+				ix.importMembers[id] = m
 			}
 		}
 	}

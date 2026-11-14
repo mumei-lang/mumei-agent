@@ -942,17 +942,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if member is None:
             return None
         if saw_deref and (
-            member.type.kind != "pointer" or not member.type.type_id
+            member.type.kind != "pointer"
+            or (
+                not member.type.type_id
+                and member.pointee_type_ids is None
+            )
         ):
             # `*lib.V = v` on a non-pointer member cannot compile —
             # the pointer check keeps a tampered record from
             # smuggling a store past the gate. The stored type's
-            # identity must also be named: the pointer fact's
-            # `type_id` IS the pointee's identity, so `*lib.PV = v`
-            # pins `T` — while `*lib.PU`, `(*lib.PA)[i]`, `*lib.PPV`
-            # and `**lib.PPV` store into unnamed pointees (`*int64`,
-            # `*[4]int64`, `*T`) whose contents the fact cannot name
-            # and a redeclaration would slip past `stale_dependents`.
+            # named identities must also pin: the pointer fact's
+            # `type_id` IS a named pointee's identity, so `*lib.PV = v`
+            # pins `T`, and `pointee_type_ids` covers deeper named
+            # uses — `*lib.PPV` on `**T` pins `T`, while a fully
+            # unnamed pointee (`*lib.PU` on `*int64`, `(*lib.PA)[i]`
+            # on `*[4]int64`) resolves to the empty list the member's
+            # own identity covers. An unresolvable pointee tree
+            # (`*struct{F T}`) emits no key — an inner redeclaration
+            # would slip past `stale_dependents` — so it stays closed.
             return None
         return member, tuple(extras), saw_deref
 
@@ -974,6 +981,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # tampered member record cannot smuggle a write through.
             raise _Unsupported("unsupported_statement", _span(lhs))
         self._pin_member_type(member)
+        if member.pointee_type_ids:
+            # A pointer var's deeper named uses — `**T` pins `T` so
+            # `type T`'s redeclaration flags the stored write.
+            self.pinned.update(member.pointee_type_ids)
         key = member.type.key
         if key is not None and key.type_id:
             # `map[K]V` — a named key's identity pins like the
