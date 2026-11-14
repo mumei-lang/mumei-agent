@@ -2177,6 +2177,24 @@ pointer to an unnamed or composite pointee (`*int64`, `**T`,
 `*struct{…}`) pins nothing — the pointee names no type identity —
 but the binding still tracks its dep set like any scalar.
 
+Pointer *values* flow through the fragment too: `&x` inherits its
+operand's dep set like any unary (non-addressable operands fail the
+producer's own type check), imported calls may return pointers
+(`lib.R(t)` — `allScalarResults` admits a `*T` result since the
+arg-union dep set is the same), and pointer-typed imported `var`
+reads (`lib.PV`) stay dep-free like scalar member reads while still
+emitting the staleness transfer. A mixed tuple
+`a, b := lib.RR(t)` unpacks at its declared arity with a `*T`
+binding storing the pointer half. Passing `&x` to an imported
+callee hands it a writable alias of `x`, so afterwards `x`
+conservatively depends on every call argument. A pointer result
+never admits a generic callee through its declared signature —
+`func G[P any](v P) *P` still goes through the instantiation
+gate. What stays closed: writing
+through a pointer (`*t = v`, `p.f = v` — the LHS gate requires a
+bare identifier), `&` on anything but a fragment operand, and
+imported `var` *writes* of any type.
+
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when
 `x` is a plain local variable that names `T` through no member read,

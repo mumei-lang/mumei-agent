@@ -212,6 +212,14 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 		out.Functions[0].Parameters[0].Type.TypeID != tID {
 		t.Fatal("a pointer parameter lost its pointee identity")
 	}
+	// A pointer-typed result keeps the call on the `direct_import`
+	// path — the arg-union dep set is the same as a scalar result's.
+	imports[0].Sources[0].Source += "\nfunc R(t *T) *T { return t }"
+	unit[0].Source = "package p\nimport \"lib\"\nfunc F(t *lib.T) *lib.T { return lib.R(t) }"
+	out = analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_import" {
+		t.Fatal("a pointer-typed imported result was rejected")
+	}
 }
 
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
