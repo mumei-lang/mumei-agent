@@ -707,6 +707,15 @@ def test_scalar_conversion_shapes_stay_unsupported(
             "func F(x, y int64) int64 { if v := min(x, y); v > 0 { return v }; return 0 }",
             frozenset({0, 1}),
         ),
+        # Parenthesized callees are still the same builtin.
+        (
+            "func F(x, y int64) int64 { return (min)(x, y) }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { return ((max))(x, y) }",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_pure_builtin_dependencies(go_types_helper, declarations, expected):

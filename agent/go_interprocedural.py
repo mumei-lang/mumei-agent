@@ -795,6 +795,13 @@ class _Builder:
                 # rest stay opaque (`len`/`cap` can only take values no
                 # supported binding can hold).
                 function_node = node.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        iter(function_node.named_children), None
+                    )
                 name = function_node.text if function_node is not None else b""
                 if name not in {b"min", b"max"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
