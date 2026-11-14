@@ -622,7 +622,8 @@ class _Builder:
         recorded write target, the same way `t.f = v` records the
         base's declared type identity. The returned extras are index
         sub-expressions inside the LHS (`lib.VA[f()] = v`); they must
-        still be evaluated for their calls. A LHS that resolves to no
+        still be evaluated for anything that could record a transfer
+        or pin. A LHS that resolves to no
         imported member — a bound local's field, a computed operand,
         an unknown name — returns None and keeps the statement
         closed.
