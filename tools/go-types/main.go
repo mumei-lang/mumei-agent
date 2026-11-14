@@ -241,6 +241,15 @@ func (ix *indexer) directImportMethodID(f *types.Func) (string, bool) {
 	if _, ok := named.Underlying().(*types.Interface); ok {
 		return "", false
 	}
+	// A generic or instantiated receiver (`T[P]`, `lib.T[lib.U]`) names
+	// more types than the member records pin — redeclaring a type
+	// argument would churn no recorded identity, so it stays closed.
+	if named.TypeParams() != nil && named.TypeParams().Len() > 0 {
+		return "", false
+	}
+	if named.TypeArgs() != nil && named.TypeArgs().Len() > 0 {
+		return "", false
+	}
 	return id, true
 }
 

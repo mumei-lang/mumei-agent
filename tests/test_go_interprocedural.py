@@ -3612,6 +3612,8 @@ METHOD_LIB = {
         "func (t T) Bad(v int64) (int64, int64) { return v, v }\n"
         "func (t *T) PM(v int64) int64 { return v }\n"
         "type I interface{ M(int64) int64 }\n"
+        "type GT[P any] int64\n"
+        "func (t GT[P]) GM(v int64) int64 { return v }\n"
         "var V T\nconst K T = 7\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
@@ -3708,6 +3710,28 @@ def test_imported_interface_method_stays_closed(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(i lib.I, x int64) int64 { return i.M(x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_generic_receiver_method_stays_closed(go_types_helper):
+    # `lib.GT[lib.T]` — an instantiated receiver names more types than
+    # the member records pin (`GT` only): redeclaring `T` would churn
+    # no recorded identity, so the call stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "var x lib.GT[lib.T]\n"
+        "func F(y int64) int64 { return x.GM(y) }\n"
     }
     report = json.loads(
         package_report_imports(go_types_helper, files, METHOD_LIB)

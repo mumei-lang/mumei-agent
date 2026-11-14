@@ -2145,7 +2145,10 @@ Boundaries: interface receivers stay `method_generic_or_variadic`
 not cover the implementations actually reached. Method expressions
 (`lib.T.M(t, x)`, where the receiver is a leading parameter), local
 methods, multi-valued method results and generic methods are
-unchanged and closed. The `method` key is optional on the wire:
+unchanged and closed — as are generic or instantiated receiver types
+(`lib.T[lib.U]`): the member records pin the receiver's named type but
+not the instantiation's type arguments, so redeclaring one would churn
+no recorded identity. The `method` key is optional on the wire:
 reports predating it keep validating, and it is rejected on any
 non-`direct_import` call.
 
