@@ -2282,12 +2282,21 @@ must keep it. The store is an external mutation, so it also records a
 zero-argument imported transfer against the base's declared type
 identity — `effects` reports `unknown` like an imported var read,
 and a redeclaration of that type flags the summary via
-`stale_dependents`. A `*t = v` dereference stays closed: `p := &x`
-aliases a tracked local and dep sets carry indices, not identities,
-so an indirected store cannot be proven not to overwrite a tracked
-binding. Unbound bases keep the statement closed, as do `&` on
-anything but a fragment operand and dereference writes through a
-bound local pointer (`*p = v`).
+`stale_dependents`. A `*t = v` dereference store admits too, routed
+through the escaped-binding fold: `p := &x` may aim the pointer at
+any tracked local, and dep sets carry indices, not identities, so
+the store cannot be proven to miss one — unioning the stored
+value's dependencies into every escaped binding is the same
+over-approximation `*lib.PV = v` uses, and the pointee's declared
+identity records the external mutation (`effects` reports
+`unknown`). The gate classifies the pointee exactly like the
+`*lib.PV` read: the operand must be a bound identifier whose
+pointer names a scalar or pointer pointee, so `p := &b` on a
+builtin `int64` (unnamed `*int64`), `**t = v`, and a computed
+pointer stay closed; `(*p)++` and `*t--` admit the same way
+without a fold — an increment is provenance-preserving, so an
+aliased binding keeps its deps. Unbound bases keep the statement
+closed, as does `&` on anything but a fragment operand.
 
 Writes to imported `var` members admit through the same external-
 mutation rule: `lib.V = v`, `lib.VA[i] = v` and `lib.VS.f = v` — and

@@ -907,6 +907,66 @@ class _Builder:
             return None
         return binding.type.type_id, ref
 
+    def _bound_pointer_write(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> str | None:
+        """A `*p = v` store through a bound pointer.
+
+        `p := &x` may aim the pointer at any escaped binding — dep
+        sets track binding indices, never pointee contents, so the
+        store cannot be proven to miss tracked state. It admits only
+        through the escaped-binding fold (the `_ALIAS_FOLD` sentinel
+        the caller installs): unioning the stored value's deps into
+        every escaped binding is the same over-approximation
+        `*lib.PV = v` uses. Returns the declared pointee identity
+        for the mutation's transfer record — or None when the LHS is
+        not a bound-pointer dereference, the binding's pointer names
+        no pointee (`*int64`), or the pointee names a non-scalar
+        shape, matching the `*t` read gate.
+        """
+        cur = node
+        while cur is not None and cur.type == "parenthesized_expression":
+            cur = next(
+                (c for c in cur.named_children if c.type != "comment"),
+                None,
+            )
+        if cur is None or cur.type != "unary_expression":
+            return None
+        operator = cur.child_by_field_name("operator")
+        if operator is None or operator.text != b"*":
+            return None
+        inner = cur.child_by_field_name("operand")
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(inner))
+        if ref is None or (
+            ref.binding_id not in locals_ and ref.binding_id not in params
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type.kind != "pointer"
+            or not binding.type.type_id
+        ):
+            return None
+        target = self.members.get(binding.type.type_id)
+        if (
+            target is None
+            or target.kind != "type"
+            or target.type.kind not in {"integer", "boolean", "pointer"}
+        ):
+            return None
+        return binding.type.type_id
+
     def _imported_pointer_deref(
         self,
         node: Any,
@@ -1514,10 +1574,10 @@ class _Builder:
                 # so a zero-argument imported transfer against the
                 # base's declared type identity records it, marking
                 # `effects` unknown like an imported var read. A
-                # `*t = v` dereference stays closed: `p := &x`
-                # aliases a tracked local and dep sets carry indices,
-                # not identities, so an indirected store cannot be
-                # proven not to overwrite a tracked binding.
+                # `*t = v` dereference admits further below through
+                # the escaped-binding fold: `p := &x` may aim the
+                # store at a tracked local, so the union keeps it
+                # sound.
                 write_target = self._opaque_write_target(
                     lhs, locals_, params
                 )
@@ -1561,6 +1621,33 @@ class _Builder:
                     # slot so the store loop unions the stored value's
                     # dependencies into every escaped binding.
                     refs.append(_ALIAS_FOLD if saw_deref else None)
+                    continue
+                # `*p = v` — a store through a bound pointer lands in
+                # memory the dep model does not track: the pointee's
+                # declared identity records the external mutation
+                # (`effects` reports `unknown`), and the stored
+                # value's dependencies fold into every escaped
+                # binding because `p := &x` may have aimed the
+                # pointer at any of them — the same approximation
+                # `*lib.PV = v` uses.
+                pointee_id = self._bound_pointer_write(
+                    lhs, locals_, params
+                )
+                if pointee_id is not None:
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            pointee_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    refs.append(_ALIAS_FOLD)
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
             # Tuple assignment is parallel: every RHS evaluates against the
@@ -1867,27 +1954,51 @@ class _Builder:
                     # x++ / x-- change the value, never its dependencies.
                     return
             member_write = self._imported_member_write(operand)
-            if member_write is None:
-                raise _Unsupported(
-                    "binding_unavailable"
-                    if operand.type == "identifier"
-                    else "unsupported_statement",
-                    _span(node),
+            if member_write is not None:
+                member, extras, _ = member_write
+                # `lib.V++` mutates package state like `lib.V = v` —
+                # the stored amount is external, so only the
+                # mutation records.
+                self._record_member_write(
+                    operand,
+                    member,
+                    extras,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
                 )
-            member, extras, _ = member_write
-            # `lib.V++` mutates package state like `lib.V = v` — the
-            # stored amount is external, so only the mutation records.
-            self._record_member_write(
-                operand,
-                member,
-                extras,
-                fn,
-                params,
-                locals_,
-                transfers,
-                count,
+                return
+            # `(*p)++` — an increment through a bound pointer mutates
+            # the same untracked memory `*p = v` does, but is
+            # provenance-preserving: an aliased binding keeps its own
+            # deps across the store, so no fold is needed — only the
+            # external mutation records.
+            pointee_id = self._bound_pointer_write(
+                operand, locals_, params
             )
-            return
+            if pointee_id is not None:
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            operand.start_byte,
+                            operand.end_byte,
+                        ),
+                        pointee_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return
+            raise _Unsupported(
+                "binding_unavailable"
+                if operand.type == "identifier"
+                else "unsupported_statement",
+                _span(node),
+            )
         if kind in {"break_statement", "continue_statement"}:
             if any(c.type == "label_name" for c in node.named_children):
                 raise _Unsupported("unsupported_statement", _span(node))
