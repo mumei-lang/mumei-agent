@@ -209,13 +209,16 @@ func (ix *indexer) directImportID(f *types.Func) (string, bool) {
 }
 
 // directImportInstantiation admits an explicit instantiation of an imported
-// generic function `lib.G[int64](...)` only when every type argument and every
-// instantiated parameter is a basic type and the instantiated result is
-// scalar. That keeps every type identity the call site can depend on basic:
-// named/alias type arguments or parameters would add identities the member
-// record's declared-signature pins cannot cover. The dependency model is the
-// same opaque `direct_import` shape — the result depends on every evaluated
-// argument. Inferred calls `lib.G(x)` keep their existing classification.
+// generic function `lib.G[int64](...)` only when every type argument is a
+// basic type, every instantiated parameter is basic-underlying, and the
+// instantiated result is scalar. A substituted type-parameter identity is
+// declared nowhere, so a named/alias type argument could never be covered by
+// the member record's signature pins; a *declared* named parameter type
+// (`func G[T any](v T2)`) is already pinned by `signature_type_ids`, while a
+// composite instantiated parameter (`[]T`) is outside the scalar fragment
+// anyway. The dependency model is the same opaque `direct_import` shape —
+// the result depends on every evaluated argument. Inferred calls `lib.G(x)`
+// keep their existing classification.
 func (ix *indexer) directImportInstantiation(x ast.Expr) (string, bool) {
 	sel, ok := x.(*ast.SelectorExpr)
 	if !ok {

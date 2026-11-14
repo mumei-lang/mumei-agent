@@ -2096,10 +2096,13 @@ including its type-parameter identities — pin the call site as with
 any other imported call.
 
 The basic-type restriction keeps the admitted surface inside the
-member record's pin coverage: a named or alias type argument or
-instantiated parameter (`lib.G[lib.T](v)`) would introduce a type
-identity no pin declares, so those instantiations stay
-`indirect_or_selector`. The consumer admits the call through the
+member record's pin coverage: a substituted type-parameter identity
+is declared nowhere, so a named/alias type argument
+(`lib.G[lib.T](v)`) could never be pinned and stays
+`indirect_or_selector`. A *declared* named parameter
+(`func G[T any](v T2)`) is already pinned by `signature_type_ids`;
+only composite instantiated parameters (`[]T`) are rejected, as
+outside the scalar fragment. The consumer admits the call through the
 same `direct_import` path — tree-sitter parses the single-type-arg
 form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
 arm maps that node shape onto the recorded call; multi-type-arg

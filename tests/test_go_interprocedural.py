@@ -3370,9 +3370,10 @@ def test_stale_dependents_propagates_transitively(go_types_helper):
 
 GENERIC_LIB = {
     "lib": {
-        "g.go": "package lib\nfunc GI[T any](v T) T { return v }\n"
+        "g.go": "package lib\ntype T2 int64\nfunc GI[T any](v T) T { return v }\n"
         "func G2[A any, B any](a A, b B) A { return a }\n"
-        "func GV[T any](v T) {}\n",
+        "func GV[T any](v T) {}\n"
+        "func GN[T any](v T2) int64 { return 0 }\n",
         "t.go": "package lib\ntype T int64\n",
     }
 }
@@ -3499,6 +3500,31 @@ def test_local_generic_instantiation_stays_closed(go_types_helper):
     assert report["calls"][0]["kind"] == "method_generic_or_variadic"
 
 
+def test_imported_generic_declared_named_param_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.GN[int64](lib.T2(x)) }\n"
+    }
+    # The instantiated parameter is the declared named type `T2` — its
+    # identity is already covered by the member record's signature pins,
+    # so the call is admitted (only composite/substituted params are not).
+    report = json.loads(
+        package_report_imports(go_types_helper, files, GENERIC_LIB)
+    )
+    assert report["status"] == "ok"
+    calls = {c["kind"] for c in report["calls"]}
+    assert "direct_import" in calls and "conversion" in calls
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
 def test_imported_generic_instantiation_flags_stale_dependents(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
@@ -3511,9 +3537,10 @@ def test_imported_generic_instantiation_flags_stale_dependents(go_types_helper):
     )
     summaries = ip.summarize_go_package(files, snapshot)
     lib2 = {
-        "g.go": "package lib\n\nfunc GI[T any](v T) T { return v }\n"
+        "g.go": "package lib\n\ntype T2 int64\nfunc GI[T any](v T) T { return v }\n"
         "func G2[A any, B any](a A, b B) A { return a }\n"
-        "func GV[T any](v T) {}\n",
+        "func GV[T any](v T) {}\n"
+        "func GN[T any](v T2) int64 { return 0 }\n",
         "t.go": "package lib\ntype T int64\n",
     }
     snapshot2 = load_go_package_snapshot(
