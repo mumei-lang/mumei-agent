@@ -2340,6 +2340,8 @@ MULTI_LIB = {
         "func H(a int64) (int64, bool) { return a, true }\n"
         "func W(a int64, b int64) int64 { return a + b }\n"
         "func GI[P any](x P) (P, P) { return x, x }\n"
+        "func GI2[P any, Q any](x P, y Q) (P, Q) { return x, y }\n"
+        "func GC[P any](x P) (P, []P) { return x, nil }\n"
     }
 }
 
@@ -2568,14 +2570,79 @@ def test_multi_result_call_discarded_statement_and_spread(go_types_helper):
     assert len(imported) == 3
 
 
-def test_multi_result_generic_instantiation_stays_closed(go_types_helper):
-    # Instantiation admission (`lib.GI[int64](x)`) is pinned to a
-    # declared signature — it keeps the single-result gate for now.
+def test_multi_result_generic_instantiation_unpacks(go_types_helper):
+    # `lib.GI[int64](x)` — the instantiation gate shares the
+    # all-scalar-at-any-arity rule: a two-result instantiation
+    # declares `results: 2` and unpacks like a plain call. A
+    # single-type-arg form parses as `type_conversion_expression`, so
+    # this also covers the conversion-shaped RHS in tuple position.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
         "\ty, z := lib.GI[int64](x)\n"
         "\treturn y + z\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["results"] == 2
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_multi_type_arg_instantiation_unpacks(
+    go_types_helper,
+):
+    # `lib.GI2[int64, bool](x, c)` — a multi-type-arg instantiation
+    # parses as `call_expression` and unpacks through the same path.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, c bool) int64 {\n"
+        "\ty, _ := lib.GI2[int64, bool](x, c)\n"
+        "\treturn y\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["results"] == 2
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    # `y` carries the union of *every* argument — the opaque-callee
+    # model cannot tell which result reads which parameter.
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_multi_result_dot_imported_instantiation_unpacks(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, z := GI[int64](x)\n"
+        "\treturn y + z\n}\n"
+    }
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_instantiation_with_composite_result_stays_closed(go_types_helper):
+    # `lib.GC[int64](x)` instantiates `(int64, []int64)` — a composite
+    # result at any arity keeps the call `external_or_bodyless`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, _ := lib.GC[int64](x)\n"
+        "\treturn y\n}\n"
     }
     report = json.loads(
         package_report_imports(go_types_helper, files, MULTI_LIB)

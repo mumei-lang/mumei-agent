@@ -2091,10 +2091,12 @@ differ; detection, not equivalence.
 An explicit instantiation of an imported generic function —
 `lib.G[int64](x)` — now classifies as `direct_import` when every
 type argument and every instantiated parameter is a basic type and
-the instantiated signature returns at most one scalar result. The
+every instantiated result is scalar. The
 producer resolves the instantiation through `types.Info.Instances`
 (newly recorded on the info map) and applies the same scalar-result
-rule as `directImportID`, against the *instantiated* signature. The
+rule as `directImportID`, against the *instantiated* signature —
+at any arity, with the arity declared on the call record's
+`results` field exactly like a non-generic callee. The
 dependency model is the existing opaque shape: the result depends on
 every evaluated argument, and the member record's
 `signature_type_ids` — which cover the generic's declared signature,
@@ -2123,9 +2125,11 @@ basic type arguments (`G[lib.T](v)` stays `external_or_bodyless`,
 since the declared-signature check alone would let a named type
 argument through unpinned). Instantiated generic *types*
 (`lib.S[int64](x)`), local generics and methods
-are unchanged and closed — as are multi-valued instantiated results
-(the instantiation gate keeps the single-result rule; non-generic
-multi-valued callees are admitted at declared arity). A void
+are unchanged and closed. A multi-valued instantiated callee
+(`a, b := lib.G[int64](x)`) unpacks at its declared `results`
+arity through the same tuple rule as any `direct_import` call —
+including the single-type-arg `type_conversion_expression` shape
+in RHS position. A void
 instantiated callee records its
 argument-dependency union like any other `direct_import` transfer.
 
@@ -2199,8 +2203,9 @@ Boundaries: a composite result anywhere in the tuple keeps the call
 `external_or_bodyless`; an arity mismatch between the record and the
 left-hand width stays `unsupported_statement`, as does a parenthesized
 RHS unwrapping to anything but a matching call. The instantiation
-gate (`lib.G[T](x)`) keeps its single-result rule — a multi-valued
-instantiated callee stays closed. The `results` key is optional on
+gate (`lib.G[T](x)`) shares the tuple rule — a multi-valued
+instantiated callee unpacks at its instantiated `results` arity
+(composite instantiated results still stay closed). The `results` key is optional on
 the wire — reports predating it keep validating — and it is rejected
 for any non-`direct_import` call, for arity below two, and for a
 non-integer value. A forged arity that still validates is caught at

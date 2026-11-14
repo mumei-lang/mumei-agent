@@ -196,12 +196,6 @@ func allScalarResults(sig *types.Signature) bool {
 	return true
 }
 
-// scalarResults admits a signature only when it returns zero results or a
-// single scalar (integer/boolean) result.
-func scalarResults(sig *types.Signature) bool {
-	return sig.Results().Len() <= 1 && allScalarResults(sig)
-}
-
 // directImportID admits an imported call only when it is summarizable:
 // every result must be scalar (integer/boolean), at any arity. Composite
 // results stay `external_or_bodyless` — a `range` over a composite would
@@ -263,8 +257,9 @@ func (ix *indexer) directImportMethodID(f *types.Func) (string, int, bool) {
 
 // directImportInstantiation admits an explicit instantiation of an imported
 // generic function `lib.G[int64](...)` only when every type argument is a
-// basic type, every instantiated parameter is basic-underlying, and the
-// instantiated result is scalar. A substituted type-parameter identity is
+// basic type, every instantiated parameter is basic-underlying, and every
+// instantiated result is scalar — arity rides on the record like any other
+// `direct_import`. A substituted type-parameter identity is
 // declared nowhere, so a named/alias type argument could never be covered by
 // the member record's signature pins; a *declared* named parameter type
 // (`func G[T any](v T2)`) is already pinned by `signature_type_ids`, while a
@@ -272,56 +267,60 @@ func (ix *indexer) directImportMethodID(f *types.Func) (string, int, bool) {
 // anyway. The dependency model is the same opaque `direct_import` shape —
 // the result depends on every evaluated argument. Inferred calls `lib.G(x)`
 // keep their existing classification.
-func (ix *indexer) directImportInstantiation(x ast.Expr) (string, bool) {
+func (ix *indexer) directImportInstantiation(x ast.Expr) (string, int, bool) {
 	sel, ok := unparen(x).(*ast.SelectorExpr)
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	if _, isPkg := ix.info.Uses[pkg].(*types.PkgName); !isPkg {
-		return "", false
+		return "", 0, false
 	}
 	f, ok := ix.info.Uses[sel.Sel].(*types.Func)
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	return ix.importedInstantiationID(f, sel.Sel)
 }
 
 // importedInstantiationID admits an instantiated generic function call only
 // when every type argument is basic, every instantiated parameter is
-// basic-underlying, and the instantiated result is scalar — the same rule
+// basic-underlying, and every instantiated result is scalar — the same rule
 // `directImportInstantiation` applies to `lib.G[int64](...)`. It is used for
 // unqualified (dot-imported or plain) instantiation callees too: checking the
 // *declared* signature there would let a named type argument through with no
-// pin covering its identity.
-func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (string, bool) {
+// pin covering its identity. The result arity is returned alongside so a
+// multi-valued instantiation declares it like any `direct_import` callee.
+func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (string, int, bool) {
 	inst, ok := ix.info.Instances[ident]
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	for i := 0; i < inst.TypeArgs.Len(); i++ {
 		if _, ok := inst.TypeArgs.At(i).(*types.Basic); !ok {
-			return "", false
+			return "", 0, false
 		}
 	}
 	isig, ok := inst.Type.(*types.Signature)
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	for i := 0; i < isig.Params().Len(); i++ {
 		if _, ok := isig.Params().At(i).Type().Underlying().(*types.Basic); !ok {
-			return "", false
+			return "", 0, false
 		}
 	}
-	if !scalarResults(isig) {
-		return "", false
+	if !allScalarResults(isig) {
+		return "", 0, false
 	}
 	id := ix.importedID(f)
-	return id, id != ""
+	if id == "" {
+		return "", 0, false
+	}
+	return id, isig.Results().Len(), true
 }
 
 // Import implements types.Importer against the host-declared import map.
@@ -689,8 +688,8 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	var instIdent *ast.Ident
 	switch e := fun.(type) {
 	case *ast.IndexExpr:
-		if id, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id, false, 0
+		if id, arity, ok := ix.directImportInstantiation(e.X); ok {
+			return "direct_import", id, false, arity
 		}
 		// An unqualified instantiation (`G[T](x)`, dot-imported or plain)
 		// still needs the instantiation-aware check below — the declared
@@ -700,8 +699,8 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		}
 		fun = unparen(e.X)
 	case *ast.IndexListExpr:
-		if id, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id, false, 0
+		if id, arity, ok := ix.directImportInstantiation(e.X); ok {
+			return "direct_import", id, false, arity
 		}
 		if i, ok := unparen(e.X).(*ast.Ident); ok {
 			instIdent = i
@@ -759,8 +758,8 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	fn, ok := functions[ix.id(f)]
 	if !ok || fn.Body == nil {
 		if instIdent != nil {
-			if id, ok := ix.importedInstantiationID(f, instIdent); ok {
-				return "direct_import", id, false, 0
+			if id, arity, ok := ix.importedInstantiationID(f, instIdent); ok {
+				return "direct_import", id, false, arity
 			}
 			return "external_or_bodyless", "", false, 0
 		}
