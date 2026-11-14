@@ -1198,24 +1198,61 @@ class _Builder:
                     function_node = next(
                         iter(function_node.named_children), None
                     )
-                ref = (
-                    self.references.get(self.node_key(function_node))
-                    if function_node is not None
-                    else None
-                )
-                if ref is not None and ref.binding_id:
-                    binding = self.bindings.get(ref.binding_id)
-                    scalar = binding is not None and binding.type.kind in {
-                        "integer",
-                        "boolean",
-                    }
-                else:
-                    scalar = (
-                        ref is not None
-                        and ref.kind == "universe"
-                        and function_node is not None
-                        and function_node.text in _SCALAR_BASIC_TYPES
+                if (
+                    function_node is not None
+                    and function_node.type == "selector_expression"
+                ):
+                    # `lib.T(e)` — the conversion target is declared by
+                    # the imported member record, not by a local binding.
+                    # Only a record naming the same member as a scalar
+                    # `type` declaration keeps the result in the
+                    # fragment.
+                    sel_operand = function_node.child_by_field_name(
+                        "operand"
                     )
+                    sel_field = function_node.child_by_field_name("field")
+                    sel_ref = (
+                        self.references.get(self.node_key(sel_field))
+                        if sel_field is not None
+                        else None
+                    )
+                    member = (
+                        self.members.get(sel_ref.binding_id)
+                        if sel_ref is not None and sel_ref.kind == "import"
+                        else None
+                    )
+                    scalar = (
+                        sel_operand is not None
+                        and sel_operand.type == "identifier"
+                        and self.references.get(
+                            self.node_key(sel_operand)
+                        )
+                        is None
+                        and sel_field is not None
+                        and member is not None
+                        and member.kind == "type"
+                        and member.name.encode("utf-8") == sel_field.text
+                        and member.type.kind in {"integer", "boolean"}
+                    )
+                else:
+                    ref = (
+                        self.references.get(self.node_key(function_node))
+                        if function_node is not None
+                        else None
+                    )
+                    if ref is not None and ref.binding_id:
+                        binding = self.bindings.get(ref.binding_id)
+                        scalar = (
+                            binding is not None
+                            and binding.type.kind in {"integer", "boolean"}
+                        )
+                    else:
+                        scalar = (
+                            ref is not None
+                            and ref.kind == "universe"
+                            and function_node is not None
+                            and function_node.text in _SCALAR_BASIC_TYPES
+                        )
                 if not scalar:
                     raise _Unsupported("binding_unavailable", _span(node))
                 if len(arguments) != 1:
