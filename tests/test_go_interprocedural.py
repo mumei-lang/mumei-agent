@@ -2380,3 +2380,177 @@ def test_directive_in_imported_source_fails_closed(go_types_helper):
     report = json.loads(package_report_imports(go_types_helper, files, bad))
     assert report["status"] != "ok"
     assert any(g["reason"] == "unresolved_import" for g in report["gaps"])
+
+
+# --- C06 imported member records ----------------------------------------------
+
+
+IMPORTED_MEMBERS_LIB = {
+    "lib": {
+        "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
+        "var V int64 = 7\ntype T int64\n"
+        "func G(y int64) int64 { return y }\n"
+    }
+}
+
+
+def test_imported_member_records_declare_referenced_objects(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.G; _ = lib.V; _ = lib.K; return x }\n"
+        "var _ lib.T\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    members = {m["name"]: m for m in report["imported_members"]}
+    # Only objects the unit actually names are declared.
+    assert {m["kind"] for m in members.values()} == {"function", "var", "const", "type"}
+    assert all(m["id"].startswith("sha256:") for m in members.values())
+    assert members["K"]["type"]["kind"] == "untyped"
+    assert members["V"]["type"]["kind"] == "integer"
+
+
+def test_imported_scalar_const_read_is_dep_free(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_imported_typed_const_read_is_dep_free(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.L }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_var_read_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.V }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_imported_function_read_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.G; return x }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_imported_string_const_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.S; return x }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_report_without_member_section_still_loads(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    report.pop("imported_members", None)
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    # Without member declarations the same read stays unmodelled.
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_member_name_must_match_the_field_token(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    for m in report["imported_members"]:
+        if m["name"] == "K":
+            m["name"] = "Other"
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_member_id_must_match_the_reference(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    bogus = "sha256:" + "0" * 64 + ":0:0:0:0"
+    for m in report["imported_members"]:
+        m["id"] = bogus
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_malformed_member_records_fail_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    for m in report["imported_members"]:
+        m["kind"] = "bogus"
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )
+    report["imported_members"] = [{"id": "sha256:bad", "name": "K", "kind": "const", "type": {"kind": "integer", "basic_name": "int64", "bit_width": 64, "signed": True, "type_id": ""}}]
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )
