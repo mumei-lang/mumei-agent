@@ -1152,10 +1152,34 @@ class _Builder:
                     raise _Unsupported("binding_unavailable", _span(node))
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
-            # `lib.K` — a package-qualified member read. Only scalar
-            # constants are admitted — imported variables are unmodelled
-            # package state and imported functions are not values here.
+            # `lib.K` — a package-qualified member read. Scalar constants
+            # are dep-free, exactly like local constants. A scalar `var`
+            # read is modelled like a zero-argument `direct_import`
+            # transfer: the value derives from package state, not from any
+            # parameter, and the `imported` flag reports `effects` as
+            # `unknown` — the read is not purity-proof. The recorded
+            # target is the member's own identity, so a regenerated report
+            # for the imported unit still flags this summary via
+            # `stale_dependents`. Non-scalar vars, functions and any read
+            # without a matching declaration stay closed.
             member = self._package_member(node)
+            if member is not None and member.kind == "var":
+                if member.type.kind not in {"integer", "boolean"}:
+                    raise _Unsupported("non_parameter_reference", _span(node))
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            node.start_byte,
+                            node.end_byte,
+                        ),
+                        member.id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return frozenset()
             if (
                 member is None
                 or member.kind != "const"
@@ -1324,7 +1348,18 @@ class _Builder:
             result = frozenset(
                 i for parameter in callee.return_dependencies for i in actual[parameter]
             )
-            transfers.append(CallTransfer(call.span, call.target, actual, result))
+            # The callee's effect opacity propagates: a local callee that
+            # itself performs imported transfers leaves this caller's
+            # effects unbounded the same way a direct_import does.
+            transfers.append(
+                CallTransfer(
+                    call.span,
+                    call.target,
+                    actual,
+                    result,
+                    imported=callee.effects == "unknown",
+                )
+            )
             return result
         raise _Unsupported("unsupported_expression", _span(node))
 
