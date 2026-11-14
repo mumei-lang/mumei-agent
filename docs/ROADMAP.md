@@ -1665,6 +1665,18 @@ targets and multi-valued call results (a count mismatch against the
 left-hand side) stay `unsupported_statement` /
 `binding_unavailable`.
 
+### C07 integer range loops
+
+`for` statements accept a `range` clause over an integer operand —
+`for i := range e` binds a fresh scoped index variable carrying the
+operand's dependencies, `for i = range e` reuses an existing binding,
+and `for _ = range e` / bare `for range e` just evaluate. Body
+may-assignments join back exactly like clause loops, and unlabelled
+`break`/`continue` use the same frame machinery. Composite ranges
+(slice, map, string, channel, array) are unreachable in-fragment —
+their operands cannot be produced by any supported binding or literal —
+and multi-variable ranges stay `unsupported_statement`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
