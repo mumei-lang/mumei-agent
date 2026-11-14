@@ -2059,10 +2059,14 @@ on a `*S` parameter or local is an auto-deref read of caller state
 member (one explicit dereference, `(*t).F`, spells the same
 auto-deref out), the field resolves through its `import` reference
 to a scalar-or-pointer `var` member, and the pointee identity pins
-for `stale_dependents`. The pointee is struct-typed, so it can never
-alias a tracked scalar binding — no escaped union is needed. A
-doubly-derefed base (`(**t).F`), a nested selection (`t.W.N`), a
-method value (`t.PF`) and a composite-typed field stay closed.
+for `stale_dependents`. Intermediate selections walk the same way:
+`t.W.N` resolves `W`'s `*W2` member to the `W2` `type` member — every
+`type` member the chain traverses pins — so the chain admits while
+each field is pointer-typed. The pointee is struct-typed, so it can
+never alias a tracked scalar binding — no escaped union is needed. A
+doubly-derefed base (`(**t).F`), a struct-valued intermediate
+(`t.A.B` on `A S3`), a method value (`t.PF`) and a composite-typed
+field stay closed.
 
 ### C06 imported member type identities
 

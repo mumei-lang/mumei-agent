@@ -7020,8 +7020,10 @@ def test_bound_base_field_read_double_deref_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_bound_base_field_read_nested_stays_closed(go_types_helper):
-    # `t.W.N` — the operand is itself a selection, not an identifier.
+def test_bound_base_field_read_nested_is_admitted(go_types_helper):
+    # `t.W.N` — the operand `t.W` resolves to field `W`'s `*W2`
+    # member, so `N` resolves one level deeper on `W2`. Both `S2`
+    # and `W2` pin; the read stays dep-free.
     lib = {
         "lib": {
             "m.go": "package lib\ntype T int64\n"
@@ -7031,6 +7033,33 @@ def test_bound_base_field_read_nested_stays_closed(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { return t.W.N }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_bound_base_field_read_nested_scalar_stays_closed(go_types_helper):
+    # `t.A.B` — the intermediate field `A` is a struct *value*, not
+    # a pointer, so the chain cannot walk deeper through it.
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype T int64\n"
+            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+            "type S3 struct{ B int64 }\ntype S4 struct{ A S3 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S4) int64 { return t.A.B }\n"
     }
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
