@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 from agent import control_flow
 
@@ -69,6 +69,9 @@ class GoType:
     bit_width: int
     signed: bool | None
     type_id: str
+    # The element fact on slice/array kinds — `[]T`, `[N]T` and
+    # named/alias types whose underlying is one.
+    elem: "GoType | None" = None
 
 
 @dataclass(frozen=True)
@@ -354,9 +357,18 @@ def _package_raws(
 
 
 def _go_type(value: Any, arch: str) -> GoType:
-    v = _record(value, "kind", "basic_name", "bit_width", "signed", "type_id")
+    # `elem` is omitempty: only slice/array facts carry it, so it joins
+    # the required keys' set rather than being required itself.
+    _require(
+        isinstance(value, dict)
+        and {"kind", "basic_name", "bit_width", "signed", "type_id"}
+        <= set(value)
+        <= {"kind", "basic_name", "bit_width", "signed", "type_id", "elem"}
+    )
+    v = value
     kind, name, width = v["kind"], v["basic_name"], v["bit_width"]
     signed, type_id = v["signed"], _string(v["type_id"])
+    elem_raw = v["elem"] if "elem" in v else None
     _require(isinstance(kind, str) and isinstance(name, str) and type(width) is int)
     if kind == "integer":
         widths = {
@@ -378,7 +390,15 @@ def _go_type(value: Any, arch: str) -> GoType:
         _require(name == "bool" and width == 1 and signed is None)
     else:
         _require(
-            kind in {"function", "pointer", "unsupported", "untyped"}
+            kind
+            in {
+                "function",
+                "pointer",
+                "unsupported",
+                "untyped",
+                "slice",
+                "array",
+            }
             and width == 0
             and signed is None
         )
@@ -392,9 +412,10 @@ def _go_type(value: Any, arch: str) -> GoType:
             "string",
             "unsafe.Pointer",
         }
-        if kind in {"function", "pointer"}:
+        if kind in {"function", "pointer", "slice", "array"}:
             # A pointer fact's identity lives in `type_id` (the
-            # pointee's named/alias type), not in a basic name.
+            # pointee's named/alias type), not in a basic name; a
+            # slice/array fact's element lives in `elem`.
             names = {""}
         elif kind == "untyped":
             names = {
@@ -402,7 +423,21 @@ def _go_type(value: Any, arch: str) -> GoType:
                 for n in ("int", "rune", "float", "complex", "string", "bool", "nil")
             }
         _require(name in names)
-    return GoType(kind, name, width, signed, type_id)
+    if kind in {"slice", "array"}:
+        _require(isinstance(elem_raw, dict))
+        elem = _go_type(elem_raw, arch)
+    else:
+        _require(elem_raw is None)
+        elem = None
+    return GoType(kind, name, width, signed, type_id, elem)
+
+
+def _type_ids(t: GoType) -> Iterator[str]:
+    """Every type identity a fact tree declares, elements included."""
+    if t.type_id:
+        yield t.type_id
+    if t.elem is not None:
+        yield from _type_ids(t.elem)
 
 
 def _parameter(value: Any, arch: str) -> Parameter:
@@ -561,8 +596,9 @@ def load_go_snapshot(
                 types_to_check.append(p.type)
         _require(
             all(
-                not t.type_id or t.type_id in by_id and by_id[t.type_id].kind == "type"
+                not tid or tid in by_id and by_id[tid].kind == "type"
                 for t in types_to_check
+                for tid in _type_ids(t)
             )
         )
         return GoTypeSnapshot(
@@ -713,11 +749,14 @@ def load_go_package_snapshot(
                 and kind in {"function", "const", "var", "type"}
             )
             _require(
-                not t.type_id
-                or (t.type_id in by_id and by_id[t.type_id].kind == "type")
-                or (
-                    t.type_id not in by_id
-                    and _IMPORTED_ID.fullmatch(t.type_id) is not None
+                all(
+                    not tid
+                    or (tid in by_id and by_id[tid].kind == "type")
+                    or (
+                        tid not in by_id
+                        and _IMPORTED_ID.fullmatch(tid) is not None
+                    )
+                    for tid in _type_ids(t)
                 )
             )
             _require(kind == "function" or "signature_type_ids" not in m)
@@ -864,13 +903,14 @@ def load_go_package_snapshot(
                 types_to_check.append(p.type)
         _require(
             all(
-                not t.type_id
-                or (t.type_id in by_id and by_id[t.type_id].kind == "type")
+                not tid
+                or (tid in by_id and by_id[tid].kind == "type")
                 or (
-                    t.type_id not in by_id
-                    and _IMPORTED_ID.fullmatch(t.type_id) is not None
+                    tid not in by_id
+                    and _IMPORTED_ID.fullmatch(tid) is not None
                 )
                 for t in types_to_check
+                for tid in _type_ids(t)
             )
         )
         return GoPackageSnapshot(

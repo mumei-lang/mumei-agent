@@ -2246,6 +2246,25 @@ closed (`lib.VS.f = v` — the base is a qualified name, not a bound
 identifier), as do `&` on anything but a fragment operand and
 imported `var` *writes* of any type.
 
+An index read of an imported container var — `lib.VA[i]` — admits
+through the member record's new element fact: slice and array type
+facts (`[]T`, `[N]T`, and named or alias types whose underlying is
+one) carry an `elem` fact, so the consumer can classify what an
+element read returns. The element is external state like the
+container var itself — the result contributes only the index's own
+dependencies while the read still records the imported transfer,
+reports `effects` as `unknown`, and pins both the container's
+declared identity and the element's named identity
+(`[]lib.T` pins `T`; `var VNS NS` pins `NS`) for `stale_dependents`.
+The operand resolves like a member read: a package-qualified name, a
+dot-imported name, or parentheses around either. The element fact
+must be scalar or pointer — a struct or nested-slice element is a
+value the fragment's model cannot hold — and anything that names no
+member stays closed: maps and strings declare no `elem` fact, a
+computed or nested operand (`f()[i]`, `lib.V2[0][0]`) is not a member
+name, and an index write (`lib.VA[i] = v`) matches the
+imported-var-write rule.
+
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when
 `x` is a plain local variable that names `T` through no member read,

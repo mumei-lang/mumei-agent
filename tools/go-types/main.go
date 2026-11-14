@@ -67,6 +67,10 @@ type typeFact struct {
 	BitWidth  int    `json:"bit_width"`
 	Signed    *bool  `json:"signed"`
 	TypeID    string `json:"type_id"`
+	// Elem carries the element type fact on slice/array kinds — `[]T`,
+	// `[N]T` and named/alias types whose underlying is one — so a
+	// container index read can classify the element it returns.
+	Elem *typeFact `json:"elem,omitempty"`
 }
 
 type binding struct {
@@ -732,6 +736,10 @@ func (ix *indexer) id(obj types.Object) string {
 }
 
 func (ix *indexer) typeOf(t types.Type) typeFact {
+	return ix.typeOfRec(t, map[types.Type]bool{})
+}
+
+func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	f := typeFact{Kind: "unsupported"}
 	if t == nil {
 		return f
@@ -755,6 +763,29 @@ func (ix *indexer) typeOf(t types.Type) typeFact {
 		case *types.Alias:
 			f.TypeID = ix.typeID(e.Obj())
 		}
+		return f
+	}
+	// A named container type can name itself — `type R []R` is valid
+	// Go — so a type already being expanded stops at its identity:
+	// the element fact reads `unsupported`, which keeps index reads
+	// of it closed like every unmodelled element.
+	if seen[t] {
+		return f
+	}
+	seen[t] = true
+	defer delete(seen, t)
+	if s, ok := t.Underlying().(*types.Slice); ok {
+		// `[]T` — or a named/alias type whose underlying is a slice,
+		// which keeps the identity the switch above already set.
+		f.Kind = "slice"
+		e := ix.typeOfRec(s.Elem(), seen)
+		f.Elem = &e
+		return f
+	}
+	if a, ok := t.Underlying().(*types.Array); ok {
+		f.Kind = "array"
+		e := ix.typeOfRec(a.Elem(), seen)
+		f.Elem = &e
 		return f
 	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
@@ -821,7 +852,7 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	ix.out.Bindings = append(ix.out.Bindings, binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "function" && kind != "function" {
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "function" && kind != "function" {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }
