@@ -1640,6 +1640,15 @@ scalar fragment still fail closed where the converted value is bound
 (the `binding_unavailable` check), and builtin calls inside a
 conversion stay `unresolved_or_opaque_call`.
 
+### C07 pure builtins in expressions
+
+Builtin calls classified `builtin` by the producer are admitted only
+for `min`/`max` — the pure builtins whose operands are scalars — and
+their result unions every argument's dependencies. Every other builtin
+(`panic`, `len`, `cap`, `append`, `make`, `new`, `complex`, `real`,
+`imag`, ...) stays `unresolved_or_opaque_call`; `len`/`cap` can only
+take values no supported binding can hold anyway.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
