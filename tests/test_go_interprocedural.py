@@ -5086,6 +5086,32 @@ def test_bound_pointer_deref_read_carries_escaped_pointee_deps(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_bound_pointer_deref_read_crosses_alias_identities(
+    go_types_helper,
+):
+    # A `*T` pointer can alias an `A2 = T` binding even though the
+    # facts record distinct type_id's for the alias — the escaped
+    # union carries every escaped binding, not a type-matched subset.
+    alias_lib = {
+        "lib": {"m.go": "package lib\ntype T int64\ntype A2 = T\n"}
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, x lib.A2, y lib.T) int64 {"
+        " _ = &x; _ = &y; return int64(*t) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, alias_lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
 def test_member_pointer_deref_read_carries_escaped_pointee_deps(
     go_types_helper,
 ):

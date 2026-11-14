@@ -1022,17 +1022,14 @@ class _Builder:
         )
         for escaped_id in self.escaped:
             # The pointer may alias any binding an earlier `&x`
-            # escaped whose declared type is the pointee — `p := &x;
-            # x = y; *p` reads x's CURRENT value, so the result must
-            # carry the escaped binding's deps, not only the
-            # pointer's provenance. The same may-read holds for
-            # `*lib.PV` once `lib.PV = &x` could have pointed it at x.
-            esc_binding = self.bindings.get(escaped_id)
-            if (
-                esc_binding is None
-                or esc_binding.type.type_id != pointee_id
-            ):
-                continue
+            # escaped — `p := &x; x = y; *p` reads x's CURRENT value,
+            # so the result must carry the escaped binding's deps,
+            # not only the pointer's provenance. No type check: a
+            # `*A` pointer can alias an `A2 = T` binding even though
+            # the facts record distinct type_id's for the aliases, so
+            # every escaped binding unions in like the `*lib.PV = v`
+            # write-side fold. The same may-read holds for `*lib.PV`
+            # once `lib.PV = &x` could have pointed it at x.
             if escaped_id in locals_:
                 result |= locals_[escaped_id]
             elif escaped_id in params:
