@@ -120,11 +120,14 @@ type fileDigest struct {
 // member declares an imported object the unit referenced: its identity in
 // the imported unit's own coordinate space plus the object's kind and type,
 // so a consumer can tell a scalar constant from unmodelled package state.
+// A function member also declares the named/alias type identities its
+// signature mentions, so a caller can pin them for staleness.
 type member struct {
-	ID   string   `json:"id"`
-	Name string   `json:"name"`
-	Kind string   `json:"kind"`
-	Type typeFact `json:"type"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Kind             string   `json:"kind"`
+	Type             typeFact `json:"type"`
+	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
 }
 
 type snapshot struct {
@@ -311,9 +314,51 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 	default:
 		return
 	}
-	ix.importMembers[id] = member{
+	m := member{
 		ID: id, Name: obj.Name(), Kind: kind, Type: ix.typeOf(obj.Type()),
 	}
+	if kind == "function" {
+		if sig, ok := obj.Type().(*types.Signature); ok {
+			m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+		}
+	}
+	ix.importMembers[id] = m
+}
+
+// signatureTypeIDs lists the named/alias type identities a signature's
+// parameters and results mention, in the coordinate space of the unit
+// declaring each type — so a caller pinning a resolved call also pins the
+// types its contract names. Basic and unnamed types contribute nothing;
+// receiver types are not signature types for this purpose.
+func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
+	seen := map[string]bool{}
+	var ids []string
+	add := func(t types.Type) {
+		var obj *types.TypeName
+		switch typ := t.(type) {
+		case *types.Named:
+			obj = typ.Obj()
+		case *types.Alias:
+			obj = typ.Obj()
+		case *types.TypeParam:
+			obj = typ.Obj()
+		}
+		if obj == nil {
+			return
+		}
+		if id := ix.typeID(obj); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for i := 0; i < sig.Params().Len(); i++ {
+		add(sig.Params().At(i).Type())
+	}
+	for i := 0; i < sig.Results().Len(); i++ {
+		add(sig.Results().At(i).Type())
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func unitDigest(sources []namedSource) string {

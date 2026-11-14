@@ -152,12 +152,13 @@ class FunctionSummary:
     return_dependencies: frozenset[int] | None
     calls: tuple[CallTransfer, ...]
     gaps: tuple[SummaryGap, ...]
-    # `pinned` names imported type identities an admitted member read or
-    # conversion resolved against, beyond the member's own binding
-    # identity: a `lib.V` read whose declared type is `lib.T` stays valid
-    # only while `T` keeps that identity, so `stale_dependents` flags the
-    # summary when `T` — not just `V` — is redeclared. Basic and unnamed
-    # types carry no identity and pin nothing.
+    # `pinned` names imported type identities an admitted member read,
+    # conversion or resolved call depends on, beyond the object's own
+    # binding identity: a `lib.V` read whose declared type is `lib.T`, or
+    # a call whose callee's signature names `lib.T`, stays valid only
+    # while `T` keeps that identity, so `stale_dependents` flags the
+    # summary when `T` — not just `V` or the callee — is redeclared.
+    # Basic and unnamed types carry no identity and pin nothing.
     pinned: tuple[str, ...] = ()
 
     @property
@@ -1406,6 +1407,13 @@ class _Builder:
                         call.span, call.target, actual, result, imported=True
                     )
                 )
+                # The callee's declared named/alias signature types are
+                # pinned the same way a member read's declared type is:
+                # redeclaring one flags this summary even when the callee's
+                # own identity is unchanged.
+                member = self.members.get(call.target)
+                if member is not None:
+                    self.pinned.update(member.signature_type_ids)
                 return result
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
@@ -1429,6 +1437,14 @@ class _Builder:
             result = frozenset(
                 i for parameter in callee.return_dependencies for i in actual[parameter]
             )
+            # The callee's declared named-type signature identities pin
+            # exactly like an imported callee's: a local type's identity
+            # already churns with its declaring file, while an imported one
+            # (a local `func G(y lib.T)` parameter) would otherwise leave
+            # this summary looking current after `T` is redeclared.
+            for p in (*target.parameters, *target.results):
+                if p.type.type_id:
+                    self.pinned.add(p.type.type_id)
             # The callee's effect opacity propagates: a local callee that
             # itself performs imported transfers leaves this caller's
             # effects unbounded the same way a direct_import does.

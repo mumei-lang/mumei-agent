@@ -2392,7 +2392,9 @@ IMPORTED_MEMBERS_LIB = {
         "var V int64 = 7\nvar VS = \"s\"\ntype F64 float64\n"
         "var VT T = 7\nconst KT T = 5\n"
         "type A = int64\ntype GT[N int64 | int32] int64\n"
-        "func G(y int64) int64 { return y }\n",
+        "func G(y int64) int64 { return y }\n"
+        "func FT(y T) T { return y }\n"
+        "func Z() T { return 7 }\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the other members' — the scenario
         # the type-identity pin exists for.
@@ -3194,3 +3196,127 @@ def test_type_id_naming_a_non_type_local_binding_is_rejected(go_types_helper):
         load_go_package_snapshot(
             json.dumps(binding_report).encode(), files, target_arch="amd64"
         )
+
+
+def test_imported_function_member_declares_signature_type_ids(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    return int64(lib.FT(lib.T(x))) + int64(lib.Z()) + lib.G(x)\n"
+        "}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB)
+    )
+    assert report["status"] == "ok"
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["FT"]["signature_type_ids"] == [members["T"]["id"]]
+    assert members["Z"]["signature_type_ids"] == [members["T"]["id"]]
+    # Scalar signatures and non-function members carry no list at all.
+    assert "signature_type_ids" not in members["G"]
+    assert "signature_type_ids" not in members["T"]
+    snapshot = _snapshot_for(go_types_helper, files)
+    member_by_name = {m.name: m for m in snapshot.imported_members}
+    assert member_by_name["FT"].signature_type_ids == (member_by_name["T"].id,)
+    assert member_by_name["G"].signature_type_ids == ()
+
+
+def test_direct_import_call_pins_signature_type_identities(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.Z()) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    z = next(m for m in snapshot.imported_members if m.name == "Z")
+    # `lib.Z` is the only member the source names — the pin comes purely
+    # from its declared signature's `T`.
+    assert all(m.name != "T" for m in snapshot.imported_members)
+    assert z.signature_type_ids != ()
+    assert result.pinned == z.signature_type_ids
+
+
+def test_direct_local_call_pins_signature_type_identities(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func G(y lib.T) int64 { return int64(y) }\n"
+        "func F(x int64) int64 { return G(lib.T(x)) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    t = next(m for m in snapshot.imported_members if m.name == "T")
+    assert result.pinned == (t.id,)
+
+
+def test_signature_pin_flags_stale_dependents(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.Z()) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(IMPORTED_MEMBERS_LIB)
+    lib2["lib"] = {
+        **IMPORTED_MEMBERS_LIB["lib"],
+        "t.go": "package lib\ntype  T int64\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]), lib2["lib"], target_arch="amd64"
+    )
+    known = {b.id for b in snapshot2.bindings}
+    z = next(m for m in snapshot.imported_members if m.name == "Z")
+    z2 = next(b for b in snapshot2.bindings if b.name == "Z")
+    # The callee's own identity is stable — only its signature type's
+    # identity churned, and the signature pin is what flags the caller.
+    assert z.id == z2.id and z.id in known
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_signature_type_ids_on_non_function_member_is_rejected(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.K }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB)
+    )
+    assert report["status"] == "ok"
+    bogus = "sha256:" + "0" * 64 + ":0:0:0:0"
+    for m in report["imported_members"]:
+        if m["kind"] != "function":
+            m["signature_type_ids"] = [bogus]
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )
+    # Malformed entries are rejected on function members too — this source
+    # names one so the report has a function member to tamper.
+    fn_files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.Z()) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, fn_files, IMPORTED_MEMBERS_LIB)
+    )
+    assert report["status"] == "ok"
+    local = next(b["id"] for b in report["bindings"])
+    for bogus_entry in ("sha256:bad", local):
+        tampered = json.loads(json.dumps(report))
+        for m in tampered["imported_members"]:
+            if m["kind"] == "function":
+                m["signature_type_ids"] = [bogus_entry]
+        with pytest.raises(SnapshotError):
+            load_go_package_snapshot(
+                json.dumps(tampered).encode(), fn_files, target_arch="amd64"
+            )

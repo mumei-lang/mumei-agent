@@ -274,6 +274,9 @@ class PackageMember:
     name: str
     kind: str
     type: GoType
+    # A function member's declared named/alias signature type identities,
+    # in the imported unit's coordinate space — staleness pins for callers.
+    signature_type_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -678,7 +681,13 @@ def load_go_package_snapshot(
             references.append(PackageReference(sp, binding_id, kind))
         members = []
         for item in _list(v.get("imported_members", [])):
-            m = _record(item, "id", "name", "kind", "type")
+            _require(
+                isinstance(item, dict)
+                and {"id", "name", "kind", "type"} <= set(item)
+                and set(item)
+                <= {"id", "name", "kind", "type", "signature_type_ids"}
+            )
+            m = item
             mid = _string(m["id"])
             name, kind = _string(m["name"]), _string(m["kind"])
             t = _go_type(m["type"], target_arch)
@@ -696,7 +705,17 @@ def load_go_package_snapshot(
                     and _IMPORTED_ID.fullmatch(t.type_id) is not None
                 )
             )
-            members.append(PackageMember(mid, name, kind, t))
+            sig_ids_raw = _list(m.get("signature_type_ids", []))
+            _require(kind == "function" or not sig_ids_raw)
+            sig_ids = tuple(_string(s) for s in sig_ids_raw)
+            _require(
+                len(set(sig_ids)) == len(sig_ids)
+                and all(
+                    s not in by_id and _IMPORTED_ID.fullmatch(s) is not None
+                    for s in sig_ids
+                )
+            )
+            members.append(PackageMember(mid, name, kind, t, sig_ids))
         _require(len({m.id for m in members}) == len(members))
         functions = []
         for item in _list(v["functions"]):
