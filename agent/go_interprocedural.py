@@ -519,15 +519,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
     ) -> tuple[PackageMember, ...] | None:
-        """Every `type` member the operand's pointer chain traverses.
+        """Every member the operand's pointer chain traverses.
 
         A bound identifier (`t`) or one explicit dereference (`*t`,
         with parentheses either side) contributes its pointee `type`
         member; a nested selection (`t.W`) recurses through
         `_bound_field_read` and extends the chain with the field's
-        own pointee when the field is pointer-typed. Anything else —
-        a computed base, a double deref, a non-pointer field —
-        returns None.
+        own member — pinned so redeclaring `W` flags the summary —
+        followed by the field's pointee `type` member when the field
+        is pointer-typed. The tuple's last element is always the
+        deepest pointee. Anything else — a computed base, a double
+        deref, a non-pointer field — returns None.
         """
         while operand.type == "parenthesized_expression":
             operand = next(
@@ -564,7 +566,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             pointee = self.members.get(inner_field.type.type_id)
             if pointee is None or pointee.kind != "type":
                 return None
-            return (*inner_pointees, pointee)
+            return (*inner_pointees, inner_field, pointee)
         if operand.type != "identifier" or operand.text == b"_":
             return None
         ref = self.references.get(self.node_key(operand))

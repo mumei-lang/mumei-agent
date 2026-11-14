@@ -7034,6 +7034,8 @@ def test_bound_base_field_read_nested_is_admitted(go_types_helper):
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { return t.W.N }\n"
     }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    members = {m["name"]: m for m in report["imported_members"]}
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
         files,
@@ -7045,6 +7047,12 @@ def test_bound_base_field_read_nested_is_admitted(go_types_helper):
     assert result.available
     assert result.return_dependencies == frozenset()
     assert result.effects == "unknown"
+    # Every member the chain traverses pins — redeclaring `W` itself
+    # (say to a struct value) must flag the summary, so the
+    # intermediate field member joins the pointees.
+    assert {members["S2"]["id"], members["W"]["id"], members["W2"]["id"]} <= set(
+        result.pinned
+    )
 
 
 def test_bound_base_field_read_nested_scalar_stays_closed(go_types_helper):
