@@ -5068,6 +5068,42 @@ def test_bound_pointer_double_deref_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_bound_pointer_deref_read_carries_escaped_pointee_deps(
+    go_types_helper,
+):
+    # `p := &x; x = y; *p` reads x's CURRENT value — the pointer's
+    # provenance alone would miss y.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y lib.T) int64 {"
+        " p := &x; x = y; return int64(*p) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_member_pointer_deref_read_carries_escaped_pointee_deps(
+    go_types_helper,
+):
+    # `lib.PV = &x; x = y; *lib.PV` may-read x's current value
+    # through the member's stored pointer.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y lib.T) int64 {"
+        " lib.PV = &x; x = y; return int64(*lib.PV) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
 def test_bound_pointer_deref_read_local_pointee_stays_closed(
     go_types_helper,
 ):

@@ -1017,9 +1017,27 @@ class _Builder:
                     imported=True,
                 )
             )
-        return self.expression(
+        result = self.expression(
             operand, fn, params, locals_, transfers, count, depth + 1
         )
+        for escaped_id in self.escaped:
+            # The pointer may alias any binding an earlier `&x`
+            # escaped whose declared type is the pointee — `p := &x;
+            # x = y; *p` reads x's CURRENT value, so the result must
+            # carry the escaped binding's deps, not only the
+            # pointer's provenance. The same may-read holds for
+            # `*lib.PV` once `lib.PV = &x` could have pointed it at x.
+            esc_binding = self.bindings.get(escaped_id)
+            if (
+                esc_binding is None
+                or esc_binding.type.type_id != pointee_id
+            ):
+                continue
+            if escaped_id in locals_:
+                result |= locals_[escaped_id]
+            elif escaped_id in params:
+                result |= {params[escaped_id]}
+        return result
 
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]

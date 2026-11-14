@@ -1993,7 +1993,12 @@ whose declared `*T` names the pointee admits, records its own
 imported transfer against the pointee identity (the binding's read
 carries none of its own), and returns the pointer's provenance —
 the binding's dependencies — as the result; `p := &t` inherits the
-same `*T` identity, so `*p` reads the same way. The pointee's
+same `*T` identity, so `*p` reads the same way. Because a stored
+pointer may alias any escaped binding of the pointee's type, the
+read also unions the current deps of every `&x`-escaped binding
+declared as the pointee — `p := &x; x = y; *p` reads x's updated
+value, and the same may-read covers `*lib.PV` once `lib.PV = &x`
+could have pointed it there. The pointee's
 identity resolves only through `imported_members`, so `*T` on a
 local `type T` stays closed too. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`), a computed pointer
