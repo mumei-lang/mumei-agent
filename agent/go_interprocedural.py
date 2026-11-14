@@ -474,24 +474,63 @@ class _Builder:
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> tuple[PackageMember, PackageMember] | None:
-        """The `(pointee member, field member)` pair `t.F` names.
+    ) -> tuple[tuple[PackageMember, ...], PackageMember] | None:
+        """The `(pointee members, field member)` pair `t.F` names.
 
         `t.F` on a bound `*S` auto-dereferences a field of caller
         state — external like `lib.VS.F`, so the read is dep-free and
         records against the field's identity. The operand must be a
-        bound identifier (`t.F.G` and computed bases stay closed)
-        whose pointer fact names the pointee `type` member, or one
-        explicit dereference of one (`(*t).F` — the same auto-deref
-        spelled out). The field resolves through its own `import`
-        reference to a scalar-or-pointer `var` member, like the
-        imported-struct-var path. A promoted method's `func` member,
-        a non-scalar field, or any unresolvable name returns None.
+        bound identifier whose pointer fact names the pointee `type`
+member, or one explicit dereference of one (`(*t).F` — the same
+        auto-deref spelled out), possibly through intermediate
+        pointer-typed selections (`t.W.N` walks field `W`'s `*W2`
+        member to `W2`, then resolves `N` there) — every `type`
+        member traversed is returned for pinning. The field resolves
+        through its own `import` reference to a scalar-or-pointer
+        `var` member, like the imported-struct-var path. A promoted
+        method's `func` member, a non-scalar field, a computed base,
+        or any unresolvable name returns None.
         """
         operand = node.child_by_field_name("operand")
         field = node.child_by_field_name("field")
         if operand is None or field is None:
             return None
+        pointees = self._bound_selector_pointees(operand, locals_, params)
+        if pointees is None:
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        field_member = (
+            self.members.get(field_ref.binding_id)
+            if field_ref is not None and field_ref.kind == "import"
+            else None
+        )
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind != "var"
+            or field_member.type.kind not in {"integer", "boolean", "pointer"}
+        ):
+            return None
+        return pointees, field_member
+
+    def _bound_selector_pointees(
+        self,
+        operand: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[PackageMember, ...] | None:
+        """Every member the operand's pointer chain traverses.
+
+        A bound identifier (`t`) or one explicit dereference (`*t`,
+        with parentheses either side) contributes its pointee `type`
+        member; a nested selection (`t.W`) recurses through
+        `_bound_field_read` and extends the chain with the field's
+        own member — pinned so redeclaring `W` flags the summary —
+        followed by the field's pointee `type` member when the field
+        is pointer-typed. The tuple's last element is always the
+        deepest pointee. Anything else — a computed base, a double
+        deref, a non-pointer field — returns None.
+        """
         while operand.type == "parenthesized_expression":
             operand = next(
                 (c for c in operand.named_children if c.type != "comment"),
@@ -500,8 +539,6 @@ class _Builder:
             if operand is None:
                 return None
         if operand.type == "unary_expression":
-            # `(*t).F` — an explicit dereference of the bound pointer
-            # before the selection; the same auto-deref spelled out.
             operator = operand.child_by_field_name("operator")
             if operator is None or operator.text != b"*":
                 return None
@@ -516,6 +553,20 @@ class _Builder:
                 )
             if operand is None:
                 return None
+        if operand.type == "selector_expression":
+            inner = self._bound_field_read(operand, locals_, params)
+            if inner is None:
+                return None
+            inner_pointees, inner_field = inner
+            if (
+                inner_field.type.kind != "pointer"
+                or not inner_field.type.type_id
+            ):
+                return None
+            pointee = self.members.get(inner_field.type.type_id)
+            if pointee is None or pointee.kind != "type":
+                return None
+            return (*inner_pointees, inner_field, pointee)
         if operand.type != "identifier" or operand.text == b"_":
             return None
         ref = self.references.get(self.node_key(operand))
@@ -533,20 +584,7 @@ class _Builder:
         pointee = self.members.get(binding.type.type_id)
         if pointee is None or pointee.kind != "type":
             return None
-        field_ref = self.references.get(self.node_key(field))
-        field_member = (
-            self.members.get(field_ref.binding_id)
-            if field_ref is not None and field_ref.kind == "import"
-            else None
-        )
-        if (
-            field_member is None
-            or field_member.name.encode("utf-8") != field.text
-            or field_member.kind != "var"
-            or field_member.type.kind not in {"integer", "boolean", "pointer"}
-        ):
-            return None
-        return pointee, field_member
+        return (pointee,)
 
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` qualified type names, or None.
@@ -2351,8 +2389,8 @@ class _Builder:
                 # field's type flags the summary.
                 bound = self._bound_field_read(node, locals_, params)
                 if bound is not None:
-                    pointee, field_member = bound
-                    self.pinned.add(pointee.id)
+                    pointees, field_member = bound
+                    self.pinned.update(p.id for p in pointees)
                     self._pin_member_type(field_member)
                     transfers.append(
                         CallTransfer(
