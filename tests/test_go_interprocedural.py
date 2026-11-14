@@ -6471,12 +6471,13 @@ def test_imported_map_index_read_dot_import(go_types_helper):
 
 
 def test_imported_map_index_read_named_key_pins(go_types_helper):
-    # `lib.VMK[k]` pins the named key `MK`'s identity: redeclaring MK
+    # `lib.VMK[0]` pins the named key `MK`'s identity: redeclaring MK
     # in its own file leaves VMK's member id untouched, so only the
-    # key pin flags the summary stale.
+    # key pin flags the summary stale. A literal index keeps the key
+    # pin unconfounded by a `k lib.MK` parameter's own type pin.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(k lib.MK) int64 { return lib.VMK[k] }\n"
+        "func F() int64 { return lib.VMK[0] }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
@@ -6499,10 +6500,11 @@ def test_imported_map_index_read_named_key_pins(go_types_helper):
 
 
 def test_imported_map_write_pins_named_key(go_types_helper):
-    # `lib.VMK[k] = v` pins the key identity too.
+    # `lib.VMK[0] = v` pins the key identity too — the literal index
+    # again isolates the key pin from a parameter's own type pin.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(k lib.MK, v int64) int64 { lib.VMK[k] = v\n\treturn 0 }\n"
+        "func F(v int64) int64 { lib.VMK[0] = v\n\treturn 0 }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
