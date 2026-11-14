@@ -2389,9 +2389,14 @@ def test_directive_in_imported_source_fails_closed(go_types_helper):
 IMPORTED_MEMBERS_LIB = {
     "lib": {
         "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
-        "var V int64 = 7\nvar VS = \"s\"\ntype T int64\ntype F64 float64\n"
+        "var V int64 = 7\nvar VS = \"s\"\ntype F64 float64\n"
+        "var VT T = 7\nconst KT T = 5\n"
         "type A = int64\ntype GT[N int64 | int32] int64\n"
-        "func G(y int64) int64 { return y }\n"
+        "func G(y int64) int64 { return y }\n",
+        # `T` lives in its own file so a variant unit can churn `T`'s
+        # identity without touching the other members' — the scenario
+        # the type-identity pin exists for.
+        "t.go": "package lib\ntype T int64\n",
     }
 }
 
@@ -3032,3 +3037,126 @@ def test_imported_conversion_without_member_section_fails_closed(go_types_helper
     )
     result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
     assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+# --- C06 imported member type identities --------------------------------------
+
+
+def test_imported_named_type_members_declare_type_identities(go_types_helper):
+    # A member's declared named type is pinned to the identity the
+    # imported unit's own report assigns it; basic-typed members keep no
+    # identity.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.V + int64(lib.VT) + int64(lib.T(x)) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB)
+    )
+    assert report["status"] == "ok"
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["VT"]["type"]["kind"] == "integer"
+    assert members["VT"]["type"]["type_id"].startswith("sha256:")
+    # A `type` member's declared fact names the type itself — the same
+    # identity its member id carries.
+    assert members["T"]["type"]["type_id"] == members["T"]["id"]
+    # A basic-typed member keeps no identity.
+    assert members["V"]["type"]["type_id"] == ""
+
+
+def test_imported_var_of_named_type_read_pins_type_identity(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + int64(lib.VT) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    vt = next(m for m in snapshot.imported_members if m.name == "VT")
+    # The unit never names `T` itself, so `T` has no member record —
+    # but `VT`'s declared type still names `T`'s imported identity.
+    assert all(m.name != "T" for m in snapshot.imported_members)
+    assert vt.type.type_id.startswith("sha256:")
+    assert result.pinned == (vt.type.type_id,)
+
+
+def test_imported_typed_const_read_pins_type_identity(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + int64(lib.KT) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    kt = next(m for m in snapshot.imported_members if m.name == "KT")
+    assert kt.type.type_id.startswith("sha256:")
+    assert result.pinned == (kt.type.type_id,)
+    # A dep-free read records no transfer, so effects stay bounded.
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_imported_scalar_conversion_pins_type_identity(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.T(x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    t = next(m for m in snapshot.imported_members if m.name == "T")
+    assert result.pinned == (t.id,)
+
+
+def test_dot_imported_named_type_member_read_pins_type_identity(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + int64(VT) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    vt = next(m for m in snapshot.imported_members if m.name == "VT")
+    assert vt.type.type_id.startswith("sha256:")
+    assert result.pinned == (vt.type.type_id,)
+
+
+def test_basic_typed_member_read_pins_nothing(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.pinned == ()
+
+
+def test_type_pin_flags_stale_dependents(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + int64(lib.VT) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    # A variant unit that shifts `T`'s declaration position without
+    # touching `VT`'s file: the member's own identity is stable but the
+    # pinned type identity churns, so the reader is flagged stale.
+    lib2 = dict(IMPORTED_MEMBERS_LIB)
+    lib2["lib"] = {
+        **IMPORTED_MEMBERS_LIB["lib"],
+        "t.go": "package lib\ntype  T int64\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]), lib2["lib"], target_arch="amd64"
+    )
+    known = {b.id for b in snapshot2.bindings}
+    vt = next(m for m in snapshot.imported_members if m.name == "VT")
+    vt2 = next(b for b in snapshot2.bindings if b.name == "VT")
+    # The member identity is genuinely unchanged — only the pin detects.
+    assert vt.id == vt2.id and vt.id in known
+    assert vt.type.type_id not in known
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})

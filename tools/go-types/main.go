@@ -278,6 +278,19 @@ func (ix *indexer) importedID(obj types.Object) string {
 		rec.digests[f], f, ix.offset(obj.Pos()), start, end)
 }
 
+// typeID names a named type's identity: the unit's own binding identity
+// for local declarations, the imported unit's own identity for an
+// object the unit only references — the same `importedID` a `direct_import`
+// call target carries, so a member's declared type pins the imported
+// type declaration for staleness. Basic and unnamed types keep no
+// identity.
+func (ix *indexer) typeID(obj types.Object) string {
+	if id := ix.id(obj); id != "" {
+		return id
+	}
+	return ix.importedID(obj)
+}
+
 // recordMember declares a referenced imported object: its identity, the
 // member kind a consumer needs to classify uses, and its type. Objects the
 // unit never names are not declared.
@@ -406,11 +419,11 @@ func (ix *indexer) typeOf(t types.Type) typeFact {
 	}
 	switch typ := t.(type) {
 	case *types.Named:
-		f.TypeID = ix.id(typ.Obj())
+		f.TypeID = ix.typeID(typ.Obj())
 	case *types.Alias:
-		f.TypeID = ix.id(typ.Obj())
+		f.TypeID = ix.typeID(typ.Obj())
 	case *types.TypeParam:
-		f.TypeID = ix.id(typ.Obj())
+		f.TypeID = ix.typeID(typ.Obj())
 	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
 		f.Kind = "function"

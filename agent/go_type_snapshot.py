@@ -777,7 +777,9 @@ def load_go_package_snapshot(
                 types_to_check.append(p.type)
         _require(
             all(
-                not t.type_id or t.type_id in by_id and by_id[t.type_id].kind == "type"
+                not t.type_id
+                or _IMPORTED_ID.fullmatch(t.type_id) is not None
+                or (t.type_id in by_id and by_id[t.type_id].kind == "type")
                 for t in types_to_check
             )
         )
