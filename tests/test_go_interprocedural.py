@@ -4918,39 +4918,122 @@ def test_imported_pointer_var_deref_non_scalar_pointee_stays_closed(
     assert not result.available
 
 
-def test_imported_pointer_var_deref_unnamed_pointee_stays_closed(
+def test_imported_pointer_var_deref_unnamed_pointee_is_admitted(
     go_types_helper,
 ):
-    # `var PU *int64` — the pointee names no member the fact can pin,
-    # so the read cannot be classified and stays closed.
+    # `var PU *int64` — `pointee_kind: "integer"` classifies the read
+    # and the empty `pointee_type_ids` means the member's own identity
+    # covers the whole declaration, so the dep-free read admits.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 {\n"
         "\treturn *lib.PU\n}\n"
     }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["PU"]["pointee_type_ids"] == []
+    assert members["PU"]["pointee_kind"] == "integer"
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
 
 
-def test_imported_pointer_var_deref_pointer_pointee_stays_closed(
+def test_imported_pointer_var_deref_pointer_pointee_is_admitted(
     go_types_helper,
 ):
-    # `var PPV **T` — `*lib.PPV` yields a `*T` whose pointee identity
-    # the `**T` fact does not carry, so it stays closed.
+    # `var PPV **T` — `*lib.PPV` yields a `*T`; `pointee_kind`
+    # classifies the pointer result and `pointee_type_ids` pins `T`,
+    # so the read admits dep-free and `*p` on the bound alias reads
+    # dep-free too.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 {\n"
         "\tp := *lib.PPV\n"
         "\treturn int64(*p)\n}\n"
     }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["PPV"]["pointee_kind"] == "pointer"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert members["T"]["id"] in result.pinned
+
+
+def test_imported_pointer_var_deref_struct_lit_pointee_stays_closed(
+    go_types_helper,
+):
+    # `var PSTR *struct{ F T }` — the anonymous struct hides a named
+    # use no key can declare, so neither `pointee_type_ids` nor
+    # `pointee_kind` is emitted and the read stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\ts := *lib.PSTR\n"
+        "\treturn int64(s.F)\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert "pointee_type_ids" not in members["PSTR"]
+    assert "pointee_kind" not in members["PSTR"]
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_imported_pointer_var_deref_array_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*lib.PA` on `*[4]int64` — `pointee_kind: "array"` is not a
+    # fragment scalar, so the read stays closed even though the
+    # pointee tree is fully pinnable.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i int64) int64 {\n"
+        "\ta := *lib.PA\n"
+        "\treturn a[i]\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_pointer_var_deref_read_observes_escaped_binding(
+    go_types_helper,
+):
+    # `lib.PU = &b; b = v; return *lib.PU` — the member may point at
+    # `b`, so the deref read unions the escaped binding's deps like
+    # the `*lib.PV` form does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(b int64, v int64) int64 {\n"
+        "\tlib.PU = &b\n"
+        "\tb = v\n"
+        "\treturn *lib.PU\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_bound_pointer_deref_read_is_admitted(go_types_helper):
