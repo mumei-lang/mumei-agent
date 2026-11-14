@@ -764,13 +764,21 @@ class _Builder:
                     if branch is None:
                         frame["exited"] = False
                         branch = dict(scope)
-                    statements = next(
+                    body = next(
                         (
-                            _children(c)
-                            for c in clause.named_children
+                            c for c in clause.named_children
                             if c.type == "statement_list"
                         ),
-                        _children(clause),
+                        None,
+                    )
+                    statements = (
+                        _children(body)
+                        if body is not None
+                        else (
+                            _children(clause)
+                            if clause.type == "default_case"
+                            else []
+                        )
                     )
                     falls = (
                         bool(statements)

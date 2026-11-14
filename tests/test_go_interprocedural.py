@@ -685,6 +685,11 @@ def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
             "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
             frozenset({0}),
         ),
+        # An empty clause beside a fallthrough chain stays admitted.
+        (
+            "func F(x int64) int64 { y := x; switch x { case 1: case 2: fallthrough; default: return y }; return y }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_expression_switch_fallthrough(go_types_helper, declarations, expected):
