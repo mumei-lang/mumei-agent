@@ -1089,6 +1089,10 @@ def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
         "func F(x int64) int64 { y,z:=x,x; return y+z }",
         # A call statement to an unsummarizable callee keeps its gap.
         "func G(){}; func F(x int64) int64 { G(); return x }",
+        # Legal statement-position builtins outside the fragment keep
+        # their gaps — only min/max are admitted builtins.
+        "func F(x int64) int64 { print(x); return x }",
+        "func F(x int64) int64 { panic(\"boom\"); return x }",
         # Unsupported initializer propagates the gap.
         "func F(x int64) int { y:=len(\"s\"); return y }",
     ],
@@ -1133,6 +1137,17 @@ def test_non_let_statements_stay_unsupported(go_types_helper, declarations):
         ),
         (
             "func G(v int64) int64 { return v }; func F(x int64) int64 { switch G(x); x { case 1: return x; default: return 0 } }",
+            frozenset({0}),
+            True,
+        ),
+        (
+            "func G(v int64) int64 { return v }; func F(x int64) int64 { for G(x); x > 0; x-- { }; return x }",
+            frozenset({0}),
+            True,
+        ),
+        # A parenthesized call statement is the same shape.
+        (
+            "func G() int64 { return 1 }; func F(x int64) int64 { (G()); return x }",
             frozenset({0}),
             True,
         ),
