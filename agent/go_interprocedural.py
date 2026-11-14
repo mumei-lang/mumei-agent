@@ -609,6 +609,155 @@ class _Builder:
             index, fn, params, locals_, transfers, count, depth + 1
         )
 
+    def _imported_member_write(
+        self, node: Any
+    ) -> tuple[PackageMember, tuple[Any, ...]] | None:
+        """The imported member an assignment LHS stores into, or None.
+
+        `lib.V = v`, `lib.VA[i] = v` and `lib.VS.f = v` — and their
+        dot-imported forms `V = v`, `VA[i] = v`, `VS.f = v` — mutate
+        package state the dependency model does not follow: it tracks
+        binding indices, never member contents, so the store carries
+        no result dependency. The member's own identity becomes the
+        recorded write target, the same way `t.f = v` records the
+        base's declared type identity. The returned extras are index
+        sub-expressions inside the LHS (`lib.VA[f()] = v`); they must
+        still be evaluated for anything that could record a transfer
+        or pin. A LHS that resolves to no
+        imported member — a bound local's field, a computed operand,
+        an unknown name — returns None and keeps the statement
+        closed.
+        """
+        while node is not None and node.type == "parenthesized_expression":
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
+        if node is None:
+            return None
+        if node.type == "identifier":
+            # Dot-imported `V = v`: a bare `import` reference whose
+            # record names the same object, exactly like a member read.
+            ref = self.references.get(self.node_key(node))
+            member = (
+                self.members.get(ref.binding_id)
+                if ref is not None and ref.kind == "import"
+                else None
+            )
+            if member is None or member.name.encode("utf-8") != node.text:
+                return None
+            return member, ()
+        extras: list[Any] = []
+        cur = node
+        while cur is not None:
+            if cur.type == "parenthesized_expression":
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+                continue
+            if cur.type == "selector_expression":
+                member = self._package_member(cur)
+                if member is not None:
+                    return member, tuple(extras)
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "index_expression":
+                index = cur.child_by_field_name("index")
+                if index is not None:
+                    extras.append(index)
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "identifier":
+                # The operand chain bottomed out on a bare name — a
+                # dot-imported `VS.f = v` or `VA[i] = v`.
+                ref = self.references.get(self.node_key(cur))
+                member = (
+                    self.members.get(ref.binding_id)
+                    if ref is not None and ref.kind == "import"
+                    else None
+                )
+                if (
+                    member is not None
+                    and member.name.encode("utf-8") == cur.text
+                ):
+                    return member, tuple(extras)
+            return None
+        return None
+
+    def _record_member_write(
+        self,
+        lhs: Any,
+        member: PackageMember,
+        extras: tuple[Any, ...],
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+    ) -> None:
+        """Record an imported member write's mutation and index calls."""
+        if member.kind != "var":
+            # `lib.F`, `lib.K` and `lib.T` name no writable storage —
+            # unreachable in compilable source, rejected anyway so a
+            # tampered member record cannot smuggle a write through.
+            raise _Unsupported("unsupported_statement", _span(lhs))
+        self._pin_member_type(member)
+        elem = member.type.elem
+        while elem is not None:
+            # `[][]T` names its element type two levels down — every
+            # level's identity pins so a redeclared `T` still flags
+            # the summary stale.
+            if elem.type_id:
+                self.pinned.add(elem.type_id)
+            elem = elem.elem
+        transfers.append(
+            CallTransfer(
+                FileSpan(self.current_file, lhs.start_byte, lhs.end_byte),
+                member.id,
+                (),
+                frozenset(),
+                imported=True,
+            )
+        )
+        # Extras were collected outermost-first while descending the
+        # operand chain; Go evaluates indices inside-out — the inner
+        # index of `lib.V2[f()][g()]` runs before `g()` — so a write
+        # `f()` performs must already be visible when `g()`'s call
+        # arguments record their dependencies.
+        for extra in reversed(extras):
+            # The index value is unused — the write lands in package
+            # state — so only evaluation's side effects matter: calls,
+            # conversions and imported member reads record transfers
+            # and pins that `stale_dependents` later reads. An index
+            # holding none of those (a literal, a bound name, pure
+            # arithmetic) needs no evaluation at all; one that does
+            # evaluates through the normal expression gate and keeps
+            # the statement closed when its shape is unmodelled.
+            if self._index_extra_effects(extra):
+                self.expression(
+                    extra, fn, params, locals_, transfers, count, 0
+                )
+
+    def _index_extra_effects(self, node: Any) -> bool:
+        """Whether an index sub-expression's evaluation could record a
+        transfer or pin — a call, or a name/selector that resolves to
+        an imported member."""
+        if node.type == "call_expression":
+            return True
+        if (
+            node.type == "selector_expression"
+            and self._package_member(node) is not None
+        ):
+            return True
+        if node.type == "identifier":
+            ref = self.references.get(self.node_key(node))
+            if ref is not None and ref.kind == "import":
+                return True
+        return any(
+            self._index_extra_effects(c) for c in _children(node)
+        )
+
     def _opaque_write_target(
         self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]
     ) -> tuple[str, Any] | None:
@@ -653,7 +802,7 @@ class _Builder:
         self,
         node: Any,
         fn: Function,
-        params: Mapping[str, int],
+        params: dict[str, int],
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: int,
@@ -1161,7 +1310,21 @@ class _Builder:
                         ref.binding_id not in locals_
                         and ref.binding_id not in params
                     ):
-                        raise _Unsupported("binding_unavailable", _span(lhs))
+                        # A dot-imported member write — `V = v` —
+                        # mutates imported package state like
+                        # `lib.V = v`; the member record decides.
+                        member_write = self._imported_member_write(lhs)
+                        if member_write is None:
+                            raise _Unsupported(
+                                "binding_unavailable", _span(lhs)
+                            )
+                        member, extras = member_write
+                        self._record_member_write(
+                            lhs, member, extras,
+                            fn, params, locals_, transfers, count,
+                        )
+                        refs.append(None)
+                        continue
                     refs.append(ref)
                     continue
                 # `t.f = v` — a field store through a pointer-typed
@@ -1202,6 +1365,22 @@ class _Builder:
                     # dependencies accumulate into the base binding
                     # rather than replacing them or being discarded.
                     refs.append((ref, True))
+                    continue
+                # An imported member write — `lib.V = v`,
+                # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
+                # state like the field write above mutates caller
+                # state: external, so the recorded transfer marks
+                # `effects` unknown, and the stored value's
+                # dependencies drop with it because no binding
+                # tracks member contents.
+                member_write = self._imported_member_write(lhs)
+                if member_write is not None:
+                    member, extras = member_write
+                    self._record_member_write(
+                        lhs, member, extras,
+                        fn, params, locals_, transfers, count,
+                    )
+                    refs.append(None)
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
             # Tuple assignment is parallel: every RHS evaluates against the
