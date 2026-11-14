@@ -801,10 +801,15 @@ def load_go_package_snapshot(
                 )
             )
             # `pointee_type_ids`/`pointee_kind` may only ride on a
-            # pointer-typed var, and the producer emits them together.
+            # pointer-typed var. `pointee_kind` without
+            # `pointee_type_ids` is meaningless and rejected, but the
+            # reverse is accepted: an older producer declares the ids
+            # alone, and a missing kind simply degrades to the
+            # pre-`pointee_kind` boundary — a deref read it cannot
+            # classify stays closed, exactly as before.
             _require(kind == "var" or "pointee_type_ids" not in m)
             _require(
-                ("pointee_type_ids" in m) == ("pointee_kind" in m)
+                "pointee_kind" not in m or "pointee_type_ids" in m
             )
             pointee_ids: tuple[str, ...] | None = None
             pointee_kind: str | None = None
@@ -820,6 +825,7 @@ def load_go_package_snapshot(
                         for s in pointee_ids
                     )
                 )
+            if "pointee_kind" in m:
                 pointee_kind = _string(m["pointee_kind"])
                 _require(bool(pointee_kind))
             members.append(

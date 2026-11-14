@@ -4944,6 +4944,31 @@ def test_imported_pointer_var_deref_unnamed_pointee_is_admitted(
     assert result.effects == "unknown"
 
 
+def test_pointee_ids_without_kind_loads_as_closed_read(
+    go_types_helper,
+):
+    # A report from before `pointee_kind` existed declares
+    # `pointee_type_ids` alone: the loader must accept it, and the
+    # read it cannot classify degrades to the old boundary — closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn *lib.PU\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    for member in report["imported_members"]:
+        member.pop("pointee_kind", None)
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_pointer_var_deref_pointer_pointee_is_admitted(
     go_types_helper,
 ):
