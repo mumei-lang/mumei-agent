@@ -2260,6 +2260,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 )
                 return
+            # `t.F++` — an increment through a bound field mutates the
+            # pointee's caller memory like `t.F = v`, and records the
+            # same identity. The stored value is the field's own —
+            # external — so, like `(*p)++`, no dependency fold is
+            # needed: the base binding's deps carry on unchanged.
+            write_target = self._opaque_write_target(
+                operand, locals_, params
+            )
+            if write_target is not None:
+                type_id, _ref = write_target
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            operand.start_byte,
+                            operand.end_byte,
+                        ),
+                        type_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return
             raise _Unsupported(
                 "binding_unavailable"
                 if operand.type == "identifier"

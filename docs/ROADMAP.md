@@ -1622,7 +1622,12 @@ indexed `lib.VA[i]++`, field `lib.VS.F++`, dereferenced
 `(*lib.PV)++` on a pointer-typed member) records the same
 external mutation a `lib.V = v` write does, index sub-expressions
 evaluate like a write's, and a member that names no writable
-storage or an operand that resolves to none stays closed.
+storage or an operand that resolves to none stays closed. A bound
+field (`t.F++`, `(*t).F++`, or a nested `t.W.F++` on a bound
+`*S`/`**W2` param) routes through the opaque-write-target gate:
+the mutation records on the same identity `t.F = v` uses, and —
+like `(*p)++` — no dependency fold is needed since the stored
+value is the field's own external contents.
 
 ### C07 statement initializers on if and switch
 
