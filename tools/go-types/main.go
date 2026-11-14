@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -23,6 +24,7 @@ const packageProfile = "mumei.go-types-package/v1"
 const languageVersion = "go1.23"
 const maxSource = 64 * 1024
 const maxFiles = 64
+const maxImports = 64
 const maxRequest = 512 * 1024
 const maxReply = 8 * 1024 * 1024
 
@@ -31,10 +33,19 @@ type namedSource struct {
 	Source string `json:"source"`
 }
 
+// importedUnit declares one importable package as source files. Nothing is
+// read from disk, the network or the toolchain — the host supplies every
+// byte an import path may resolve to.
+type importedUnit struct {
+	Path    string        `json:"path"`
+	Sources []namedSource `json:"sources"`
+}
+
 type request struct {
-	Source     string        `json:"source"`
-	Sources    []namedSource `json:"sources"`
-	TargetArch string        `json:"target_arch"`
+	Source     string         `json:"source"`
+	Sources    []namedSource  `json:"sources"`
+	Imports    []importedUnit `json:"imports"`
+	TargetArch string         `json:"target_arch"`
 }
 
 // All spans are half-open UTF-8 byte offsets. In the single-file profile
@@ -121,6 +132,14 @@ type snapshot struct {
 	Gaps            []gap        `json:"gaps"`
 }
 
+// importUnit tracks a resolved imported package's own coordinate space so
+// imported objects get the same identities that unit's own report produces.
+type importUnit struct {
+	pkg     *types.Package
+	digests []string
+	files   map[*token.File]int
+}
+
 type indexer struct {
 	source   string
 	sources  []namedSource
@@ -132,6 +151,77 @@ type indexer struct {
 	sizes    types.Sizes
 	info     *types.Info
 	out      *snapshot
+
+	importDecls    map[string][]namedSource
+	importCache    map[string]*types.Package
+	importInFlight map[string]bool
+	importUnits    map[*types.Package]*importUnit
+}
+
+var errUnresolvedImport = fmt.Errorf("unresolved import")
+
+// Import implements types.Importer against the host-declared import map.
+// Resolution is recursive: a declared unit may itself import other declared
+// paths, and a cycle simply fails resolution.
+func (ix *indexer) Import(path string) (*types.Package, error) {
+	if p, ok := ix.importCache[path]; ok {
+		return p, nil
+	}
+	if ix.importInFlight[path] {
+		return nil, errUnresolvedImport
+	}
+	srcs, ok := ix.importDecls[path]
+	if !ok {
+		return nil, errUnresolvedImport
+	}
+	ix.importInFlight[path] = true
+	defer delete(ix.importInFlight, path)
+	rec := &importUnit{files: make(map[*token.File]int)}
+	var asts []*ast.File
+	for i, s := range srcs {
+		d := sha256.Sum256([]byte(s.Source))
+		rec.digests = append(rec.digests, fmt.Sprintf("%x", d[:]))
+		f, err := parser.ParseFile(ix.fset, s.Name, s.Source, 0)
+		if err != nil {
+			return nil, errUnresolvedImport
+		}
+		rec.files[ix.fset.File(f.Pos())] = i
+		asts = append(asts, f)
+	}
+	conf := types.Config{GoVersion: languageVersion, Sizes: ix.sizes, Importer: ix}
+	pkg, err := conf.Check(path, ix.fset, asts, nil)
+	if err != nil {
+		return nil, errUnresolvedImport
+	}
+	rec.pkg = pkg
+	ix.importUnits[pkg] = rec
+	ix.importCache[path] = pkg
+	return pkg, nil
+}
+
+// importedID reproduces the identity the imported unit's own report assigns
+// to obj: sha256:{declaring-file-digest}:{file}:{pos}:{scope_start}:{scope_end}
+// in that unit's file order. A caller's `direct_import` target therefore
+// matches the callee's own binding identity — staleness propagates across
+// package boundaries.
+func (ix *indexer) importedID(obj types.Object) string {
+	rec := ix.importUnits[obj.Pkg()]
+	if rec == nil || !obj.Pos().IsValid() || obj.Name() == "" || obj.Name() == "_" {
+		return ""
+	}
+	f, ok := rec.files[ix.fset.File(obj.Pos())]
+	if !ok {
+		return ""
+	}
+	start, end := -1, -1
+	if sc := obj.Parent(); sc == rec.pkg.Scope() {
+		// Package scope is the unit-wide sentinel, as in `scope`.
+		start, end = 0, 0
+	} else if sc != nil && sc.Pos().IsValid() {
+		start, end = ix.offset(sc.Pos()), ix.offset(sc.End())
+	}
+	return fmt.Sprintf("sha256:%s:%d:%d:%d:%d",
+		rec.digests[f], f, ix.offset(obj.Pos()), start, end)
 }
 
 func unitDigest(sources []namedSource) string {
@@ -276,6 +366,11 @@ func (ix *indexer) parameters(tuple *types.Tuple) []parameter {
 }
 
 func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
+	// Package-name bindings are namespace qualifiers, not values — uses of
+	// the imported member carry an `import` reference instead.
+	if _, ok := obj.(*types.PkgName); ok {
+		return
+	}
 	id := ix.id(obj)
 	if id == "" || seen[id] {
 		return
@@ -331,6 +426,19 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		if selection := ix.info.Selections[e]; selection != nil && selection.Kind() != types.FieldVal {
 			return "method_generic_or_variadic", ""
 		}
+		// A package-qualified call `lib.G(...)`: the callee is declared in
+		// a resolved imported unit. The target is that unit's own binding
+		// identity; the body stays opaque to the summarizer.
+		if x, ok := e.X.(*ast.Ident); ok {
+			if _, isPkg := ix.info.Uses[x].(*types.PkgName); isPkg {
+				if f, ok := ix.info.Uses[e.Sel].(*types.Func); ok {
+					if id := ix.importedID(f); id != "" {
+						return "direct_import", id
+					}
+				}
+				return "indirect_or_selector", ""
+			}
+		}
 	}
 	ident, ok := fun.(*ast.Ident)
 	if !ok {
@@ -346,6 +454,11 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	}
 	fn, ok := functions[ix.id(f)]
 	if !ok || fn.Body == nil {
+		// Dot-imported names reach here: the func is not local but its
+		// imported identity is still stable and reportable.
+		if id := ix.importedID(f); id != "" {
+			return "direct_import", id
+		}
 		return "external_or_bodyless", ""
 	}
 	if fn.Method || fn.Generic || fn.Variadic {
@@ -382,7 +495,9 @@ func analyze(req request) (out snapshot) {
 		}
 	}()
 	packaged := len(req.Sources) > 0
-	if packaged == (req.Source != "") {
+	// `imports` only applies to package units: it declares the source sets
+	// an import path may resolve to. The single-file profile stays closed.
+	if packaged == (req.Source != "") || (!packaged && len(req.Imports) > 0) {
 		out.Gaps = append(out.Gaps, gap{"invalid_request", nil})
 		return out
 	}
@@ -394,13 +509,34 @@ func analyze(req request) (out snapshot) {
 		out.Gaps = append(out.Gaps, gap{"source_limit_or_encoding", nil})
 		return out
 	}
-	seenNames := make(map[string]bool)
-	for _, s := range unit {
-		if s.Name == "" || seenNames[s.Name] || len(s.Source) > maxSource || !utf8.ValidString(s.Source) {
-			out.Gaps = append(out.Gaps, gap{"source_limit_or_encoding", nil})
+	validateUnit := func(sources []namedSource) bool {
+		if len(sources) == 0 || len(sources) > maxFiles {
+			return false
+		}
+		seen := make(map[string]bool)
+		for _, s := range sources {
+			if s.Name == "" || seen[s.Name] || len(s.Source) > maxSource || !utf8.ValidString(s.Source) {
+				return false
+			}
+			seen[s.Name] = true
+		}
+		return true
+	}
+	if !validateUnit(unit) {
+		out.Gaps = append(out.Gaps, gap{"source_limit_or_encoding", nil})
+		return out
+	}
+	importDecls := make(map[string][]namedSource, len(req.Imports))
+	if len(req.Imports) > maxImports {
+		out.Gaps = append(out.Gaps, gap{"invalid_request", nil})
+		return out
+	}
+	for _, imp := range req.Imports {
+		if imp.Path == "" || importDecls[imp.Path] != nil || !validateUnit(imp.Sources) {
+			out.Gaps = append(out.Gaps, gap{"invalid_request", nil})
 			return out
 		}
-		seenNames[s.Name] = true
+		importDecls[imp.Path] = imp.Sources
 	}
 	switch req.TargetArch {
 	case "amd64", "386", "arm64":
@@ -413,6 +549,10 @@ func analyze(req request) (out snapshot) {
 		source: req.Source, sources: unit, fset: fset, packaged: packaged,
 		out: &out, sizes: types.SizesFor("gc", req.TargetArch),
 		files: make(map[*token.File]int),
+		importDecls:    importDecls,
+		importCache:    make(map[string]*types.Package),
+		importInFlight: make(map[string]bool),
+		importUnits:    make(map[*types.Package]*importUnit),
 	}
 	for _, s := range unit {
 		ix.digests = append(ix.digests, fmt.Sprintf("%x", sha256.Sum256([]byte(s.Source))))
@@ -435,8 +575,16 @@ func analyze(req request) (out snapshot) {
 	}
 	for _, file := range astFiles {
 		for _, imp := range file.Imports {
-			sp := ix.nodeSpan(imp)
-			out.Gaps = append(out.Gaps, gap{"imports_not_supported", &sp})
+			// Imports resolve only through the declared map — there is no
+			// disk, network or stdlib importer.
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				path = ""
+			}
+			if _, err := ix.Import(path); err != nil {
+				sp := ix.nodeSpan(imp)
+				out.Gaps = append(out.Gaps, gap{"unresolved_import", &sp})
+			}
 		}
 		for _, group := range file.Comments {
 			for _, comment := range group.List {
@@ -458,7 +606,7 @@ func analyze(req request) (out snapshot) {
 		Implicits: make(map[ast.Node]types.Object), Types: make(map[ast.Expr]types.TypeAndValue),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 	}
-	conf := types.Config{GoVersion: languageVersion, Sizes: ix.sizes, Error: func(e error) {
+	conf := types.Config{GoVersion: languageVersion, Sizes: ix.sizes, Importer: &ix, Error: func(e error) {
 		if len(out.Gaps) < 16 {
 			var sp *span
 			if te, ok := e.(types.Error); ok && te.Pos.IsValid() {
@@ -482,9 +630,16 @@ func analyze(req request) (out snapshot) {
 		ix.addBinding(obj, seen)
 	}
 	for ident, obj := range info.Uses {
+		if _, ok := obj.(*types.PkgName); ok {
+			continue
+		}
 		id, kind := ix.id(obj), "local"
 		if id == "" {
-			kind = "universe"
+			if iid := ix.importedID(obj); iid != "" {
+				id, kind = iid, "import"
+			} else {
+				kind = "universe"
+			}
 		}
 		out.References = append(out.References, reference{ix.nodeSpan(ident), id, kind})
 	}
@@ -555,7 +710,10 @@ func analyze(req request) (out snapshot) {
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}
-				if kind != "direct_local" {
+				// `direct_import` calls are summarized conservatively — the
+				// result may depend on every argument — so they are not a
+				// `call_not_summarized_*` gap.
+				if kind != "direct_local" && kind != "direct_import" {
 					out.Gaps = append(out.Gaps, gap{"call_not_summarized_" + kind, &sp})
 				}
 			}

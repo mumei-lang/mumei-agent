@@ -1953,3 +1953,339 @@ def test_package_sources_must_be_exactly_the_declared_unit(
         ip.summarize_go_package(sources, snapshot)
     with pytest.raises(SnapshotError):
         snapshot.cfg_for_function(sources, snapshot.functions[0].binding_id)
+
+
+# --- C06 host-declared import resolution --------------------------------------
+
+
+def package_report_imports(
+    helper: Path,
+    files: dict[str, str],
+    imports: dict[str, dict[str, str]],
+    arch: str = "amd64",
+) -> bytes:
+    proc = subprocess.run(
+        [str(helper)],
+        input=json.dumps(
+            {
+                "sources": [
+                    {"name": name, "source": src} for name, src in files.items()
+                ],
+                "imports": [
+                    {
+                        "path": path,
+                        "sources": [
+                            {"name": name, "source": src}
+                            for name, src in srcs.items()
+                        ],
+                    }
+                    for path, srcs in imports.items()
+                ],
+                "target_arch": arch,
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert proc.stderr == b""
+    return proc.stdout
+
+
+IMPORTER = "package p\nimport \"lib\"\nfunc F(x int64) int64 { return lib.G(x) }\n"
+LIB = {"lib": {"g.go": "package lib\nfunc G(y int64) int64 { return y + 1 }\n"}}
+
+
+def lib_g_identity(helper: Path, lib: dict[str, str]) -> str:
+    report = package_report(helper, lib)
+    data = json.loads(report)
+    return next(b["id"] for b in data["bindings"] if b["name"] == "G")
+
+
+def test_imported_call_records_the_callees_own_identity(go_types_helper):
+    report = json.loads(
+        package_report_imports(go_types_helper, {"a.go": IMPORTER}, LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import"
+    assert call["target"] == lib_g_identity(go_types_helper, LIB["lib"])
+
+
+def test_imported_call_transfer_and_cross_package_staleness(go_types_helper):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    (transfer,) = result.calls
+    assert transfer.target not in {b.id for b in snapshot.bindings}
+    lib2 = {"g.go": "package lib\nfunc G(y int64) int64 { return y + 2 }\n"}
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_undeclared_import_fails_closed(go_types_helper):
+    files = {"a.go": IMPORTER}
+    report = json.loads(package_report(go_types_helper, files))
+    assert report["status"] != "ok"
+    assert any(g["reason"] == "unresolved_import" for g in report["gaps"])
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            package_report(go_types_helper, files), files, target_arch="amd64"
+        )
+
+
+def test_uncompilable_import_fails_closed(go_types_helper):
+    files = {"a.go": IMPORTER}
+    bad = {"lib": {"g.go": "package lib\nfunc G( {\n"}}
+    report = json.loads(package_report_imports(go_types_helper, files, bad))
+    assert report["status"] != "ok"
+    assert any(g["reason"] == "unresolved_import" for g in report["gaps"])
+
+
+def test_import_cycle_fails_closed(go_types_helper):
+    files = {"a.go": "package p\nimport \"a\"\nvar _ = a.V\n"}
+    imports = {
+        "a": {"a.go": "package a\nimport \"b\"\nvar V = b.V\n"},
+        "b": {"b.go": "package b\nimport \"a\"\nvar V = a.V\n"},
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, imports))
+    assert report["status"] != "ok"
+
+
+def test_named_and_dot_imports_resolve(go_types_helper):
+    files = {
+        "a.go": "package p\nimport l \"lib\"\nimport . \"other\"\n"
+        "func F(x int64) int64 { return l.G(x) + H(x) }\n"
+    }
+    imports = {
+        "lib": {"g.go": "package lib\nfunc G(y int64) int64 { return y + 1 }\n"},
+        "other": {"h.go": "package other\nfunc H(y int64) int64 { return y * 2 }\n"},
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, imports))
+    assert report["status"] == "ok"
+    kinds = {c["kind"] for c in report["calls"]}
+    assert kinds == {"direct_import"}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert len(result.calls) == 2
+
+
+def test_imported_member_references_carry_import_kind(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "var _ = lib.V\nvar _ = lib.K\nvar _ lib.T\n"
+        "func F(x int64) int64 { return x }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar V = 1\nconst K = 2\ntype T int64\n"
+        }
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    assert report["status"] == "ok"
+    import_refs = [r for r in report["references"] if r["kind"] == "import"]
+    assert len(import_refs) == 3
+    assert all(b["name"] != "lib" for b in report["bindings"])
+    load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+
+
+def test_transitive_imports_resolve_through_the_same_map(go_types_helper):
+    files = {"a.go": "package p\nimport \"a\"\nfunc F(x int64) int64 { return a.G(x) }\n"}
+    imports = {
+        "a": {"a.go": "package a\nimport \"b\"\nfunc G(y int64) int64 { return b.H(y) }\n"},
+        "b": {"b.go": "package b\nfunc H(z int64) int64 { return z }\n"},
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, imports))
+    assert report["status"] == "ok"
+    (call,) = [c for c in report["calls"] if c["kind"] == "direct_import"]
+    assert call["target"].startswith("sha256:")
+
+
+def test_imports_require_package_mode(go_types_helper):
+    proc = subprocess.run(
+        [str(go_types_helper)],
+        input=json.dumps(
+            {
+                "source": "package p\n",
+                "imports": [{"path": "lib", "sources": LIB["lib"]}],
+                "target_arch": "amd64",
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert json.loads(proc.stdout)["status"] == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "imports",
+    [
+        [{"path": "", "sources": [{"name": "g.go", "source": "package l\n"}]}],
+        [
+            {"path": "lib", "sources": [{"name": "g.go", "source": "package l\n"}]},
+            {"path": "lib", "sources": [{"name": "h.go", "source": "package l\n"}]},
+        ],
+        [{"path": "lib", "sources": []}],
+        [
+            {
+                "path": "lib",
+                "sources": [
+                    {"name": "g.go", "source": "package l\n"},
+                    {"name": "g.go", "source": "package l\n"},
+                ],
+            }
+        ],
+    ],
+)
+def test_import_declarations_validate_like_units(go_types_helper, imports):
+    proc = subprocess.run(
+        [str(go_types_helper)],
+        input=json.dumps(
+            {
+                "sources": [{"name": "a.go", "source": "package p\n"}],
+                "imports": imports,
+                "target_arch": "amd64",
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert json.loads(proc.stdout)["status"] == "invalid_request"
+
+
+def test_imported_identities_follow_the_imported_unit_not_the_caller(
+    go_types_helper,
+):
+    files = {"a.go": IMPORTER}
+    first = json.loads(package_report_imports(go_types_helper, files, LIB))
+    (target1,) = [c["target"] for c in first["calls"]]
+    files2 = {"a.go": IMPORTER + "func A() int64 { return 0 }\n"}
+    second = json.loads(package_report_imports(go_types_helper, files2, LIB))
+    (target2,) = [
+        c["target"] for c in second["calls"] if c["kind"] == "direct_import"
+    ]
+    assert target1 == target2
+    lib2 = {"lib": {"g.go": "package lib\nfunc G(y int64) int64 { return y + 9 }\n"}}
+    third = json.loads(package_report_imports(go_types_helper, files, lib2))
+    (target3,) = [c["target"] for c in third["calls"]]
+    assert target3 != target1
+
+
+def test_imported_call_result_unions_argument_dependencies(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 { return lib.G(x, y) + x }\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nfunc G(a, b int64) int64 { return a }\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+    (transfer,) = result.calls
+    assert transfer.result == frozenset({0, 1})
+
+
+def test_zero_argument_import_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.H() + x }\n"
+    }
+    lib = {"lib": {"h.go": "package lib\nfunc H() int64 { return 7 }\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    (transfer,) = result.calls
+    assert transfer.result == frozenset()
+
+
+def test_direct_import_is_not_a_call_gap(go_types_helper):
+    report = json.loads(
+        package_report_imports(go_types_helper, {"a.go": IMPORTER}, LIB)
+    )
+    assert not any(
+        g["reason"] == "call_not_summarized_direct_import" for g in report["gaps"]
+    )
+
+
+def test_single_file_loader_rejects_import_kinds():
+    data = schema_fixture()
+    data["calls"] = [
+        {
+            "span": {"start": 0, "end": 5},
+            "arguments": [],
+            "owner": "",
+            "target": "sha256:" + "0" * 64 + ":0:1:0:0",
+            "kind": "direct_import",
+        }
+    ]
+    with pytest.raises(SnapshotError):
+        load_go_snapshot(json.dumps(data).encode(), SOURCE, target_arch="amd64")
+    data = schema_fixture()
+    data["references"] = [
+        {"span": {"start": 0, "end": 1}, "binding_id": "", "kind": "import"}
+    ]
+    with pytest.raises(SnapshotError):
+        load_go_snapshot(json.dumps(data).encode(), SOURCE, target_arch="amd64")
+
+
+def test_package_loader_rejects_import_target_pointing_at_local(go_types_helper):
+    files = {"a.go": IMPORTER}
+    report = json.loads(package_report_imports(go_types_helper, files, LIB))
+    local = next(b["id"] for b in report["bindings"] if b["kind"] == "function")
+    report["calls"][0]["target"] = local
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )
+    report = json.loads(package_report_imports(go_types_helper, files, LIB))
+    report["calls"][0]["target"] = "sha256:nothex:0:1:0:0"
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )
+
+
+def test_package_loader_rejects_import_reference_to_local(go_types_helper):
+    files = {"a.go": IMPORTER}
+    report = json.loads(package_report_imports(go_types_helper, files, LIB))
+    ref = next(r for r in report["references"] if r["kind"] == "import")
+    ref["binding_id"] = next(b["id"] for b in report["bindings"])
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )

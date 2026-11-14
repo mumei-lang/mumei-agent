@@ -1874,6 +1874,42 @@ gap spans carry the declaring file's position only — file identity
 lives in the binding identity, not the gap. Ordering, caching, and
 which file sets form a unit stay host decisions.
 
+### C06 host-declared import resolution
+
+The package request gains `imports: [{path, sources: [{name, source}]}]`
+— the host declares every source set an import path may resolve to.
+The producer's `types.Importer` resolves only through that map:
+nothing reads disk, the network, or the toolchain, and the stdlib is
+not provided. Resolution is recursive (a declared unit may import other
+declared paths) and cycle-safe; an undeclared, uncompilable or cyclic
+import fails the report as `unresolved_import`. `imports` requires
+`sources` — the single-file profile stays closed. At most 64 declared
+paths, each a unit under the same ≤64-file/≤64-KiB rules.
+
+The payoff is cross-package freshness: a package-qualified call
+`lib.G(x)` — or a dot-imported `G(x)` — records `direct_import` whose
+target is the callee's identity computed in the imported unit's own
+coordinate space (`sha256:{its-file-digest}:{file}:{pos}:{scope}` —
+identical to what that unit's own `mumei.go-types-package/v1` report
+assigns, given the same source order). Regenerating the imported unit's
+report churns that identity, so `stale_dependents` flags callers across
+package boundaries. Uses of imported members record `import` references
+with the same identity; package names are namespace qualifiers and are
+not emitted as bindings or references. The loader revalidates the
+format: `direct_import` targets and `import` binding ids must carry the
+5-field imported-identity shape and must not collide with local
+functions or bindings; the single-file loader rejects both kinds.
+
+Consumer semantics stay honest: `summarize_go_package` treats a
+`direct_import` call's result as potentially depending on every
+argument — a documented over-approximation, since the callee body is
+opaque and package-level state is not modelled — and records the
+transfer so staleness propagates. `call_not_summarized_direct_import`
+is therefore not a gap a resolved report emits. Which packages exist,
+their paths, and their source order stay host decisions; there is no
+import shadowing, vendoring or version selection, and a transitive
+import path must also be declared.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

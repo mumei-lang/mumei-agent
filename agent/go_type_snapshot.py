@@ -25,6 +25,7 @@ TARGETS = frozenset({"amd64", "386", "arm64"})
 _CALL_KINDS = frozenset(
     {
         "direct_local",
+        "direct_import",
         "conversion",
         "builtin",
         "indirect_or_selector",
@@ -34,6 +35,10 @@ _CALL_KINDS = frozenset(
         "deferred",
     }
 )
+# Identity of an object declared in a resolved imported unit: it embeds that
+# unit's own file digest, file index and coordinates, so the target a caller
+# records is exactly the binding identity the callee's own report produces.
+_IMPORTED_ID = re.compile(r"sha256:[0-9a-f]{64}:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+\Z")
 _GAPS = frozenset(
     {
         "unsupported_value_semantics",
@@ -492,7 +497,11 @@ def load_go_snapshot(
                 _string(c["target"]),
             )
             kind = _string(c["kind"])
-            _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
+            _require(
+                kind in _CALL_KINDS
+                and kind != "direct_import"
+                and (not owner or owner in fn_by_id)
+            )
             if kind == "direct_local":
                 _require(target in fn_by_id)
                 callee = fn_by_id[target]
@@ -623,16 +632,20 @@ def load_go_package_snapshot(
             sp, binding_id = _file_span(ref["span"], raws), _string(ref["binding_id"])
             _require(sp.file >= 0)
             kind = ref["kind"]
-            _require(kind in {"local", "universe"})
-            _require(
-                (kind == "local" and binding_id in by_id)
-                or (kind == "universe" and binding_id == "")
-            )
-            if binding_id:
+            _require(kind in {"local", "universe", "import"})
+            if kind == "local":
+                _require(binding_id in by_id)
                 _require(
                     raws[sp.file][sp.start : sp.end].decode("utf-8")
                     == by_id[binding_id].name
                 )
+            elif kind == "import":
+                _require(
+                    _IMPORTED_ID.fullmatch(binding_id) is not None
+                    and binding_id not in by_id
+                )
+            else:
+                _require(binding_id == "")
             references.append(PackageReference(sp, binding_id, kind))
         functions = []
         for item in _list(v["functions"]):
@@ -686,6 +699,13 @@ def load_go_package_snapshot(
                 _require(
                     callee.body is not None
                     and not (callee.method or callee.generic or callee.variadic)
+                )
+            elif kind == "direct_import":
+                # The callee lives in a resolved imported unit: the target
+                # is that unit's own binding identity, never a local one.
+                _require(
+                    _IMPORTED_ID.fullmatch(target) is not None
+                    and target not in fn_by_id
                 )
             else:
                 _require(target == "")

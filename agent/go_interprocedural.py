@@ -1131,7 +1131,8 @@ class _Builder:
             if (
                 call is None
                 or call.owner != fn.binding_id
-                or call.kind not in {"direct_local", "conversion", "builtin"}
+                or call.kind
+                not in {"direct_local", "direct_import", "conversion", "builtin"}
             ):
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
             arguments_node = node.child_by_field_name("arguments")
@@ -1213,6 +1214,22 @@ class _Builder:
                         depth + 1,
                     )
                 return deps
+            if call.kind == "direct_import":
+                # The callee lives in a resolved imported unit; its body is
+                # opaque here. The result may depend on every argument — an
+                # over-approximation — and the recorded target is the
+                # imported unit's own binding identity, so a regenerated
+                # report for it still flags this summary via
+                # `stale_dependents`. Package-level state is not modelled.
+                actual = tuple(
+                    self.expression(
+                        arg, fn, params, locals_, transfers, count, depth + 1
+                    )
+                    for arg in arguments
+                )
+                result = frozenset().union(*actual) if actual else frozenset()
+                transfers.append(CallTransfer(call.span, call.target, actual, result))
+                return result
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
                 raise _Unsupported("callee_unavailable", _span(node), call.target)
@@ -1275,6 +1292,13 @@ def summarize_go_package(
     only churns that file's identities (`stale_dependents` still
     applies). `sources` maps each declared file name to its contents
     (or lists them in declaration order); digests re-validate.
+
+    Calls into host-resolved imported units record `direct_import`
+    transfers: the callee body is opaque, so the result is treated as
+    potentially depending on every argument — an over-approximation;
+    package-level state is not modelled. The target is the imported
+    unit's own binding identity, so regenerating that unit's report
+    churns it and `stale_dependents` still flags dependents.
     """
     raws, key = _package_context(snapshot, sources)
     builder = _Builder(
