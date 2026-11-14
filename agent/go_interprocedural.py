@@ -761,6 +761,20 @@ class _Builder:
                 imported=True,
             )
         )
+        if index.type in {
+            "int_literal",
+            "float_literal",
+            "imaginary_literal",
+            "rune_literal",
+            "interpreted_string_literal",
+            "raw_string_literal",
+            "true",
+            "false",
+        }:
+            # A literal index carries no dependencies — `lib.VM["k"]`
+            # reads the entry at a constant key like any other
+            # modelled index shape.
+            return frozenset()
         return self.expression(
             index, fn, params, locals_, transfers, count, depth + 1
         )

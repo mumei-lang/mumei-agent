@@ -2376,9 +2376,9 @@ through the same gate: map type facts carry both a `key` fact and the
 `elem` value fact (`map[K]V`), the result carries only the index's
 dependencies, and the named key's identity pins alongside the
 container's and value's. The index expression must still be a
-modelled shape — `lib.VM["k"]` indexes with an unmodelled string
-literal, and the comma-ok form `v, ok := lib.VM[k]` needs a two-name
-binding the path does not perform, so both stay closed; a member
+modelled shape — a literal index (`lib.VM["k"]`) is dep-free like a
+constant — while the comma-ok form `v, ok := lib.VM[k]` needs a
+two-name binding the path does not perform, so it stays closed; a member
 write (`lib.VM[k] = v`) pins the named key's identity too.
 
 The member record's `signature_type_ids` for a method now include

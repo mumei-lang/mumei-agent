@@ -6205,7 +6205,9 @@ def test_imported_nested_index_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_map_index_stays_closed(go_types_helper):
+def test_imported_map_index_literal_key_is_admitted(go_types_helper):
+    # `lib.VM["k"]` — a literal index carries no dependencies, so the
+    # read admits like `lib.VM[k]` does with a modelled key.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 { return lib.VM[\"k\"] }\n"
@@ -6214,7 +6216,8 @@ def test_imported_map_index_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
 
 
 def test_imported_string_index_stays_closed(go_types_helper):
