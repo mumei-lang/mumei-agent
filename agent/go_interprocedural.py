@@ -152,13 +152,14 @@ class FunctionSummary:
     return_dependencies: frozenset[int] | None
     calls: tuple[CallTransfer, ...]
     gaps: tuple[SummaryGap, ...]
-    # `pinned` names imported type identities an admitted member read,
+    # `pinned` names named/alias type identities an admitted member read,
     # conversion or resolved call depends on, beyond the object's own
     # binding identity: a `lib.V` read whose declared type is `lib.T`, or
-    # a call whose callee's signature names `lib.T`, stays valid only
-    # while `T` keeps that identity, so `stale_dependents` flags the
-    # summary when `T` — not just `V` or the callee — is redeclared.
-    # Basic and unnamed types carry no identity and pin nothing.
+    # a call whose callee's signature names a named type, stays valid
+    # only while that type keeps its identity, so `stale_dependents`
+    # flags the summary when it — not just the member or callee — is
+    # redeclared. Basic and unnamed types carry no identity and pin
+    # nothing.
     pinned: tuple[str, ...] = ()
 
     @property

@@ -705,8 +705,8 @@ def load_go_package_snapshot(
                     and _IMPORTED_ID.fullmatch(t.type_id) is not None
                 )
             )
+            _require(kind == "function" or "signature_type_ids" not in m)
             sig_ids_raw = _list(m.get("signature_type_ids", []))
-            _require(kind == "function" or not sig_ids_raw)
             sig_ids = tuple(_string(s) for s in sig_ids_raw)
             _require(
                 len(set(sig_ids)) == len(sig_ids)
