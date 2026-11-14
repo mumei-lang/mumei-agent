@@ -474,12 +474,13 @@ class _Builder:
         `t.F` on a bound `*S` auto-dereferences a field of caller
         state — external like `lib.VS.F`, so the read is dep-free and
         records against the field's identity. The operand must be a
-        bound identifier (`(*t).F`, `t.F.G` and computed bases stay
-        closed) whose pointer fact names the pointee `type` member;
-        the field resolves through its own `import` reference to a
-        scalar-or-pointer `var` member, like the imported-struct-var
-        path. A promoted method's `func` member, a non-scalar field,
-        or any unresolvable name returns None.
+        bound identifier (`t.F.G` and computed bases stay closed)
+        whose pointer fact names the pointee `type` member, or one
+        explicit dereference of one (`(*t).F` — the same auto-deref
+        spelled out). The field resolves through its own `import`
+        reference to a scalar-or-pointer `var` member, like the
+        imported-struct-var path. A promoted method's `func` member,
+        a non-scalar field, or any unresolvable name returns None.
         """
         operand = node.child_by_field_name("operand")
         field = node.child_by_field_name("field")
@@ -490,6 +491,23 @@ class _Builder:
                 (c for c in operand.named_children if c.type != "comment"),
                 None,
             )
+            if operand is None:
+                return None
+        if operand.type == "unary_expression":
+            # `(*t).F` — an explicit dereference of the bound pointer
+            # before the selection; the same auto-deref spelled out.
+            operator = operand.child_by_field_name("operator")
+            if operator is None or operator.text != b"*":
+                return None
+            operand = operand.child_by_field_name("operand")
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = next(
+                    (c for c in operand.named_children if c.type != "comment"),
+                    None,
+                )
             if operand is None:
                 return None
         if operand.type != "identifier" or operand.text == b"_":
