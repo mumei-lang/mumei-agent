@@ -152,6 +152,13 @@ class FunctionSummary:
     return_dependencies: frozenset[int] | None
     calls: tuple[CallTransfer, ...]
     gaps: tuple[SummaryGap, ...]
+    # `pinned` names imported type identities an admitted member read or
+    # conversion resolved against, beyond the member's own binding
+    # identity: a `lib.V` read whose declared type is `lib.T` stays valid
+    # only while `T` keeps that identity, so `stale_dependents` flags the
+    # summary when `T` — not just `V` — is redeclared. Basic and unnamed
+    # types carry no identity and pin nothing.
+    pinned: tuple[str, ...] = ()
 
     @property
     def available(self) -> bool:
@@ -245,21 +252,22 @@ class GoSummarySet:
         return result
 
     def stale_dependents(self, known: Iterable[str]) -> frozenset[str]:
-        """Summaries that recorded a call to a callee identity outside `known`.
+        """Summaries resolved against a callee or pinned identity outside `known`.
 
         Binding identities carry the producing unit's source digest, so a
         replaced callee never reuses its identity: every summary that
-        recorded a call to a target absent from `known` must be
-        re-derived. Direct callees only — a transitive caller two edges
-        away is not reported; hosts building incremental caches must
-        propagate invalidation through the recorded call graph
-        themselves. Detection only — what to recompute is the host's call.
+        recorded a call to a target absent from `known`, or pinned an
+        imported type identity absent from `known`, must be re-derived.
+        Direct edges only — a transitive caller two edges away is not
+        reported; hosts building incremental caches must propagate
+        invalidation through the recorded call graph themselves.
+        Detection only — what to recompute is the host's call.
         """
         live = frozenset(known)
         return frozenset(
             f.binding_id
             for f in self.functions
-            if any(target not in live for target in f.call_targets)
+            if any(target not in live for target in (*f.call_targets, *f.pinned))
         )
 
 
@@ -321,6 +329,7 @@ class _Builder:
         self.bindings_by_span = {_key3(b.span): b for b in snapshot.bindings}
         self.cache: dict[str, FunctionSummary] = {}
         self.active: set[str] = set()
+        self.pinned: set[str] = set()
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -379,6 +388,7 @@ class _Builder:
         dependencies: frozenset[int] | None = None,
         calls: tuple[CallTransfer, ...] = (),
         gaps: tuple[SummaryGap, ...] = (),
+        pinned: tuple[str, ...] = (),
     ) -> FunctionSummary:
         key = hashlib.sha256((self.key + ":" + fn.binding_id).encode()).hexdigest()
         return FunctionSummary(
@@ -389,7 +399,19 @@ class _Builder:
             dependencies,
             calls,
             gaps,
+            pinned,
         )
+
+    def _pin_member_type(self, member: PackageMember) -> None:
+        """Pin an admitted member's declared named-type identity.
+
+        The producer names an imported `Named`/`Alias` type by the
+        identity the imported unit's own report assigns it, so pinning
+        it lets `stale_dependents` flag this summary when the type —
+        not just the member — is redeclared.
+        """
+        if member.type.type_id:
+            self.pinned.add(member.type.type_id)
 
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
@@ -458,23 +480,31 @@ class _Builder:
             locals_[result_binding] = frozenset()
         deps: list[frozenset[int]] = [frozenset()]
         saw_return = [False]
-        # The frame stack belongs to this function alone — a caller's
-        # exited frame must never leak into (or be marked by) a callee
+        # The frame stack and the pinned set belong to this function
+        # alone — a caller's exited frame and a callee's type pins must
+        # never leak into (or be marked by) the other function
         # summarized mid-expression.
         saved_frames = self.frames
+        saved_pinned = self.pinned
         self.frames = []
+        self.pinned = set()
         try:
             self._sequence(
                 statements, fn, params, locals_, transfers, count, deps,
                 saw_return, False,
             )
         finally:
+            pinned = tuple(sorted(self.pinned))
             self.frames = saved_frames
+            self.pinned = saved_pinned
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
         return self.result(
-            fn, deps[0], tuple(sorted(transfers, key=lambda c: _key3(c.span)))
+            fn,
+            deps[0],
+            tuple(sorted(transfers, key=lambda c: _key3(c.span))),
+            pinned=pinned,
         )
 
     def _sequence(
@@ -1147,11 +1177,13 @@ class _Builder:
                 member = self.members.get(ref.binding_id)
                 if member is not None and member.name.encode("utf-8") == node.text:
                     if member.kind == "const" and _scalar_const_type(member.type):
+                        self._pin_member_type(member)
                         return frozenset()
                     if member.kind == "var" and member.type.kind in {
                         "integer",
                         "boolean",
                     }:
+                        self._pin_member_type(member)
                         transfers.append(
                             CallTransfer(
                                 FileSpan(
@@ -1196,6 +1228,7 @@ class _Builder:
             if member is not None and member.kind == "var":
                 if member.type.kind not in {"integer", "boolean"}:
                     raise _Unsupported("non_parameter_reference", _span(node))
+                self._pin_member_type(member)
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -1216,6 +1249,7 @@ class _Builder:
                 or not _scalar_const_type(member.type)
             ):
                 raise _Unsupported("non_parameter_reference", _span(node))
+            self._pin_member_type(member)
             return frozenset()
         if kind == "parenthesized_expression" and len(children) == 1:
             return self.expression(
@@ -1281,6 +1315,8 @@ class _Builder:
                         and member.kind == "type"
                         and member.type.kind in {"integer", "boolean"}
                     )
+                    if scalar:
+                        self._pin_member_type(member)
                 else:
                     ref = (
                         self.references.get(self.node_key(function_node))
@@ -1300,6 +1336,8 @@ class _Builder:
                             == function_node.text
                             and member.type.kind in {"integer", "boolean"}
                         )
+                        if scalar:
+                            self._pin_member_type(member)
                     elif ref is not None and ref.binding_id:
                         binding = self.bindings.get(ref.binding_id)
                         scalar = (

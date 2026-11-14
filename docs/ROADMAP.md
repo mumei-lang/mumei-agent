@@ -1980,16 +1980,44 @@ member admits the conversion. The member name must still match the
 source token; function values, non-scalars, generic instantiations
 and reads without a matching record stay closed.
 
-Boundaries: member types carry no `type_id` into the imported unit
-(type fact emission is producer-side; `ix.id` yields no identity for
-non-root objects, so `type_id` is empty) — imported type
-declarations classify scalar conversions but cannot yet name a
-binding identity for freshness joins. Package-level constant
-reads are dependency-free but their *values* are not modelled —
-the fragment tracks what a result depends on, not what a constant
-equals. Selector reads remain limited to a plain package-qualified
-name: nested selectors, method values and field accesses on values
-stay unsupported.
+### C06 imported member type identities
+
+A member's declared type fact now carries `type_id` when the type is
+a named or alias type the imported unit declares: the producer names
+it with that declaration's own imported-unit binding identity — the
+same `sha256:{digest}:{file}:{pos}:{scope}` coordinate space
+`direct_import` targets and member ids already use (an alias names
+the alias object). Basic and unnamed types keep no identity. The
+package loader admits the imported-identity shape on `type_id` in
+addition to local binding ids; the single-file profile still rejects
+`imported_members` outright, so the relaxation is unreachable there.
+
+The consumer pins that identity on every admitted read or conversion
+whose declared member type carries one — a scalar `var`/`const` read
+of a named-type member and a named-type conversion alike,
+package-qualified or dot-imported. `FunctionSummary.pinned` records
+the pinned identities alongside `call_targets`, and
+`stale_dependents(known)` flags a summary whose pinned identity
+leaves the known set: redeclaring `type T` in the imported unit flags
+summaries that read `lib.VT` or convert through `lib.T` even when the
+member declaration itself is byte-identical.
+
+Boundaries: the pin names the *declared* type, not its meaning — a
+compatible redeclaration still flags the dependent (detection, not
+equivalence), and a member whose type fact has no `type_id` (basic,
+unnamed or composite types) pins nothing. Pins attach only on
+admitted reads: a read of a member declared with a non-scalar named
+type stays closed before any pin applies, and an unavailable summary
+still records none. A *local* binding that merely names an imported
+type (`var x lib.T`) records no pin either — its admission never
+depends on the type's identity, so redeclaring `T` only reaches it
+through the consumer report's own regenerated type facts.
+Package-level constant reads remain
+dependency-free but their *values* are not modelled — the fragment
+tracks what a result depends on, not what a constant equals.
+Selector reads remain limited to a plain package-qualified name:
+nested selectors, method values and field accesses on values stay
+unsupported.
 
 ## Roadmap authority and vocabulary
 
