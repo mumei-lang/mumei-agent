@@ -729,3 +729,107 @@ def test_statement_after_break_is_conditional():
         " return a; }"
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_break_skips_for_increment():
+    # A `break` exits the loop without running the increment — the
+    # body's last store survives.
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = 0;"
+        " for (let i = 0; i < 1; a = 0) { a = x; break; }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_continue_runs_for_increment():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = 0;"
+        " for (let i = 0; i < 4; i += y) {"
+        "   a = x; continue; }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_block_let_does_not_shadow_outer():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = x; { let a = y; } return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_block_let_local_does_not_escape():
+    s = _fn(
+        "function f(x: number): number {"
+        " { let a = x; } return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_reading_block_let_outside_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " { let a = x; } return a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_var_in_block_escapes():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = x; { var a = y; } return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_var_in_for_init_escapes():
+    s = _fn(
+        "function f(x: number): number {"
+        " for (var i = x; i < 4; i++) {} return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_var_in_branch_is_conditional():
+    s = _fn(
+        "function f(x: number, y: number, b: boolean): number {"
+        " var a = x; if (b) { var a = y; } return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_loop_condition_call_transfer_widens():
+    # The condition re-evaluates each pass — the recorded transfer's
+    # argument deps reflect the widened binding.
+    src = (
+        "function check(i: number): boolean { return i > 0; }\n"
+        "function f(x: number): number {"
+        " let i = 0; while (check(i)) { i = x; } return i; }"
+    )
+    s = _fn(src)
+    assert s.available and s.return_dependencies == frozenset({0})
+    (call,) = s.calls
+    assert call.arguments == (frozenset({0}),)
+
+
+def test_for_condition_call_transfer_widens():
+    src = (
+        "function check(i: number): boolean { return i > 0; }\n"
+        "function f(x: number): number {"
+        " for (let i = 0; check(i); i = x) {} return 0; }"
+    )
+    s = _fn(src)
+    assert s.available
+    (call,) = s.calls
+    assert call.arguments == (frozenset({0}),)
+
+
+def test_unavailable_summary_reports_unknown_effects():
+    s = _fn("function f(x): number { return 1; }")
+    assert not s.available
+    assert s.effects == "unknown"

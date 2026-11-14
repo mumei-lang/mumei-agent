@@ -27,7 +27,9 @@ Admitted:
   tracked result), assignments `x = e` to bound names, compound
   assignments `x op= e` for the admitted operators (deps union like
   `x = x op e`), and `x++`/`x--`/`++x`/`--x` on bound names
-  (dependency-preserving).
+  (dependency-preserving). `var` bindings are function-scoped —
+  they escape bare blocks and `for` initializers — while `let`/`const`
+  are block-scoped and never shadow an outer name past their block.
 * `if`/`else` (each branch evaluated over a scope copy and joined by
   union — a conditional store keeps both the new deps and the value
   the skipped path would have left),
@@ -199,6 +201,11 @@ class _Builder:
                 if self.unit_gap is None:
                     self.unit_gap = TsGap("unsupported_unit", _span(child))
         self.frames: list[dict[str, bool]] = []
+        # Function-level scope for `var` bindings, set per body; plus
+        # the let/const block-scope save stack and the var-name set.
+        self.function_locals: dict[str, frozenset[int]] = {}
+        self.var_names: set[str] = set()
+        self.block_stack: list[dict[str, frozenset[int] | None]] = []
 
     def summarize_all(self) -> tuple[TsFunctionSummary, ...]:
         return tuple(
@@ -215,17 +222,20 @@ class _Builder:
                 None,
                 (),
                 (TsGap("unsupported_signature", _span(node)),),
+                (),
+                "unknown",
             )
         name = name_node.text.decode()
         if self.unit_gap is not None:
             return TsFunctionSummary(
-                name, False, (), None, (), (self.unit_gap,)
+                name, False, (), None, (), (self.unit_gap,), (), "unknown"
             )
         try:
             return self.body(node, name)
         except _Unsupported as u:
             return TsFunctionSummary(
-                name, False, (), None, (), (TsGap(u.reason, u.span, u.callee),)
+                name, False, (), None, (),
+                (TsGap(u.reason, u.span, u.callee),), (), "unknown",
             )
 
     def body(self, node, name: str) -> TsFunctionSummary:
@@ -264,6 +274,9 @@ class _Builder:
             params[pname] = len(params)
 
         locals_: dict[str, frozenset[int]] = {}
+        self.function_locals = locals_
+        self.var_names = set()
+        self.block_stack = []
         transfers: list[TsCall] = []
         count = [0]
         deps = [frozenset()]
@@ -340,10 +353,23 @@ class _Builder:
             raise _Unsupported("analysis_limit", _span(node))
         kind = node.type
         if kind == "statement_block":
-            self._sequence(
-                _children(node), params, locals_, transfers, count, deps,
-                saw_return, conditional,
-            )
+            # let/const bound in the block are restored on exit — only
+            # `var` bindings (function-scoped) and assignments to outer
+            # names escape.
+            saved: dict[str, frozenset[int] | None] = {}
+            self.block_stack.append(saved)
+            try:
+                self._sequence(
+                    _children(node), params, locals_, transfers, count,
+                    deps, saw_return, conditional,
+                )
+            finally:
+                for name, prev in saved.items():
+                    if prev is None:
+                        locals_.pop(name, None)
+                    else:
+                        locals_[name] = prev
+                self.block_stack.pop()
             return
         if kind == "comment" or kind == "empty_statement":
             return
@@ -361,6 +387,7 @@ class _Builder:
             saw_return[0] = True
             return
         if kind in {"lexical_declaration", "variable_declaration"}:
+            is_var = kind == "variable_declaration"
             declarators = [
                 c for c in _children(node) if c.type == "variable_declarator"
             ]
@@ -382,9 +409,27 @@ class _Builder:
                 deps_v = self.expression(
                     value, params, locals_, transfers, count
                 )
-                self._store(
-                    locals_, params, pname.text.decode(), deps_v, conditional
-                )
+                name = pname.text.decode()
+                if is_var:
+                    # `var` is function-scoped: it also lands in the
+                    # current scope so loop fixed-points widen it.
+                    self.var_names.add(name)
+                    self._store(
+                        self.function_locals, params, name, deps_v,
+                        conditional,
+                    )
+                    if locals_ is not self.function_locals:
+                        self._store(
+                            locals_, params, name, deps_v, conditional
+                        )
+                else:
+                    if self.block_stack:
+                        saved = self.block_stack[-1]
+                        if name not in saved:
+                            saved[name] = locals_.get(name)
+                    self._store(
+                        locals_, params, name, deps_v, conditional
+                    )
             return
         if kind == "expression_statement":
             self._expression_statement(
@@ -425,10 +470,9 @@ class _Builder:
             body = node.child_by_field_name("body")
             if condition is None or body is None:
                 raise _Unsupported("unsupported_statement", _span(node))
-            self.expression(condition, params, locals_, transfers, count)
             self._loop(
-                body, None, params, locals_, transfers, count, deps,
-                saw_return, conditional, node,
+                body, None, condition, params, locals_, transfers, count,
+                deps, saw_return, conditional, node,
             )
             return
         if kind == "for_statement":
@@ -443,14 +487,10 @@ class _Builder:
                     saw_return, conditional,
                 )
             condition = node.child_by_field_name("condition")
-            if condition is not None:
-                self.expression(
-                    condition, params, scope, transfers, count
-                )
             increment = node.child_by_field_name("increment")
             self._loop(
-                body, increment, params, scope, transfers, count, deps,
-                saw_return, conditional, node,
+                body, increment, condition, params, scope, transfers,
+                count, deps, saw_return, conditional, node,
             )
             self._join(locals_, scope, params)
             return
@@ -461,6 +501,9 @@ class _Builder:
             if frame is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             frame["exited"] = True
+            # A `break` skips the for-increment; `continue` still runs
+            # it. Both make the rest of the body conditional.
+            frame["broke"] = kind == "break_statement"
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
@@ -506,7 +549,8 @@ class _Builder:
                              conditional, augmented=True)
             return
         if node.type == "update_expression":
-            self._update(node, params, locals_, transfers, count, conditional)
+            self._update(node, params, locals_, transfers, count,
+                         conditional)
             return
         # Any other statement-level expression evaluates for its calls.
         self.expression(node, params, locals_, transfers, count)
@@ -526,47 +570,68 @@ class _Builder:
         ):
             raise _Unsupported("unsupported_statement", _span(node))
         name = left.text.decode()
-        if name not in locals_ and name not in params:
+        target = self._write_scope(name, locals_, params)
+        if target is None:
             raise _Unsupported("binding_unavailable", _span(left))
         value = self.expression(right, params, locals_, transfers, count)
         if augmented:
             value = self._read_name(left, params, locals_, _span(left)) | value
-        self._store(locals_, params, name, value, conditional)
+        self._store(target, params, name, value, conditional)
+
+    def _write_scope(self, name, locals_, params):
+        """The scope a store lands in: block first, then the function
+        scope a `var` may have escaped into, then a parameter (stored
+        in the current scope as a shadow)."""
+        if name in locals_:
+            return locals_
+        if name in self.function_locals:
+            return self.function_locals
+        if name in params:
+            return locals_
+        return None
 
     def _update(self, node, params, locals_, transfers, count, conditional):
         argument = node.child_by_field_name("argument")
         if argument is None or argument.type != "identifier":
             raise _Unsupported("unsupported_statement", _span(node))
         name = argument.text.decode()
-        if name not in locals_ and name not in params:
+        target = self._write_scope(name, locals_, params)
+        if target is None:
             raise _Unsupported("binding_unavailable", _span(argument))
         self._store(
-            locals_, params, name,
+            target, params, name,
             self._read_name(argument, params, locals_, _span(argument)),
             conditional,
         )
 
     def _loop(
-        self, body, increment, params, scope, transfers, count, deps,
-        saw_return, conditional, node,
+        self, body, increment, condition, params, scope, transfers,
+        count, deps, saw_return, conditional, node,
     ) -> None:
         """Iterate a loop body to a dependency fixed point — a join, not
         an unroll; trip counts are never modelled."""
         passes = 0
-        frame = {"exited": False}
+        frame = {"exited": False, "broke": False}
         self.frames.append(frame)
         try:
             while True:
                 mark = len(transfers)
                 frame["exited"] = False
+                frame["broke"] = False
                 inner = dict(scope)
+                if condition is not None:
+                    # The condition re-evaluates each pass so a call's
+                    # recorded arguments reflect widened bindings.
+                    self.expression(
+                        condition, params, inner, transfers, count
+                    )
                 self.statement(
                     body, params, inner, transfers, count, deps,
                     saw_return, conditional,
                 )
-                if increment is not None:
+                if increment is not None and not frame["broke"]:
                     # The increment runs after each pass so its writes
-                    # seed the next iteration.
+                    # seed the next iteration — a `break` skips it.
                     self._for_part(
                         increment, params, inner, transfers, count, deps,
                         saw_return, conditional,
@@ -605,6 +670,8 @@ class _Builder:
         name = node.text.decode()
         if name in locals_:
             return locals_[name]
+        if name in self.function_locals:
+            return self.function_locals[name]
         if name in params:
             return frozenset({params[name]})
         raise _Unsupported("binding_unavailable", span)
