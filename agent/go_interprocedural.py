@@ -1009,7 +1009,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         recorded write target, and the base's reference is returned
         with it so the caller can fold the stored value's dependencies
         back into the base binding (a later `t.M()` can observe the
-        write). An imported member, a package var, an unbound name, or
+        write). A nested selection `t.W.f` walks the operand chain
+        through pointer-typed field members like the bound field
+        read: every traversed member pins and the deepest pointee
+        records the transfer. An imported member, a package var, an unbound name, or
         a base whose type declares no identity keeps the statement
         closed, matching the bare-identifier gate. A `(*t).f` base
         admits the same way — the explicit dereference spells out
