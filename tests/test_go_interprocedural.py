@@ -3746,9 +3746,10 @@ def test_imported_generic_receiver_method_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_method_expression_stays_closed(go_types_helper):
-    # `lib.T.M(t, x)` — a method expression, not a method value: the
-    # receiver is a leading parameter, a different call shape.
+def test_imported_method_expression_is_admitted(go_types_helper):
+    # `lib.T.M(t, x)` — a method expression: the receiver is already
+    # the leading argument, so the plain `direct_import` model covers
+    # it and no `method` flag is recorded.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t lib.T, x int64) int64 { return lib.T.M(t, x) }\n"
@@ -3758,12 +3759,86 @@ def test_imported_method_expression_stays_closed(go_types_helper):
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "direct_import" and "method" not in call
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["target"] == members["M"]["id"]
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    # The result depends on the receiver argument and the parameter.
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_pointer_method_expression_records_but_stays_unsupported(
+    go_types_helper,
+):
+    # `(*lib.T).PM(t, x)` records `direct_import` — the wire shape is
+    # identical to `lib.T.M` — but a `*lib.T` receiver can only arrive
+    # through a pointer-typed parameter, which the signature rules
+    # reject as `unsupported_signature`; it is closed at the consumer
+    # level for now.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, x int64) int64 { return (*lib.T).PM(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and "method" not in call
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_interface_method_expression_stays_closed(go_types_helper):
+    # `lib.I.M` — dispatch through an interface type is dynamic; the
+    # recorded method identity would not cover the implementations
+    # actually reached.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i lib.I, x int64) int64 { return lib.I.M(i, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+
+
+def test_generic_receiver_method_expression_stays_closed(go_types_helper):
+    # `lib.GT[lib.T].GM` — an instantiated receiver: member records pin
+    # `GT` but not the type arguments.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.GT[lib.T], x int64) int64 {"
+        " return lib.GT[lib.T].GM(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+
+
+def test_multi_result_method_expression_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64) (int64, int64) {"
+        " return lib.T.Bad(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
 
 
 def test_imported_multi_result_method_stays_closed(go_types_helper):

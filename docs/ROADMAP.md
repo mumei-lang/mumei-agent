@@ -2126,14 +2126,19 @@ A method call `recv.M(args)` now classifies as `direct_import` when
 the method is declared in a resolved imported unit on a concrete
 named receiver type (`lib.T`, or a pointer to one) and returns zero
 or a single scalar result. The producer resolves the selection
-through `types.Info.Selections` (`MethodVal` only — field selections
-and method expressions `lib.T.M` keep the existing classification)
-and marks the recorded call `method: true`, so the consumer also
-evaluates the receiver expression: the result depends on the
-receiver and every evaluated argument. `x.M(y)` on a parameter,
-`lib.V.M(x)` on package state (its var read still records the
-staleness transfer) and `lib.K.M(x)` on a constant all share the
-path.
+through `types.Info.Selections` (field selections keep the existing
+classification) and marks a method value `method: true`, so the
+consumer also evaluates the receiver expression: the result depends
+on the receiver and every evaluated argument. `x.M(y)` on a
+parameter, `lib.V.M(x)` on package state (its var read still records
+the staleness transfer) and `lib.K.M(x)` on a constant all share the
+path. A method *expression* `lib.T.M(recv, args)` needs no flag —
+the receiver is already the leading argument, so the plain
+`direct_import` result-depends-on-every-argument model covers it
+(`(*lib.T).PM(t, x)` records the same wire shape; a `*lib.T`
+receiver can only arrive through a pointer-typed parameter, which
+the signature rules still reject, so it is closed at the consumer
+level for now).
 
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when
@@ -2142,13 +2147,13 @@ so redeclaring `T` still flags every admitted caller.
 
 Boundaries: interface receivers stay `method_generic_or_variadic`
 — dispatch there is dynamic, and the recorded method identity would
-not cover the implementations actually reached. Method expressions
-(`lib.T.M(t, x)`, where the receiver is a leading parameter), local
+not cover the implementations actually reached (this covers both
+method values `i.M(x)` and method expressions `lib.I.M`). Local
 methods, multi-valued method results and generic methods are
 unchanged and closed — as are generic or instantiated receiver types
-(`lib.T[lib.U]`): the member records pin the receiver's named type but
-not the instantiation's type arguments, so redeclaring one would churn
-no recorded identity. The `method` key is optional on the wire:
+(`lib.T[lib.U]`, or `lib.GT[lib.T].GM`): the member records pin the
+receiver's named type but not the instantiation's type arguments, so
+redeclaring one would churn no recorded identity. The `method` key is optional on the wire:
 reports predating it keep validating, and it is rejected on any
 non-`direct_import` call.
 
