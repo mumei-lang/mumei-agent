@@ -2120,6 +2120,35 @@ argument through unpinned). Instantiated generic *types*
 are unchanged and closed. A void instantiated callee records its
 argument-dependency union like any other `direct_import` transfer.
 
+### C06 imported method calls on concrete named types
+
+A method call `recv.M(args)` now classifies as `direct_import` when
+the method is declared in a resolved imported unit on a concrete
+named receiver type (`lib.T`, or a pointer to one) and returns zero
+or a single scalar result. The producer resolves the selection
+through `types.Info.Selections` (`MethodVal` only — field selections
+and method expressions `lib.T.M` keep the existing classification)
+and marks the recorded call `method: true`, so the consumer also
+evaluates the receiver expression: the result depends on the
+receiver and every evaluated argument. `x.M(y)` on a parameter,
+`lib.V.M(x)` on package state (its var read still records the
+staleness transfer) and `lib.K.M(x)` on a constant all share the
+path.
+
+The member record's `signature_type_ids` for a method now include
+the receiver's own named-type identity — `x.M(y)` pins `T` even when
+`x` is a plain local variable that names `T` through no member read,
+so redeclaring `T` still flags every admitted caller.
+
+Boundaries: interface receivers stay `method_generic_or_variadic`
+— dispatch there is dynamic, and the recorded method identity would
+not cover the implementations actually reached. Method expressions
+(`lib.T.M(t, x)`, where the receiver is a leading parameter), local
+methods, multi-valued method results and generic methods are
+unchanged and closed. The `method` key is optional on the wire:
+reports predating it keep validating, and it is rejected on any
+non-`direct_import` call.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

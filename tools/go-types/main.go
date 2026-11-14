@@ -105,6 +105,10 @@ type call struct {
 	Owner     string `json:"owner"`
 	Target    string `json:"target"`
 	Kind      string `json:"kind"`
+	// Method marks a `direct_import` call whose callee is a method on a
+	// named type of an imported unit — the consumer must also evaluate
+	// the receiver expression (`recv.M(args)`), not just the arguments.
+	Method bool `json:"method,omitempty"`
 }
 
 type gap struct {
@@ -203,6 +207,38 @@ func (ix *indexer) directImportID(f *types.Func) (string, bool) {
 	}
 	sig, ok := f.Type().(*types.Signature)
 	if !ok || !scalarResults(sig) {
+		return "", false
+	}
+	return id, true
+}
+
+// directImportMethodID admits an imported method call `recv.M(...)` only
+// when the method is declared in a resolved imported unit on a concrete
+// named receiver type and returns zero or a single scalar result. The
+// dependency model is the same opaque `direct_import` shape — the result
+// may depend on the receiver and every argument; the consumer evaluates
+// the receiver expression for a `method` call. Interface receivers stay
+// `method_generic_or_variadic`: dispatch there is dynamic, and the
+// pinned method identity would not cover the implementations actually
+// reached.
+func (ix *indexer) directImportMethodID(f *types.Func) (string, bool) {
+	id := ix.importedID(f)
+	if id == "" {
+		return "", false
+	}
+	sig, ok := f.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil || !scalarResults(sig) {
+		return "", false
+	}
+	rt := sig.Recv().Type()
+	if ptr, ok := rt.(*types.Pointer); ok {
+		rt = ptr.Elem()
+	}
+	named, ok := rt.(*types.Named)
+	if !ok {
+		return "", false
+	}
+	if _, ok := named.Underlying().(*types.Interface); ok {
 		return "", false
 	}
 	return id, true
@@ -396,9 +432,12 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 
 // signatureTypeIDs lists the named/alias type identities a signature's
 // parameters and results mention, in the coordinate space of the unit
-// declaring each type — so a caller pinning a resolved call also pins the
-// types its contract names. Basic and unnamed types contribute nothing;
-// receiver types are not signature types for this purpose.
+// declaring each type — so a caller pinning a resolved call also pins
+// the types its contract names. Basic and unnamed types contribute
+// nothing. For a method, the receiver's own named type is included too:
+// an admitted `recv.M(args)` depends on that type as surely as on a
+// parameter, and a receiver that is a plain local variable carries no
+// member read that would pin it otherwise.
 func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 	seen := map[string]bool{}
 	var ids []string
@@ -419,6 +458,13 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 			seen[id] = true
 			ids = append(ids, id)
 		}
+	}
+	if sig.Recv() != nil {
+		rt := sig.Recv().Type()
+		if ptr, ok := rt.(*types.Pointer); ok {
+			rt = ptr.Elem()
+		}
+		add(rt)
 	}
 	for i := 0; i < sig.Params().Len(); i++ {
 		add(sig.Params().At(i).Type())
@@ -618,16 +664,16 @@ func unparen(e ast.Expr) ast.Expr {
 	}
 }
 
-func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (string, string) {
+func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (string, string, bool) {
 	if ix.info.Types[c.Fun].IsType() {
-		return "conversion", ""
+		return "conversion", "", false
 	}
 	fun := unparen(c.Fun)
 	var instIdent *ast.Ident
 	switch e := fun.(type) {
 	case *ast.IndexExpr:
 		if id, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id
+			return "direct_import", id, false
 		}
 		// An unqualified instantiation (`G[T](x)`, dot-imported or plain)
 		// still needs the instantiation-aware check below — the declared
@@ -638,7 +684,7 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		fun = unparen(e.X)
 	case *ast.IndexListExpr:
 		if id, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id
+			return "direct_import", id, false
 		}
 		if i, ok := unparen(e.X).(*ast.Ident); ok {
 			instIdent = i
@@ -646,7 +692,19 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		fun = unparen(e.X)
 	case *ast.SelectorExpr:
 		if selection := ix.info.Selections[e]; selection != nil && selection.Kind() != types.FieldVal {
-			return "method_generic_or_variadic", ""
+			// `recv.M(args)`: admit a concrete-receiver method declared
+			// in a resolved imported unit as a `direct_import` marked
+			// `method`, so the consumer evaluates the receiver too.
+			// Method expressions `T.M` stay closed — their receiver
+			// becomes a leading parameter, a different call shape.
+			if selection.Kind() == types.MethodVal {
+				if f, ok := selection.Obj().(*types.Func); ok {
+					if id, ok := ix.directImportMethodID(f); ok {
+						return "direct_import", id, true
+					}
+				}
+			}
+			return "method_generic_or_variadic", "", false
 		}
 		// A package-qualified call `lib.G(...)`: the callee is declared in
 		// a resolved imported unit. The target is that unit's own binding
@@ -655,45 +713,45 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			if _, isPkg := ix.info.Uses[x].(*types.PkgName); isPkg {
 				if f, ok := ix.info.Uses[e.Sel].(*types.Func); ok {
 					if id, ok := ix.directImportID(f); ok {
-						return "direct_import", id
+						return "direct_import", id, false
 					}
-					return "external_or_bodyless", ""
+					return "external_or_bodyless", "", false
 				}
-				return "indirect_or_selector", ""
+				return "indirect_or_selector", "", false
 			}
 		}
 	}
 	ident, ok := fun.(*ast.Ident)
 	if !ok {
-		return "indirect_or_selector", ""
+		return "indirect_or_selector", "", false
 	}
 	obj := ix.info.Uses[ident]
 	if _, ok := obj.(*types.Builtin); ok {
-		return "builtin", ""
+		return "builtin", "", false
 	}
 	f, ok := obj.(*types.Func)
 	if !ok {
-		return "indirect_or_selector", ""
+		return "indirect_or_selector", "", false
 	}
 	fn, ok := functions[ix.id(f)]
 	if !ok || fn.Body == nil {
 		if instIdent != nil {
 			if id, ok := ix.importedInstantiationID(f, instIdent); ok {
-				return "direct_import", id
+				return "direct_import", id, false
 			}
-			return "external_or_bodyless", ""
+			return "external_or_bodyless", "", false
 		}
 		// Dot-imported names reach here: the func is not local but its
 		// imported identity is still stable and reportable.
 		if id, ok := ix.directImportID(f); ok {
-			return "direct_import", id
+			return "direct_import", id, false
 		}
-		return "external_or_bodyless", ""
+		return "external_or_bodyless", "", false
 	}
 	if fn.Method || fn.Generic || fn.Variadic {
-		return "method_generic_or_variadic", ""
+		return "method_generic_or_variadic", "", false
 	}
-	return "direct_local", fn.BindingID
+	return "direct_local", fn.BindingID, false
 }
 
 func spanFile(s *span) int {
@@ -926,9 +984,9 @@ func analyze(req request) (out snapshot) {
 			case *ast.DeferStmt:
 				special[node.Call] = "deferred"
 			case *ast.CallExpr:
-				kind, target := ix.classify(node, functions)
+				kind, target, method := ix.classify(node, functions)
 				if override, ok := special[node]; ok {
-					kind, target = override, ""
+					kind, target, method = override, "", false
 				}
 				sp := ix.nodeSpan(node)
 				if fn, ok := functions[owner]; !ok || fn.Body == nil || sp.Start < fn.Body.Start || sp.End > fn.Body.End || spanFile(&sp) != spanFile(fn.Body) {
@@ -938,7 +996,7 @@ func analyze(req request) (out snapshot) {
 				for _, arg := range node.Args {
 					args = append(args, ix.nodeSpan(arg))
 				}
-				out.Calls = append(out.Calls, call{sp, args, owner, target, kind})
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method})
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}

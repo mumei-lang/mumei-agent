@@ -254,6 +254,10 @@ class PackageCall:
     owner: str
     target: str
     kind: str
+    # `method` marks a `direct_import` call whose callee is a method on a
+    # named type of an imported unit: the consumer evaluates the receiver
+    # expression too, so `recv.M(args)` unions the receiver's deps.
+    method: bool = False
 
 
 @dataclass(frozen=True)
@@ -755,7 +759,14 @@ def load_go_package_snapshot(
         _require(len(fn_by_id) == len(functions))
         calls = []
         for item in _list(v["calls"]):
-            c = _record(item, "span", "arguments", "owner", "target", "kind")
+            _require(
+                isinstance(item, dict)
+                and {"span", "arguments", "owner", "target", "kind"}
+                <= set(item)
+                and set(item)
+                <= {"span", "arguments", "owner", "target", "kind", "method"}
+            )
+            c = item
             sp, owner, target = (
                 _file_span(c["span"], raws),
                 _string(c["owner"]),
@@ -763,6 +774,10 @@ def load_go_package_snapshot(
             )
             kind = _string(c["kind"])
             _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
+            method = _boolean(c.get("method", False))
+            # `method` only travels on an imported method call — a local
+            # callee with a receiver never becomes `direct_import`.
+            _require(not method or kind == "direct_import")
             if kind == "direct_local":
                 _require(target in fn_by_id)
                 callee = fn_by_id[target]
@@ -786,7 +801,7 @@ def load_go_package_snapshot(
                     for a in args
                 )
             )
-            calls.append(PackageCall(sp, args, owner, target, kind))
+            calls.append(PackageCall(sp, args, owner, target, kind, method))
         gaps = []
         for item in _list(v["gaps"]):
             g = _record(item, "reason", "span")
