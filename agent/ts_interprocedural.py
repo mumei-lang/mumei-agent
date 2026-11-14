@@ -29,7 +29,8 @@ Admitted:
   `x = x op e`), and `x++`/`x--`/`++x`/`--x` on bound names
   (dependency-preserving).
 * `if`/`else` (each branch evaluated over a scope copy and joined by
-  union — a store only sticks when it happened on every path),
+  union — a conditional store keeps both the new deps and the value
+  the skipped path would have left),
   `while` and classic `for (init; cond; incr)` loops (bodies iterate
   to a dependency fixed point — a join, never an unroll; trip counts
   are not modelled), and unlabelled `break`/`continue` inside a loop.
@@ -592,16 +593,13 @@ class _Builder:
 
     @staticmethod
     def _join(scope, branch, params) -> None:
+        # Branch-local bindings (names absent from `scope`) never
+        # escape — only existing and parameter names are merged.
         for name, value in branch.items():
             if name in scope:
                 scope[name] |= value
             elif name in params:
                 scope[name] = frozenset({params[name]}) | value
-        for name in scope:
-            if name not in branch:
-                continue
-        # Branch-local bindings (names absent from `scope` originally)
-        # never escape — the loop above only touched existing names.
 
     def _read_name(self, node, params, locals_, span) -> frozenset[int]:
         name = node.text.decode()

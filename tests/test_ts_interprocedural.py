@@ -635,3 +635,97 @@ def test_call_argument_order_preserved():
     s = _fn(src)
     (call,) = s.calls
     assert call.arguments == (frozenset({1}), frozenset({0}))
+
+
+def test_else_if_chain_joins_all_arms():
+    s = _fn(
+        "function f(x: number, y: number, z: number, b: boolean,"
+        " c: boolean): number {"
+        " let a = 0;"
+        " if (b) { a = x; } else if (c) { a = y; } else { a = z; }"
+        " return a; }"
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_break_in_inner_loop_only():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = 0;"
+        " while (a < 10) {"
+        "   while (a < 5) { a += x; break; }"
+        "   a += y;"
+        " }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_logical_compound_assignment():
+    s = _fn(
+        "function f(x: number, b: boolean): number {"
+        " let a = x; b &&= x > 0; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_multiple_declarators():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = 0, b = x; return a + b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_var_initializer_in_for():
+    s = _fn(
+        "function f(x: number): number {"
+        " for (var i = 0; i < 4; i++) { x = x; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_context_key_is_deterministic():
+    src = "function f(x: number): number { return x; }"
+    assert (
+        _summarize(src).context_key == _summarize(src).context_key
+    )
+    assert (
+        _summarize(src).context_key
+        != _summarize(src + " ").context_key
+    )
+
+
+def test_parameters_order_preserved():
+    s = _fn(
+        "function f(a: number, b: boolean, c: number): number {"
+        " return c; }"
+    )
+    assert s.parameters == ("a", "b", "c")
+    assert s.return_dependencies == frozenset({2})
+
+
+def test_exported_function_keeps_summary_with_gap():
+    summaries = _summarize(
+        "export function f(x: number): number { return x; }"
+    ).functions
+    (s,) = summaries
+    assert s.name == "f" and not s.available
+    assert s.gaps[0].reason == "unsupported_unit"
+
+
+def test_statement_after_break_is_conditional():
+    # The statement after `break` may be skipped — a store there joins
+    # by union rather than replacing unconditionally.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = x;"
+        " while (a < 10) {"
+        "   if (a > 5) { break; }"
+        "   a = y;"
+        " }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
