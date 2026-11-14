@@ -846,3 +846,28 @@ def test_conditional_break_still_runs_for_increment():
         " return i; }"
     )
     assert s.available and s.return_dependencies == frozenset({1})
+
+def test_let_in_for_init_does_not_rewind_outer_name():
+    # `let i` in the initializer is scoped to the loop — it must not
+    # register in the enclosing block's restore map, which would
+    # rewind assignments made after the loop.
+    s = _fn(
+        "function f(a: number, b: number, n: number): number {"
+        " let i = a;"
+        " for (let i = 0; i < n; i++) {}"
+        " i = b;"
+        " return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_let_in_for_init_does_not_pollute_outer_name():
+    # The loop-scoped `i` shadows the outer one — its widened deps
+    # never join back into the enclosing binding.
+    s = _fn(
+        "function f(a: number, z: number, n: number): number {"
+        " let i = a;"
+        " for (let i = 0; i < n; i = i + z) {}"
+        " return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

@@ -480,18 +480,33 @@ class _Builder:
             if body is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             scope = dict(locals_)
-            initializer = node.child_by_field_name("initializer")
-            if initializer is not None:
-                self._for_part(
-                    initializer, params, scope, transfers, count, deps,
-                    saw_return, conditional,
+            # `let`/`const` in the initializer are scoped to the loop:
+            # they register in a for-local restore map, never the
+            # enclosing block's — otherwise the block's exit would
+            # rewind assignments made after the loop.
+            for_saved: dict[str, frozenset[int] | None] = {}
+            self.block_stack.append(for_saved)
+            try:
+                initializer = node.child_by_field_name("initializer")
+                if initializer is not None:
+                    self._for_part(
+                        initializer, params, scope, transfers, count,
+                        deps, saw_return, conditional,
+                    )
+                condition = node.child_by_field_name("condition")
+                increment = node.child_by_field_name("increment")
+                self._loop(
+                    body, increment, condition, params, scope,
+                    transfers, count, deps, saw_return, conditional,
+                    node,
                 )
-            condition = node.child_by_field_name("condition")
-            increment = node.child_by_field_name("increment")
-            self._loop(
-                body, increment, condition, params, scope, transfers,
-                count, deps, saw_return, conditional, node,
-            )
+            finally:
+                for name, prev in for_saved.items():
+                    if prev is None:
+                        scope.pop(name, None)
+                    else:
+                        scope[name] = prev
+                self.block_stack.pop()
             self._join(locals_, scope, params)
             return
         if kind in {"break_statement", "continue_statement"}:
