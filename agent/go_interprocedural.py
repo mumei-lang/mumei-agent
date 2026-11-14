@@ -261,10 +261,18 @@ class _Builder:
         locals_: dict[str, frozenset[int]] = {}
         deps: list[frozenset[int]] = [frozenset()]
         saw_return = [False]
-        self._sequence(
-            statements, fn, params, locals_, transfers, count, deps,
-            saw_return, False,
-        )
+        # The frame stack belongs to this function alone — a caller's
+        # exited frame must never leak into (or be marked by) a callee
+        # summarized mid-expression.
+        saved_frames = self.frames
+        self.frames = []
+        try:
+            self._sequence(
+                statements, fn, params, locals_, transfers, count, deps,
+                saw_return, False,
+            )
+        finally:
+            self.frames = saved_frames
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
         return self.result(
@@ -307,10 +315,12 @@ class _Builder:
         conditional: bool,
     ) -> None:
         if conditional:
-            prior = locals_.get(binding_id, frozenset())
-            if binding_id in params:
-                prior = prior | frozenset({params[binding_id]})
-            value = prior | value
+            if binding_id in locals_:
+                # The skipped path keeps the binding's CURRENT value —
+                # not a parameter's original deps once it was reassigned.
+                value = locals_[binding_id] | value
+            elif binding_id in params:
+                value = frozenset({params[binding_id]}) | value
         locals_[binding_id] = value
 
     def statement(

@@ -624,6 +624,12 @@ def test_control_statement_shapes_stay_unsupported(
             "func F(x int64) int64 { var y int64; for { if x>0 { break }; y = x }; return y }",
             frozenset({0}),
         ),
+        # A conditional write keeps the binding's CURRENT value — a
+        # parameter's original deps do not revive once it was reassigned.
+        (
+            "func F(x int64) int64 { x = 1; for { break; x = 0 }; return x }",
+            frozenset(),
+        ),
     ],
 )
 def test_unlabelled_jumps_make_later_writes_may_assignments(
@@ -631,6 +637,21 @@ def test_unlabelled_jumps_make_later_writes_may_assignments(
 ):
     result = named(*unit(go_types_helper, declarations))
     assert result.available and result.return_dependencies == expected
+
+
+def test_callee_summary_is_not_polluted_by_caller_exit_state(
+    go_types_helper,
+):
+    # F analyzes G mid-expression while F's loop frame is exited; G's own
+    # summary must still be unconditional — its cached result cannot
+    # depend on which caller state happened to run first.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { var y int64; for { y = x; break; _ = G(x) }; return y };"
+        "func G(a int64) int64 { v := a; v = 0; return v }",
+    )
+    g = named(source, snapshot, summaries, name="G")
+    assert g.available and g.return_dependencies == frozenset()
 
 
 @pytest.mark.parametrize(
