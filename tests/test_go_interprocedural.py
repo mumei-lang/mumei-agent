@@ -579,6 +579,61 @@ def test_control_statement_shapes_stay_unsupported(
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A break may skip the rest of the loop body — writes after it are
+        # may-assignments and union instead of replacing the deps the
+        # taken path kept.
+        (
+            "func F(x int64) int64 { var y int64; for { y = x; break; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { var y int64; for { y = x; continue; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, c int64) int64 { var y int64; for i:=c; i>0; i-- { y = x; if i>0 { break }; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        # A break inside a switch clause skips only the clause tail.
+        (
+            "func F(x int64) int64 { var y int64; switch x { case 0: y = x; break; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        # continue inside a switch clause targets the enclosing loop and
+        # skips the rest of the loop body too.
+        (
+            "func F(x int64) int64 { var y int64; for { y = x; switch x { case 0: continue }; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        # An inner loop consumes its own break — the outer body's tail is
+        # still unconditional and replaces dependencies.
+        (
+            "func F(x int64) int64 { var y int64; for { y = x; for { break }; y = 0 }; return y }",
+            frozenset(),
+        ),
+        # A switch break is consumed by the switch — the statement after
+        # it in the loop body is unconditional.
+        (
+            "func F(x int64) int64 { var y int64; for { y = x; switch x { case 0: break }; y = 0 }; return y }",
+            frozenset(),
+        ),
+        # Writes after a possible exit union with the value they keep.
+        (
+            "func F(x int64) int64 { var y int64; for { if x>0 { break }; y = x }; return y }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_unlabelled_jumps_make_later_writes_may_assignments(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # An if initializer is outside the fragment.

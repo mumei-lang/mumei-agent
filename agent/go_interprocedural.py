@@ -16,11 +16,14 @@ modelled). Expression ``switch`` statements with neither initializer nor
 evaluated (effect-free), each clause body runs in its own scope and its
 reassignments union back. ``var`` declarations bind like lets — one name
 per ``var_spec`` with at most one value; ``var x T`` is the dep-free zero
-value (grouped ``var (...)`` forms are a parser gap). ``x++``/``x--`` and
-unlabelled ``break``/``continue`` are effect-free for dependency purposes
-(the inc/dec operand must resolve to a bound scalar; labelled jumps,
-``goto``, ``defer`` and ``go`` stay unmodelled), and ``_ = expression``
-evaluates-and-discards like a condition. Type switches, ``select``,
+value (grouped ``var (...)`` forms are a parser gap). ``x++``/``x--`` on a
+bound scalar are dependency-preserving, and ``_ = expression``
+evaluates-and-discards like a condition. An unlabelled
+``break``/``continue`` marks its innermost loop or switch construct as
+exited — every later statement in that body is a may-assignment whose
+writes union instead of replace, because the jump may have skipped them
+(labelled jumps, ``goto``, ``defer`` and ``go`` stay unmodelled). Type
+switches, ``select``,
 ``const`` declarations and every other statement shape stay unsupported.
 Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
@@ -165,6 +168,9 @@ class _Builder:
         self.bindings_by_span = {b.span: b for b in snapshot.bindings}
         self.cache: dict[str, FunctionSummary] = {}
         self.active: set[str] = set()
+        # Innermost enclosing loop/switch constructs, innermost last; an
+        # unlabelled break or continue marks the frame it exits.
+        self.frames: list[dict[str, Any]] = []
         root = _syntax(raw)
         if root is not None:
             for node in root.named_children:
@@ -255,15 +261,57 @@ class _Builder:
         locals_: dict[str, frozenset[int]] = {}
         deps: list[frozenset[int]] = [frozenset()]
         saw_return = [False]
-        for statement in statements:
-            self.statement(
-                statement, fn, params, locals_, transfers, count, deps, saw_return
-            )
+        self._sequence(
+            statements, fn, params, locals_, transfers, count, deps,
+            saw_return, False,
+        )
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
         return self.result(
             fn, deps[0], tuple(sorted(transfers, key=lambda c: (c.span.start, c.span.end)))
         )
+
+    def _sequence(
+        self,
+        children: list[Any],
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        deps: list[frozenset[int]],
+        saw_return: list[bool],
+        conditional: bool,
+    ) -> None:
+        """Run a statement list, honouring exits earlier children record.
+
+        Once the innermost loop-or-switch frame is marked exited by an
+        unlabelled break/continue, every later statement is conditional —
+        it may have been skipped, so its writes union like a branch join.
+        """
+        frame = self.frames[-1] if self.frames else None
+        for child in children:
+            if frame is not None and frame["exited"]:
+                conditional = True
+            self.statement(
+                child, fn, params, locals_, transfers, count, deps,
+                saw_return, conditional,
+            )
+
+    @staticmethod
+    def _store(
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+        binding_id: str,
+        value: frozenset[int],
+        conditional: bool,
+    ) -> None:
+        if conditional:
+            prior = locals_.get(binding_id, frozenset())
+            if binding_id in params:
+                prior = prior | frozenset({params[binding_id]})
+            value = prior | value
+        locals_[binding_id] = value
 
     def statement(
         self,
@@ -275,16 +323,17 @@ class _Builder:
         count: list[int],
         deps: list[frozenset[int]],
         saw_return: list[bool],
+        conditional: bool,
     ) -> None:
         count[0] += 1
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         kind = node.type
         if kind in {"block", "statement_list"}:
-            for child in _children(node):
-                self.statement(
-                    child, fn, params, locals_, transfers, count, deps, saw_return
-                )
+            self._sequence(
+                _children(node), fn, params, locals_, transfers, count,
+                deps, saw_return, conditional,
+            )
             return
         if kind == "return_statement":
             expressions = _children(node)
@@ -311,8 +360,12 @@ class _Builder:
             binding = self.bindings_by_span.get(_span(lefts[0]))
             if binding is None or binding.type.kind not in {"integer", "boolean"}:
                 raise _Unsupported("binding_unavailable", _span(node))
-            locals_[binding.id] = self.expression(
-                rights[0], fn, params, locals_, transfers, count, 0
+            self._store(
+                locals_, params, binding.id,
+                self.expression(
+                    rights[0], fn, params, locals_, transfers, count, 0
+                ),
+                conditional,
             )
             return
         if kind == "var_declaration":
@@ -344,12 +397,17 @@ class _Builder:
                 }:
                     raise _Unsupported("binding_unavailable", _span(spec))
                 # `var x T` without a value is the zero value — dep-free.
-                locals_[binding.id] = (
-                    self.expression(
-                        values[0], fn, params, locals_, transfers, count, 0
-                    )
-                    if values
-                    else frozenset()
+                self._store(
+                    locals_, params, binding.id,
+                    (
+                        self.expression(
+                            values[0], fn, params, locals_, transfers,
+                            count, 0,
+                        )
+                        if values
+                        else frozenset()
+                    ),
+                    conditional,
                 )
             return
         if kind == "if_statement":
@@ -371,11 +429,10 @@ class _Builder:
             # Reassignments of existing names join back by union: the
             # branch may not execute.
             branch = dict(locals_)
-            for child in _children(consequence):
-                self.statement(
-                    child, fn, params, branch, transfers, count, deps,
-                    saw_return,
-                )
+            self._sequence(
+                _children(consequence), fn, params, branch, transfers,
+                count, deps, saw_return, conditional,
+            )
             self._join(locals_, branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
@@ -383,14 +440,13 @@ class _Builder:
                 if alternative.type == "if_statement":
                     self.statement(
                         alternative, fn, params, branch, transfers,
-                        count, deps, saw_return,
+                        count, deps, saw_return, conditional,
                     )
                 else:
-                    for child in _children(alternative):
-                        self.statement(
-                            child, fn, params, branch, transfers,
-                            count, deps, saw_return,
-                        )
+                    self._sequence(
+                        _children(alternative), fn, params, branch,
+                        transfers, count, deps, saw_return, conditional,
+                    )
                 self._join(locals_, branch, params)
             return
         if kind == "assignment_statement":
@@ -422,8 +478,12 @@ class _Builder:
             # Reassignment replaces the binding's dependencies; it never
             # declares a new variable. Inside a branch the caller's join
             # unions the new value back as a may-assignment.
-            locals_[ref.binding_id] = self.expression(
-                rights[0], fn, params, locals_, transfers, count, 0
+            self._store(
+                locals_, params, ref.binding_id,
+                self.expression(
+                    rights[0], fn, params, locals_, transfers, count, 0
+                ),
+                conditional,
             )
             return
         if kind == "for_statement":
@@ -448,7 +508,7 @@ class _Builder:
                 if init is not None:
                     self.statement(
                         init, fn, params, scope, transfers, count, deps,
-                        saw_return,
+                        saw_return, conditional,
                     )
                 condition = clause.child_by_field_name("condition")
                 if condition is not None:
@@ -479,33 +539,39 @@ class _Builder:
             # parameter indexes, so widening is monotone over a bounded
             # universe; the pass cap is a defensive analysis limit.
             passes = 0
-            while True:
-                mark = len(transfers)
-                inner = dict(scope)
-                for child in _children(body_node):
-                    self.statement(
-                        child, fn, params, inner, transfers, count, deps,
-                        saw_return,
+            frame = {"kind": "loop", "exited": False}
+            self.frames.append(frame)
+            try:
+                while True:
+                    mark = len(transfers)
+                    frame["exited"] = False
+                    inner = dict(scope)
+                    self._sequence(
+                        _children(body_node), fn, params, inner, transfers,
+                        count, deps, saw_return, conditional,
                     )
-                changed = False
-                for binding_id, binding_deps in inner.items():
-                    if binding_id in scope:
-                        if not binding_deps <= scope[binding_id]:
-                            scope[binding_id] |= binding_deps
+                    changed = False
+                    for binding_id, binding_deps in inner.items():
+                        if binding_id in scope:
+                            if not binding_deps <= scope[binding_id]:
+                                scope[binding_id] |= binding_deps
+                                changed = True
+                        elif binding_id in params:
+                            scope[binding_id] = (
+                                frozenset({params[binding_id]}) | binding_deps
+                            )
                             changed = True
-                    elif binding_id in params:
-                        scope[binding_id] = (
-                            frozenset({params[binding_id]}) | binding_deps
-                        )
-                        changed = True
-                if not changed:
-                    break
-                # Keep only the last pass's transfers: argument dependency
-                # sets widen across passes and earlier copies are stale.
-                del transfers[mark:]
-                passes += 1
-                if passes > len(scope) * (len(params) + 1):
-                    raise _Unsupported("analysis_limit", _span(node))
+                    if not changed:
+                        break
+                    # Keep only the last pass's transfers: argument
+                    # dependency sets widen across passes and earlier
+                    # copies are stale.
+                    del transfers[mark:]
+                    passes += 1
+                    if passes > len(scope) * (len(params) + 1):
+                        raise _Unsupported("analysis_limit", _span(node))
+            finally:
+                self.frames.pop()
             # Loop-body reassignments join back by union: the loop may
             # execute zero or many times.
             self._join(locals_, scope, params)
@@ -520,32 +586,40 @@ class _Builder:
                 self.expression(
                     value, fn, params, locals_, transfers, count, 0
                 )
-            for clause in node.named_children:
-                if clause.type == "expression_case":
-                    for sub in clause.named_children:
-                        if sub.type == "expression_list":
-                            # Case guards are evaluated like the tag.
-                            for guard in _children(sub):
-                                self.expression(
-                                    guard, fn, params, locals_, transfers,
-                                    count, 0,
+            frame = {"kind": "switch", "exited": False}
+            self.frames.append(frame)
+            try:
+                for clause in node.named_children:
+                    # Each clause is an alternative — a break in one does
+                    # not make another clause's tail unreachable.
+                    frame["exited"] = False
+                    if clause.type == "expression_case":
+                        for sub in clause.named_children:
+                            if sub.type == "expression_list":
+                                # Case guards are evaluated like the tag.
+                                for guard in _children(sub):
+                                    self.expression(
+                                        guard, fn, params, locals_,
+                                        transfers, count, 0,
+                                    )
+                            elif sub.type == "statement_list":
+                                branch = dict(locals_)
+                                self._sequence(
+                                    _children(sub), fn, params, branch,
+                                    transfers, count, deps, saw_return,
+                                    conditional,
                                 )
-                        elif sub.type == "statement_list":
-                            branch = dict(locals_)
-                            for stmt in _children(sub):
-                                self.statement(
-                                    stmt, fn, params, branch, transfers,
-                                    count, deps, saw_return,
-                                )
-                            self._join(locals_, branch, params)
-                elif clause.type == "default_case":
-                    branch = dict(locals_)
-                    for stmt in _children(clause):
-                        self.statement(
-                            stmt, fn, params, branch, transfers,
-                            count, deps, saw_return,
+                                self._join(locals_, branch, params)
+                    elif clause.type == "default_case":
+                        branch = dict(locals_)
+                        self._sequence(
+                            _children(clause), fn, params, branch,
+                            transfers, count, deps, saw_return,
+                            conditional,
                         )
-                    self._join(locals_, branch, params)
+                        self._join(locals_, branch, params)
+            finally:
+                self.frames.pop()
             return
         if kind == "labeled_statement":
             inner = [c for c in node.named_children if c.type != "label_name"]
@@ -556,7 +630,7 @@ class _Builder:
             # inside it stay unsupported via the label check below.
             self.statement(
                 inner[0], fn, params, locals_, transfers, count, deps,
-                saw_return,
+                saw_return, conditional,
             )
             return
         if kind in {"inc_statement", "dec_statement"}:
@@ -573,8 +647,21 @@ class _Builder:
         if kind in {"break_statement", "continue_statement"}:
             if any(c.type == "label_name" for c in node.named_children):
                 raise _Unsupported("unsupported_statement", _span(node))
-            # Control-flow-only statements carry no dependencies; syntactic
-            # returns are unioned regardless — reachability is not proven.
+            if kind == "break_statement":
+                # Unlabelled break exits the innermost loop or switch.
+                if not self.frames:
+                    raise _Unsupported("unsupported_statement", _span(node))
+                self.frames[-1]["exited"] = True
+            else:
+                # Unlabelled continue exits the innermost loop — plus
+                # every construct between here and it, such as an
+                # enclosing switch clause.
+                for frame in reversed(self.frames):
+                    frame["exited"] = True
+                    if frame["kind"] == "loop":
+                        break
+                else:
+                    raise _Unsupported("unsupported_statement", _span(node))
             return
         raise _Unsupported("unsupported_statement", _span(node))
 

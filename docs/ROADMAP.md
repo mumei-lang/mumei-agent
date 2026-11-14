@@ -1602,12 +1602,17 @@ Multi-name specs, non-scalar bindings, `const` declarations and grouped
 `x++`/`x--` join the fragment as dependency-preserving statements: the
 operand must be a single identifier resolving to a bound scalar —
 incrementing changes the value, never which parameters it derives from.
-Unlabelled `break`/`continue` are accepted as effect-free control flow
-(syntactic returns are unioned regardless — reachability is not proven),
-and `_ = expression` evaluates-and-discards like a condition.
+`_ = expression` evaluates-and-discards like a condition, and
 `labeled_statement` unwraps to its inner statement — a label without
 labelled jumps is inert syntax, and a label that IS used requires a
 jump, which stays `unsupported_statement`.
+
+Unlabelled `break`/`continue` mark their innermost loop-or-switch
+construct as exited (a `continue` inside a `switch` clause still reaches
+the enclosing loop); every later statement in that construct's body is
+then a may-assignment — its writes union instead of replace, because the
+jump may have skipped them. This is the same over-approximation the
+branch and loop joins already use; reachability is still not proven.
 
 Labelled `break`/`continue`, `goto`, `defer`, `go`, and non-identifier
 inc/dec operands stay `unsupported_statement`/`binding_unavailable`.
