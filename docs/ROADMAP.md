@@ -1907,7 +1907,18 @@ Consumer semantics stay honest: `summarize_go_package` treats a
 argument — a documented over-approximation, since the callee body is
 opaque and package-level state is not modelled — and records the
 transfer so staleness propagates. `call_not_summarized_direct_import`
-is therefore not a gap a resolved report emits. Which packages exist,
+is therefore not a gap a resolved report emits. `direct_import` is only
+classified for zero-result or single-scalar-result callees — composite
+or multi-valued imported results stay `external_or_bodyless` and fail
+closed (a `range` over a composite operand would break the integer-only
+range model). A summary recording a `direct_import` transfer reports
+`effects` as `unknown` — the imported callee's side effects are outside
+the fragment. Imported sources honour the same no-directive contract as
+the root unit (`//go:`, `// +build`, `//line` markers fail resolution).
+Identities are content-addressed within a unit's file order: two
+declared packages with identical file contents produce identical
+identities, so a host tracking freshness per path must not rely on
+identity membership alone. Which packages exist,
 their paths, and their source order stay host decisions; there is no
 import shadowing, vendoring or version selection, and a transitive
 import path must also be declared.

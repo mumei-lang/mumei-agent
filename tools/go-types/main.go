@@ -160,6 +160,33 @@ type indexer struct {
 
 var errUnresolvedImport = fmt.Errorf("unresolved import")
 
+// directImportID admits an imported call only when it is summarizable: zero
+// results, or a single scalar (integer/boolean) result. Composite or
+// multi-valued imported results stay `external_or_bodyless` — a `range` over
+// a composite would break the fragment's integer-only range model, and
+// multi-valued results are out of scope.
+func (ix *indexer) directImportID(f *types.Func) (string, bool) {
+	id := ix.importedID(f)
+	if id == "" {
+		return "", false
+	}
+	sig, ok := f.Type().(*types.Signature)
+	if !ok {
+		return "", false
+	}
+	res := sig.Results()
+	if res.Len() > 1 {
+		return "", false
+	}
+	if res.Len() == 1 {
+		b, ok := res.At(0).Type().Underlying().(*types.Basic)
+		if !ok || (b.Info()&types.IsInteger == 0 && b.Kind() != types.Bool) {
+			return "", false
+		}
+	}
+	return id, true
+}
+
 // Import implements types.Importer against the host-declared import map.
 // Resolution is recursive: a declared unit may itself import other declared
 // paths, and a cycle simply fails resolution.
@@ -181,9 +208,21 @@ func (ix *indexer) Import(path string) (*types.Package, error) {
 	for i, s := range srcs {
 		d := sha256.Sum256([]byte(s.Source))
 		rec.digests = append(rec.digests, fmt.Sprintf("%x", d[:]))
-		f, err := parser.ParseFile(ix.fset, s.Name, s.Source, 0)
+		f, err := parser.ParseFile(ix.fset, s.Name, s.Source, parser.ParseComments)
 		if err != nil {
 			return nil, errUnresolvedImport
+		}
+		// Imported sources follow the same no-directive contract as the
+		// root unit: the analysis has no build configuration, so
+		// `//go:`, `// +build` and `//line` markers cannot be honoured.
+		for _, group := range f.Comments {
+			for _, comment := range group.List {
+				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+				if strings.HasPrefix(text, "go:") || strings.HasPrefix(text, "+build") ||
+					strings.HasPrefix(text, "line ") || strings.HasPrefix(text, "/*line ") {
+					return nil, errUnresolvedImport
+				}
+			}
 		}
 		rec.files[ix.fset.File(f.Pos())] = i
 		asts = append(asts, f)
@@ -203,7 +242,10 @@ func (ix *indexer) Import(path string) (*types.Package, error) {
 // to obj: sha256:{declaring-file-digest}:{file}:{pos}:{scope_start}:{scope_end}
 // in that unit's file order. A caller's `direct_import` target therefore
 // matches the callee's own binding identity — staleness propagates across
-// package boundaries.
+// package boundaries. Identities are content-addressed within a unit's file
+// order: two declared packages with identical file contents produce identical
+// identities, so a host tracking freshness per path must not rely on identity
+// membership alone.
 func (ix *indexer) importedID(obj types.Object) string {
 	rec := ix.importUnits[obj.Pkg()]
 	if rec == nil || !obj.Pos().IsValid() || obj.Name() == "" || obj.Name() == "_" {
@@ -432,9 +474,10 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		if x, ok := e.X.(*ast.Ident); ok {
 			if _, isPkg := ix.info.Uses[x].(*types.PkgName); isPkg {
 				if f, ok := ix.info.Uses[e.Sel].(*types.Func); ok {
-					if id := ix.importedID(f); id != "" {
+					if id, ok := ix.directImportID(f); ok {
 						return "direct_import", id
 					}
+					return "external_or_bodyless", ""
 				}
 				return "indirect_or_selector", ""
 			}
@@ -456,7 +499,7 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	if !ok || fn.Body == nil {
 		// Dot-imported names reach here: the func is not local but its
 		// imported identity is still stable and reportable.
-		if id := ix.importedID(f); id != "" {
+		if id, ok := ix.directImportID(f); ok {
 			return "direct_import", id
 		}
 		return "external_or_bodyless", ""

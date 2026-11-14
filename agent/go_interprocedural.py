@@ -139,6 +139,9 @@ class CallTransfer:
     target: str
     arguments: tuple[frozenset[int], ...]
     result: frozenset[int]
+    # `imported` marks a `direct_import` call: the callee body is opaque to
+    # the fragment, so its effects cannot be claimed `none`.
+    imported: bool = False
 
 
 @dataclass(frozen=True)
@@ -157,7 +160,11 @@ class FunctionSummary:
 
     @property
     def effects(self) -> str:
-        return "none_in_supported_fragment" if self.available else "unknown"
+        # A `direct_import` transfer means part of the call graph is an
+        # opaque imported callee whose effects the fragment cannot bound.
+        if not self.available or any(c.imported for c in self.calls):
+            return "unknown"
+        return "none_in_supported_fragment"
 
     @property
     def call_targets(self) -> frozenset[str]:
@@ -1228,7 +1235,11 @@ class _Builder:
                     for arg in arguments
                 )
                 result = frozenset().union(*actual) if actual else frozenset()
-                transfers.append(CallTransfer(call.span, call.target, actual, result))
+                transfers.append(
+                    CallTransfer(
+                        call.span, call.target, actual, result, imported=True
+                    )
+                )
                 return result
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
@@ -1298,7 +1309,12 @@ def summarize_go_package(
     potentially depending on every argument — an over-approximation;
     package-level state is not modelled. The target is the imported
     unit's own binding identity, so regenerating that unit's report
-    churns it and `stale_dependents` still flags dependents.
+    churns it and `stale_dependents` still flags dependents. A summary
+    recording such a transfer reports `effects` as `unknown` — the
+    imported callee's side effects are outside the fragment. Only
+    imported calls with zero results or a single scalar result are
+    classified `direct_import`; composite or multi-valued imported
+    results keep `external_or_bodyless` and fail closed.
     """
     raws, key = _package_context(snapshot, sources)
     builder = _Builder(

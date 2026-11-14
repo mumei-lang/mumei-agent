@@ -2289,3 +2289,94 @@ def test_package_loader_rejects_import_reference_to_local(go_types_helper):
         load_go_package_snapshot(
             json.dumps(report).encode(), files, target_arch="amd64"
         )
+
+
+def test_imported_call_marks_effects_unknown(go_types_helper):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.effects == "unknown"
+    assert result.calls[0].imported
+
+
+def test_composite_import_result_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tfor range lib.S() { x++ }\n"
+        "\treturn x\n}\n"
+    }
+    lib = {
+        "lib": {"s.go": "package lib\nfunc S() []int64 { return nil }\n"}
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "external_or_bodyless"
+    assert any(
+        g["reason"] == "call_not_summarized_external_or_bodyless"
+        for g in report["gaps"]
+    )
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+
+
+def test_multi_result_import_call_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, z := lib.G(x)\n"
+        "\treturn y + z\n}\n"
+    }
+    lib = {
+        "lib": {"g.go": "package lib\nfunc G(y int64) (int64, int64) { return y, y }\n"}
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    (call,) = report["calls"]
+    assert call["kind"] == "external_or_bodyless"
+    assert any(
+        g["reason"] == "call_not_summarized_external_or_bodyless"
+        for g in report["gaps"]
+    )
+
+
+def test_zero_result_import_statement_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { lib.D(x); return x }\n"
+    }
+    lib = {"lib": {"d.go": "package lib\nfunc D(y int64) {}\n"}}
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import"
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_directive_in_imported_source_fails_closed(go_types_helper):
+    files = {"a.go": IMPORTER}
+    bad = {
+        "lib": {"g.go": "//go:build linux\npackage lib\nfunc G(y int64) int64 { return y }\n"}
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, bad))
+    assert report["status"] != "ok"
+    assert any(g["reason"] == "unresolved_import" for g in report["gaps"])
