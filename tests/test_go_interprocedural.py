@@ -9,6 +9,7 @@ import pytest
 
 from agent import control_flow, go_interprocedural as ip
 from agent.go_type_snapshot import (
+    FileSpan,
     SnapshotError,
     load_go_package_snapshot,
     load_go_snapshot,
@@ -2527,6 +2528,43 @@ def test_imported_var_read_flags_stale_dependents(go_types_helper):
         if snapshot.binding(f.binding_id).name == "F"
     )
     assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_imported_var_read_effects_propagate_through_local_calls(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func G() int64 { return lib.V }\n"
+        "func F(x int64) int64 { return G() + x }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    g = named_package(files, snapshot, summaries, "G")
+    assert g.effects == "unknown"
+    # G's state-read opacity propagates through the local call: F cannot
+    # claim bounded effects while it calls an opaque-state reader.
+    f = named_package(files, snapshot, summaries, "F")
+    assert f.available and f.effects == "unknown"
+
+
+def test_imported_var_read_transfer_keeps_file_index(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar _ = lib.K\n",
+        "b.go": "package p\nimport \"lib\"\nfunc F() int64 { return lib.V }\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    f = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    # The read happened in the second file — the transfer position keeps it.
+    assert f.calls
+    span = f.calls[0].span
+    assert isinstance(span, FileSpan) and span.file == 1
 
 
 def test_imported_nonscalar_var_read_fails_closed(go_types_helper):

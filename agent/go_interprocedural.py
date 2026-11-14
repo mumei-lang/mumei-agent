@@ -1168,7 +1168,11 @@ class _Builder:
                     raise _Unsupported("non_parameter_reference", _span(node))
                 transfers.append(
                     CallTransfer(
-                        _span(node),
+                        FileSpan(
+                            self.current_file,
+                            node.start_byte,
+                            node.end_byte,
+                        ),
                         member.id,
                         (),
                         frozenset(),
@@ -1344,7 +1348,18 @@ class _Builder:
             result = frozenset(
                 i for parameter in callee.return_dependencies for i in actual[parameter]
             )
-            transfers.append(CallTransfer(call.span, call.target, actual, result))
+            # The callee's effect opacity propagates: a local callee that
+            # itself performs imported transfers leaves this caller's
+            # effects unbounded the same way a direct_import does.
+            transfers.append(
+                CallTransfer(
+                    call.span,
+                    call.target,
+                    actual,
+                    result,
+                    imported=callee.effects == "unknown",
+                )
+            )
             return result
         raise _Unsupported("unsupported_expression", _span(node))
 
