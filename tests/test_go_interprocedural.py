@@ -5068,6 +5068,24 @@ def test_bound_pointer_double_deref_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_bound_pointer_deref_read_local_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*p` on `p := &t` where `t` is a local `type T` — the
+    # pointee identity resolves only through `imported_members`, so
+    # a local named type never admits.
+    files = {
+        "a.go": "package p\nimport \"lib\"\ntype LT int64\n"
+        "var _ = lib.V\n"
+        "func F(x int64) int64 { var t LT; p := &t; return int64(*p) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_local_pointer_deref_read_named_pointee_is_admitted(
     go_types_helper,
 ):

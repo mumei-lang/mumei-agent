@@ -1993,7 +1993,9 @@ whose declared `*T` names the pointee admits, records its own
 imported transfer against the pointee identity (the binding's read
 carries none of its own), and returns the pointer's provenance —
 the binding's dependencies — as the result; `p := &t` inherits the
-same `*T` identity, so `*p` reads the same way. An unnamed-pointee
+same `*T` identity, so `*p` reads the same way. The pointee's
+identity resolves only through `imported_members`, so `*T` on a
+local `type T` stays closed too. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`), a computed pointer
 (`*g()`), and a nested deref (`**t`) stay closed — matching the
 `*t = v` write side, where dep sets track binding indices, not
