@@ -604,11 +604,24 @@ class _Builder:
         # pointee contents.
         children = tuple(node.named_children)
         operand = children[0] if len(children) == 1 else None
-        member = (
-            self._package_member(operand)
-            if operand is not None and operand.type == "selector_expression"
-            else None
-        )
+        inner = operand
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(iter(inner.named_children), None)
+        member = None
+        if inner is not None and inner.type == "selector_expression":
+            member = self._package_member(inner)
+        elif inner is not None and inner.type == "identifier":
+            # A dot-imported `*PV` classifies by the declared member
+            # exactly like `*lib.PV` — a bare `import` reference whose
+            # record names the same object.
+            ref = self.references.get(self.node_key(inner))
+            if ref is not None and ref.kind == "import":
+                candidate = self.members.get(ref.binding_id)
+                if (
+                    candidate is not None
+                    and candidate.name.encode("utf-8") == inner.text
+                ):
+                    member = candidate
         if (
             member is None
             or member.kind != "var"
