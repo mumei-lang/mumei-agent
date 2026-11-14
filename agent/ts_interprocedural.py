@@ -514,14 +514,15 @@ class _Builder:
             if frame is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             frame["exited"] = True
-            # A `break` skips the for-increment; `continue` still runs
-            # it. Both make the rest of the body conditional.
-            frame["broke"] = kind == "break_statement"
-            if kind == "break_statement" and not conditional:
-                # Only an unconditional break leaves no exit that
-                # reaches the increment — a conditional one means the
-                # non-breaking path still runs it.
-                frame["broke_always"] = True
+            # A `break` skips the for-increment on its own exit but
+            # leaves the non-breaking exit — the increment's stores
+            # then join as may-writes. `continue` never disturbs it.
+            if kind == "break_statement":
+                frame["broke"] = True
+                if not conditional:
+                    # Only an unconditional break leaves no exit that
+                    # reaches the increment at all.
+                    frame["broke_always"] = True
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
@@ -651,10 +652,11 @@ class _Builder:
                 if increment is not None and not frame["broke_always"]:
                     # The increment runs after each pass so its writes
                     # seed the next iteration — a `break` skips it
-                    # only when no exit reaches the increment at all.
+                    # only when no exit reaches the increment at all,
+                    # and a conditional break keeps it a may-write.
                     self._for_part(
                         increment, params, inner, transfers, count, deps,
-                        saw_return, conditional,
+                        saw_return, conditional or frame["broke"],
                     )
                 changed = False
                 for name, ndeps in inner.items():

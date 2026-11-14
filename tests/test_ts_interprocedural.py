@@ -897,3 +897,17 @@ def test_var_in_for_body_escapes_with_last_store():
         " return v; }"
     )
     assert s.available and s.return_dependencies == frozenset({1})
+
+def test_conditional_break_keeps_increment_a_may_write():
+    # On the breaking exit the increment never ran, so `a` keeps the
+    # body's store; on the non-breaking exit it ran — the join is a
+    # may-write union, not an unconditional overwrite.
+    s = _fn(
+        "function f(x: number, c: boolean, n: number): number {"
+        " let a = 0;"
+        " for (let i = 0; i < n; a = 0) {"
+        "   a = x; if (c) { break; }"
+        " }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
