@@ -4519,8 +4519,8 @@ def test_pointer_type_fact_forgery_is_rejected(go_types_helper):
     )
     assert report["status"] == "ok"
     for bad in (
-        {"name": "int64"},
-        {"width": 64},
+        {"basic_name": "int64"},
+        {"bit_width": 64},
         {"signed": True},
     ):
         tampered = json.loads(json.dumps(report))
