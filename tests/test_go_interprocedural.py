@@ -2467,6 +2467,36 @@ def test_imported_var_read_is_an_opaque_state_read(go_types_helper):
     assert transfer.target in member_ids
 
 
+def test_imported_var_read_alone_has_no_dependencies(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.V }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_imported_var_read_inside_imported_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.G(lib.V) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
 def test_imported_var_read_flags_stale_dependents(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
