@@ -28,7 +28,9 @@ writes union instead of replace, because the jump may have skipped them
 (labelled jumps, ``goto``, ``defer`` and ``go`` stay unmodelled). Type
 switches, ``select``,
 ``const`` declarations and every other statement shape stay unsupported.
-Compiler-resolved
+Scalar conversions ``T(e)`` are effect-free — the result inherits the
+operand's dependencies; the type change itself (truncation, widening)
+is not modelled. Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -764,13 +766,25 @@ class _Builder:
             if (
                 call is None
                 or call.owner != fn.binding_id
-                or call.kind != "direct_local"
+                or call.kind not in {"direct_local", "conversion"}
             ):
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
             arguments_node = node.child_by_field_name("arguments")
             arguments = _children(arguments_node) if arguments_node is not None else []
             if tuple(_span(arg) for arg in arguments) != call.arguments:
                 raise _Unsupported("call_mapping_unavailable", _span(node), call.target)
+            if call.kind == "conversion":
+                # `T(e)` is effect-free for dependency purposes — the
+                # result inherits the operand's dependencies; the type
+                # change itself (truncation, widening) is not modelled.
+                if len(arguments) != 1:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return self.expression(
+                    arguments[0], fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
                 raise _Unsupported("callee_unavailable", _span(node), call.target)

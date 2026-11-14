@@ -1629,6 +1629,17 @@ outside the fragment — multi-name declarations, compound assignments,
 expression/send statements — stay `unsupported_statement` /
 `binding_unavailable` through the same dispatch.
 
+### C07 scalar conversions in expressions
+
+Conversion calls `T(e)` — reported by the producer as call kind
+`conversion` — are effect-free for dependency purposes: the result
+inherits the operand's dependencies. The type change itself
+(truncation, widening, signedness) is not modelled; dependency is about
+value provenance, not representation. Conversions to types outside the
+scalar fragment still fail closed where the converted value is bound
+(the `binding_unavailable` check), and builtin calls inside a
+conversion stay `unresolved_or_opaque_call`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
