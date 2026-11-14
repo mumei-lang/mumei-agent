@@ -1953,7 +1953,9 @@ reads are dependency-free but their *values* are not modelled —
 the fragment tracks what a result depends on, not what a constant
 equals. Selector reads remain limited to a plain package-qualified
 name: nested selectors, method values and field accesses on values
-stay unsupported.
+stay unsupported, and a dot-imported name is a plain identifier —
+it keeps `non_parameter_reference` rather than consulting member
+declarations.
 
 ## Roadmap authority and vocabulary
 

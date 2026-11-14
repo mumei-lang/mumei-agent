@@ -2554,3 +2554,41 @@ def test_malformed_member_records_fail_closed(go_types_helper):
         load_go_package_snapshot(
             json.dumps(report).encode(), files, target_arch="amd64"
         )
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    report["imported_members"].append(dict(report["imported_members"][0]))
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(report).encode(), files, target_arch="amd64"
+        )
+
+
+def test_dot_imported_const_read_fails_closed(go_types_helper):
+    # A dot-imported name is a plain identifier, not a package-qualified
+    # selector — it stays unmodelled even for a scalar constant.
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + K }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_imported_const_read_inside_imported_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.G(lib.K) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    # The opaque callee's result is the union of its argument deps —
+    # and `lib.K` contributes none.
+    assert result.available and result.return_dependencies == frozenset()
