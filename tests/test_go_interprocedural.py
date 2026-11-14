@@ -4066,10 +4066,12 @@ METHOD_LIB = {
         "func (t T) M2(a int64, b int64) int64 { return a }\n"
         "func (t T) Bad(v int64) (int64, int64) { return v, v }\n"
         "func (t *T) PM(v int64) int64 { return v }\n"
+        "func R(t *T) *T { return t }\n"
+        "func RR(t *T) (int64, *T) { return 0, t }\n"
         "type I interface{ M(int64) int64 }\n"
         "type GT[P any] int64\n"
         "func (t GT[P]) GM(v int64) int64 { return v }\n"
-        "var V T\nconst K T = 7\n",
+        "var V T\nconst K T = 7\nvar PV *T\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
         "t.go": "package lib\ntype T int64\n",
@@ -4529,3 +4531,130 @@ def test_pointer_type_fact_forgery_is_rejected(go_types_helper):
             load_go_package_snapshot(
                 json.dumps(tampered).encode(), files, target_arch="amd64"
             )
+
+
+def test_address_of_param_produces_pointer_deps(go_types_helper):
+    # `&x` inherits the operand's deps exactly like a `p := x` bind —
+    # the result is a `*lib.T` value carrying `{0}`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T) *lib.T { return &x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_address_of_alias_method_call(go_types_helper):
+    # `p := &x` gives a `*lib.T` local; the pointer-receiver method
+    # call through it unions the alias's and argument's deps.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 {\n"
+        "\tp := &x\n"
+        "\treturn p.PM(y)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_pointer_result_imported_call_is_admitted(go_types_helper):
+    # `lib.R(t)` returns `*T` — a pointer result carries the same
+    # arg-union dep set as a scalar one; the pointer binding stores it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, y int64) *lib.T {\n"
+        "\tp := lib.R(t)\n"
+        "\t_ = y\n"
+        "\treturn p\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    assert report["calls"][0]["kind"] == "direct_import"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_mixed_pointer_multi_result_unpacks(go_types_helper):
+    # `a, b := lib.RR(t)` — a tuple mixing scalar and pointer results:
+    # arity travels the record, each result gets the arg union, and
+    # `b`'s `*T` binding admits the store.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) int64 {\n"
+        "\ta, b := lib.RR(t)\n"
+        "\treturn a + b.PM(0)\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    call = next(
+        c
+        for c in report["calls"]
+        if c["kind"] == "direct_import" and c.get("results") == 2
+    )
+    assert call["results"] == 2
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_pointer_var_member_read_is_admitted(go_types_helper):
+    # `lib.PV` is a `*T` package var — reads stay dep-free like scalar
+    # var reads and still emit the staleness transfer.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(y int64) int64 {\n"
+        "\tp := lib.PV\n"
+        "\treturn p.PM(y)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert any(t.imported for t in result.calls)
+
+
+def test_pointer_write_stays_closed(go_types_helper):
+    # `*p = v` mutates the pointee — an indirected store is outside
+    # the fragment even though the pointer binding itself summarizes.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, v int64) int64 {\n"
+        "\t*t = lib.T(v)\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_address_of_composite_stays_closed(go_types_helper):
+    # `&` on a non-identifier operand can't evaluate inside the
+    # fragment — `&(*t)` fails at the operand, not the operator.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) *lib.T {\n"
+        "\treturn &(*t)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available

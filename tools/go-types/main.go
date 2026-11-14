@@ -184,11 +184,18 @@ type indexer struct {
 var errUnresolvedImport = fmt.Errorf("unresolved import")
 
 // allScalarResults admits a signature when every result is a scalar
-// (integer/boolean), at any arity — including zero.
+// (integer/boolean) or a pointer, at any arity — including zero. A
+// pointer result carries the same arg-union dep set as a scalar one:
+// the dep model tracks the binding, not the pointee, and the caller's
+// own gates decide whether a `*T` binding can store it.
 func allScalarResults(sig *types.Signature) bool {
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
-		b, ok := res.At(i).Type().Underlying().(*types.Basic)
+		t := res.At(i).Type()
+		if _, ok := t.Underlying().(*types.Pointer); ok {
+			continue
+		}
+		b, ok := t.Underlying().(*types.Basic)
 		if !ok || (b.Info()&types.IsInteger == 0 && b.Kind() != types.Bool) {
 			return false
 		}
