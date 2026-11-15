@@ -6,6 +6,7 @@ never against a live compiler.
 """
 import hashlib
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -187,6 +188,24 @@ def test_output_equal_to_a_declared_source_fails(tmp_path, capsys):
     )
     assert code == 1 and out == "" and "overwrite" in err
     assert source.read_text() == SOURCE
+
+
+def test_unresolvable_output_path_fails_closed(tmp_path, capsys):
+    """A symlink loop under --output resolves with RuntimeError, which
+    must surface as a clean failure, not a traceback."""
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    os.symlink("loop", tmp_path / "loop")
+    code, out, err = _run(
+        capsys,
+        _args(
+            helper,
+            source,
+            extra=["--output", str(tmp_path / "loop" / "m.json")],
+        ),
+    )
+    assert code == 1 and out == ""
+    assert err.startswith("go-summaries: ") and "Traceback" not in err
 
 
 def test_request_over_the_helper_bound_fails(tmp_path, capsys):

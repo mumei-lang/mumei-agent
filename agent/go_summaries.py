@@ -144,12 +144,19 @@ def main(args: argparse.Namespace | None = None) -> int:
         args = build_parser().parse_args()
     try:
         sources = _read_sources(args.source)
-        if args.output is not None and Path(args.output).resolve() in {
-            Path(raw).resolve() for raw in args.source
-        }:
-            raise SnapshotError(
-                "declared output path would overwrite a declared source"
-            )
+        if args.output is not None:
+            try:
+                output_path = Path(args.output).resolve()
+            except RuntimeError:
+                raise SnapshotError(
+                    "declared output path cannot be resolved"
+                )
+            if output_path in {
+                Path(raw).resolve() for raw in args.source
+            }:
+                raise SnapshotError(
+                    "declared output path would overwrite a declared source"
+                )
         if len(sources) == 1:
             request = {
                 "source": next(iter(sources.values())),
