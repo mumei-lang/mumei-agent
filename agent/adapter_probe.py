@@ -338,6 +338,8 @@ def observe_probes(
     """
     if not isinstance(requests, tuple):
         raise ValueError("probe observation requires a request tuple")
+    if cancel_event is not None and type(cancel_event) is not threading.Event:
+        raise ValueError("probe cancellation requires an event")
     if runner is None:
         runner = AttemptRunner()
     out: list[RuntimeObservation] = []

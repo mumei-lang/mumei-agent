@@ -373,6 +373,11 @@ def test_observe_probes_rejects_non_tuple():
         observe_probes([_req()])
 
 
+def test_observe_probes_rejects_bad_cancel_event():
+    with pytest.raises(ValueError, match="cancellation"):
+        observe_probes((), cancel_event=object())
+
+
 def test_observe_probes_feeds_replan():
     """Round-trip: schedule → observe → plan sees the observation."""
     registry = _registry(
