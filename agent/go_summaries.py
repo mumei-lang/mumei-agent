@@ -419,22 +419,25 @@ def _check_output_path(
                 )
 
 
-def _run_declared(
-    args: argparse.Namespace,
-) -> tuple[dict[str, str], bytes]:
-    """Read declared inputs, build the helper request and run it.
+def summarize_declared(
+    sources: dict[str, str],
+    go_types: str,
+    target_arch: str,
+    imports: dict[str, dict[str, str]] | None = None,
+    timeout: int = 30,
+):
+    """Run a provisioned helper on declared sources and summarize.
 
-    Shared by both routes: the produce route emits the manifest, the
-    check route compares a declared manifest against the same fresh
-    report.
+    The wire's public entry point shared by the CLI routes and the
+    MCP tool: the caller declares every byte (source texts keyed by
+    basename, import units keyed by import path) plus the helper
+    binary — nothing is resolved from disk, the project or the
+    toolchain here.
     """
-    sources = _read_sources(args.source)
-    declared = _declared_paths(args)
-    _check_output_path(args, declared)
     if len(sources) == 1:
         request: dict = {
             "source": next(iter(sources.values())),
-            "target_arch": args.target_arch,
+            "target_arch": target_arch,
         }
     else:
         request = {
@@ -442,9 +445,8 @@ def _run_declared(
                 {"name": name, "source": text}
                 for name, text in sources.items()
             ],
-            "target_arch": args.target_arch,
+            "target_arch": target_arch,
         }
-    imports = _read_imports(args.imports)
     if imports and len(sources) == 1:
         raise SnapshotError(
             "declared imports require a multi-file --source package unit"
@@ -466,7 +468,27 @@ def _run_declared(
             f"declared request exceeds the {MAX_REQUEST_BYTES}-byte "
             "helper bound"
         )
-    return sources, _run_helper(args.go_types, payload, args.timeout)
+    report = _run_helper(go_types, payload, timeout)
+    return _summarize(sources, report, target_arch), report
+
+
+def _run_declared(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str], bytes]:
+    """Read declared inputs, run the helper and summarize.
+
+    Shared by both routes: the produce route emits the manifest, the
+    check route compares a declared manifest against the same fresh
+    report.
+    """
+    sources = _read_sources(args.source)
+    declared = _declared_paths(args)
+    _check_output_path(args, declared)
+    imports = _read_imports(args.imports)
+    summary, report = summarize_declared(
+        sources, args.go_types, args.target_arch, imports, args.timeout
+    )
+    return sources, report
 
 
 def _emit(document: str, output: str | None) -> None:

@@ -1951,6 +1951,90 @@ def audit_code(
         return asdict(result)
 
 @mcp.tool()
+def go_summaries(
+    source_files: str,
+    go_types: str,
+    target_arch: str = "amd64",
+    imports_json: str = "{}",
+    timeout_s: int = 30,
+) -> str:
+    """Emit a declared Go parameter-dependency summary manifest.
+
+    Args:
+        source_files: JSON array of Go source file paths (one file
+            selects the single-file profile; several select the
+            package profile). Every file is declared — nothing is
+            resolved from disk, a project or the toolchain.
+        go_types: Path to the provisioned go-types helper binary.
+        target_arch: `gc` target the report is validated against
+            (amd64, 386 or arm64).
+        imports_json: JSON object mapping an import path to a file or
+            an array of files of that importable unit.
+        timeout_s: Bound on the helper spawn, in seconds.
+
+    Returns:
+        JSON with `manifest` — the mumei.go-scalar-parameter-deps/v1
+        document — on success, or `error` on a declared failure. A
+        summary is a conservative report, not a proof or verdict.
+    """
+    try:
+        from agent.go_summaries import (
+            MAX_IMPORTS,
+            _read_imports,
+            _read_sources,
+            summarize_declared,
+        )
+        from agent.go_type_snapshot import SnapshotError
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    try:
+        paths = json.loads(source_files)
+    except json.JSONDecodeError as exc:
+        return _err(f"failed to parse source_files: {exc}")
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or any(not isinstance(p, str) or not p for p in paths)
+    ):
+        return _err("source_files must be a nonempty JSON array of paths")
+
+    try:
+        imports_doc = json.loads(imports_json)
+    except json.JSONDecodeError as exc:
+        return _err(f"failed to parse imports_json: {exc}")
+    if not isinstance(imports_doc, dict):
+        return _err("imports_json must be a JSON object")
+    specs: list[str] = []
+    for import_path, files in imports_doc.items():
+        if not isinstance(import_path, str) or not import_path:
+            return _err("imports_json keys must be nonempty import paths")
+        files_list = files if isinstance(files, list) else [files]
+        for f in files_list:
+            if not isinstance(f, str) or not f:
+                return _err(
+                    "imports_json values must be paths or arrays of paths"
+                )
+            specs.append(f"{import_path}={f}")
+    if len(imports_doc) > MAX_IMPORTS:
+        return _err(f"imports_json declares more than {MAX_IMPORTS} units")
+
+    try:
+        sources = _read_sources(paths)
+        imports = _read_imports(specs)
+        summary, _report = summarize_declared(
+            sources,
+            go_types,
+            target_arch,
+            imports=imports or None,
+            timeout=timeout_s,
+        )
+    except (SnapshotError, OSError, UnicodeDecodeError) as exc:
+        return _err(str(exc))
+    return _ok({"manifest": summary.to_dict()})
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 

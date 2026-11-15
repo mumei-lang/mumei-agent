@@ -1054,3 +1054,45 @@ def test_attempt_skips_candidate_when_inputs_drift(tmp_path, capsys):
     assert report["normalized"]["outcome"] == "exited"
     assert "selected_result" not in report["sequence"]
     assert "candidate" not in report
+
+
+def test_mcp_tool_emits_manifest(tmp_path):
+    """The MCP surface speaks the same declared-report contract."""
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, _json.dumps(schema_fixture()).encode())
+    out = _json.loads(
+        mcp_server.go_summaries(
+            _json.dumps([str(src)]), str(helper)
+        )
+    )
+    assert "manifest" in out
+    assert (
+        out["manifest"]["schema_version"]
+        == "mumei.go-scalar-parameter-deps/v1"
+    )
+
+
+def test_mcp_tool_rejects_bad_declarations(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, b"{}")
+    assert "error" in _json.loads(
+        mcp_server.go_summaries("not json", str(helper))
+    )
+    assert "error" in _json.loads(
+        mcp_server.go_summaries(_json.dumps([]), str(helper))
+    )
+    assert "error" in _json.loads(
+        mcp_server.go_summaries(
+            _json.dumps([str(src)]), str(helper), imports_json="[]"
+        )
+    )
+    missing = tmp_path / "no-such-binary"
+    assert "error" in _json.loads(
+        mcp_server.go_summaries(_json.dumps([str(src)]), str(missing))
+    )

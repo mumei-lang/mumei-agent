@@ -3078,6 +3078,26 @@ Routing only — a selected adapter is a routing decision, not an
 accepted manifest.
 
 
+### C06 declared summary MCP tool (go_summaries)
+
+The MCP surface exposes the produce route as `go_summaries(
+source_files, go_types, target_arch='amd64', imports_json='{}',
+timeout_s=30)` — the same declared boundary the CLI speaks: the
+caller declares every byte (source texts, import units, the helper
+binary), the tool runs the provisioned helper through the shared
+`summarize_declared` entry point, and the manifest goes out under
+`manifest`. Nothing is resolved from disk, a project or the
+toolchain — a summary is a conservative report, not a proof or a
+verdict.
+
+`agent.go_summaries.summarize_declared` is the wire's public entry
+point: the CLI routes and the MCP tool both build the same helper
+request (single-file profile vs package profile, bounded
+`MAX_REQUEST_BYTES`, per-file `MAX_SOURCE_BYTES`, `MAX_IMPORTS`
+units). Tool-level failures report under `error` via `_err` like
+every other tool.
+
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe
