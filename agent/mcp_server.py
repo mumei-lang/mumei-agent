@@ -2667,7 +2667,10 @@ def verify_attempt(
     runs — the request fingerprint binds the Core executable's bytes,
     the source bytes and the solver budgets — then, only on a selected
     (`exited`, `exit_code == 0`) result, runs the live representation
-    check and evaluates acceptance.
+    check and evaluates acceptance. A selected run reports
+    `discharged_checks` — `file_identity`, `freshness`,
+    `producer_authenticity` and `semantic_correspondence` — with
+    `claim_truth` and `artifact_semantics` in `checks_not_performed`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.

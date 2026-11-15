@@ -608,6 +608,15 @@ lineage with no selection; `--output` may not overwrite declared
 inputs and sources over Core's 64 KiB input bound are rejected before
 dispatch. Acceptance stays representation-level — claim truth,
 freshness, authenticity and correspondence remain unassessed duties.
+A selected run also discharges four of the six semantic checks for
+the produced record at representation level — `file_identity` (its
+`subject.sha256` was computed over the declared bytes),
+`producer_authenticity` (provenance binds the pinned executable),
+`freshness` (just produced) and `semantic_correspondence`
+(established within the declared profile) — reported in
+`discharged_checks` with `claim_truth` (establishment is not a truth
+receipt) and `artifact_semantics` (the compiled-artifact layer) left
+in `checks_not_performed`.
 C02 stays partial.
 
 ### C02 declared verify-recheck route (verify-recheck)
