@@ -2580,6 +2580,12 @@ the consumer: the left-hand width must equal it.
   and unresolved non-void calls record opaque `RustCall`s
   carrying the args' (and bound callee's) deps and mark
   `unknown` instead of closing.
+- `let (a, b) = p` destructures bind via pattern walk;
+  writes through parameters (`self.x = v`, `*p = v`,
+  `a[i] = v`) accumulate per-param write deps that callers
+  merge into the slot the argument expression roots at —
+  `p.set(v)` updates `p`'s deps and `st(&mut s, x)` unions
+  `x`'s deps into `s`.
 - `for i in it` binds the pattern to the iterator's deps;
   loop returns gain condition deps; `x.m(args)` method calls
   union the receiver deps into the opaque result; index/

@@ -73,9 +73,42 @@ def _children(node):
     return [c for c in node.children if c.is_named]
 
 
+def _arg_root(node):
+    """Innermost identifier under reference/member/index
+    wrappers — the slot a `&mut` argument writes through."""
+    while node is not None:
+        if node.type in {"identifier", "self"}:
+            return node.text.decode()
+        if node.type == "field_expression":
+            node = node.child_by_field_name("value")
+            continue
+        if node.type == "index_expression":
+            node = next(
+                (
+                    c for c in _children(node)
+                    if c.type != "type_cast_expression"
+                ),
+                None,
+            )
+            continue
+        kids = [
+            c for c in _children(node)
+            if c.type not in _TYPE_NAMES
+        ]
+        if len(kids) == 1:
+            node = kids[0]
+            continue
+        return None
+    return None
+
+
 def _pattern_bindings(pat):
     """Identifier names bound by a pattern, skipping every
     `type` subtree (`Some(v)` binds `v`, not `Some`)."""
+    if pat is None:
+        return []
+    if pat.type == "identifier":
+        return [pat.text.decode()]
     out = []
 
     def walk(n):
@@ -274,20 +307,24 @@ class _Builder:
         if t == "let_declaration":
             pat = st.child_by_field_name("pattern")
             val = st.child_by_field_name("value")
-            if pat is None or pat.type != "identifier":
-                raise _Unsupported(
-                    "unsupported_statement", _span(st)
-                )
+            if pat is None:
+                return None
             deps = (
                 self._expr(val, locals_, param_index, summary)
                 if val is not None
                 else frozenset()
             )
-            locals_[pat.text.decode()] = deps
-            if self._writes:
-                self._writes[-1].add(pat.text.decode())
-            if self._decls:
-                self._decls[-1].add(pat.text.decode())
+            bound = _pattern_bindings(pat)
+            if not bound:
+                raise _Unsupported(
+                    "unsupported_statement", _span(st)
+                )
+            for bname in bound:
+                locals_[bname] = deps
+                if self._writes:
+                    self._writes[-1].add(bname)
+                if self._decls:
+                    self._decls[-1].add(bname)
             return None
         if t == "return_expression":
             val = next(
@@ -558,13 +595,27 @@ class _Builder:
             return deps
         if left is not None and left.type in _EXPR_TYPES:
             # `*p = v`, `x.f = v`, `a[i] = v` — non-scalar
-            # targets: the value's deps still flow, but the
-            # slot model can't place them. Evaluate both sides.
+            # targets: the value's deps still flow. When the
+            # root is a parameter (`self`, `p: &mut T`) record
+            # the write so callers can merge it into the slot
+            # the argument binds.
             deps = (
                 self._expr(right, locals_, param_index, summary)
                 if right is not None
                 else frozenset()
             )
+            root = _arg_root(left)
+            if root is not None and root in param_index:
+                pw = getattr(
+                    summary, "param_writes", None
+                )
+                if pw is None:
+                    pw = {}
+                    summary.param_writes = pw
+                pw[param_index[root]] = (
+                    pw.get(param_index[root], frozenset())
+                    | deps
+                )
             try:
                 deps |= self._expr(
                     left, locals_, param_index, summary
@@ -578,11 +629,13 @@ class _Builder:
         fn_expr = node.child_by_field_name("function")
         arglist = node.child_by_field_name("arguments")
         actual = []
+        roots = []
         if arglist is not None:
             for a in _children(arglist):
                 actual.append(
                     self._expr(a, locals_, param_index, summary)
                 )
+                roots.append(_arg_root(a))
         actual_t = tuple(actual)
         actual_union = frozenset()
         for a in actual:
@@ -651,6 +704,11 @@ class _Builder:
                     name = next(iter(ukeys))
                     actual.insert(0, recv_deps)
                     actual_t = tuple(actual)
+                    recv_root = (
+                        _arg_root(recv)
+                        if recv is not None else None
+                    )
+                    roots.insert(0, recv_root)
         if name is None or name not in self.functions:
             # method calls, fn-pointers, enum constructors
             # (`Some(x)`), external `crate::f` — opaque record.
@@ -694,6 +752,24 @@ class _Builder:
         summary.calls.append(
             RustCall(_span(node), name, actual_t, deps)
         )
+        for pidx, pdeps in getattr(
+            callee, "param_writes", {}
+        ).items():
+            # `f(&mut p)` / `p.set(x)` — writes the callee made
+            # through the parameter merge into the slot the
+            # caller's argument roots at.
+            if pidx >= len(roots):
+                continue
+            rname = roots[pidx]
+            if rname is None:
+                if summary.effects != "state_writes":
+                    summary.effects = "unknown"
+                continue
+            locals_[rname] = (
+                locals_.get(rname, frozenset()) | pdeps
+            )
+            if self._writes:
+                self._writes[-1].add(rname)
         if callee.effects == "unknown" and summary.effects != "state_writes":
             summary.effects = "unknown"
         return frozenset() if void else deps
@@ -878,6 +954,8 @@ _TYPE_NAMES = {
     "reference_type", "pointer_type", "unit_type",
     "abstract_type", "trait_bounds", "higher_ranked_trait_bound",
     "removed_trait_bound", "bounded_type", "qualified_type",
+    "mutable_specifier", "self_parameter", "visibility_modifier",
+    "function_modifiers", "where_clause", "extern_modifier",
 }
 
 _EXPR_TYPES = {

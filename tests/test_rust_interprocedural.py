@@ -310,3 +310,43 @@ def test_slice3_extern_path_call_opaque():
     assert s.available
     assert s.return_dependencies == frozenset({0})
     assert s.effects == "unknown"
+
+
+def test_slice4_let_destructure():
+    s = _fn(
+        "fn f(x: u64, y: u64) -> u64 { let (a, b) = (x, y); a + b }",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice4_self_field_write_propagates():
+    s = _fn(
+        """struct P { x: u64 }
+impl P { fn set(&mut self, v: u64) { self.x = v; } }
+fn f(p: &mut P, v: u64) -> u64 { p.set(v); unsafe { *p } }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice4_mut_arg_write_propagates():
+    s = _fn(
+        """fn st(p: &mut u64, v: u64) { *p = v; }
+fn f(x: u64) -> u64 { let mut s = 0u64; st(&mut s, x); s }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_slice4_mut_arg_root_resolution():
+    s = _fn(
+        """fn st(p: &mut u64, v: u64) { *p = v; }
+fn f(x: u64, y: u64) -> u64 {
+    let mut s = x;
+    st(&mut s, y);
+    s
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
