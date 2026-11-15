@@ -2867,6 +2867,32 @@ reader still recomputes derived properties and reuse still goes
 through `for_function`/`stale_dependents`. No audit, MCP or planner
 route is wired yet, and Evidence normalization/acceptance stays open.
 
+### C06 declared summary manifest reuse check (go-summaries-check)
+
+`python -m agent go-summaries-check` is the second consumable route:
+it runs the same provisioned helper on the same declared inputs
+(`--go-types`, `--source`, `--import`, `--target-arch`, `--timeout`)
+plus `--manifest <PATH>` naming a manifest the produce route emitted,
+restores it through `GoSummarySet.from_dict` (bounded at the helper's
+`maxReply` scale) and emits `mumei.go-summary-check/v1` on stdout (or
+`--output`). The report names whether the manifest's declared context
+key still matches the fresh derivation (`context_match`) and partitions
+the manifest's functions by identity: `reusable` — the identity
+survives in the fresh report and nothing it references went stale —
+`stale` — `stale_dependents` flags it, transitively, for referencing a
+replaced binding, member or type identity — and `missing` — the fresh
+report no longer produces the identity at all.
+
+The report is detection, not authorization: identity survival is
+weaker evidence than the monolithic `context_key` gate `for_function`
+enforces, so a host that consumes `reusable` under `context_match:
+false` is choosing per-function freshness over the strict whole-set
+check — `stale_dependents` itself stays a detection helper and what
+to recompute remains the host's call. `--output` may not equal any
+declared input (sources, import files or the manifest itself). No
+scheduling, re-derivation or audit route is wired yet; Evidence
+normalization/acceptance stays open.
+
 
 ### C11 declared availability probes
 

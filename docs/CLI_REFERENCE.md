@@ -40,6 +40,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `observe-tests` | 5 | Check harvested Python and Rust test observations against Mumei atoms. |
 | `config` | 2 | Show effective settings and where each value comes from |
 | `go-summaries` | 6 | Run a provisioned go-types helper on declared Go sources and print the summary manifest JSON. |
+| `go-summaries-check` | 7 | Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -507,6 +508,23 @@ Run a provisioned go-types helper on declared Go sources and print the summary m
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the manifest JSON here instead of stdout. |
+
+
+## `mumei-agent go-summaries-check`
+
+Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--go-types` | `<<PATH>>` | yes | — | Path to the provisioned tools/go-types helper binary. |
+| `--source` | `<<PATH>>` | yes | — | Go source file to summarize. Repeat for a multi-file package unit; each file is declared under its basename and basenames must be unique. |
+| `--target-arch` | `{386, amd64, arm64}` | no | amd64 | Target architecture for gc sizes (default: amd64). |
+| `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
+| `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
+| `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to check. |
 
 
 ## `mumei-agent mcp-server`
