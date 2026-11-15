@@ -3017,6 +3017,38 @@ No retry policy, scheduling or audit route is wired; Evidence
 normalization/acceptance stays open.
 
 
+### C06 declared Rust summary route family
+
+`python -m agent rust-summaries` and its four siblings bring the Rust
+interprocedural spike to the same declared route family Go pioneered —
+one opt-in surface per route, all fail-closed, none wired into a
+production verification path:
+
+- `rust-summaries` emits `mumei.rust-scalar-parameter-deps/v1` for one
+  declared `.rs` source: per-function scalar dependency summaries over
+  the bounded fragment (scalar params, `let` bindings, if/else joins,
+  a one-pass loop may-analysis, intra-file calls, tail-expression
+  deps). Parsing is in-process tree-sitter — no helper binary, no
+  `process.spawn` need — and every uncovered construct lands as a
+  recorded gap, not a dropped edge.
+- `rust-summaries-check` (`mumei.rust-summary-check/v1`) compares a
+  declared manifest against a fresh derivation and partitions its
+  functions into reusable/stale/missing.
+- `rust-summaries-reuse` emits a manifest reusing the unchanged
+  summaries `check` reports, re-keyed to the fresh context.
+- `rust-summaries-accept` (`mumei.rust-summary-accept/v1`) echoes one
+  binding's declared summary under the strict whole-context gate.
+- `rust-summaries-attempt` runs the produce route as one declared
+  attempt inside the C11 lifecycle (`dispatch_attempt` → reconcile →
+  compare-and-set publication, input bytes re-hashed after the run)
+  and emits `mumei.rust-summaries-attempt-report/v1`.
+
+`rust_summaries_adapter()` registers the produce route as a second
+`summary_derivation` descriptor — declaring only `filesystem.read`,
+since the derivation spawns no process — so `summary_descriptors()`,
+`summary_registry()` and `plan_summary_route` cover it the same way.
+
+
 ### C06 declared summary adapter descriptor
 
 `agent.summaries_adapters` registers the produce route as a planner

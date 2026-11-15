@@ -45,6 +45,11 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
+| `rust-summaries-reuse` | 2 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `rust-summaries-attempt` | 3 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -598,6 +603,90 @@ Run the go-summaries produce route as one declared attempt and emit the reconcil
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+
+
+## `mumei-agent rust-summaries`
+
+Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+
+## `mumei-agent rust-summaries-accept`
+
+Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to accept from. |
+| `--function` | `<<NAME>>` | yes | — | Function whose summary to accept — the emitted name or a bare member name when it is unambiguous. Accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
+
+
+## `mumei-agent rust-summaries-check`
+
+Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to check. |
+| `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
+
+
+## `mumei-agent rust-summaries-reuse`
+
+Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to reuse unchanged summaries from. |
+| `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+
+
+## `mumei-agent rust-summaries-attempt`
+
+Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 
 
 ## `mumei-agent mcp-server`
