@@ -2632,6 +2632,25 @@ outcome = run_probe(req)  # bounded by declared max_* budgets
 Still closed: plugin loading, adapter code execution beyond the declared
 probe, stdout interpretation, version truth and Evidence acceptance.
 
+
+### C11 observation-driven probe scheduling
+
+`agent.adapter_probe.probe_requests_for(registry, request, policy,
+observations, stamp=...)` runs `plan()` and returns an
+`AdapterProbeRequest` for every decision whose exclusion reasons are all
+observation-level (`availability_unknown`, `tool_missing`,
+`tool_version_unknown`, `tool_version_mismatch`) and whose descriptor
+declares `probe_argv`. Adapters excluded for structural reasons are not
+probed — no probe fixes an unsupported method or a denied location — and
+an already-selected adapter is skipped. The shared stamp is per-request
+safe because registry stamps are per adapter id.
+
+Scheduling stays declarative: it decides which declared probes would
+make excluded candidates observable — it runs nothing itself, keeps the
+argv host-declared verbatim text, and the emitted request still goes
+through `run_probe` for actual execution. Retry policy, concurrency,
+probe ordering across stamps and Evidence acceptance remain open.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

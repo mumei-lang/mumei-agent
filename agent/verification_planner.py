@@ -808,6 +808,12 @@ class AdapterRegistry:
             raise ValueError("adapter already registered; replacement must be explicit")
         self._adapters[adapter.adapter_id] = adapter
 
+    def descriptor(self, adapter_id: str) -> AdapterDescriptor | None:
+        """The registered descriptor for `adapter_id`; None when unregistered.
+        """
+        _label(adapter_id)
+        return self._adapters.get(adapter_id)
+
     def register_manifest(self, manifest: dict, *, replace: bool = False) -> None:
         """Register a declared manifest; parsing is static, no code is loaded.
 
