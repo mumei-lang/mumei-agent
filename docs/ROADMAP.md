@@ -2988,6 +2988,28 @@ equal any declared input. No scheduling or audit route is wired yet;
 Evidence normalization/acceptance stays open.
 
 
+### C06 declared summary adapter descriptor
+
+`agent.summaries_adapters` registers the produce route as a planner
+adapter: `summary_derivation` joins the planner's method vocabulary —
+deriving a dependency-summary manifest is an evidence method distinct
+from every verification method — and `go_summaries_adapter()` returns
+the declared `AdapterDescriptor` for `go-summaries` (profile
+`mumei.go-scalar-parameter-deps/v1`, `mumei.source-text/v1` input,
+`filesystem.read` + `process.spawn` permissions, a `bounded`/
+`declared-inputs` result contract with `conservative-summary`
+correspondence at `assumed` status, and a `probe_argv` the C11 probe
+boundary can observe). `summary_requirements(profile)` builds the
+matching `RouteRequirements` query, so `AdapterRegistry.plan()` and
+`prepare_source()` select and bind the adapter like any declared
+capability.
+
+A descriptor is routing metadata only: registering it spawns no
+process and accepts no manifest — the host still runs the route and
+owns acceptance. No production verification path consults this
+registry yet; planner/audit wiring for the summary routes stays open.
+
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe
