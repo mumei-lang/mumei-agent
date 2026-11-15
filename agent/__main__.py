@@ -50,6 +50,7 @@ _SUBCOMMANDS = {
     "sol-summaries-reuse",
     "sol-summaries-attempt",
     "evidence-check-accept",
+    "evidence-identity-check",
     "verify-attempt",
     "verify-recheck",
     "native-recheck",
@@ -630,6 +631,24 @@ def main() -> None:
         evidence_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_accept_main(args))
+    elif command == "evidence-identity-check":
+        import argparse
+        from agent.evidence_identity import (
+            build_identity_parser as evidence_identity_build_parser,
+            main_identity as evidence_identity_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-identity-check",
+            description=(
+                "Check a declared evidence record's source binding "
+                "against a declared source file and emit the "
+                "representation-level file-identity descriptor."
+            ),
+        )
+        evidence_identity_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_identity_main(args))
     elif command == "verify-attempt":
         import argparse
         from agent.verify_attempt import (
