@@ -7563,10 +7563,11 @@ def test_imported_field_read_parenthesized_is_admitted(go_types_helper):
 
 
 def test_imported_field_read_method_member_stays_closed(go_types_helper):
-    # `lib.VS.PF` selects a method member, not a field — method values
-    # keep their own gate.
+    # A method *value* `f := lib.VS.PF` selects a method member, not a
+    # field — method values keep their own gate even though the call
+    # `lib.VS.PF()` admits as a composite receiver.
     files = _files_member_read(
-        "return lib.VS.PF()", decl="func F() int64"
+        "f := lib.VS.PF\n\treturn f()", decl="func F() int64"
     )
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
