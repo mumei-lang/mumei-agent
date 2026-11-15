@@ -97,6 +97,7 @@ Exported tools:
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
 | `go_summaries(source_files, go_types, target_arch='amd64', imports_json='{}', timeout_s=30)` | Emit a declared `mumei.go-scalar-parameter-deps/v1` summary manifest via a provisioned go-types helper; every byte is declared by the caller (files, import units, helper binary) — a conservative report, not a proof |
+| `go_summaries_attempt(source_files, go_types, attempt_timeout_ms, target_arch='amd64', imports_json='{}', timeout_s=30, memory_bound_mb=0)` | Run the `go-summaries` produce route as one declared attempt (same wiring as `go-summaries-attempt`) — returns `mumei.go-summaries-attempt-report/v1`: canonical lineage, not an accepted manifest |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
 | `heal_file(source_code='', error_report='', code_file='')` | Self-heal a `.mm` source via the existing fix-strategy pipeline |
 | `list_forge_log(log_path='forge_log.json')` | Read `forge_log.json` |
@@ -183,6 +184,7 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `rust_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `sol_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
+| `go_summaries_attempt` | `source_files: str, go_types: str, attempt_timeout_ms: int, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30, memory_bound_mb: int = 0` | `report` |
 | `suggest_mm_migration` | `code_file: str, language: str, issues_json: str = '[]'` | `migration_hints` |
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |
 | `extract_spec_from_code` | `code_file: str, language: str = '', domain_hint: str = '', generate: bool = False, mumei_repo: str = '', ctx: Context \| None = None` | `spec`, `natural_language_spec`, `detected_language`, `warnings`, `code`, `final_spec`, `verified` |

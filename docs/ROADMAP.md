@@ -3206,6 +3206,22 @@ a summary after any change anywhere in the unit. `--output` may not
 equal any declared input. No scheduling or audit route is wired yet;
 Evidence normalization/acceptance stays open.
 
+### C06 declared summary attempt MCP tool (go_summaries_attempt)
+
+`go_summaries_attempt` exposes the `go-summaries-attempt` route
+over MCP: the produce route's declared inputs arrive as the same
+JSON encodings the `go_summaries` tool already speaks
+(`source_files` as an array, `imports_json` as an object), parsed
+through the shared `_go_summaries_declared_args`, and the
+route's lifecycle is shared through `run_attempt(args)` — the
+same `AttemptSequence` keyed to the request fingerprint (helper
+binary bytes plus every declared file), `dispatch_attempt`
+observation and the same drift gate. The tool emits
+`{"report": ...}` carrying the
+`mumei.go-summaries-attempt-report/v1` lineage — canonical, never
+an accepted manifest.
+
+
 ### C06 declared summary attempt route (go-summaries-attempt)
 
 `python -m agent go-summaries-attempt` is the fifth consumable route:
