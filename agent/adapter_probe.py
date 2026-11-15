@@ -58,6 +58,7 @@ interpretation and Evidence acceptance remain open.
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import re
@@ -391,6 +392,7 @@ def observe_probes(
     *,
     runner: AttemptRunner | None = None,
     cancel_event: "threading.Event | None" = None,
+    max_parallel: int = 1,
 ) -> tuple[RuntimeObservation, ...]:
     """Execute probe requests and return their observations.
 
@@ -404,18 +406,43 @@ def observe_probes(
     `run_probe`: only availability/stamp/version cross the
     boundary, so a probe's stdout or exit detail cannot leak into
     a routing decision.
+
+    `max_parallel` bounds how many probes run at once. The runner
+    keeps no state between calls, so sharing it across workers is
+    safe; output order never depends on completion order —
+    `observations[i]` always answers `requests[i]`. `max_parallel=1`
+    is plain sequential execution.
+
+    The parallel path is only taken when no request declares a
+    `memory_bound_mb`: `AttemptRunner` installs that limit through a
+    `preexec_fn`, and `preexec_fn` forces the fork+exec spawn path,
+    which can deadlock in a multithreaded process. A batch carrying a
+    memory-bound probe falls back to sequential execution rather than
+    risk a spawn that can stall before timeout accounting starts.
     """
     if not isinstance(requests, tuple):
         raise ValueError("probe observation requires a request tuple")
     if cancel_event is not None and type(cancel_event) is not threading.Event:
         raise ValueError("probe cancellation requires an event")
+    if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
+        raise ValueError("probe parallelism bound must be a positive int")
     if runner is None:
         runner = AttemptRunner()
-    out: list[RuntimeObservation] = []
-    for req in requests:
-        outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
-        out.append(outcome.observation)
-    return tuple(out)
+    if (
+        max_parallel == 1
+        or len(requests) <= 1
+        or any(req.memory_bound_mb is not None for req in requests)
+    ):
+        out: list[RuntimeObservation] = []
+        for req in requests:
+            outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
+            out.append(outcome.observation)
+        return tuple(out)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        outcomes = list(
+            pool.map(lambda req: run_probe(req, runner=runner, cancel_event=cancel_event), requests)
+        )
+    return tuple(outcome.observation for outcome in outcomes)
 
 # Bound on recorded probe attempts per adapter request — mirrors
 # `MAX_ATTEMPTS` for attempt sequences: a history is replay
@@ -532,6 +559,7 @@ def plan_with_probes(
     runner: AttemptRunner | None = None,
     cancel_event: "threading.Event | None" = None,
     rounds: int = 1,
+    max_parallel: int = 1,
 ) -> AdapterProbePlan:
     """Plan, probe the observation-excluded candidates, re-plan.
 
@@ -541,7 +569,9 @@ def plan_with_probes(
     `rounds` (1..MAX_PLAN_ROUNDS) bounds the loop: more than one
     round only re-probes adapters still excluded by observation —
     a probe that timed out may deserve one retry, a structurally
-    excluded adapter is never re-asked. The driver stops early when
+    excluded adapter is never re-asked. `max_parallel` forwards to
+    `observe_probes`: probes inside one round may run concurrently,
+    rounds still run one after another. The driver stops early when
     a candidate is selected or a round emits no requests.
 
     The caller owns `stamp` allocation: pass a base stamp that is
@@ -560,6 +590,8 @@ def plan_with_probes(
         raise ValueError("invalid probe planning stamp")
     if not isinstance(rounds, int) or not 1 <= rounds <= MAX_PLAN_ROUNDS:
         raise ValueError("probe planning rounds out of bounds")
+    if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
+        raise ValueError("probe parallelism bound must be a positive int")
     if runner is None:
         runner = AttemptRunner()
     # Latest observation per adapter — the result must be
@@ -581,7 +613,10 @@ def plan_with_probes(
         if not reqs:
             break
         fresh = observe_probes(
-            reqs, runner=runner, cancel_event=cancel_event
+            reqs,
+            runner=runner,
+            cancel_event=cancel_event,
+            max_parallel=max_parallel,
         )
         # A re-probed adapter replaces its prior observation —
         # `plan()` rejects duplicate adapter ids, and the freshest
