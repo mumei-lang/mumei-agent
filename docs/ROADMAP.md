@@ -2596,6 +2596,20 @@ in-process; no audit/CLI/MCP route changes.
   contracts prefer the caller's contract.
 
 
+### C06 Solidity loops, conversions and builtins (slice 2)
+
+- `for`/`while`/`do...while` bodies run one pass over a copy of
+  locals, then a may-write union merge back: a slot the body
+  wrote (even with an unchanged dep set) gains the condition's
+  deps; loop-local `i` stays scoped. `break`/`continue` stay
+  closed.
+- `unchecked { ... }` blocks admit like any block.
+- `keccak256`/`sha256`/`ripemd160`/`ecrecover`/`blockhash`/
+  `addmod`/`mulmod`/`gasleft`/`selfdestruct`/`type(...)` return
+  the union of their argument dep sets; `abi.encode*`/
+  `abi.decode` member calls compose the same way (encoded
+  output carries every argument's deps).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -143,11 +143,23 @@ def test_member_call_closes():
     assert not s.available
 
 
-def test_loop_closes():
+def test_empty_loop_admitted():
     src = """contract C {
   function f(uint256 x) public pure returns (uint256) {
     for (uint256 i = 0; i < x; i++) { }
     return x;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_break_in_loop_closes():
+    src = """contract C {
+  function f(uint256 x) public pure returns (uint256) {
+    uint256 s = x;
+    for (uint256 i = 0; i < x; i++) { if (i > 2) { break; } s += i; }
+    return s;
   }
 }"""
     s = _fn(src, "f")
@@ -292,3 +304,56 @@ def test_unknown_call_result_position_closes():
     s = _fn(src, "f")
     assert not s.available
     assert any(g.reason == "call_unresolved" for g in s.gaps)
+
+
+def test_for_loop_may_write():
+    src = """contract C {
+  function f(uint256 n, uint256 x) public pure returns (uint256) {
+    uint256 s = x;
+    for (uint256 i = 0; i < n; i++) { s += i; }
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert 0 in s.return_dependencies and 1 in s.return_dependencies
+
+
+def test_while_loop():
+    src = """contract C {
+  function f(uint256 n, uint256 x) public pure returns (uint256) {
+    uint256 s = x;
+    while (s < n) { s += 1; }
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert 0 in s.return_dependencies and 1 in s.return_dependencies
+
+
+def test_unchecked_block():
+    src = """contract C {
+  function f(uint256 x) public pure returns (uint256) {
+    uint256 s = 0;
+    unchecked { s += x; }
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_keccak_and_abi_encode_carry_deps():
+    src = """contract C {
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    bytes32 h = keccak256(abi.encodePacked(x));
+    return y;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})
+    assert any(
+        c.callee in {"keccak256", "abi.encodePacked"}
+        for c in s.calls
+    )

@@ -63,6 +63,11 @@ _AUGMENTED_OPS = {
 }
 _BUILTIN_VOID_CALLS = {"require", "assert", "revert"}
 _OPAQUE_GLOBALS = {"msg", "block", "tx", "abi"}
+_CRYPTO_BUILTINS = {
+    "keccak256", "sha256", "ripemd160", "ecrecover",
+    "blockhash", "addmod", "mulmod", "gasleft",
+    "selfdestruct", "suicide", "type",
+}
 import re as _re
 
 
@@ -175,6 +180,7 @@ class _Builder:
         self.contracts: dict[str, str] = {}
         self.summaries: dict[str, SolFunctionSummary] = {}
         self._inline_depth = 0
+        self._writes: list[set[str]] = []
 
     # -- unit scan ----------------------------------------------------
 
@@ -396,6 +402,8 @@ class _Builder:
                 else frozenset()
             )
             locals_[name.text.decode()] = deps
+            if self._writes:
+                self._writes[-1].add(name.text.decode())
             return None
         if t == "expression_statement":
             expr = next(
@@ -444,6 +452,64 @@ class _Builder:
             if right_ret is not None:
                 ret = right_ret if ret is None else ret | right_ret
             return ret
+        if t == "while_statement" or t == "do_while_statement":
+            kids = _children(st)
+            cond = next(
+                (c for c in kids if c.type == "expression"), None
+            )
+            body = next(
+                (
+                    c
+                    for c in kids
+                    if c.type in {"statement", "block_statement"}
+                ),
+                None,
+            )
+            return self._loop(
+                cond, None, body, locals_, param_index, summary
+            )
+        if t == "for_statement":
+            kids = _children(st)
+            body = kids[-1] if kids and kids[-1].type in {
+                "statement", "block_statement"
+            } else None
+            inner_parts = [
+                c
+                for c in kids[:-1]
+                if c.type
+                in {
+                    "variable_declaration_statement",
+                    "expression_statement",
+                    "expression",
+                }
+            ]
+            init = inner_parts[0] if inner_parts else None
+            cond_node = (
+                inner_parts[1] if len(inner_parts) > 1 else None
+            )
+            update = (
+                inner_parts[2] if len(inner_parts) > 2 else None
+            )
+            cond = None
+            if cond_node is not None:
+                if cond_node.type == "expression":
+                    cond = cond_node
+                else:
+                    cond = next(
+                        (
+                            c
+                            for c in _children(cond_node)
+                            if c.type == "expression"
+                        ),
+                        None,
+                    )
+            if init is not None:
+                self._statement(
+                    init, locals_, param_index, summary
+                )
+            return self._loop(
+                cond, update, body, locals_, param_index, summary
+            )
         if t == "revert_statement":
             err = next(
                 (c for c in _children(st) if c.type == "expression"),
@@ -494,9 +560,46 @@ class _Builder:
                 )
             )
             return None
+        if t == "unchecked":
+            # Named keyword child of `unchecked { ... }` — the
+            # block_statement arm already walks its statements.
+            return None
         if t == "block_statement":
             return self._block(st, locals_, param_index, summary)
         raise _Unsupported("unsupported_statement", _span(st))
+
+    def _loop(
+        self, cond, update, body, locals_, param_index, summary
+    ) -> frozenset[int] | None:
+        """One body pass over a copy of locals, then a
+        may-write union merge back, e.g. `s += i` inside a loop
+        adds i's deps to s without fixing iteration counts.
+        Condition deps join every slot the body may have
+        touched, matching the if-join."""
+        inner = dict(locals_)
+        self._writes.append(set())
+        try:
+            ret = None
+            if body is not None:
+                ret = self._block(
+                    body, inner, param_index, summary
+                )
+            if update is not None:
+                self._assign_or_call(
+                    update, inner, param_index, summary
+                )
+        finally:
+            touched = self._writes.pop()
+        merged = frozenset()
+        if cond is not None:
+            merged |= self._expr(
+                cond, locals_, param_index, summary
+            )
+        for name in list(locals_):
+            deps = inner.get(name, frozenset())
+            if deps != locals_[name] or name in touched:
+                locals_[name] = locals_[name] | deps | merged
+        return ret
 
     def _assign_or_call(
         self, expr, locals_, param_index, summary
@@ -531,6 +634,8 @@ class _Builder:
             if expr.type == "augmented_assignment_expression":
                 deps |= locals_[lident.text.decode()]
             locals_[lident.text.decode()] = deps
+            if self._writes:
+                self._writes[-1].add(lident.text.decode())
             return deps
         if expr.type == "update_expression":
             target = expr.child_by_field_name("argument")
@@ -549,6 +654,8 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_statement", _span(expr)
                 )
+            if self._writes:
+                self._writes[-1].add(tident.text.decode())
             return locals_[tident.text.decode()]
         if expr.type == "call_expression":
             return self._call(
@@ -666,6 +773,7 @@ class _Builder:
     def _call(
         self, node, locals_, param_index, summary, void=False
     ) -> frozenset[int]:
+        abi_member = None
         fn_expr = node.child_by_field_name("function")
         if (
             fn_expr is not None
@@ -687,6 +795,12 @@ class _Builder:
                 and idents[0].text == b"this"
             ):
                 fn_expr = idents[1]
+            elif (
+                len(idents) == 2
+                and idents[0].text.decode() == "abi"
+            ):
+                abi_member = idents[1].text.decode()
+                fn_expr = None
         args = [
             c
             for c in _children(node)
@@ -709,6 +823,18 @@ class _Builder:
         actual_union = frozenset()
         for a in actual:
             actual_union |= a
+        if abi_member is not None:
+            # abi.encode*/decode — the encoded result
+            # carries every argument's deps.
+            summary.calls.append(
+                SolCall(
+                    _span(node),
+                    f"abi.{abi_member}",
+                    actual_t,
+                    actual_union,
+                )
+            )
+            return actual_union
         if (
             fn_expr is None
             or fn_expr.type != "identifier"
@@ -725,6 +851,13 @@ class _Builder:
                 SolCall(_span(node), name, actual_t, None)
             )
             return frozenset()
+        if name in _CRYPTO_BUILTINS:
+            summary.calls.append(
+                SolCall(
+                    _span(node), name, actual_t, actual_union
+                )
+            )
+            return actual_union
         # Same-contract resolution first — two contracts may
         # declare the same function name.
         target = None
