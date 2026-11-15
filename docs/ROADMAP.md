@@ -381,6 +381,37 @@ dependency or default audit/CLI/MCP route is added. C11 stays partial;
 Core meaning and acceptance, C12's demand gate and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 
+### C11 recorded evidence-check outcomes
+
+`agent.core_evidence.record_evidence_check(sequence, output, *,
+core_executable, timeout_ms, cancel_event=None)` runs
+`check_evidence_representation` and returns the `AttemptEvidenceCheck`
+the sequence's `evidence_check` produces: `"valid"` when Core returned
+the known v1 diagnostic, `"failed"` when the check produced no accepted
+diagnostic and `"cancelled"` when the host's cancel event was observed.
+The check now distinguishes failure kinds: `CoreCheckFailed` (a
+`ValueError` subclass) marks a real check failure, while request-shape
+errors stay plain `ValueError`, so a malformed request is never recorded
+as a checked-and-failed representation. Static errors — an unselected
+sequence, a foreign/stale output binding or a malformed request —
+propagate and record nothing; the candidate and output binding are
+validated before any spawn.
+
+```python
+check = record_evidence_check(
+    selected, output,
+    core_executable=trusted_core_path, timeout_ms=1000,
+)
+assert check.outcome in {"valid", "failed", "cancelled"}
+```
+
+The driver adds no new authority: it runs the same opt-in POSIX handoff
+with the same executable/trust/timeout contract, and the record remains
+a host declaration — `"valid"` means representation-valid only, never
+acceptance. C11 stays partial; Core meaning and acceptance, C12's demand
+gate and existing assurance/Lean/native/LLVM/deferred-WASM policies are
+unchanged.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

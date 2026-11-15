@@ -11,7 +11,11 @@ import subprocess
 import threading
 import time
 
-from agent.verification_attempt import AttemptOutput, AttemptSequence
+from agent.verification_attempt import (
+    AttemptEvidenceCheck,
+    AttemptOutput,
+    AttemptSequence,
+)
 
 MAX_DIAGNOSTIC_BYTES = 4096
 MAX_CHECK_TIMEOUT_MS = 60_000
@@ -34,6 +38,15 @@ _DIAGNOSTIC = {
 
 class CoreCheckCancelled(ValueError):
     """Host cancellation was observed; no representation result is returned."""
+
+
+class CoreCheckFailed(ValueError):
+    """The check produced no accepted diagnostic; the request itself was valid.
+
+    Distinguished from request-shape errors (which stay plain `ValueError`)
+    so a host can record a `\"failed\"` check outcome without misreading a
+    malformed request as a checked-and-failed representation.
+    """
 
 
 def check_evidence_representation(
@@ -91,7 +104,51 @@ def check_evidence_representation(
     except CoreCheckCancelled:
         raise
     except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
-        raise ValueError("Core Evidence representation check failed") from None
+        raise CoreCheckFailed(
+            "Core Evidence representation check failed"
+        ) from None
+
+
+def record_evidence_check(
+    sequence: AttemptSequence,
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+) -> AttemptEvidenceCheck:
+    """Run the Core representation check and record its declared outcome.
+
+    Returns the `AttemptEvidenceCheck` this sequence's `evidence_check`
+    produces: `\"valid\"` when Core returned the known v1 diagnostic,
+    `\"failed\"` when the check produced no accepted diagnostic and
+    `\"cancelled\"` when the host's cancel event was observed. Static
+    errors — an unselected sequence, a foreign/stale output binding or a
+    malformed request — propagate as `ValueError` and record nothing;
+    only a real check outcome becomes a record.
+
+    Recording stays a host declaration, not acceptance, and the record
+    carries no bytes: `"valid"` means representation-valid only.
+    """
+    if type(sequence) is not AttemptSequence:
+        raise ValueError("unsupported Core representation check request")
+    candidate = sequence.evidence_candidate()
+    sequence.check_output_binding(output)
+    try:
+        check_evidence_representation(
+            output,
+            core_executable=core_executable,
+            timeout_ms=timeout_ms,
+            cancel_event=cancel_event,
+            attempt_sequence=sequence,
+        )
+    except CoreCheckCancelled:
+        outcome = "cancelled"
+    except CoreCheckFailed:
+        outcome = "failed"
+    else:
+        outcome = "valid"
+    return sequence.evidence_check(candidate, outcome)
 
 
 def _check_cancelled(cancel_event: threading.Event | None) -> None:
