@@ -3831,3 +3831,128 @@ def test_normalized_result_is_frozen_and_passive():
     again = normalized_result()
     assert result == again
     assert result.to_dict() == before == again.to_dict()
+
+
+def test_event_from_dict_round_trip():
+    for event in (
+        AttemptEvent("started", 0),
+        AttemptEvent("exited", 3, -1),
+        AttemptEvent("cancel_requested", 2),
+    ):
+        assert AttemptEvent.from_dict(event.to_dict()) == event
+
+
+def test_event_from_dict_rejects_foreign_snapshots():
+    event = AttemptEvent("started", 0).to_dict()
+    for bad in (
+        "not a dict",
+        {**event, "extra": 1},
+        {"kind": "started"},
+        {**event, "kind": "exploded"},
+        {**event, "elapsed_ms": -1},
+        {**event, "schema_version": "mumei.other/v1"},
+    ):
+        with pytest.raises(ValueError):
+            AttemptEvent.from_dict(bad)
+
+
+def test_record_from_dict_round_trip():
+    record = AttemptRecord(FINGERPRINT, 1, 10_000)
+    assert AttemptRecord.from_dict(record.to_dict()) == record
+    record = record.record(START).record(AttemptEvent("exited", 3, 0))
+    assert AttemptRecord.from_dict(record.to_dict()) == record
+
+
+def test_record_from_dict_rejects_foreign_snapshots():
+    record = AttemptRecord(FINGERPRINT, 1, 10_000).record(START)
+    data = record.to_dict()
+    for bad in (
+        "not a dict",
+        {**data, "schema_version": "mumei.other/v1"},
+        {**data, "extra": 1},
+        {k: v for k, v in data.items() if k != "state"},
+        {**data, "state": "exited"},
+        {**data, "events": "not a list"},
+        {**data, "events": ["not a dict"]},
+        {
+            **data,
+            "events": [
+                {"kind": "exited", "elapsed_ms": 1, "exit_code": 0},
+                {"kind": "exited", "elapsed_ms": 2, "exit_code": 0},
+            ],
+        },
+    ):
+        with pytest.raises(ValueError):
+            AttemptRecord.from_dict(bad)
+
+
+def test_sequence_from_dict_round_trip():
+    sequence = AttemptSequence(FINGERPRINT, 10_000)
+    assert AttemptSequence.from_dict(sequence.to_dict()) == sequence
+    sequence = sequence.begin_attempt()
+    assert AttemptSequence.from_dict(sequence.to_dict()) == sequence
+    sequence = sequence.reconcile_report(
+        sequence.current.record(START).record(AttemptEvent("exited", 3, 0))
+    )
+    assert AttemptSequence.from_dict(sequence.to_dict()) == sequence
+
+
+def test_sequence_from_dict_restores_selected_result():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    selected = sequence.select_result(output)
+    restored = AttemptSequence.from_dict(selected.to_dict())
+    assert restored == selected
+    assert restored.selected_result == selected.selected_result
+
+
+def test_sequence_from_dict_restores_report_stamp():
+    sequence, _ = exited_sequence_and_output(prepared_source())
+    stamped = replace(sequence, report_stamp=7)
+    assert AttemptSequence.from_dict(stamped.to_dict()) == stamped
+
+
+def test_sequence_from_dict_rejects_foreign_snapshots():
+    sequence = AttemptSequence(FINGERPRINT, 10_000).begin_attempt()
+    sequence = sequence.reconcile_report(
+        sequence.current.record(START).record(AttemptEvent("exited", 3, 0))
+    )
+    data = sequence.to_dict()
+    for bad in (
+        "not a dict",
+        {**data, "schema_version": "mumei.other/v1"},
+        {**data, "extra": 1},
+        {k: v for k, v in data.items() if k != "timeout_ms"},
+        {**data, "attempts": "not a list"},
+        {**data, "attempts": ["not a dict"]},
+        {**data, "attempts": data["attempts"] * 2},
+        {
+            **data,
+            "selected_result": {
+                "attempt_number": 2,
+                "output_fingerprint": "b" * 64,
+            },
+        },
+        {**data, "selected_result": {"attempt_number": 1}},
+        {**data, "report_stamp": -1},
+    ):
+        with pytest.raises(ValueError):
+            AttemptSequence.from_dict(bad)
+
+
+def test_sequence_from_dict_does_not_rebind_selected_output():
+    # A restored selection names a declared fingerprint; the snapshot
+    # cannot re-bind it to bytes — evidence_candidate() still requires
+    # the canonical lineage only.
+    sequence, output = exited_sequence_and_output(prepared_source())
+    selected = sequence.select_result(output)
+    restored = AttemptSequence.from_dict(selected.to_dict())
+    assert restored.evidence_candidate() == selected.evidence_candidate()
+
+
+def test_sequence_from_dict_restore_preserves_store_publish():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    selected = sequence.select_result(output)
+    restored = AttemptSequence.from_dict(selected.to_dict())
+    store = AttemptSequenceStore()
+    store.publish(restored)
+    assert store.current == selected

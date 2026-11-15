@@ -665,6 +665,37 @@ dependency or default audit/CLI/MCP route is added. C11/C13 stay partial;
 Core meaning and acceptance, C12's demand gate and existing assurance/Lean/
 native/LLVM/deferred-WASM policies are unchanged.
 
+### C11 declared lineage restoration
+
+`AttemptEvent.from_dict`, `AttemptRecord.from_dict` and
+`AttemptSequence.from_dict` rebuild the declared
+`mumei.verifier-attempt-sequence/v1` (and nested
+`mumei.verifier-attempt/v1`) snapshots a host persisted, letting a host
+reinstate its own canonical lineage after a restart without trusting the
+bytes: unknown or missing keys, a foreign `schema_version`, malformed
+members and a record's declared `state` disagreeing with its replayed
+events are static errors, and every constructor invariant — record
+bindings, ordinals, terminal predecessors, the selected-result reference,
+the report stamp — is re-checked, not recovered.
+
+```python
+from agent.verification_attempt import AttemptSequence
+
+restored = AttemptSequence.from_dict(persisted_snapshot)
+```
+
+A restored `selected_result` still names a declared fingerprint the
+snapshot cannot re-bind to bytes, and a record's restored events are the
+same host reports they were before persistence — restoration changes
+nothing about their provenance. Durability itself, canonical-store
+ownership, distribution, crash recovery and Evidence remain host duties:
+this is a parse boundary, not a trust boundary. No runner/scheduler,
+stream collection, execution/cancellation, Evidence normalization/
+acceptance, external verifier, dependency or default audit/CLI/MCP route
+is added. C11 stays partial; Core meaning and acceptance, C12's demand
+gate and existing assurance/Lean/native/LLVM/deferred-WASM policies are
+unchanged.
+
 ### C11 canonical result selection for sequential attempts
 
 `AttemptSequence.select_result(output)` declares one bound `AttemptOutput` the
