@@ -715,6 +715,25 @@ declared-input errors surface through `_err` with declared paths
 redacted to basenames — model-facing text never carries a
 checkout-local absolute path.
 
+### C02 declared evidence comparison route (evidence-compare)
+
+`python -m agent evidence-compare --evidence-a <path>
+--evidence-b <path>` is the record-vs-record companion of
+`evidence-identity-check` (record vs current source bytes) and
+`verify-recheck` (record vs a fresh Core query): it reads two
+declared `mumei.verification-evidence/v1` records — the same bounded
+read, the same fail-closed schema check, the same closed
+`{id, kind, sha256}` subject shape, plus a required `specification`
+object — and emits `mumei.evidence-comparison/v1` comparing the two
+records' claim surfaces verbatim: `subject_match` (bound subject
+objects equal), `specification_match` (claim objects equal) and
+`claims_match` (both). A mismatch is data, not an error; a malformed,
+oversized or wrong-shaped input on either side is a static failure.
+The route runs no Core, no fresh query and no spawn — `claims_match`
+means the two records carry the same claims, never that the claims
+are true, current or authentic: the full six-entry
+`checks_not_performed` vocabulary stays named. C02 stays partial.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

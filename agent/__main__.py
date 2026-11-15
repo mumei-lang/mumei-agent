@@ -50,6 +50,7 @@ _SUBCOMMANDS = {
     "sol-summaries-reuse",
     "sol-summaries-attempt",
     "evidence-check-accept",
+    "evidence-compare",
     "evidence-identity-check",
     "verify-attempt",
     "verify-recheck",
@@ -649,6 +650,24 @@ def main() -> None:
         evidence_identity_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_identity_main(args))
+    elif command == "evidence-compare":
+        import argparse
+        from agent.evidence_compare import (
+            build_compare_parser as evidence_compare_build_parser,
+            main_compare as evidence_compare_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-compare",
+            description=(
+                "Compare two declared evidence records' bound subject "
+                "and specification claims and emit the "
+                "representation-level comparison descriptor."
+            ),
+        )
+        evidence_compare_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_compare_main(args))
     elif command == "verify-attempt":
         import argparse
         from agent.verify_attempt import (
