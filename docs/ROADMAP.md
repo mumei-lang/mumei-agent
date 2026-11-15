@@ -412,6 +412,24 @@ no arbitration across writers, retry policy, durability or Evidence
 acceptance — it composes the declared boundaries only. C11 stays
 partial; Core meaning and acceptance are unchanged.
 
+### C11 declared lifecycle composition coverage
+
+`tests/test_attempt_lifecycle.py` exercises the declared boundaries as
+one chain rather than five separate gates: a manifest-declared adapter
+probe → `probe_request_for`/`observe_probes`/`run_probe` →
+`AdapterProbeHistory` and `probe_retry_requests` → `plan_with_probes` →
+`AttemptSequenceStore` lineage → `dispatch_and_publish` →
+`captured_output` → canonical `selected_result` → `evidence_candidate` →
+`normalized()` and `to_dict` snapshots. A regression in any composition
+fails one test.
+
+This is regression coverage of the declared contracts only: every value
+in the chain remains a host declaration — probing proves a command ran,
+selection names a declared canonical snapshot and the evidence candidate
+is a handoff descriptor, never acceptance. C11 stays partial; Core
+meaning and acceptance, C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 evidence-candidate handoff descriptors
 
 `AttemptSequence.evidence_candidate()` returns an `AttemptEvidenceCandidate`
