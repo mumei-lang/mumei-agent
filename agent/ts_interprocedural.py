@@ -4106,6 +4106,12 @@ class _Builder:
                     )
                 klass = klass.parent
             new = _composite_dyn_set(old, path, value, _span(node))
+            if self._may_depth:
+                # May-write: union into the shared object so every
+                # alias keeps the skipped-path value and the write,
+                # and identity survives for later propagation.
+                _merge_into(old, new)
+                return
             if old in self._aliased_objs:
                 old.fields.clear()
                 old.fields.update(new.fields)
@@ -4147,6 +4153,16 @@ class _Builder:
         new = _composite_set(
             old, path, value, conditional, _span(node)
         )
+        if self._may_depth:
+            # May-write: union the write into the shared object —
+            # every alias (other names here, module scope or an
+            # unseen scope) keeps both the skipped-path value and
+            # the write, and identity survives so later writes
+            # still propagate. Rebinding under may semantics is
+            # unsound: per-name `_merge_vals` copies would split
+            # one alias into two objects.
+            _merge_into(old, new)
+            return
         if old in self._aliased_objs:
             # Shared with an UNSEEN scope (the caller's receiver
             # `a` when `this.f = v` ran inside `a.set(...)`, or
@@ -4156,14 +4172,9 @@ class _Builder:
             # marked object takes an in-place write at most once,
             # so later writes compose on the copy and a loop join
             # keeps its pre-write snapshot.
-            if self._may_depth:
-                # The store may not have run — union the write so
-                # the pre-branch value survives on every alias.
-                _merge_into(old, new)
-            else:
-                old.fields.clear()
-                old.fields.update(new.fields)
-                old.deleted = new.deleted
+            old.fields.clear()
+            old.fields.update(new.fields)
+            old.deleted = new.deleted
         # Every binding IN THIS SCOPE sharing the instance is an
         # alias — the write reaches all of them. Only `locals_` is
         # scanned: eagerly rewriting the enclosing scope would
@@ -4175,14 +4186,10 @@ class _Builder:
         # Module scope is the other writable scope — a composite
         # aliased across scopes (`let p = o` where `o` is module
         # scope) needs the copy-on-write result in both, or the
-        # store is lost on the module side. Under `_may_depth` the
-        # may-write unions instead of rebinding so the module
-        # scope keeps the skipped-path value.
+        # store is lost on the module side.
         for name, val in self.module_locals.items():
             if val is old:
-                self.module_locals[name] = (
-                    _merge_vals(old, new) if self._may_depth else new
-                )
+                self.module_locals[name] = new
 
     def expression(self, node, params, locals_, transfers, count):
         """Evaluate a node to scalar dependencies — a composite

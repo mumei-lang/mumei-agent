@@ -6211,3 +6211,19 @@ def test_review8_alt_rebind_divergent_class_closes_call():
         "}"
     )
     assert not s.available
+
+
+def test_conditional_module_write_keeps_alias_identity():
+    # `a`/`b` alias the same module-scope composite; a conditional
+    # write through `b` must not split them into two objects — a
+    # later unconditional write through `a` still reaches `b`.
+    s = _fn(
+        "let a = {f: 0};\n"
+        "let b = a;\n"
+        "function f(c: boolean, x: number, y: number): number {"
+        "  if (c) { b.g = x; }"
+        "  a.h = y;"
+        "  return b.h;"
+        "}"
+    )
+    assert s.available and s.return_dependencies == frozenset({2})
