@@ -139,6 +139,12 @@ class SummaryGap:
     span: ByteSpan | FileSpan | None = None
     callee: str = ""
 
+    def to_dict(self) -> dict:
+        result = {"reason": self.reason, "span": _span_dict(self.span)}
+        if self.callee:
+            result["callee"] = self.callee
+        return result
+
 
 @dataclass(frozen=True)
 class CallTransfer:
@@ -149,6 +155,44 @@ class CallTransfer:
     # `imported` marks a `direct_import` call: the callee body is opaque to
     # the fragment, so its effects cannot be claimed `none`.
     imported: bool = False
+
+    def to_dict(self) -> dict:
+        result = {
+            "span": _span_dict(self.span),
+            "target": self.target,
+            "arguments": [sorted(argument) for argument in self.arguments],
+            "result": sorted(self.result),
+        }
+        if self.imported:
+            result["imported"] = True
+        return result
+
+
+def _span_dict(span: ByteSpan | FileSpan | None) -> dict | None:
+    if span is None:
+        return None
+    result = {}
+    if type(span) is FileSpan:
+        result["file"] = span.file
+    elif type(span) is not ByteSpan:
+        raise ValueError("summary serialization requires a declared span")
+    result["start"], result["end"] = span.start, span.end
+    return result
+
+
+def _type_dict(t: GoType) -> dict:
+    result = {
+        "kind": t.kind,
+        "basic_name": t.basic_name,
+        "bit_width": t.bit_width,
+        "signed": t.signed,
+        "type_id": t.type_id,
+    }
+    if t.elem is not None:
+        result["elem"] = _type_dict(t.elem)
+    if t.key is not None:
+        result["key"] = _type_dict(t.key)
+    return result
 
 
 @dataclass(frozen=True)
@@ -186,6 +230,29 @@ class FunctionSummary:
     def call_targets(self) -> frozenset[str]:
         """Callee identities the recorded calls were resolved against."""
         return frozenset(call.target for call in self.calls)
+
+    def to_dict(self) -> dict:
+        """Detached declared metadata only — no bytes, no acceptance claim.
+
+        `available`/`effects` recompute from the serialized fields rather
+        than being stored: a manifest names what was declared, and the
+        reader re-derives the same answers. `None` dependencies serialize
+        as a missing field, never a null that could read as
+        parameter-independent."""
+        result = {
+            "binding_id": self.binding_id,
+            "key": self.key,
+            "parameters": [_type_dict(t) for t in self.parameters],
+            "calls": [call.to_dict() for call in self.calls],
+            "gaps": [gap.to_dict() for gap in self.gaps],
+        }
+        if self.result_type is not None:
+            result["result_type"] = _type_dict(self.result_type)
+        if self.return_dependencies is not None:
+            result["return_dependencies"] = sorted(self.return_dependencies)
+        if self.pinned:
+            result["pinned"] = list(self.pinned)
+        return result
 
 
 def _context(source: str, snapshot: GoTypeSnapshot) -> tuple[bytes, str]:
@@ -293,6 +360,20 @@ class GoSummarySet:
                     stale.add(f.binding_id)
                     changed = True
         return frozenset(stale)
+
+    def to_dict(self) -> dict:
+        """The declared summary manifest under `mumei.go-scalar-parameter-deps/v1`.
+
+        Detached metadata naming the context key the set was derived
+        against plus each function's declared fields — a host can persist
+        or hand it to a route, but it proves nothing: `for_function`
+        still rejects reuse after any source/snapshot change and
+        `stale_dependents` still flags dependents of replaced identities."""
+        return {
+            "schema_version": PROFILE,
+            "context_key": self.context_key,
+            "functions": [f.to_dict() for f in self.functions],
+        }
 
 
 class _Unsupported(Exception):
