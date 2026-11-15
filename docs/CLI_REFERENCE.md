@@ -45,6 +45,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -615,6 +616,19 @@ Run the go-summaries produce route as one declared attempt and emit the reconcil
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+
+
+## `mumei-agent evidence-check-accept`
+
+Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--sequence` | `<PATH>` | yes | — | Declared attempt-sequence snapshot (mumei.verifier-attempt-sequence/v1 JSON). |
+| `--check` | `<PATH>` | yes | — | Declared evidence-check record (mumei.verifier-evidence-check/v1 JSON). |
+| `--output` | `<PATH>` | no | — | Write the acceptance descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent rust-summaries`
