@@ -6492,3 +6492,114 @@ def test_accept_route_matches_context_across_resolved_modules(
     out = json.loads(capsys.readouterr().out)
     assert out["accepted"] is False
     assert out["reason"] == "context_mismatch"
+
+
+# --- slice 68: ts-summaries-check / ts-summaries-reuse routes -----------------
+
+def _route_args(source, manifest=None, function=None,
+                output=None, resolve=False):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest) if manifest else None,
+            "function": function,
+            "output": str(output) if output else None,
+            "resolve_modules": resolve,
+        },
+    )()
+
+
+_SRC_TWO = (
+    "function f(x: number): number { return g(x); }"
+    "function g(v: number): number { return v + 1; }"
+)
+_SRC_TWO_CHANGED = (
+    "function f(x: number): number { return g(x); }"
+    "function g(v: number): number { return 7; }"
+)
+
+
+def test_check_route_partitions_names(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    old = ts.summarize_typescript(_SRC_TWO).to_dict()
+    old["functions"].append(
+        {
+            "name": "gone",
+            "available": True,
+            "parameters": [],
+            "return_dependencies": [],
+            "calls": [],
+            "gaps": [],
+            "effects": "none_in_supported_fragment",
+            "pinned": [],
+        }
+    )
+    manifest.write_text(json.dumps(old))
+
+    src.write_text(_SRC_TWO_CHANGED)
+    ts.main_check(_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.ts-summary-check/v1"
+    assert out["context_match"] is False
+    # g now returns a constant: its deps flip {0}→{}. f's record is
+    # unchanged — the call transfer already depends on every actual
+    # regardless of the callee's result.
+    assert out["stale"] == ["g"]
+    assert out["missing"] == ["gone"]
+    assert out["reusable"] == ["f"]
+
+
+def test_check_route_reports_reusable_records(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    ts.main_check(_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["context_match"] is True
+    assert out["reusable"] == ["f", "g"]
+    assert out["stale"] == []
+    assert out["missing"] == []
+
+
+def test_reuse_route_merges_verbatim_and_fresh(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    old = ts.summarize_typescript(
+        "function f(x: number): number { return x; }"
+        "function g(v: number): number { return v + 1; }"
+    ).to_dict()
+    manifest.write_text(json.dumps(old))
+    ts.main_reuse(_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    # The merged manifest is keyed to the fresh context.
+    assert out["schema_version"] == "mumei.ts-interprocedural/v1"
+    fresh = ts.summarize_typescript(_SRC_TWO)
+    assert out["context_key"] == fresh.context_key
+    by_name = {f["name"]: f for f in out["functions"]}
+    # g is reusable verbatim (identical record under both sources);
+    # f changed and was freshly re-derived.
+    assert by_name["g"]["return_dependencies"] == [0]
+    assert by_name["f"]["calls"][0]["callee"] == "g"
+
+
+def test_reuse_route_output_file(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    out_path = tmp_path / "merged.json"
+    ts.main_reuse(_route_args(src, manifest, output=out_path))
+    merged = json.loads(out_path.read_text())
+    assert merged["context_key"] == (
+        ts.summarize_typescript(_SRC_TWO).context_key
+    )

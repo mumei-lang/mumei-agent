@@ -23,6 +23,8 @@ _SUBCOMMANDS = {
     "self-correct",
     "ts-summaries",
     "ts-summaries-accept",
+    "ts-summaries-check",
+    "ts-summaries-reuse",
     "mcp-server",
     "check-spec-health",
     "migrate-suggest",
@@ -279,6 +281,40 @@ def main() -> None:
         ts_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         ts_accept_main(args)
+    elif command == "ts-summaries-check":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_check_parser as ts_check_build_parser,
+            main_check as ts_check_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-check",
+            description=(
+                "Check a declared TypeScript summary manifest "
+                "against the fresh derivation."
+            ),
+        )
+        ts_check_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_check_main(args)
+    elif command == "ts-summaries-reuse":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_reuse_parser as ts_reuse_build_parser,
+            main_reuse as ts_reuse_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-reuse",
+            description=(
+                "Emit a manifest reusing a declared manifest's "
+                "unchanged TypeScript summaries."
+            ),
+        )
+        ts_reuse_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_reuse_main(args)
     elif command == "validate-code-to-spec":
         import argparse
         from agent.cross_validation import (

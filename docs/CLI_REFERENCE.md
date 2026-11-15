@@ -31,6 +31,8 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `validate-spec-to-code` | 8 | Detect missing implementation constraints and report the spec constraint to code line relationship. |
 | `ts-summaries` | 1 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `ts-summaries-accept` | 3 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `ts-summaries-check` | 3 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
+| `ts-summaries-reuse` | 3 | Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
 | `validate-code-to-spec` | 8 | Detect spec drift by comparing changed code to specs. |
 | `verify-conformance` | 8 | Return structured JSON for natural-language spec to code conformance. |
 | `verify-traceability` | 8 | Return structured JSON for bidirectional spec/code traceability. |
@@ -343,6 +345,44 @@ Re-derive the TypeScript summary set for one declared source and accept one func
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to accept from. |
 | `--function` | `<<NAME>>` | yes | — | Name of the function whose summary to accept — accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
+
+
+## `mumei-agent ts-summaries-check`
+
+Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-interprocedural/v1) to check. |
+| `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
+
+
+## `mumei-agent ts-summaries-reuse`
+
+Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-interprocedural/v1) to reuse unchanged summaries from. |
+| `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
 
 
 ## `mumei-agent validate-code-to-spec`

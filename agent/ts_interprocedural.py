@@ -7450,7 +7450,61 @@ def _read_declared_source(path, schema):
     return raw
 
 
-def _read_declared_manifest(path):
+CHECK_PROFILE = "mumei.ts-summary-check/v1"
+
+
+def build_check_parser(parser=None):
+    """Parser for ``ts-summaries-check``: the produce route's
+    declared inputs plus ``--manifest`` naming the summary manifest
+    to check and ``--output`` for the check report."""
+    parser = build_parser(parser)
+    parser.description = (
+        "Re-derive the TypeScript summary set for one declared "
+        "source and check a declared manifest's functions against "
+        "it."
+    )
+    parser.add_argument(
+        "--manifest",
+        required=True,
+        metavar="<PATH>",
+        help=(
+            "Summary manifest (mumei.ts-interprocedural/v1) "
+            "to check."
+        ),
+    )
+    parser.add_argument(
+        "--output",
+        metavar="<PATH>",
+        help="Write the check report JSON here instead of stdout.",
+    )
+    return parser
+
+
+def build_reuse_parser(parser=None):
+    """Parser for ``ts-summaries-reuse``: the produce route's
+    declared inputs plus ``--manifest`` naming the manifest to reuse
+    from and ``--output`` for the merged manifest."""
+    parser = build_check_parser(parser)
+    parser.description = (
+        "Re-derive the TypeScript summary set for one declared "
+        "source and emit a manifest that reuses a declared "
+        "manifest's unchanged summaries."
+    )
+    for action in parser._actions:
+        if action.dest == "manifest":
+            action.help = (
+                "Summary manifest (mumei.ts-interprocedural/v1) "
+                "to reuse unchanged summaries from."
+            )
+        elif action.dest == "output":
+            action.help = (
+                "Write the merged manifest JSON here instead of "
+                "stdout."
+            )
+    return parser
+
+
+def _read_declared_manifest(path, schema=ACCEPT_PROFILE):
     import json
 
     try:
@@ -7459,7 +7513,7 @@ def _read_declared_manifest(path):
     except OSError as exc:
         _emit(
             {
-                "schema_version": ACCEPT_PROFILE,
+                "schema_version": schema,
                 "error": {
                     "reason": "manifest_unreadable",
                     "detail": exc.strerror or str(exc),
@@ -7470,7 +7524,7 @@ def _read_declared_manifest(path):
     if len(blob) > MAX_MANIFEST_BYTES:
         _emit(
             {
-                "schema_version": ACCEPT_PROFILE,
+                "schema_version": schema,
                 "error": {
                     "reason": "manifest_too_large",
                     "limit_bytes": MAX_MANIFEST_BYTES,
@@ -7483,7 +7537,7 @@ def _read_declared_manifest(path):
     except (TypeError, UnicodeDecodeError):
         _emit(
             {
-                "schema_version": ACCEPT_PROFILE,
+                "schema_version": schema,
                 "error": {
                     "reason": "manifest_malformed",
                     "detail": "declared summary manifest is malformed",
@@ -7494,7 +7548,7 @@ def _read_declared_manifest(path):
     except ValueError as exc:
         _emit(
             {
-                "schema_version": ACCEPT_PROFILE,
+                "schema_version": schema,
                 "error": {
                     "reason": "manifest_malformed",
                     "detail": str(exc),
@@ -7592,3 +7646,97 @@ def _fs_resolver(source_path):
         return None
 
     return resolve
+
+
+def _reuse_partition(declared, live):
+    """Partition the manifest's functions against the fresh set.
+
+    `reusable` — the name survives and the record is identical
+    (derivation is deterministic, so an unchanged function derives
+    the same record); `stale` — the name survives but the record
+    differs; `missing` — the fresh set no longer produces the name.
+    Detection only.
+    """
+    live_by_name = {}
+    for f in live.functions:
+        live_by_name.setdefault(f.name, f)
+    reusable, stale, missing = [], [], []
+    for entry in declared.functions:
+        fresh = live_by_name.get(entry.name)
+        if fresh is None:
+            missing.append(entry.name)
+        elif fresh == entry:
+            reusable.append(entry.name)
+        else:
+            stale.append(entry.name)
+    return reusable, stale, missing
+
+
+def main_check(args=None) -> None:
+    """Check a declared manifest against a fresh summary set.
+
+    Emits ``mumei.ts-summary-check/v1``: whether the declared context
+    key still matches (the strict whole-context gate) and a name-level
+    partition of the manifest's functions — `reusable` (identical
+    record survives), `stale` (same name, different record) and
+    `missing` (the fresh set no longer produces the name). Detection
+    only — what to recompute is the host's call.
+    """
+    import json
+
+    if args is None:
+        args = build_check_parser().parse_args()
+    declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
+    raw = _read_declared_source(args.source, CHECK_PROFILE)
+    live = summarize_typescript(raw, resolver=_resolver_for(args))
+    reusable, stale, missing = _reuse_partition(declared, live)
+    document = json.dumps(
+        {
+            "schema_version": CHECK_PROFILE,
+            "context_match": declared.context_key == live.context_key,
+            "reusable": sorted(reusable),
+            "stale": sorted(stale),
+            "missing": sorted(missing),
+        },
+        sort_keys=True,
+    )
+    if getattr(args, "output", None):
+        with open(args.output, "w") as handle:
+            handle.write(document + "\n")
+    else:
+        print(document)
+
+
+def main_reuse(args=None) -> None:
+    """Emit a manifest reusing a declared manifest's unchanged
+    summaries.
+
+    Same partition as ``ts-summaries-check``: a declared function
+    whose record is identical under the fresh derivation is reused
+    verbatim, every other live function is freshly derived and a
+    `missing` entry is dropped. The emitted set is keyed to the fresh
+    context — per-function reuse stays the host's weaker freshness
+    choice, never the strict whole-context gate.
+    """
+    import json
+
+    if args is None:
+        args = build_reuse_parser().parse_args()
+    declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
+    raw = _read_declared_source(args.source, CHECK_PROFILE)
+    live = summarize_typescript(raw, resolver=_resolver_for(args))
+    reusable, _, _ = _reuse_partition(declared, live)
+    declared_by_name = {f.name: f for f in declared.functions}
+    merged = [
+        declared_by_name.get(f.name, f) if f.name in reusable else f
+        for f in live.functions
+    ]
+    document = json.dumps(
+        TsSummarySet(live.context_key, merged).to_dict(),
+        sort_keys=True,
+    )
+    if getattr(args, "output", None):
+        with open(args.output, "w") as handle:
+            handle.write(document + "\n")
+    else:
+        print(document)
