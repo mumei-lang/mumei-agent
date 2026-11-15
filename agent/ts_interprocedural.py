@@ -794,6 +794,7 @@ class _Callable:
     __slots__ = (
         "node", "params", "defaults", "captured", "rest",
         "is_method", "param_props", "origin", "bound", "patterns",
+        "alts",
     )
 
     def __init__(
@@ -802,6 +803,10 @@ class _Callable:
         self.node = node
         self.params = params
         self.defaults = defaults
+        # Alternate callees the same member slot may resolve to
+        # (a maybe-deleted own field hiding a prototype method) —
+        # every invocation runs them all and unions the results.
+        self.alts = ()
         self.captured = captured
         self.rest = rest
         self.is_method = is_method
@@ -1091,6 +1096,7 @@ def _composite_dyn_set(composite, path, value, span):
             widened.origin = fval.origin
             widened.patterns = fval.patterns
             widened.bound = fval.bound
+            widened.alts = fval.alts
             fields[fname] = widened
         else:
             fields[fname] = _scalar_of(fval) | vdeps
@@ -3456,6 +3462,7 @@ class _Builder:
                     widened.origin = cval.origin
                     widened.patterns = cval.patterns
                     widened.bound = cval.bound
+                    widened.alts = cval.alts
                     self._fn_cache[name] = widened
             return self._fn_cache[name]
         if name in self.imported_bindings:
@@ -3669,51 +3676,109 @@ class _Builder:
                         read_union |= result
                     klass = klass.parent
                 return read_union
-            if key not in val.fields or key in val.deleted:
-                # A maybe-deleted field reads BOTH the surviving
-                # field deps and the prototype's fallback — the
-                # join can't tell which ran.
-                field_deps = (
-                    _scalar_of(val.fields[key])
-                    if key in val.fields
-                    else frozenset()
-                )
-                # Missing fields on an instance fall through to
-                # the class's accessors/methods (the prototype) —
-                # still missing means `undefined`, dep-free.
-                if val.klass is not None:
-                    if key in val.klass.getters:
-                        # `o.p` invokes `get p()` like a no-arg
-                        # method call on the instance.
-                        result = self._invoke_callable(
-                            val.klass.getters[key],
-                            (),
-                            params,
-                            locals_,
-                            transfers,
-                            count,
-                            _span(node),
-                            this_val=val,
+            if key in val.fields and key not in val.deleted:
+                val = val.fields[key]
+                continue
+            fval = val.fields.get(key)
+            # Missing or maybe-deleted fields on an instance fall
+            # through to the class's accessors/methods (the
+            # prototype). A maybe-deleted field keeps BOTH
+            # candidates — the join can't tell which ran.
+            if val.klass is not None:
+                if key in val.klass.getters:
+                    # `o.p` invokes `get p()` like a no-arg
+                    # method call on the instance.
+                    result = self._invoke_callable(
+                        val.klass.getters[key],
+                        (),
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        _span(node),
+                        this_val=val,
+                    )
+                    transfers.append(
+                        TsCall(_span(node), key, (), result)
+                    )
+                    if isinstance(fval, _Callable):
+                        # Reads see the getter; calls may still
+                        # reach the field — carry both.
+                        widened = _Callable(
+                            fval.node,
+                            fval.params,
+                            fval.defaults,
+                            fval.captured | result,
+                            fval.rest,
+                            fval.is_method,
                         )
-                        transfers.append(
-                            TsCall(_span(node), key, (), result)
+                        widened.param_props = fval.param_props
+                        widened.origin = fval.origin
+                        widened.patterns = fval.patterns
+                        widened.bound = fval.bound
+                        widened.alts = fval.alts
+                        val = widened
+                        continue
+                    return result | (
+                        _scalar_of(fval)
+                        if fval is not None
+                        else frozenset()
+                    )
+                if key in val.klass.methods:
+                    mval = val.klass.methods[key]
+                    if isinstance(fval, _Callable):
+                        # The own field may still be the callee —
+                        # chain the prototype method as an
+                        # alternate so `o.m(x)` invokes both.
+                        widened = _Callable(
+                            fval.node,
+                            fval.params,
+                            fval.defaults,
+                            fval.captured,
+                            fval.rest,
+                            fval.is_method,
                         )
-                        return result | field_deps
-                    if key in val.klass.methods:
-                        mval = val.klass.methods[key]
-                        if field_deps:
-                            return field_deps | _scalar_of(mval)
+                        widened.param_props = fval.param_props
+                        widened.origin = fval.origin
+                        widened.patterns = fval.patterns
+                        widened.bound = fval.bound
+                        widened.alts = fval.alts + (mval,)
+                        val = widened
+                        continue
+                    if fval is None:
                         val = mval
                         continue
-                if val.klass is _MAP_SET_KLASS:
-                    # `m.size` — a Map/Set pseudo-member carries
-                    # the whole entry union.
-                    return _scalar_of(val) | index_deps
-                # An opaque call may have ADDED fields the
-                # table never named — `"*"` carries their deps
-                # (still dep-free when no opaque call ran).
-                return val.fields.get("*", frozenset()) | field_deps
-            val = val.fields[key]
+                    # A scalar field can't be called — the method
+                    # is the callee; the field's deps still join
+                    # a plain read via `captured`.
+                    widened = _Callable(
+                        mval.node,
+                        mval.params,
+                        mval.defaults,
+                        mval.captured | _scalar_of(fval),
+                        mval.rest,
+                        mval.is_method,
+                    )
+                    widened.param_props = mval.param_props
+                    widened.origin = mval.origin
+                    widened.patterns = mval.patterns
+                    widened.bound = mval.bound
+                    widened.alts = mval.alts
+                    val = widened
+                    continue
+            if val.klass is _MAP_SET_KLASS:
+                # `m.size` — a Map/Set pseudo-member carries
+                # the whole entry union.
+                return _scalar_of(val) | index_deps
+            if fval is not None:
+                # Maybe-deleted with no class member — the read
+                # sees the field or `undefined` (dep-free).
+                val = fval
+                continue
+            # An opaque call may have ADDED fields the
+            # table never named — `"*"` carries their deps
+            # (still dep-free when no opaque call ran).
+            return val.fields.get("*", frozenset())
         return val
 
     def _member_delete(
@@ -3872,6 +3937,7 @@ class _Builder:
             widened.param_props = old.param_props
             widened.origin = old.origin
             widened.bound = old.bound
+            widened.alts = old.alts
             widened.patterns = old.patterns
             for name, val in locals_.items():
                 if val is old:
@@ -4113,6 +4179,7 @@ class _Builder:
         this_val=None,
         construct=False,
         actual_values=None,
+        alt_this=None,
     ) -> frozenset[int]:
         """`g(args)` where `g` binds an arrow/function value —
         evaluate the body inline. Captured names read the CALL
@@ -4144,7 +4211,7 @@ class _Builder:
             return result
         self._invoke_depth += 1
         try:
-            return self._invoke_callable_body(
+            result = self._invoke_callable_body(
                 cval,
                 actual,
                 params,
@@ -4156,6 +4223,29 @@ class _Builder:
                 construct=construct,
                 actual_values=actual_values,
             )
+            for alt in cval.alts:
+                # A maybe-deleted member slot may resolve to the
+                # prototype method — invoke it too.
+                try:
+                    result |= self._invoke_callable(
+                        alt,
+                        actual,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        span,
+                        this_val=(
+                            alt_this if alt.is_method else None
+                        ),
+                        actual_values=actual_values,
+                    )
+                except _Unsupported:
+                    # A callee that closes keeps the actuals'
+                    # union (the opaque shape).
+                    for a in actual:
+                        result |= a
+            return result
         finally:
             self._invoke_depth -= 1
 
@@ -5138,6 +5228,7 @@ class _Builder:
             )
             out.origin = base.origin
             out.patterns = base.patterns
+            out.alts = base.alts
             transfers.append(
                 TsCall(
                     _span(node),
@@ -6273,9 +6364,13 @@ class _Builder:
                     return result_m
                 # A `function`/shorthand method invoked through a
                 # member path receives `this` = the object; an
-                # arrow never does.
+                # arrow never does. A maybe-deleted slot's
+                # alternate callee may still want the receiver.
                 this_val = None
-                if raw.is_method:
+                alt_this = None
+                if raw.is_method or any(
+                    alt.is_method for alt in raw.alts
+                ):
                     obj_node = function.child_by_field_name("object")
                     if obj_node is not None and obj_node.type == "super":
                         # `super.m(x)` — `this` stays the instance.
@@ -6292,7 +6387,10 @@ class _Builder:
                             )
                         )
                     if isinstance(base_val, _Composite):
-                        this_val = base_val
+                        # The primary binds `this` only when it is
+                        # method-shaped; alternates take their own.
+                        this_val = base_val if raw.is_method else None
+                        alt_this = base_val
                 result = self._invoke_callable(
                     raw,
                     actual_m,
@@ -6303,6 +6401,7 @@ class _Builder:
                     _span(node),
                     this_val=this_val,
                     actual_values=vals_m,
+                    alt_this=alt_this,
                 )
                 transfers.append(
                     TsCall(

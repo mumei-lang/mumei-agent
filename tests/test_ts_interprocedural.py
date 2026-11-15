@@ -5856,14 +5856,30 @@ def test_review3_reassign_smaller_composite_in_loop_converges():
 
 def test_review4_delete_field_in_loop_keeps_prototype_fallback():
     # `delete this.f` in a loop removes the field hiding a getter —
-    # later reads must union the surviving field deps with the
-    # getter's deps, and the join must still converge.
+    # later reads must union the surviving field deps ({0}) with
+    # the getter's ({1}), and the join must still converge.
     s = _fn(
         "class C { f; get f() { return this.g; } g; "
-        "m(x) { this.f = x; for (let i = 0; i < 3; i++) { delete this.f; } "
+        "m(x, y) { this.f = x; this.g = y; "
+        "for (let i = 0; i < 3; i++) { delete this.f; } "
         "return this.f; } }\n"
-        "function f(a) { let c = new C(); return c.m(a); }",
+        "function f(a, b) { let c = new C(); return c.m(a, b); }",
         "f",
     )
     assert s.available
-    assert s.return_dependencies == {0}
+    assert s.return_dependencies == {0, 1}
+
+
+def test_review5_deleted_field_keeps_both_method_candidates():
+    # A conditional `delete this.m` leaves both call candidates:
+    # the own callable field ({2} through its arg) and the
+    # prototype method ({0} through `this.k`).
+    s = _fn(
+        "class C { m(v) { return this.k; } k; "
+        "n(a, c, x) { this.m = (v) => v; "
+        "if (c) { delete this.m; } this.k = a; return this.m(x); } }\n"
+        "function f(a, c, x) { let o = new C(); return o.n(a, c, x); }",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == {0, 2}
