@@ -253,6 +253,13 @@ Admitted:
   `_Composite` in module scope: bare members are dep-free and an
   initializer contributes its own deps, so `E.A` reads as a
   field.
+* `async` — `async function f(...): Promise<T>` admits when
+  `T` is `number`/`boolean` (nested `Promise<Promise<T>>`
+  unwraps the same way); `await` passes the operand's deps
+  through, `for await (const v of a)` iterates like `for
+  ..of`, and `async` arrows/function expressions bind like
+  plain ones. `for(;;)`/`for(;c;)` empty slots parse as
+  `empty_statement` — they read as absent.
 * Class accessors — `get p()`/`set p(v)` on a class admit:
   `o.p` on an instance invokes the getter like a no-arg method
   (`this` is the instance) and records a `TsCall`; `o.p = v`
@@ -970,7 +977,19 @@ class _Builder:
         ret = node.child_by_field_name("return_type")
         if params_node is None or body is None or body.type != "statement_block":
             raise _Unsupported("unsupported_signature", _span(node))
-        if ret is None or not self._scalar_annotation(ret):
+        is_async = any(c.type == "async" for c in node.children)
+        if ret is not None and not self._scalar_annotation(ret):
+            inner = next(iter(_children(ret)), None)
+            # `async f(): Promise<T>` — the promise resolves to its
+            # value, so `Promise<number|boolean>` admits exactly
+            # where a plain scalar annotation would.
+            if not (
+                is_async
+                and inner is not None
+                and self._promise_scalar(inner)
+            ):
+                raise _Unsupported("unsupported_signature", _span(node))
+        elif ret is None:
             raise _Unsupported("unsupported_signature", _span(node))
         params: dict[str, int] = {}
         destructured: list = []
@@ -1106,6 +1125,24 @@ class _Builder:
             and inner.type == "predefined_type"
             and inner.text in _SCALAR_TYPES
         )
+
+    def _promise_scalar(self, tnode) -> bool:
+        """A type node that is `number`/`boolean` or a
+        `Promise<...>` wrapping one — the `async` return-annotation
+        counterpart of `_scalar_annotation`."""
+        if tnode.type == "predefined_type":
+            return tnode.text in _SCALAR_TYPES
+        if tnode.type == "generic_type":
+            name = tnode.child_by_field_name("name")
+            args = tnode.child_by_field_name("type_arguments")
+            targs = _children(args) if args is not None else []
+            return (
+                name is not None
+                and name.text == b"Promise"
+                and len(targs) == 1
+                and self._promise_scalar(targs[0])
+            )
+        return False
 
     def _sequence(
         self,
@@ -1583,13 +1620,30 @@ class _Builder:
             self.block_stack.append(for_saved)
             try:
                 initializer = node.child_by_field_name("initializer")
+                if (
+                    initializer is not None
+                    and initializer.type == "empty_statement"
+                ):
+                    # `for(;cond;)` — the empty slot parses as an
+                    # `empty_statement`; treat it as absent.
+                    initializer = None
                 if initializer is not None:
                     self._for_part(
                         initializer, params, scope, transfers, count,
                         deps, saw_return, conditional,
                     )
                 condition = node.child_by_field_name("condition")
+                if (
+                    condition is not None
+                    and condition.type == "empty_statement"
+                ):
+                    condition = None
                 increment = node.child_by_field_name("increment")
+                if (
+                    increment is not None
+                    and increment.type == "empty_statement"
+                ):
+                    increment = None
                 self._loop(
                     body, increment, condition, params, scope,
                     transfers, count, deps, saw_return, conditional,

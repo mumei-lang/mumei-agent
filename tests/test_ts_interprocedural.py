@@ -3484,3 +3484,80 @@ def test_static_getter_closes():
         " return C.p; }"
     )
     assert not s.available
+
+
+# --- slice 34: async functions + empty for slots ----------------------------
+
+
+def test_async_promise_return():
+    s = _fn(
+        "async function f(x: number): Promise<number> { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_async_await_passthrough():
+    s = _fn(
+        "async function f(x: number): Promise<number> {"
+        " const v = await g(x); return v; }"
+        " function g(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_async_nested_promise():
+    s = _fn(
+        "async function f(x: number): Promise<Promise<number>> {"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_async_non_scalar_promise_closes():
+    s = _fn(
+        "async function f(x: number): Promise<string> { return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_signature"
+
+
+def test_nonasync_promise_closes():
+    s = _fn(
+        "function f(x: number): Promise<number> { return x; }"
+    )
+    assert not s.available
+
+
+def test_for_await():
+    s = _fn(
+        "async function f(x: number): Promise<number> {"
+        " const a = [x];"
+        " for await (const v of a) { return v; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_bare_for_loop():
+    s = _fn(
+        "function f(x: number): number {"
+        " let i = 0; for(;;) { i = x; break; } return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_labeled_bare_for():
+    s = _fn(
+        "function f(x: number): number {"
+        " let i = 0; outer: for(;;) { i = x; break outer; }"
+        " return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_for_partial_slots():
+    s = _fn(
+        "function f(x: number): number {"
+        " let i = 0; for (; i < 5;) { i = x; } return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

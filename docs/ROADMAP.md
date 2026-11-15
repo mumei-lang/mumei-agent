@@ -3079,6 +3079,20 @@ Private `get #p` keys by the `#` name like other members,
 and `super.p` reaches an inherited getter through the
 parent merge.
 
+### C06 TypeScript async functions (slice 34)
+
+`async function f(x): Promise<number>` admits —
+`Promise<number|boolean>` (and nested `Promise<Promise<T>>`)
+unwraps to the scalar check; `await` already passes operand
+deps through and `for await (const v of a)` iterates like
+`for..of`. `async` arrows bind like plain callables. A
+`Promise<string>` (or `Promise<{}>`) return still closes —
+only scalar-shaped results are modelled.
+
+`for(;;)` / `for(;c;)` empty slots parse as
+`empty_statement` and now read as absent — classic loops
+admit in every partial form.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
