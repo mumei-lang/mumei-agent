@@ -63,6 +63,24 @@ Admitted:
   assigned dependencies) and `sequence_expression` (the comma
   operator — operands evaluate left to right, the union is the
   result).
+* Object literals `{a: e, n: {c: e}}` bound to a name — a
+  `_Composite` value tracking dependencies per field; member reads
+  `o.f`/`o.a.b` descend to the field's deps, member writes
+  `o.f = e`/`o.f op= e`/`o.f++` rewrite the field copy-on-write
+  (branch joins merge field-wise, and a shape mismatch collapses
+  the composite to the union of its leaf deps), string-key
+  subscripts `o["f"]` act like member syntax, a dynamic `o[k]`
+  read unions every field at that level plus the index's deps
+  (writes stay closed), and a missing field reads as `undefined`
+  (no deps). Reading or passing a whole composite flattens to the
+  union of its fields. Aliasing is reference-faithful only at the
+  name level: `p = o` shares the composite and a member write
+  through either name reaches both bindings in the same scope —
+  while a composite bound anywhere else collapses to its leaf
+  deps (`{a: o2}` field values, `q = o.a` member-path bindings,
+  `o.f = o2` member stores, `{o}` shorthand), so no sub-object
+  alias can diverge. Spread/method/computed-key object members
+  and member access on a scalar or unbound base stay closed.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -76,7 +94,8 @@ Admitted:
 
 Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
-objects/member access, `this`, arrow-function values or callbacks,
+member CALLS (`o.m()` — no closure methods), `this`, arrow-function
+values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
 spread, destructuring, `new`, `for`-`in`/`of` and function
 expressions/`=>` values stay
@@ -181,6 +200,86 @@ def _span(node) -> TsSpan:
 
 def _children(node) -> list:
     return node.named_children
+
+
+class _Composite:
+    """An object-shaped value: field name -> scalar deps or nested
+    `_Composite`. Treated as immutable — a member write produces a
+    new instance bound to the base name, so branch scopes may share
+    an instance freely."""
+
+    __slots__ = ("fields",)
+
+    def __init__(self, fields: dict) -> None:
+        self.fields = fields
+
+
+def _scalar_of(value) -> frozenset[int]:
+    """Flatten a value to scalar deps — reading or passing a whole
+    composite over-approximates to the union of its leaf deps."""
+    if isinstance(value, _Composite):
+        result = frozenset()
+        for field in value.fields.values():
+            result |= _scalar_of(field)
+        return result
+    return value
+
+
+def _merge_vals(old, new):
+    """Join two values: scalar|scalar unions, composite|composite
+    merges field-wise, and a shape mismatch collapses the composite
+    to its leaf deps (a name can't be both shapes at once)."""
+    if isinstance(old, _Composite) and isinstance(new, _Composite):
+        fields = dict(old.fields)
+        for key, nval in new.fields.items():
+            if key in fields:
+                fields[key] = _merge_vals(fields[key], nval)
+            else:
+                fields[key] = nval
+        return _Composite(fields)
+    if isinstance(old, _Composite):
+        return _scalar_of(old) | new
+    if isinstance(new, _Composite):
+        return old | _scalar_of(new)
+    return old | new
+
+
+def _val_leq(new, old) -> bool:
+    """`new` adds nothing over `old` — the fixed-point test."""
+    if isinstance(old, _Composite) and isinstance(new, _Composite):
+        for key, nval in new.fields.items():
+            if key not in old.fields or not _val_leq(
+                nval, old.fields[key]
+            ):
+                return False
+        return True
+    if isinstance(new, _Composite):
+        return _scalar_of(new) <= _scalar_of(old)
+    if isinstance(old, _Composite):
+        return False
+    return new <= old
+
+
+def _composite_set(composite, path, value, conditional, span):
+    """Copy-on-write member store: `composite.path = value`,
+    returning the updated `_Composite`."""
+    fields = dict(composite.fields)
+    key = path[0]
+    if len(path) == 1:
+        old = fields.get(key)
+        fields[key] = (
+            _merge_vals(old, value)
+            if conditional and old is not None
+            else value
+        )
+    else:
+        sub = fields.get(key)
+        if not isinstance(sub, _Composite):
+            raise _Unsupported("unsupported_expression", span)
+        fields[key] = _composite_set(
+            sub, path[1:], value, conditional, span
+        )
+    return _Composite(fields)
 
 
 def _syntax(raw: bytes):
@@ -339,7 +438,7 @@ class _Builder:
                 raise _Unsupported("unsupported_signature", _span(param))
             params[pname] = len(params)
 
-        locals_: dict[str, frozenset[int]] = {}
+        locals_: dict[str, object] = {}
         self.function_locals = locals_
         self.var_names = set()
         self.block_stack = []
@@ -417,9 +516,11 @@ class _Builder:
         if conditional:
             if name in locals_:
                 # The skipped path keeps the binding's CURRENT value.
-                value = locals_[name] | value
+                value = _merge_vals(locals_[name], value)
             elif name in params:
-                value = frozenset({params[name]}) | value
+                # A parameter is a scalar slot — a composite stored
+                # into it collapses to the union of its leaf deps.
+                value = frozenset({params[name]}) | _scalar_of(value)
         locals_[name] = value
 
     def statement(
@@ -489,8 +590,11 @@ class _Builder:
                     raise _Unsupported("binding_unavailable", _span(decl))
                 value = decl.child_by_field_name("value")
                 deps_v = (
-                    self.expression(
-                        value, params, locals_, transfers, count
+                    self._bindable(
+                        value,
+                        self._eval(
+                            value, params, locals_, transfers, count
+                        ),
                     )
                     if value is not None
                     # `let x;` binds `undefined` — no dependencies.
@@ -884,19 +988,41 @@ class _Builder:
         if (
             left is None
             or right is None
-            or left.type != "identifier"
             or (augmented and (op is None or op.type not in _AUGMENTED_OPS))
             or (not augmented and op is not None and op.type != "=")
         ):
             raise _Unsupported("unsupported_statement", _span(node))
-        name = left.text.decode()
-        target = self._write_scope(name, locals_, params)
-        if target is None:
-            raise _Unsupported("binding_unavailable", _span(left))
-        value = self.expression(right, params, locals_, transfers, count)
-        if augmented:
-            value = self._read_name(left, params, locals_, _span(left)) | value
-        self._store(target, params, name, value, conditional)
+        value = self._eval(right, params, locals_, transfers, count)
+        if left.type == "identifier":
+            name = left.text.decode()
+            target = self._write_scope(name, locals_, params)
+            if target is None:
+                raise _Unsupported("binding_unavailable", _span(left))
+            if augmented:
+                value = (
+                    self._read_name(left, params, locals_, _span(left))
+                    | _scalar_of(value)
+                )
+            else:
+                value = self._bindable(right, value)
+            self._store(target, params, name, value, conditional)
+            return
+        if left.type in {"member_expression", "subscript_expression"}:
+            if augmented:
+                value = (
+                    _scalar_of(
+                        self._member_read(
+                            left, params, locals_, transfers, count
+                        )
+                    )
+                    | _scalar_of(value)
+                )
+            self._member_store(
+                left, value, params, locals_, transfers, count,
+                conditional,
+            )
+            return
+        raise _Unsupported("unsupported_statement", _span(node))
 
     def _write_scope(self, name, locals_, params):
         """The scope a store lands in: block first, then the function
@@ -912,15 +1038,37 @@ class _Builder:
 
     def _update(self, node, params, locals_, transfers, count, conditional):
         argument = node.child_by_field_name("argument")
-        if argument is None or argument.type != "identifier":
+        if argument is None or argument.type not in {
+            "identifier",
+            "member_expression",
+            "subscript_expression",
+        }:
             raise _Unsupported("unsupported_statement", _span(node))
-        name = argument.text.decode()
-        target = self._write_scope(name, locals_, params)
-        if target is None:
-            raise _Unsupported("binding_unavailable", _span(argument))
-        self._store(
-            target, params, name,
-            self._read_name(argument, params, locals_, _span(argument)),
+        if argument.type == "identifier":
+            name = argument.text.decode()
+            target = self._write_scope(name, locals_, params)
+            if target is None:
+                raise _Unsupported("binding_unavailable", _span(argument))
+            self._store(
+                target, params, name,
+                self._read_name(
+                    argument, params, locals_, _span(argument)
+                ),
+                conditional,
+            )
+            return
+        # `o.f++` — dep-preserving member write.
+        self._member_store(
+            argument,
+            _scalar_of(
+                self._member_read(
+                    argument, params, locals_, transfers, count
+                )
+            ),
+            params,
+            locals_,
+            transfers,
+            count,
             conditional,
         )
 
@@ -970,19 +1118,21 @@ class _Builder:
                 changed = False
                 for name, ndeps in inner.items():
                     if name in scope:
-                        if not ndeps <= scope[name]:
-                            scope[name] |= ndeps
+                        if not _val_leq(ndeps, scope[name]):
+                            scope[name] = _merge_vals(scope[name], ndeps)
                             changed = True
                     elif name in params:
-                        scope[name] = frozenset({params[name]}) | ndeps
+                        scope[name] = (
+                            frozenset({params[name]}) | _scalar_of(ndeps)
+                        )
                         changed = True
                     elif name in self.var_names:
                         # `var` is function-scoped: a declaration or
                         # assignment inside the body escapes the loop
                         # like any may-write.
-                        scope[name] = scope.get(
-                            name, frozenset()
-                        ) | ndeps
+                        scope[name] = _merge_vals(
+                            scope.get(name, frozenset()), ndeps
+                        )
                         changed = True
                 if not changed:
                     break
@@ -1001,16 +1151,33 @@ class _Builder:
         # escape — only existing, parameter and `var` names merge.
         for name, value in branch.items():
             if name in scope:
-                scope[name] |= value
+                scope[name] = _merge_vals(scope[name], value)
             elif name in params:
-                scope[name] = frozenset({params[name]}) | value
+                scope[name] = (
+                    frozenset({params[name]}) | _scalar_of(value)
+                )
             elif name in var_names:
                 # `var` is function-scoped: a declaration inside a
                 # branch escapes it like any may-write.
                 scope[name] = value
 
-    def _read_name(self, node, params, locals_, span) -> frozenset[int]:
-        name = node.text.decode()
+    @staticmethod
+    def _bindable(node, value):
+        """A composite may only bind via an object literal or a
+        whole-name alias (`p = o` shares the instance — writes
+        propagate to every holder). A member-path result bound to a
+        name would let writes through either side diverge, so it
+        collapses to its leaf deps."""
+        if isinstance(value, _Composite) and node.type not in {
+            "object",
+            "identifier",
+        }:
+            return _scalar_of(value)
+        return value
+
+    def _lookup(self, name, params, locals_, span):
+        """The raw binding for `name` — a scalar dep set or a
+        `_Composite`."""
         if name in locals_:
             return locals_[name]
         if name in self.function_locals:
@@ -1019,13 +1186,189 @@ class _Builder:
             return frozenset({params[name]})
         raise _Unsupported("binding_unavailable", span)
 
+    def _read_name(self, node, params, locals_, span) -> frozenset[int]:
+        return _scalar_of(
+            self._lookup(node.text.decode(), params, locals_, span)
+        )
+
+    def _member_target(
+        self, node, params, locals_, transfers, count
+    ):
+        """Walk a `obj.f` / `obj[k]` / parenthesized chain down to its
+        base identifier — returns `(base name, field path,
+        index deps)`. A `None` path step marks a dynamic key, whose
+        index still evaluates for deps and calls."""
+        path: list = []
+        index_deps = frozenset()
+        cur = node
+        while cur.type in {
+            "member_expression",
+            "subscript_expression",
+            "parenthesized_expression",
+        }:
+            if cur.type == "parenthesized_expression":
+                inner = next(iter(_children(cur)), None)
+                if inner is None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(cur)
+                    )
+                cur = inner
+                continue
+            if cur.type == "member_expression":
+                prop = cur.child_by_field_name("property")
+                if prop is None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(cur)
+                    )
+                path.append(prop.text.decode())
+            else:
+                index = cur.child_by_field_name("index")
+                if index is None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(cur)
+                    )
+                # Literal keys carry no deps or calls; a dynamic
+                # index evaluates for both.
+                if index.type == "string":
+                    path.append(index.text.decode().strip("\"'"))
+                else:
+                    index_deps |= self.expression(
+                        index, params, locals_, transfers, count
+                    )
+                    path.append(None)
+            obj = cur.child_by_field_name("object")
+            if obj is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(cur)
+                )
+            cur = obj
+        if cur.type != "identifier":
+            raise _Unsupported("unsupported_expression", _span(cur))
+        path.reverse()
+        return cur.text.decode(), path, index_deps
+
+    def _member_read(self, node, params, locals_, transfers, count):
+        """`o.f` / `o.a.b` — descend the base's `_Composite` to the
+        field's raw value. A missing field is `undefined` (no deps);
+        a dynamic key step over-approximates to every field at that
+        level plus the index's deps."""
+        base, path, index_deps = self._member_target(
+            node, params, locals_, transfers, count
+        )
+        val = self._lookup(base, params, locals_, _span(node))
+        for key in path:
+            if not isinstance(val, _Composite):
+                raise _Unsupported("unsupported_expression", _span(node))
+            if key is None:
+                return _scalar_of(val) | index_deps
+            val = val.fields.get(key, frozenset())
+        return val
+
+    def _member_store(
+        self, node, value, params, locals_, transfers, count,
+        conditional,
+    ) -> None:
+        """`o.f = v` — copy-on-write the field into the base binding.
+        The base must bind a `_Composite` in a writable scope; a
+        dynamic subscript key can't pick a field, so it closes.
+        Composite bindings alias (`p = o` shares the instance), so
+        the write propagates to every name holding it."""
+        base, path, _ = self._member_target(
+            node, params, locals_, transfers, count
+        )
+        if any(key is None for key in path):
+            raise _Unsupported("unsupported_expression", _span(node))
+        target = self._write_scope(base, locals_, params)
+        if target is None:
+            raise _Unsupported("binding_unavailable", _span(node))
+        old = target.get(base)
+        if not isinstance(old, _Composite):
+            raise _Unsupported("unsupported_expression", _span(node))
+        if isinstance(value, _Composite):
+            # `o.f = o2` would alias `o2` at field level — writes
+            # would diverge, so a composite field value collapses.
+            value = _scalar_of(value)
+        new = _composite_set(
+            old, path, value, conditional, _span(node)
+        )
+        # Every binding IN THIS SCOPE sharing the instance is an
+        # alias — the write reaches all of them. Only `locals_` is
+        # scanned: eagerly rewriting the enclosing scope would
+        # defeat a loop's fixed-point join (the join itself carries
+        # the update outward, over-approximating skipped paths).
+        for name, val in locals_.items():
+            if val is old:
+                locals_[name] = new
+
     def expression(self, node, params, locals_, transfers, count):
+        """Evaluate a node to scalar dependencies — a composite
+        flattens to the union of its leaf deps."""
+        return _scalar_of(
+            self._eval(node, params, locals_, transfers, count)
+        )
+
+    def _eval(self, node, params, locals_, transfers, count):
+        """Evaluate a node to its raw value: a scalar dependency set
+        or a `_Composite` for object shapes."""
         count[0] += 1
         if count[0] > MAX_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         kind = node.type
         if kind == "identifier":
-            return self._read_name(node, params, locals_, _span(node))
+            return self._lookup(
+                node.text.decode(), params, locals_, _span(node)
+            )
+        if kind == "object":
+            # `{a: x, b: {c: y}, short}` — a composite tracking deps
+            # per field; spread/method/computed-key members close.
+            fields: dict = {}
+            for child in _children(node):
+                if child.type == "pair":
+                    key = child.child_by_field_name("key")
+                    fval = child.child_by_field_name("value")
+                    if (
+                        key is None
+                        or fval is None
+                        or key.type
+                        not in {"property_identifier", "string", "number"}
+                    ):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(child)
+                        )
+                    fdeps = self._eval(
+                        fval, params, locals_, transfers, count
+                    )
+                    if isinstance(fdeps, _Composite) and (
+                        fval.type != "object"
+                    ):
+                        # `{a: o2}` aliases `o2` at field level —
+                        # writes would diverge, so collapse.
+                        fdeps = _scalar_of(fdeps)
+                    fields[
+                        key.text.decode().strip("\"'")
+                        if key.type == "string"
+                        else key.text.decode()
+                    ] = fdeps
+                elif child.type == "shorthand_property_identifier":
+                    # `{o}` — a whole-name alias collapses like a
+                    # non-literal field value.
+                    fields[child.text.decode()] = _scalar_of(
+                        self._lookup(
+                            child.text.decode(),
+                            params,
+                            locals_,
+                            _span(child),
+                        )
+                    )
+                else:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(child)
+                    )
+            return _Composite(fields)
+        if kind in {"member_expression", "subscript_expression"}:
+            return self._member_read(
+                node, params, locals_, transfers, count
+            )
         if kind in {"number", "true", "false"}:
             return frozenset()
         if kind == "parenthesized_expression":
@@ -1101,12 +1444,19 @@ class _Builder:
             )
             return result
         if kind == "update_expression":
-            # `x++` inside an expression (`return x++`) — dep-preserving
-            # read of the bound name; the store is statement-level only.
+            # `x++` / `o.f++` inside an expression (`return x++`) —
+            # a dep-preserving read of the bound name; the store is
+            # statement-level only.
             argument = node.child_by_field_name("argument")
-            if argument is None or argument.type != "identifier":
+            if argument is None or argument.type not in {
+                "identifier",
+                "member_expression",
+                "subscript_expression",
+            }:
                 raise _Unsupported("unsupported_expression", _span(node))
-            return self._read_name(argument, params, locals_, _span(argument))
+            return _scalar_of(
+                self._eval(argument, params, locals_, transfers, count)
+            )
         if kind in {
             "assignment_expression",
             "augmented_assignment_expression",
@@ -1127,7 +1477,9 @@ class _Builder:
                     u.span,
                 ) from u
             left = node.child_by_field_name("left")
-            return self._read_name(left, params, locals_, _span(left))
+            return _scalar_of(
+                self._eval(left, params, locals_, transfers, count)
+            )
         if kind == "sequence_expression":
             # The comma operator: each operand evaluates for its
             # writes/calls; the whole value is the union of the deps.

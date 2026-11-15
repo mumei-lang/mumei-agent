@@ -2412,7 +2412,7 @@ and calls to a same-unit named function — each records a `TsCall`
 transfer whose `arguments` hold the argument dependency sets, and the
 result is the union of all of them (the opaque-callee model: the callee
 body is not composed). Everything else closes: `unsupported_expression`
-covers member access/calls, subscripts, `new`, arrow/function values,
+covers member calls, `new`, arrow/function values,
 `await`, template strings and any other node;
 `binding_unavailable` covers reads or stores to names never bound;
 `call_unresolved` covers callees not defined in the unit.
@@ -2518,7 +2518,40 @@ admission is unaffected, matching the opaque-callee model.
 
 Boundaries: function expressions and arrow values (`const g = fn`,
 `const g = () => x`) still close — binding a callable to a name is
-the composite-value boundary the whole slice line defers.
+a closure boundary the slice line still defers.
+
+### C06 TypeScript composite member model (slice 6)
+
+Object literals bound to a name become `_Composite` values that
+track dependencies per field instead of collapsing the binding.
+`o.f`/`o.a.b` reads descend to the field's deps (a missing field
+reads as `undefined` — no deps), `o.f = e`/`o.f op= e`/`o.f++`
+writes rewrite the field copy-on-write so branch scopes can share
+the composite, and a string-key subscript `o["f"]` behaves like
+member syntax. A dynamic `o[k]` read unions every field at that
+level plus the index's deps, and still evaluates the index for
+calls; dynamic writes
+close. Reads or call arguments that take a whole composite
+flatten to the union of its leaf deps — the same
+over-approximation the scalar fragment used for opaque values.
+Joins merge composites field-wise; a scalar/composite shape
+mismatch collapses the composite to its flattened deps rather
+than inventing a third shape, and the loop fixed point compares
+with a structural `_val_leq` so field-widening still iterates.
+
+Aliasing follows JS reference semantics only at the name level:
+`p = o` shares the `_Composite` instance and a member write
+through either name reaches every binding holding it in the
+current scope. A composite bound anywhere else would let writes
+through the two handles diverge, so it collapses to its leaf
+deps instead — `{a: o2}` field values, `q = o.a` member-path
+bindings, `o.f = o2` member stores and `{o}` shorthand all store
+flattened deps.
+
+Boundaries: spread/method/computed-key object members, member
+CALLS (`o.m()` — no closure methods), member access on a scalar
+or unbound base, classes/`this`, and function values bound to
+names stay closed — the member model tracks data fields only.
 
 ## Roadmap authority and vocabulary
 

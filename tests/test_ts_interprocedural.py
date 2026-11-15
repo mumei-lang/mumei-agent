@@ -781,14 +781,30 @@ def test_new_expression_closes():
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_member_access_closes():
+def test_member_access_on_unbound_closes():
     s = _fn("function f(x: number): number { return o.f; }")
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_member_access_on_scalar_closes():
+    s = _fn(
+        "function f(x: number): number { let o = x; return o.f; }"
+    )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_subscript_closes():
+def test_subscript_on_unbound_closes():
     s = _fn("function f(x: number): number { return a[0]; }")
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_subscript_on_scalar_closes():
+    s = _fn(
+        "function f(x: number): number { let a = x; return a[0]; }"
+    )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_expression"
 
@@ -1217,3 +1233,270 @@ def test_conditional_break_keeps_increment_a_may_write():
         " return a; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 6: composite member model -------------------------------------
+
+
+def test_object_literal_field_read_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_literal_whole_read_flattens():
+    # Reading `o` itself over-approximates to every leaf dep.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: x, b: y}; return o; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_member_write_admits():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: x}; o.a = y; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_member_write_keeps_sibling_fields():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: x, b: x}; o.a = y; return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_member_read_write():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: {c: x}}; o.a.c = y; return o.a.c; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_conditional_member_write_merges():
+    s = _fn(
+        "function f(x: number, y: number, c: boolean): number {"
+        " let o = {a: x}; if (c) { o.a = y; } return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_member_write_into_new_field_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; o.b = x; return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_shorthand_property_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {x}; return o.x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_string_key_subscript_admits():
+    s = _fn(
+        'function f(x: number): number {'
+        ' let o = {a: x}; return o["a"]; }'
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_subscript_read_unions_fields():
+    s = _fn(
+        "function f(x: number, y: number, k: number): number {"
+        " let o = {a: x, b: y}; return o[k]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_dynamic_subscript_write_closes():
+    s = _fn(
+        "function f(x: number, k: number): number {"
+        " let o = {a: x}; o[k] = x; return o.a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_member_write_on_scalar_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = x; o.a = x; return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_member_increment_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; o.a++; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_member_augmented_admits():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: x}; o.a += y; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_composite_passed_to_call_flattens():
+    s = _summarize(
+        "function g(v: number): number { return v; }"
+        "function f(x: number, y: number): number {"
+        " let o = {a: x, b: y}; return g(o); }"
+    )
+    f = {fn.name: fn for fn in s.functions}["f"]
+    assert f.available and f.return_dependencies == frozenset({0, 1})
+    assert f.calls[0].arguments[0] == frozenset({0, 1})
+
+
+def test_composite_branch_join_merges_fields():
+    s = _fn(
+        "function f(x: number, y: number, c: boolean): number {"
+        " let o = {a: x};"
+        " if (c) { o = {a: y, b: y}; }"
+        " return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_composite_to_scalar_shape_merge_collapses():
+    s = _fn(
+        "function f(x: number, y: number, c: boolean): number {"
+        " let o = {a: x};"
+        " if (c) { o = y; }"
+        " return o; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_missing_field_read_is_dep_free():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_object_spread_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; let p = {...o}; return p.a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_method_call_on_object_still_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; return o.a(); }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_member_read_on_param_closes():
+    s = _fn(
+        "function f(x: number): number { return x.f; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_object_alias_write_propagates():
+    # `p = o` shares the composite — a member write through `p`
+    # reaches `o` (JS reference semantics).
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: x}; let p = o; p.a = y; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_member_path_binding_collapses_to_scalar():
+    # `q = o.a` binds leaf deps — a later member write through `o`
+    # does not reach `q` (no under-approximation the other way).
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {a: {c: x}}; let q = o.a; return q; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_member_path_bound_to_name_closes_member_read():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: {c: x}}; let q = o.a; return q.c; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_dynamic_subscript_index_deps():
+    s = _fn(
+        "function f(x: number, k: number): number {"
+        " let o = {a: x}; return o[k]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_alias_conditional_write_over_approximates():
+    s = _fn(
+        "function f(x: number, y: number, c: boolean): number {"
+        " let o = {a: x}; let p = o;"
+        " if (c) { p.a = y; } return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_field_value_alias_collapses():
+    # `{a: o2}` collapses the field — a member write through `o.a`
+    # then closes rather than diverging from `o2`.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o2 = {c: x}; let o = {a: o2}; o.a.c = y; return o.a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_composite_member_store_collapses():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: 0}; o.a = {c: x}; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_loop_member_write_iterates_fixed_point():
+    s = _fn(
+        "function f(x: number, y: number, n: number): number {"
+        " let o = {a: x};"
+        " for (let i = 0; i < n; i++) { o.a = y; }"
+        " return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_shorthand_composite_collapses():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x}; let p = {o}; return p.o.a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
