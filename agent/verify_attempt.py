@@ -31,6 +31,18 @@ its acceptance. The report carries no evidence bytes; the child's
 output is only observed through its bounded capture claim. Recording
 stays a host declaration: ``"valid"`` is representation-level only and
 acceptance is not claim truth, freshness or semantic correspondence.
+
+A selected run (``EstablishedWithinProfile``, no input drift) also
+discharges four of the six C02 semantic checks for the produced
+record at representation level: ``file_identity`` (the record's
+``subject.sha256`` was computed over the declared source bytes),
+``producer_authenticity`` (its provenance binds the pinned Core
+executable), ``freshness`` (the record was produced in this run) and
+``semantic_correspondence`` (the verifier established its claims
+within the declared profile). ``claim_truth`` stays a deeper duty —
+establishment is not a truth receipt — and ``artifact_semantics``
+belongs to the compiled-artifact layer ``native-recheck`` covers;
+both stay in ``checks_not_performed``.
 """
 
 from __future__ import annotations
@@ -53,6 +65,39 @@ MAX_SOURCE_BYTES = 65_536
 DEFAULT_SOLVER_TIMEOUT_MS = "5000"
 DEFAULT_SOLVER_RESOURCE_LIMIT = "1000000"
 DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000
+
+# The six semantic acceptance checks of the C02 contract. A selected
+# `EstablishedWithinProfile` run produces the evidence record in this
+# very run — discharging `file_identity` (subject.sha256 computed over
+# the declared bytes), `producer_authenticity` (provenance binds the
+# pinned executable), `freshness` (just produced) and
+# `semantic_correspondence` (the claims were established within the
+# declared profile). `claim_truth` stays a deeper duty — an
+# EstablishedWithinProfile verdict is not a truth receipt — and
+# `artifact_semantics` belongs to the compiled-artifact layer.
+CHECK_VOCABULARY = frozenset(
+    {
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+        "artifact_semantics",
+    }
+)
+
+
+class DischargedChecks:
+    """Semantic checks a terminal produce outcome discharges."""
+
+    ESTABLISHED = frozenset(
+        {
+            "file_identity",
+            "freshness",
+            "producer_authenticity",
+            "semantic_correspondence",
+        }
+    )
 
 
 def _file_sha256(path: str) -> str:
@@ -283,6 +328,12 @@ def run_attempt(args: argparse.Namespace) -> dict:
         report["evidence_check"] = check.to_dict()
         report["acceptance"] = evaluate_evidence_check(
             published, check
+        )
+        report["discharged_checks"] = sorted(
+            DischargedChecks.ESTABLISHED
+        )
+        report["checks_not_performed"] = sorted(
+            CHECK_VOCABULARY - DischargedChecks.ESTABLISHED
         )
     return report
 
