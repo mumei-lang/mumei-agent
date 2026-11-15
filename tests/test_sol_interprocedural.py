@@ -1237,3 +1237,91 @@ def test_slice15_env_builtins_flow():
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_loop_return_gains_cond_deps():
+    s = _fn(
+        """contract C {
+    function f(uint n) public returns (uint) {
+        while (n > 0) { return 1; }
+        return 0;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_for_without_init_reads_condition():
+    s = _fn(
+        """contract C {
+    function f(uint x) public returns (uint) {
+        uint s = 0;
+        for (; s < x; s++) {}
+        return s;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_internal_call_propagates_state_writes():
+    s = _fn(
+        """contract C {
+    uint x;
+    function g(uint b) public { x = b; }
+    function f(uint a) public returns (uint) { g(a); return a; }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_review_discarded_unknown_call_admitted():
+    s = _fn(
+        """contract C {
+    function f(uint x) public returns (uint) { mystery(); return x; }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_free_function_overloads():
+    s = _fn(
+        """function g(uint a) returns (uint) { return a; }
+function g(uint a, uint b) returns (uint) { return b; }
+contract C {
+    function h(uint x) public returns (uint) { return g(x); }
+}""",
+        "h",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_shadowed_state_var_not_state_write():
+    s = _fn(
+        """contract C {
+    uint s;
+    function f(uint x) public returns (uint) {
+        uint s = x;
+        s = 2;
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "none_in_supported_fragment"
+
+
+def test_review_emit_marks_unknown():
+    s = _fn(
+        """contract C {
+    event E();
+    function f() public { emit E(); }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "unknown"
