@@ -794,7 +794,7 @@ class _Callable:
     __slots__ = (
         "node", "params", "defaults", "captured", "rest",
         "is_method", "param_props", "origin", "bound", "patterns",
-        "alts",
+        "alts", "extra",
     )
 
     def __init__(
@@ -807,6 +807,10 @@ class _Callable:
         # (a maybe-deleted own field hiding a prototype method) —
         # every invocation runs them all and unions the results.
         self.alts = ()
+        # Deps that also flow through the member slot this value
+        # was read from — a maybe-deleted field's getter fallback —
+        # unioned into every invocation's result.
+        self.extra = frozenset()
         self.captured = captured
         self.rest = rest
         self.is_method = is_method
@@ -916,7 +920,12 @@ def _scalar_of(value) -> frozenset[int]:
             result |= value.klass.captured
         return result
     if isinstance(value, _Callable):
-        return value.captured
+        result = value.captured | value.extra
+        for alt in value.alts:
+            # A maybe-deleted slot's other candidates keep their
+            # captured deps too — scalarizing the value sees them.
+            result |= _scalar_of(alt)
+        return result
     if isinstance(value, _Class):
         return value.captured
     if isinstance(value, _External):
@@ -1027,6 +1036,40 @@ def _composite_delete(composite, path, span):
     return _Composite(fields, composite.klass, deleted)
 
 
+def _clone_value(val, memo):
+    """Copy-on-write clone for an isolated candidate invocation.
+
+    `_Composite`s deep-clone (callee writes must not reach the
+    other candidates' view); `_Callable`s clone shallow — every
+    slot is a frozenset or a tuple, so sharing is safe; scalars,
+    `_External`s and `_Class`es share (their tables are read-only
+    in this model). `memo` keeps intra-frame aliasing intact:
+    two names bound to the same object get the same clone."""
+    if not isinstance(val, (_Composite, _Callable)):
+        return val
+    oid = id(val)
+    if oid in memo:
+        return memo[oid]
+    if isinstance(val, _Composite):
+        clone = _Composite({}, val.klass, val.deleted)
+        memo[oid] = clone
+        for key, fval in val.fields.items():
+            clone.fields[key] = _clone_value(fval, memo)
+        return clone
+    clone = _Callable(
+        val.node, val.params, val.defaults, val.captured,
+        val.rest, val.is_method,
+    )
+    memo[oid] = clone
+    clone.param_props = val.param_props
+    clone.origin = val.origin
+    clone.patterns = val.patterns
+    clone.bound = val.bound
+    clone.alts = val.alts
+    clone.extra = val.extra
+    return clone
+
+
 def _composite_set(composite, path, value, conditional, span):
     """Copy-on-write member store: `composite.path = value`,
     returning the updated `_Composite`."""
@@ -1097,6 +1140,7 @@ def _composite_dyn_set(composite, path, value, span):
             widened.patterns = fval.patterns
             widened.bound = fval.bound
             widened.alts = fval.alts
+            widened.extra = fval.extra
             fields[fname] = widened
         else:
             fields[fname] = _scalar_of(fval) | vdeps
@@ -3463,6 +3507,7 @@ class _Builder:
                     widened.patterns = cval.patterns
                     widened.bound = cval.bound
                     widened.alts = cval.alts
+                    widened.extra = cval.extra
                     self._fn_cache[name] = widened
             return self._fn_cache[name]
         if name in self.imported_bindings:
@@ -3717,6 +3762,10 @@ class _Builder:
                         widened.patterns = fval.patterns
                         widened.bound = fval.bound
                         widened.alts = fval.alts
+                        # The getter's own call deps stay on the
+                        # call path too — `o.f(x)` still reaches
+                        # the function the getter may return.
+                        widened.extra = fval.extra | result
                         val = widened
                         continue
                     return result | (
@@ -3743,6 +3792,7 @@ class _Builder:
                         widened.patterns = fval.patterns
                         widened.bound = fval.bound
                         widened.alts = fval.alts + (mval,)
+                        widened.extra = fval.extra
                         val = widened
                         continue
                     if fval is None:
@@ -3764,6 +3814,7 @@ class _Builder:
                     widened.patterns = mval.patterns
                     widened.bound = mval.bound
                     widened.alts = mval.alts
+                    widened.extra = mval.extra
                     val = widened
                     continue
             if val.klass is _MAP_SET_KLASS:
@@ -3938,6 +3989,7 @@ class _Builder:
             widened.origin = old.origin
             widened.bound = old.bound
             widened.alts = old.alts
+            widened.extra = old.extra
             widened.patterns = old.patterns
             for name, val in locals_.items():
                 if val is old:
@@ -4211,6 +4263,7 @@ class _Builder:
             return result
         self._invoke_depth += 1
         try:
+            saved_frame = dict(locals_) if cval.alts else None
             result = self._invoke_callable_body(
                 cval,
                 actual,
@@ -4225,26 +4278,90 @@ class _Builder:
             )
             for alt in cval.alts:
                 # A maybe-deleted member slot may resolve to the
-                # prototype method — invoke it too.
+                # prototype method — invoke it too. Each candidate
+                # is exclusive, so it runs on a clone of the
+                # pre-call frame: the primary's writes must not
+                # reach the alternate's reads (and vice versa),
+                # then both worlds' writes union back in.
+                if cval.bound is not None:
+                    # `bind()` applied to the primary carries the
+                    # same partial application onto each
+                    # candidate — bound actuals and a bound
+                    # `this` must reach the alternate too.
+                    bound_alt = _Callable(
+                        alt.node,
+                        alt.params,
+                        alt.defaults,
+                        alt.captured,
+                        alt.rest,
+                        alt.is_method,
+                    )
+                    bound_alt.param_props = alt.param_props
+                    bound_alt.origin = alt.origin
+                    bound_alt.patterns = alt.patterns
+                    bound_alt.bound = cval.bound
+                    bound_alt.alts = alt.alts
+                    bound_alt.extra = alt.extra
+                    alt = bound_alt
+                memo = {}
+                alt_locals = {
+                    name: _clone_value(val, memo)
+                    for name, val in saved_frame.items()
+                }
+                alt_actuals = (
+                    [_clone_value(v, memo) for v in actual_values]
+                    if actual_values is not None
+                    else None
+                )
                 try:
                     result |= self._invoke_callable(
                         alt,
                         actual,
                         params,
-                        locals_,
+                        alt_locals,
                         transfers,
                         count,
                         span,
                         this_val=(
-                            alt_this if alt.is_method else None
+                            _clone_value(alt_this, memo)
+                            if alt.is_method and alt_this is not None
+                            else None
                         ),
-                        actual_values=actual_values,
+                        actual_values=alt_actuals,
                     )
                 except _Unsupported:
                     # A callee that closes keeps the actuals'
-                    # union (the opaque shape).
+                    # union (the opaque shape) — writes to the
+                    # actuals fold in the same way.
+                    opaque = _scalar_of(alt)
                     for a in actual:
-                        result |= a
+                        opaque |= a
+                    result |= opaque
+                    self._opaque_call_writes(actual_values, opaque)
+                for name, aval in alt_locals.items():
+                    if name in locals_:
+                        locals_[name] = _merge_vals(
+                            locals_[name], aval
+                        )
+                    else:
+                        locals_[name] = aval
+            if cval.extra:
+                if isinstance(result, frozenset):
+                    result = result | cval.extra
+                elif isinstance(result, _Composite):
+                    # A composite return keeps its shape — the
+                    # slot's fallback deps fold into the
+                    # unknown-field bucket instead.
+                    widened = _Composite(
+                        dict(result.fields),
+                        result.klass,
+                        result.deleted,
+                    )
+                    widened.fields["*"] = _merge_vals(
+                        widened.fields.get("*", frozenset()),
+                        cval.extra,
+                    )
+                    result = widened
             return result
         finally:
             self._invoke_depth -= 1
@@ -5229,6 +5346,7 @@ class _Builder:
             out.origin = base.origin
             out.patterns = base.patterns
             out.alts = base.alts
+            out.extra = base.extra
             transfers.append(
                 TsCall(
                     _span(node),

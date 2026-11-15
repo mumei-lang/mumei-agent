@@ -5883,3 +5883,97 @@ def test_review5_deleted_field_keeps_both_method_candidates():
     )
     assert s.available
     assert s.return_dependencies == {0, 2}
+
+
+# --- review round 6: isolated alternate candidates --------------------------
+
+
+def test_review6_alt_invocation_sees_pre_call_state():
+    # The primary (own-field) candidate writes c.g; the prototype
+    # alternate must still read the field as it was before the call.
+    s = _fn(
+        "class C {"
+        "  g: number = 0;"
+        "  m(v: number): number { return this.g }"
+        "}"
+        "function f(y: number, z: number): number {"
+        "  let c = new C();"
+        "  c.g = y;"
+        "  c.m = (v: number) => { c.g = z; return v };"
+        "  if (y > 0) { delete c.m }"
+        "  return c.m(z)"
+        "}"
+    )
+    assert s.available
+    assert frozenset({0, 1}) <= s.return_dependencies
+
+
+def test_review6_bind_reaches_alternate_candidate():
+    # `bind` on a maybe-deleted member applies the partial
+    # application to every candidate, not just the primary.
+    s = _fn(
+        "class C {"
+        "  m(v: number): number { return v }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let c = new C();"
+        "  c.m = (v: number) => y;"
+        "  if (x > 0) { delete c.m }"
+        "  const g = c.m.bind(c, x);"
+        "  return g(y)"
+        "}"
+    )
+    assert s.return_dependencies == frozenset({0, 1})
+
+
+def test_review6_unsupported_alt_keeps_opaque_writes():
+    # An alternate whose body closes still may-writes every field
+    # of a composite actual (the opaque callee shape).
+    s = _fn(
+        "class C {"
+        "  m(v: number): number { return unknownFn(v) }"
+        "}"
+        "function f(x: number): number {"
+        "  let c = new C();"
+        "  c.m = (v: number) => x;"
+        "  if (x > 0) { delete c.m }"
+        "  let o = {v: x};"
+        "  c.m(o);"
+        "  return o.v"
+        "}"
+    )
+    assert frozenset({0}) <= s.return_dependencies
+
+
+def test_review6_getter_fallback_deps_reach_call_result():
+    # A maybe-deleted member covered by a getter — the getter's
+    # own result deps stay on the call path, not just reads.
+    s = _fn(
+        "class C {"
+        "  g: number = 0;"
+        "  get f(): any { return this.g }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let c = new C();"
+        "  c.g = x;"
+        "  c.f = (v: number) => y;"
+        "  if (y > 0) { delete c.f }"
+        "  return c.f(y)"
+        "}"
+    )
+    assert s.return_dependencies == frozenset({0, 1})
+
+
+def test_review6_method_value_keeps_alt_captured():
+    # Reading the maybe-deleted member as a value scalarizes
+    # every candidate's captured deps.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        "  class C { m(v: number): number { return v + y } }"
+        "  let c = new C();"
+        "  c.m = (v: number) => x;"
+        "  if (x > 0) { delete c.m }"
+        "  return c.m"
+        "}"
+    )
+    assert frozenset({0, 1}) <= s.return_dependencies
