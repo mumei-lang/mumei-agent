@@ -597,9 +597,11 @@ def plan_with_probes(
     """Plan, probe the observation-excluded candidates, re-plan.
 
     One round is: `plan()` → `probe_retry_requests` → run the
-    requests → feed every observation back in. Stamps increment
-    per round so the registry's freshness check accepts each new
-    observation. `rounds` (1..MAX_PLAN_ROUNDS) bounds the loop:
+    requests → feed every observation back in. Each attempt's
+    stamp is `stamp` plus the adapter's recorded attempt count,
+    so the registry's freshness check accepts each new
+    observation and stamps stay inside the caller's allocation.
+    `rounds` (1..MAX_PLAN_ROUNDS) bounds the loop:
     more than one round only re-probes adapters still excluded by
     observation — a probe that timed out may deserve one retry, a
     structurally excluded adapter is never re-asked. `max_parallel`
@@ -653,7 +655,7 @@ def plan_with_probes(
         by_hist[h.adapter_id] = h
     observed = tuple(observations)
     plan = registry.plan(request, policy, observed)
-    for offset in range(rounds):
+    for _ in range(rounds):
         if plan.selected is not None:
             break
         reqs = probe_retry_requests(
@@ -662,7 +664,7 @@ def plan_with_probes(
             policy,
             observed,
             histories=tuple(by_hist.values()),
-            stamp=stamp + offset,
+            stamp=stamp,
             max_attempts=max_attempts,
             tool_version=tool_version,
         )
