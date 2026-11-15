@@ -528,3 +528,52 @@ def dispatch_next_attempt(
         memory_bound_mb=memory_bound_mb,
         report_stamp=report_stamp,
     )
+
+
+def dispatch_and_publish(
+    store: AttemptSequenceStore,
+    argv: tuple[str, ...],
+    *,
+    runner: "AttemptRunner | None" = None,
+    cancel_event: "threading.Event | None" = None,
+    memory_bound_mb: int | None = None,
+    report_stamp: int | None = None,
+) -> AttemptDispatch:
+    """Reserve the next attempt, run it and publish its terminal lineage.
+
+    `store.current` supplies the lineage — an empty store has nothing to
+    reserve from. `begin_attempt` provides the reservation (a sequence
+    closed by a selected result or holding a nonterminal current record
+    fails statically), `dispatch_attempt` runs it under the declared
+    timeout and reconciles the observation (a stamped lineage requires a
+    fresh `report_stamp`, checked before spawn), and `publish_dispatch`
+    publishes the terminal lineage through compare-and-set against the
+    pre-run store value: a store another writer touched between the read
+    and the publish fails statically instead of clobbering their value.
+
+    The returned `AttemptDispatch` pairs the reconciled sequence with
+    the observed run; the canonical lineage — including any
+    `selected_result` the publish added — is the store's current value.
+    A CAS rejection after a completed run surfaces the store's error:
+    the process still ran, and recovering or retrying it is a host
+    decision. No arbitration across writers, retry policy, durability or
+    Evidence acceptance is added — the driver composes the declared
+    boundaries and nothing else.
+    """
+    if type(store) is not AttemptSequenceStore:
+        raise ValueError(
+            "attempt dispatch-and-publish requires a sequence store"
+        )
+    current = store.current
+    if current is None:
+        raise ValueError("attempt dispatch-and-publish requires a lineage")
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        runner=runner,
+        cancel_event=cancel_event,
+        memory_bound_mb=memory_bound_mb,
+        report_stamp=report_stamp,
+    )
+    publish_dispatch(store, dispatch, expected=current)
+    return dispatch
