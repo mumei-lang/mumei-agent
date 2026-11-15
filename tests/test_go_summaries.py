@@ -1112,3 +1112,19 @@ def test_mcp_tool_error_redacts_declared_paths(tmp_path):
     assert str(missing) not in out["error"]
     assert str(src) not in out["error"]
     assert str(tmp_path) not in out["error"]
+
+
+def test_mcp_tool_error_survives_circular_symlink(tmp_path):
+    """A circular symlink declared path still gets a JSON _err —
+    Path.resolve() raising RuntimeError must not escape."""
+    import json as _json
+    import os
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    loop = tmp_path / "loop"
+    os.symlink("loop", loop)
+    out = _json.loads(
+        mcp_server.go_summaries(_json.dumps([str(src)]), str(loop))
+    )
+    assert "error" in out

@@ -2030,7 +2030,9 @@ def go_summaries(
             base = os.path.basename(p) or "<path>"
             try:
                 text = text.replace(str(Path(p).resolve()), base)
-            except OSError:
+            except (OSError, RuntimeError):
+                # RuntimeError: a circular symlink still resolves
+                # lazily — the raw form below still redacts.
                 pass
             text = text.replace(p, base)
         return text
