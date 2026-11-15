@@ -135,6 +135,7 @@ def test_cancel_event_passthrough():
     assert out.observation.availability == "available"
 
 
+
 def test_declared_tool_version_reaches_observation():
     out = run_probe(_req(tool_version="4.0.0"))
     assert out.observation.tool_version == "4.0.0"
@@ -172,3 +173,91 @@ def test_plan_selects_adapter_after_successful_probe():
     out = run_probe(_req(tool_version="4.0.0"))
     plan = registry.plan(request, PlannerPolicy(), (out.observation,))
     assert plan.selected is not None
+
+
+
+from agent.verification_planner import (
+    AdapterDescriptor,
+    PROTOCOL_VERSION,
+)
+from agent.adapter_probe import probe_request_for
+
+
+def _manifest(**kw):
+    base = {
+        "schema_version": PROTOCOL_VERSION,
+        "adapter_id": "zendingsol.host.lean_scaffold",
+        "adapter_version": "0.1.0",
+        "profiles": ["zendingsol.host.lean_scaffold/v0"],
+        "methods": ["deductive_proof"],
+        "max_timeout_ms": 5_000,
+        "max_memory_mb": 256,
+        "probe_argv": ["lean", "--version"],
+    }
+    base.update(kw)
+    return base
+
+
+def test_manifest_probe_argv_parsed_and_serialized():
+    d = AdapterDescriptor.from_manifest(_manifest())
+    assert d.probe_argv == ("lean", "--version")
+    assert d.to_dict()["probe_argv"] == ["lean", "--version"]
+
+
+def test_manifest_probe_argv_absent_stays_none():
+    m = _manifest()
+    del m["probe_argv"]
+    d = AdapterDescriptor.from_manifest(m)
+    assert d.probe_argv is None
+    assert d.to_dict()["probe_argv"] is None
+
+
+def test_manifest_probe_argv_rejects_bad_shapes():
+    for bad in ([], ["ok", ""], "lean --version", 7):
+        with pytest.raises(ValueError):
+            AdapterDescriptor.from_manifest(
+                _manifest(probe_argv=bad)
+            )
+
+
+def test_probe_request_binds_declared_budgets():
+    d = AdapterDescriptor.from_manifest(_manifest())
+    req = probe_request_for(d, stamp=7)
+    assert req.adapter_id == d.adapter_id
+    assert req.argv == ("lean", "--version")
+    assert req.timeout_ms == 5_000
+    assert req.memory_bound_mb == 256
+    assert req.stamp == 7
+
+
+def test_probe_request_requires_declaration():
+    m = _manifest()
+    del m["probe_argv"]
+    d = AdapterDescriptor.from_manifest(m)
+    with pytest.raises(ValueError, match="not declared"):
+        probe_request_for(d, stamp=1)
+    with pytest.raises(ValueError):
+        probe_request_for(object(), stamp=1)
+
+
+def test_probe_request_runs_declared_command():
+    d = AdapterDescriptor.from_manifest(
+        _manifest(
+            probe_argv=[
+                sys.executable, "-c",
+                "import sys; sys.exit(0)",
+            ]
+        )
+    )
+    out = run_probe(probe_request_for(d, stamp=9))
+    assert out.observation.availability == "available"
+    assert out.observation.stamp == 9
+
+
+
+def test_probe_request_passes_declared_tool_version():
+    d = AdapterDescriptor.from_manifest(_manifest())
+    req = probe_request_for(d, stamp=7, tool_version="4.0.0")
+    assert req.tool_version == "4.0.0"
+    with pytest.raises(ValueError):
+        probe_request_for(d, stamp=7, tool_version="bad version!")
