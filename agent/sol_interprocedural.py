@@ -387,6 +387,9 @@ class _Builder:
         self.summaries: dict[str, SolFunctionSummary] = {}
         self._inline_depth = 0
         self._placeholder: list = []
+        # `uint[1] storage xs = arr` — local name bound to a state
+        # variable's slot: reads and writes resolve through it.
+        self._storage_alias: dict = {}
         self._effects_touched = False
         self._writes: list[set[str]] = []
         self._decls: list[set[str]] = []
@@ -734,7 +737,9 @@ class _Builder:
         # checks consult only its own frames — the caller's
         # locals never shadow this function's state writes.
         prev_decls = self._decls
+        prev_alias = self._storage_alias
         self._decls = [set()]
+        self._storage_alias = {}
         try:
             try:
                 rets = self._run_body(
@@ -746,6 +751,7 @@ class _Builder:
         finally:
             self._writes.pop()
             self._decls = prev_decls
+            self._storage_alias = prev_alias
         if rets is None and ret is None:
             # No `returns` clause — the function produces no
             # results; a missing `return` is fine.
@@ -858,6 +864,10 @@ class _Builder:
                 for i, p in enumerate(mparams)
             }
 
+            # Frames pushed while the modifier runs are its own
+            # locals — they must not count as body shadowing at `_;`.
+            decl_mark = len(self._decls)
+
             def _wrapped():
                 # `_;` — the wrapped body inherits the state
                 # slots the modifier wrote (function params are
@@ -871,7 +881,8 @@ class _Builder:
                     shadowed = (
                         sv in param_index
                         or any(
-                            sv in frame for frame in self._decls
+                            sv in frame
+                            for frame in self._decls[:decl_mark]
                         )
                     )
                     if not shadowed and sv in mlocals:
@@ -1017,6 +1028,33 @@ class _Builder:
                 self._writes[-1].add(name.text.decode())
             if self._decls:
                 self._decls[-1].add(name.text.decode())
+            # `uint[1] storage xs = arr` — a storage reference bound
+            # to a state variable. Reads/writes on `xs` resolve to
+            # `arr`'s slot, so `xs[i] = v` marks the state write.
+            if (
+                expr is not None
+                and any(
+                    not c.is_named and c.text == b"storage"
+                    for c in decl.children
+                )
+            ):
+                ein = (
+                    _children(expr)[0]
+                    if expr.type == "expression"
+                    and len(_children(expr)) == 1
+                    else expr
+                )
+                if (
+                    ein is not None
+                    and ein.type == "identifier"
+                    and ein.text.decode()
+                    in self._all_state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    )
+                ):
+                    self._storage_alias[
+                        name.text.decode()
+                    ] = ein.text.decode()
             return None
         if t == "expression_statement":
             expr = next(
@@ -1472,7 +1510,9 @@ class _Builder:
                     raise _Unsupported(
                         "unsupported_statement", _span(expr)
                     )
-                name = node.text.decode()
+                name = self._storage_alias.get(
+                    node.text.decode(), node.text.decode()
+                )
                 if name in self._all_state_vars_of(
                     getattr(self, "_current_contract", "")
                 ):
@@ -1532,10 +1572,12 @@ class _Builder:
             )
             if expr.type == "augmented_assignment_expression":
                 deps |= locals_[lident.text.decode()]
-            locals_[lident.text.decode()] = deps
+            lname = self._storage_alias.get(
+                lident.text.decode(), lident.text.decode()
+            )
+            locals_[lname] = deps
             if self._writes:
-                self._writes[-1].add(lident.text.decode())
-            lname = lident.text.decode()
+                self._writes[-1].add(lname)
             shadowed = (
                 lname in param_index
                 or any(
@@ -1610,7 +1652,9 @@ class _Builder:
                 )
         t = node.type
         if t == "identifier":
-            name = node.text.decode()
+            name = self._storage_alias.get(
+                node.text.decode(), node.text.decode()
+            )
             if name not in locals_:
                 if name in self._all_state_vars_of(
                     getattr(self, "_current_contract", "")

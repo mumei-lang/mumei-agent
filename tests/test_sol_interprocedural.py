@@ -2332,3 +2332,51 @@ def test_review_multiple_named_arg_groups_fall_back_to_arity():
     # applies and `x`'s dep is the first arg.
     assert s.available
     assert s.return_dependencies == frozenset({0})
+
+
+def test_review6_storage_reference_alias_marks_state_write():
+    # `uint256[] storage xs = arr` binds a local name to the state
+    # variable's slot — `xs[0] = a` writes `arr`, not a local.
+    src = """contract C {
+  uint256[] public arr;
+  function f(uint256 a) public returns (uint256) {
+    uint256[] storage xs = arr;
+    xs[0] = a;
+    return arr[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.effects == "state_writes"
+    assert 0 in s.return_dependencies
+
+
+def test_review6_scalar_storage_alias_writes_state():
+    # Same for a scalar `storage` slot.
+    src = """contract C {
+  uint256 s;
+  function f(uint256 a) public returns (uint256) {
+    uint256 storage y = s;
+    y = a;
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.effects == "state_writes"
+    assert 0 in s.return_dependencies
+
+
+def test_review6_modifier_local_block_does_not_suppress_sync():
+    # The modifier's own block decl (`uint256 s`) must not count
+    # as body shadowing at `_;` — the state write still syncs in.
+    src = """contract C {
+  uint256 s;
+  modifier m(uint256 v) { s = v; { uint256 s; _; } }
+  function f(uint256 a) public m(a) returns (uint256) {
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert 0 in s.return_dependencies
