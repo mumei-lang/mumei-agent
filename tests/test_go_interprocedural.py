@@ -4873,6 +4873,71 @@ def test_dot_imported_pointer_var_deref_read_is_admitted(go_types_helper):
     assert any(t.imported for t in result.calls)
 
 
+def test_imported_field_member_deref_read_is_admitted(go_types_helper):
+    # `*lib.VS2.P` — a dereference read through an imported
+    # pointer-typed *field* member resolves like a field read: the
+    # result is dep-free external state, `effects` reports
+    # `unknown`, and the base member's identity pins beside the
+    # pointee `T`'s.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn int64(*lib.VS2.P)\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    assert members["VS2"]["id"] in result.pinned
+    assert members["T"]["id"] in result.pinned
+
+
+def test_imported_field_member_deref_read_dot_import(go_types_helper):
+    # `*VS2.P` through a dot import resolves the same member pair.
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F() int64 { return int64(*VS2.P) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+
+
+def test_imported_field_member_deref_unnamed_pointee_is_admitted(
+    go_types_helper,
+):
+    # `*lib.VS3.PU` — the field member's pointee is `int64`
+    # (unnamed): it classifies by `pointee_kind` like `*lib.PU`, so
+    # the read admits dep-free and still records the transfer.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype S3 struct{ PU *int64 }\nvar VS3 S3\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return *lib.VS3.PU }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
 def test_imported_pointer_var_deref_read_flags_stale_dependents(
     go_types_helper,
 ):
