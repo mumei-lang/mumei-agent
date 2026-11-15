@@ -3027,6 +3027,26 @@ Boundaries: methods not in the table still close, and
 `pop`/`shift` keep every field — the surviving elements
 are the over-approximation.
 
+### C06 TypeScript computed-base member access (slice 31)
+
+`a.slice()[0]`, `f().m`, `new C().v` admit: a member/subscript
+whose base isn't an identifier evaluates the base node, then
+descends the remaining path — read-only.
+
+A scalar mid-path over-approximates to the scalar's deps:
+`s.length`, `x.f`, `a[0]` on a scalar all read the base's dep
+set. Member calls on a scalar base (`s.indexOf(x)`, `m.f(x)`
+on an opaque `require('m')` result) record a `TsCall` and
+yield `base ∪ actuals` — the same over-approximation as an
+`_External` callee.
+
+Regex literals are dep-free (`/a+/`).
+
+Boundaries: member *stores* on a computed base still close
+(`a.slice().f = x` has no binding to rebind), and a callable
+field read off a scalar collapses to the scalar's deps (a
+`g.name`-style read over-approximates).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

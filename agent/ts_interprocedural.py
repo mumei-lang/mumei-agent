@@ -237,6 +237,15 @@ Admitted:
   `push`/`unshift` copy-on-write a grown instance onto every
   same-scope alias like `_member_store`. A user field named
   `map` still shadows the built-in.
+* Member access on a computed base — `a.slice()[0]`, `f().m`,
+  `new C().v`: `_member_target` returns the non-identifier base
+  node and `_member_read` evaluates it, then descends the rest of
+  the path. A scalar mid-path over-approximates to the scalar's
+  deps (`s.length`, `x.f`) — including member *calls* on a scalar
+  base (`s.indexOf(x)`, `m.f(x)` on an opaque `require` result),
+  which record a `TsCall` and yield `base ∪ actuals` like an
+  `_External` callee. Member stores on a computed base still
+  close (no binding to rebind). Regex literals are dep-free.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -2223,7 +2232,12 @@ class _Builder:
             path.reverse()
             return cur.type, path, index_deps
         if cur.type != "identifier":
-            raise _Unsupported("unsupported_expression", _span(cur))
+            # A non-name base (`a.slice()[0]`, `f().m`,
+            # `new C().f`) — return the node itself; readers
+            # evaluate it, writers close (a computed base can't
+            # be rebound).
+            path.reverse()
+            return cur, path, index_deps
         path.reverse()
         return cur.text.decode(), path, index_deps
 
@@ -2245,6 +2259,10 @@ class _Builder:
                     "unsupported_expression", _span(node)
                 )
             val = parent
+        elif not isinstance(base, str):
+            # `a.slice()[0]` / `f().m` — evaluate the computed
+            # base, then descend the remaining path.
+            val = self._eval(base, params, locals_, transfers, count)
         else:
             val = self._lookup(base, params, locals_, _span(node))
         for idx, key in enumerate(path):
@@ -2265,7 +2283,9 @@ class _Builder:
                     return frozenset()
                 continue
             if not isinstance(val, _Composite):
-                raise _Unsupported("unsupported_expression", _span(node))
+                # A scalar's member read over-approximates to
+                # the scalar's deps (`x.f`, `s.length`).
+                return _scalar_of(val) | index_deps
             if key is None:
                 return _scalar_of(val) | index_deps
             if key not in val.fields:
@@ -3162,6 +3182,7 @@ class _Builder:
             "string",
             "undefined",
             "null",
+            "regex",
         }:
             return frozenset()
         if kind == "template_string":
@@ -3455,6 +3476,25 @@ class _Builder:
                             count,
                             node,
                         )
+                    if isinstance(base_val2, frozenset):
+                        # A member call on a scalar base
+                        # (`s.indexOf(x)`, `m.f(x)` on an opaque
+                        # `require` result) — the result carries
+                        # the base's deps plus the actuals' union
+                        # (same over-approximation as an
+                        # `_External` callee).
+                        result_m = base_val2
+                        for a in actual_m:
+                            result_m |= a
+                        transfers.append(
+                            TsCall(
+                                _span(node),
+                                function.text.decode(),
+                                actual_m,
+                                result_m,
+                            )
+                        )
+                        return result_m
                     if not optional_call:
                         raise _Unsupported(
                             "unsupported_expression", _span(node)

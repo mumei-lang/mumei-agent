@@ -792,12 +792,13 @@ def test_member_access_on_unbound_closes():
     assert s.gaps[0].reason == "binding_unavailable"
 
 
-def test_member_access_on_scalar_closes():
+def test_member_access_on_scalar_overapprox():
+    # Slice 31: a scalar's member read over-approximates to the
+    # scalar's deps (`s.length`, `x.f`).
     s = _fn(
         "function f(x: number): number { let o = x; return o.f; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_subscript_on_unbound_closes():
@@ -806,12 +807,11 @@ def test_subscript_on_unbound_closes():
     assert s.gaps[0].reason == "binding_unavailable"
 
 
-def test_subscript_on_scalar_closes():
+def test_subscript_on_scalar_overapprox():
     s = _fn(
         "function f(x: number): number { let a = x; return a[0]; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_await_passthrough():
@@ -1413,12 +1413,11 @@ def test_method_call_on_object_still_closes():
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_member_read_on_param_closes():
+def test_member_read_on_param_overapprox():
     s = _fn(
         "function f(x: number): number { return x.f; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_object_alias_write_propagates():
@@ -1441,13 +1440,14 @@ def test_member_path_binding_collapses_to_scalar():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_member_path_bound_to_name_closes_member_read():
+def test_member_path_bound_to_name_collapses_deps():
+    # `q = o.a` collapses the nested composite to its leaf deps;
+    # `q.c` then over-approximates to that scalar (slice 31).
     s = _fn(
         "function f(x: number): number {"
         " let o = {a: {c: x}}; let q = o.a; return q.c; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_dynamic_subscript_index_deps():
@@ -1497,12 +1497,13 @@ def test_loop_member_write_iterates_fixed_point():
 
 
 def test_shorthand_composite_collapses():
+    # `{o}` collapses the composite field to scalar deps;
+    # `p.o.a` then over-approximates to them (slice 31).
     s = _fn(
         "function f(x: number): number {"
         " let o = {a: x}; let p = {o}; return p.o.a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 # --- slice 7: for..in / for..of over composites ---------------------------
@@ -3282,3 +3283,72 @@ def test_slice_concat():
         " return b[0]; }"
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+# --- slice 31: computed-base member reads, scalar member calls, regex
+
+
+def test_call_result_subscript():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " return a.slice()[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_call_result_member():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { v = 1; m(vv: number) { return this; } }"
+        " const c = new C();"
+        " return c.m(x).v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_new_expression_member():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { v = 1; }"
+        " return new C().v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_scalar_member_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const s = x;"
+        " return s.indexOf(1); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "s.indexOf"
+
+
+def test_require_call_chain():
+    s = _fn(
+        "function f(x: number): number {"
+        " const m = require('mod');"
+        " return m.f(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_regex_literal_dep_free():
+    s = _fn(
+        "function f(x: number): number {"
+        " const r = /a+/;"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_member_write_call_base_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " a.slice().f = x;"
+        " return x; }"
+    )
+    assert not s.available
