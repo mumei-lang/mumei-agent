@@ -635,3 +635,73 @@ def test_accept_route_rejects_a_malformed_manifest(tmp_path, capsys):
     assert exc.value.code == 2
     out = json.loads(capsys.readouterr().out)
     assert out["error"]["reason"] == "manifest_malformed"
+
+
+# --- slice 10: rust-summaries-check / rust-summaries-reuse routes -------------
+
+def _rust_route_args(source, manifest, output=None):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest),
+            "output": str(output) if output else None,
+        },
+    )()
+
+
+_RS_CHANGED = "fn f(x: u64) -> u64 { g(x) } fn g(v: u64) -> u64 { 7 }"
+
+
+def test_check_route_partitions_names(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    old = summarize_rust(_RS_SRC).to_dict()
+    old["functions"].append(
+        {
+            "name": "gone",
+            "available": True,
+            "parameters": [],
+            "return_dependencies": [],
+            "calls": [],
+            "gaps": [],
+            "effects": "unknown",
+        }
+    )
+    manifest.write_text(json.dumps(old))
+    src.write_text(_RS_CHANGED)
+    rust.main_check(_rust_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.rust-summary-check/v1"
+    assert out["context_match"] is False
+    assert out["missing"] == ["gone"]
+    assert "g" in out["stale"]
+
+
+def test_check_route_reports_reusable_records(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(summarize_rust(_RS_SRC).to_dict()))
+    rust.main_check(_rust_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["context_match"] is True
+    assert out["reusable"] == ["f", "g"]
+    assert out["stale"] == []
+    assert out["missing"] == []
+
+
+def test_reuse_route_merges_and_rekeys(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_CHANGED)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(summarize_rust(_RS_SRC).to_dict()))
+    rust.main_reuse(_rust_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.rust-interprocedural/v0"
+    fresh = summarize_rust(_RS_CHANGED)
+    assert out["context_key"] == fresh.context_key
+    by_name = {f["name"]: f for f in out["functions"]}
+    assert by_name["g"]["return_dependencies"] == []

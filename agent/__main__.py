@@ -29,6 +29,8 @@ _SUBCOMMANDS = {
     "observe-tests",
     "rust-summaries",
     "rust-summaries-accept",
+    "rust-summaries-check",
+    "rust-summaries-reuse",
     "config",
 }
 
@@ -518,6 +520,40 @@ def main() -> None:
         rust_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         rust_accept_main(args)
+    elif command == "rust-summaries-check":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_check_parser as rust_check_build_parser,
+            main_check as rust_check_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-check",
+            description=(
+                "Check a declared Rust summary manifest "
+                "against the fresh derivation."
+            ),
+        )
+        rust_check_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_check_main(args)
+    elif command == "rust-summaries-reuse":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_reuse_parser as rust_reuse_build_parser,
+            main_reuse as rust_reuse_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-reuse",
+            description=(
+                "Emit a manifest reusing a declared manifest's "
+                "unchanged Rust summaries."
+            ),
+        )
+        rust_reuse_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_reuse_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
