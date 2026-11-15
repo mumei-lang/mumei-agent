@@ -261,3 +261,90 @@ def test_probe_request_passes_declared_tool_version():
     assert req.tool_version == "4.0.0"
     with pytest.raises(ValueError):
         probe_request_for(d, stamp=7, tool_version="bad version!")
+
+
+from agent.adapter_probe import probe_requests_for
+from agent.verification_planner import (
+    AdapterRegistry,
+    PlannerPolicy,
+    RouteRequirements,
+)
+
+
+def _registry(**kw):
+    registry = AdapterRegistry()
+    registry.register(AdapterDescriptor.from_manifest(_manifest(**kw)))
+    return registry
+
+
+def _route():
+    return RouteRequirements(
+        "zendingsol.host.lean_scaffold/v0",
+        "deductive_proof",
+        frozenset(),
+    )
+
+
+def test_probe_requests_pick_observation_excluded_candidates():
+    registry = _registry()
+    plan = registry.plan(_route(), PlannerPolicy(), ())
+    assert plan.selected is None
+    reqs = probe_requests_for(registry, _route(), PlannerPolicy(), stamp=3)
+    assert len(reqs) == 1
+    assert reqs[0].argv == ("lean", "--version")
+    assert reqs[0].stamp == 3
+    assert reqs[0].timeout_ms == 5_000
+
+
+def test_probe_requests_skip_undeclared_probe():
+    m = _manifest()
+    del m["probe_argv"]
+    registry = AdapterRegistry()
+    registry.register(AdapterDescriptor.from_manifest(m))
+    assert (
+        probe_requests_for(registry, _route(), PlannerPolicy(), stamp=1)
+        == ()
+    )
+
+
+def test_probe_requests_skip_structural_exclusions():
+    registry = _registry()
+    other = RouteRequirements(
+        "zendingsol.host.lean_scaffold/v0",
+        "bounded_model_checking",  # not a declared method
+        frozenset(),
+    )
+    assert (
+        probe_requests_for(registry, other, PlannerPolicy(), stamp=1)
+        == ()
+    )
+
+
+def test_probe_requests_skip_selected_adapter():
+    registry = _registry()
+    observed = RuntimeObservation(
+        "zendingsol.host.lean_scaffold",
+        availability="available",
+        tool_version="4.0.0",
+        stamp=2,
+    )
+    plan = registry.plan(_route(), PlannerPolicy(), (observed,))
+    assert plan.selected is not None
+    assert (
+        probe_requests_for(
+            registry, _route(), PlannerPolicy(), (observed,), stamp=3
+        )
+        == ()
+    )
+
+
+def test_probe_requests_validation():
+    registry = _registry()
+    with pytest.raises(ValueError):
+        probe_requests_for(object(), _route(), PlannerPolicy(), stamp=1)
+    with pytest.raises(ValueError):
+        probe_requests_for(registry, object(), PlannerPolicy(), stamp=1)
+    with pytest.raises(ValueError):
+        probe_requests_for(registry, _route(), object(), stamp=1)
+    with pytest.raises(ValueError):
+        probe_requests_for(registry, _route(), PlannerPolicy(), stamp=0)

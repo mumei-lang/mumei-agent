@@ -22,6 +22,14 @@ stamp)` binds it to the descriptor's declared `max_timeout_ms` /
 gets, and a descriptor without the declaration is a static error, never
 a wildcard probe.
 
+For scheduling, `probe_requests_for(registry, request, policy,
+observations, stamp=...)` runs `plan()` and emits a request for each
+candidate excluded **only** by observation-level reasons
+(`availability_unknown`, `tool_missing`, `tool_version_unknown`,
+`tool_version_mismatch`) that declares `probe_argv` — adapters excluded
+structurally are never probed, since no probe fixes an unsupported
+method or a denied location.
+
 Boundary held honestly: a probe reports **observed command behavior**,
 not tool health, availability proof, version truth or acceptance. The
 command is host-declared, so a lying or wrong probe simply records a
@@ -52,6 +60,9 @@ from agent.verification_attempt import (
 from agent.verification_planner import (
     MAX_STAMP,
     AdapterDescriptor,
+    AdapterRegistry,
+    PlannerPolicy,
+    RouteRequirements,
     RuntimeObservation,
     _label,
     _positive,
@@ -238,3 +249,64 @@ def probe_request_for(
         memory_bound_mb=descriptor.max_memory_mb,
         tool_version=tool_version,
     )
+
+
+_OBSERVATION_REASONS = frozenset(
+    {
+        "availability_unknown",
+        "tool_missing",
+        "tool_version_unknown",
+        "tool_version_mismatch",
+    }
+)
+
+
+def probe_requests_for(
+    registry: AdapterRegistry,
+    request: RouteRequirements,
+    policy: PlannerPolicy,
+    observations: tuple[RuntimeObservation, ...] = (),
+    *,
+    stamp: int,
+    attempt_number: int = 1,
+    tool_version: str | None = None,
+) -> tuple[AdapterProbeRequest, ...]:
+    """Declared probes for candidates excluded by observation alone.
+
+    Runs `plan()` and returns a `AdapterProbeRequest` for every decision
+    whose exclusion reasons are all observation-level
+    (`availability_unknown`, `tool_missing`, `tool_version_unknown`,
+    `tool_version_mismatch`) and whose descriptor declares `probe_argv`.
+    Adapters excluded for any structural reason are not probed — a probe
+    cannot fix an unsupported method or a denied location. The shared
+    `stamp` is per-request safe: registry stamps are per adapter id.
+    """
+    if not isinstance(registry, AdapterRegistry):
+        raise ValueError("probe scheduling requires a registry")
+    if not isinstance(request, RouteRequirements):
+        raise ValueError("probe scheduling requires a route request")
+    if not isinstance(policy, PlannerPolicy):
+        raise ValueError("probe scheduling requires a policy")
+    plan = registry.plan(request, policy, observations)
+    selected_id = (
+        plan.selected.adapter_id if plan.selected is not None else None
+    )
+    out: list[AdapterProbeRequest] = []
+    for decision in plan.decisions:
+        if decision.adapter_id == selected_id:
+            continue
+        reasons = frozenset(decision.reasons)
+        if not reasons or not reasons <= _OBSERVATION_REASONS:
+            continue
+        descriptor = registry.descriptor(decision.adapter_id)
+        if descriptor is None or descriptor.probe_argv is None:
+            continue
+        out.append(
+            probe_request_for(
+                descriptor,
+                stamp,
+                attempt_number=attempt_number,
+                tool_version=tool_version,
+            )
+        )
+    return tuple(out)
