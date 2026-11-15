@@ -30,10 +30,68 @@ _SCALAR = (
 )
 
 
+# Declared-manifest restoration bounds and validators — the same
+# fail-closed shape `GoSummarySet.from_dict` enforces: a manifest is
+# declared data, so unknown keys, wrong types and oversize
+# collections are malformed, never partially adopted.
+MAX_MANIFEST_MEMBERS = 8192
+
+
+def _require_manifest(condition: bool) -> None:
+    if not condition:
+        raise ValueError("declared summary manifest is malformed")
+
+
+def _manifest_record(
+    value, required: tuple[str, ...], optional: tuple[str, ...] = ()
+) -> dict:
+    if not isinstance(value, dict) or not (
+        set(required) <= set(value) <= set(required) | set(optional)
+    ):
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _string(value) -> str:
+    if type(value) is not str:
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _boolean(value) -> bool:
+    if type(value) is not bool:
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _list(value) -> list:
+    if type(value) is not list:
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _deps_from_list(value) -> frozenset[int]:
+    deps = _list(value)
+    _require_manifest(
+        len(deps) <= MAX_MANIFEST_MEMBERS
+        and all(type(d) is int and d >= 0 for d in deps)
+    )
+    return frozenset(deps)
+
+
 @dataclass(frozen=True)
 class RustGap:
     reason: str
     byte: int
+
+    def to_dict(self) -> dict:
+        return {"reason": self.reason, "byte": self.byte}
+
+    @classmethod
+    def from_dict(cls, value) -> "RustGap":
+        v = _manifest_record(value, ("reason", "byte"))
+        _require_manifest(type(v["byte"]) is int and v["byte"] >= 0)
+        return cls(_string(v["reason"]), v["byte"])
 
 
 @dataclass(frozen=True)
@@ -42,6 +100,33 @@ class RustCall:
     name: str | None
     actual: tuple
     returns: frozenset | None
+
+    def to_dict(self) -> dict:
+        return {
+            "byte": self.byte,
+            "name": self.name,
+            "arguments": [sorted(a) for a in self.actual],
+            "result": (
+                None if self.returns is None else sorted(self.returns)
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "RustCall":
+        v = _manifest_record(
+            value, ("byte", "name", "arguments", "result")
+        )
+        _require_manifest(type(v["byte"]) is int and v["byte"] >= 0)
+        _require_manifest(v["name"] is None or type(v["name"]) is str)
+        arguments = _list(v["arguments"])
+        _require_manifest(len(arguments) <= MAX_MANIFEST_MEMBERS)
+        result = v["result"]
+        return cls(
+            v["byte"],
+            v["name"],
+            tuple(_deps_from_list(a) for a in arguments),
+            None if result is None else _deps_from_list(result),
+        )
 
 
 @dataclass
@@ -54,12 +139,98 @@ class RustFunctionSummary:
     gaps: list = field(default_factory=list)
     effects: str = "none_in_supported_fragment"
 
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "available": self.available,
+            "parameters": list(self.params),
+            "return_dependencies": (
+                None
+                if self.return_dependencies is None
+                else sorted(self.return_dependencies)
+            ),
+            "calls": [c.to_dict() for c in self.calls],
+            "gaps": [g.to_dict() for g in self.gaps],
+            "effects": self.effects,
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "RustFunctionSummary":
+        v = _manifest_record(
+            value,
+            (
+                "name",
+                "available",
+                "parameters",
+                "return_dependencies",
+                "calls",
+                "gaps",
+                "effects",
+            ),
+        )
+        parameters = _list(v["parameters"])
+        calls = _list(v["calls"])
+        gaps = _list(v["gaps"])
+        _require_manifest(
+            len(parameters) <= MAX_MANIFEST_MEMBERS
+            and len(calls) <= MAX_MANIFEST_MEMBERS
+            and len(gaps) <= MAX_MANIFEST_MEMBERS
+        )
+        deps = v["return_dependencies"]
+        restored_deps = None if deps is None else _deps_from_list(deps)
+        restored_gaps = [RustGap.from_dict(g) for g in gaps]
+        available = _boolean(v["available"])
+        # A manifest may not contradict itself: `available` tracks
+        # exactly "a result was derived and no gap was recorded" —
+        # a forged flag cannot borrow trust the record lacks.
+        _require_manifest(
+            available == (restored_deps is not None)
+            and available == (not restored_gaps)
+        )
+        return cls(
+            _string(v["name"]),
+            tuple(_string(p) for p in parameters),
+            available,
+            restored_deps,
+            [RustCall.from_dict(c) for c in calls],
+            restored_gaps,
+            _string(v["effects"]),
+        )
+
 
 @dataclass
 class RustSummarySet:
     context_key: str
     profile: str
     functions: list
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.profile,
+            "context_key": self.context_key,
+            "functions": [f.to_dict() for f in self.functions],
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "RustSummarySet":
+        """Restore a declared manifest — strict, bounded, fail-closed.
+
+        The manifest is declared data, not trusted input: unknown or
+        missing keys, wrong types and oversize collections are all
+        malformed — the caller fails closed rather than adopting a
+        partial set."""
+        v = _manifest_record(
+            value,
+            ("schema_version", "context_key", "functions"),
+        )
+        _require_manifest(v["schema_version"] == PROFILE)
+        functions = _list(v["functions"])
+        _require_manifest(len(functions) <= MAX_MANIFEST_MEMBERS)
+        return cls(
+            _string(v["context_key"]),
+            PROFILE,
+            [RustFunctionSummary.from_dict(f) for f in functions],
+        )
 
 
 class _Unsupported(Exception):
@@ -251,7 +422,7 @@ class _Builder:
                     )
                 )
         return RustSummarySet(
-            context_key=hashlib.sha256(self.source).hexdigest()[:16],
+            context_key=hashlib.sha256(self.source).hexdigest(),
             profile=PROFILE,
             functions=summaries,
         )

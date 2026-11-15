@@ -1,7 +1,12 @@
 """C06 Rust interprocedural summaries — slice tests."""
 
+import json
+
+import pytest
+
 from agent.rust_interprocedural import (
     PROFILE,
+    RustSummarySet,
     summarize_rust,
 )
 
@@ -17,7 +22,7 @@ def _fn(src, name):
 def test_profile_and_context():
     r = summarize_rust("fn f(x: u64) -> u64 { x }")
     assert r.profile == PROFILE
-    assert len(r.context_key) == 16
+    assert len(r.context_key) == 64
 
 
 def test_scalar_param_return():
@@ -464,3 +469,67 @@ fn f(s: u64, c: u64, x: u64) -> u64 { let mut s2 = s; st(&mut s2, c, x); s2 }"""
     )
     assert s.available
     assert s.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_manifest_round_trip_restores_the_summary_set():
+    s = summarize_rust(
+        "fn f(x: u64, y: u64) -> u64 { g(x) + y }"
+        "fn g(v: u64) -> u64 { v + 1 }"
+    )
+    restored = RustSummarySet.from_dict(
+        json.loads(json.dumps(s.to_dict()))
+    )
+    assert restored == s
+
+
+def test_manifest_restoration_rejects_a_wrong_schema():
+    s = summarize_rust("fn f(x: u64) -> u64 { x }")
+    bad = s.to_dict()
+    bad["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(bad)
+
+
+def test_manifest_restoration_rejects_unknown_and_missing_keys():
+    s = summarize_rust("fn f(x: u64) -> u64 { x }")
+    good = s.to_dict()
+    bad = dict(good, extra_key=1)
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(bad)
+    bad = dict(good)
+    del bad["context_key"]
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(bad)
+
+
+def test_manifest_restoration_rejects_a_contradictory_available_flag():
+    s = summarize_rust("fn f(x: u64) -> u64 { x }")
+    good = s.to_dict()
+    forged = dict(good)
+    forged["functions"] = [
+        dict(good["functions"][0], available=False)
+    ]
+    # `available: false` alongside a derived result claims the
+    # record has a gap it does not declare — malformed.
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(forged)
+
+
+def test_manifest_restoration_rejects_wrong_types():
+    s = summarize_rust("fn f(x: u64) -> u64 { x }")
+    good = s.to_dict()
+    bad = dict(good, context_key=123)
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(bad)
+    fn = dict(good["functions"][0])
+    fn["calls"] = [
+        {
+            "byte": 0,
+            "name": "g",
+            "arguments": [["x"]],
+            "result": [0],
+        }
+    ]
+    bad = dict(good, functions=[fn])
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(bad)
