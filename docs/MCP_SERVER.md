@@ -71,6 +71,9 @@ Exported tools:
 | `forge_task(task_json, mumei_repo, dry_run=true)` | Run a single forge spec (drop-in `MumeiForge.forge_one`) |
 | `evidence_check_accept(sequence_json, check_json)` | Restore a declared attempt-sequence snapshot and evidence-check record from inline JSON and emit the `mumei.evidence-check-acceptance/v1` descriptor — `accepted` only when the record binds the sequence's current candidate and is `"valid"`; no Core run, representation-level only |
 | `evidence_identity_check(evidence_path, source_path)` | Compare a declared `mumei.verification-evidence/v1` record's bound `subject.sha256` to the current source bytes and emit `mumei.evidence-file-identity/v1` (`match`/`mismatch`); byte-level file identity only, no Core run |
+| `verify_attempt(core_path, source_path, solver_timeout_ms=5000, solver_resource_limit=1000000, attempt_timeout_ms=30000)` | Run `evidence verify-source` as one declared attempt (same wiring as the `verify-attempt` route) and return `mumei.verify-attempt-report/v1` — including `candidate`, `evidence_check` and `acceptance` when a result is selected; representation-level acceptance only |
+| `verify_recheck(core_path, evidence_path, source_path, solver_timeout_ms=5000, solver_resource_limit=1000000, attempt_timeout_ms=30000)` | Run `evidence recheck-source` as one declared attempt (same wiring as `verify-recheck`); `recheck` is claimed only for uniquely-mapped exit codes and mid-run drift reports `inputs_changed` |
+| `native_recheck(core_path, bundle_dir, source_path, expected_build_id, attempt_timeout_ms=30000)` | Run `native-bundle recheck-llvm` as one declared attempt (same wiring as `native-recheck`) and return `mumei.native-recheck-report/v1` |
 | `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
@@ -132,12 +135,15 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `validate_foreign_code` | `code: str, language: str, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
 | `validate_spec_to_code` | `spec: str, code_path: str, language: str \| None = None, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
 | `validate_code_to_spec` | `code_path: str, spec_path: str, language: str \| None = None, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
+| `verify_attempt` | `core_path: str, source_path: str, solver_timeout_ms: int = 5000, solver_resource_limit: int = 1000000, attempt_timeout_ms: int = 30000` | `report` |
 | `verify_conformance` | `spec: str, code_path: str, language: str \| None = None, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
+| `verify_recheck` | `core_path: str, evidence_path: str, source_path: str, solver_timeout_ms: int = 5000, solver_resource_limit: int = 1000000, attempt_timeout_ms: int = 30000` | `report` |
 | `verify_code_spec_traceability` | `code_file: str, spec_text: str, language: str \| None = None, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
 | `verify_foreign_code` | `source_code: str, language: str, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
 | `audit_code` | `source_code: str, language: str, domain_hint: str = '', ctx: Context \| None = None` |  |
 | `evidence_check_accept` | `sequence_json: str, check_json: str` | `acceptance` |
 | `evidence_identity_check` | `evidence_path: str, source_path: str` | `identity` |
+| `native_recheck` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 30000` | `report` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
 | `suggest_mm_migration` | `code_file: str, language: str, issues_json: str = '[]'` | `migration_hints` |
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |

@@ -25,6 +25,7 @@ Running the server::
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from dataclasses import asdict
 import json
@@ -2161,6 +2162,230 @@ def evidence_check_accept(sequence_json: str, check_json: str) -> str:
     except ValueError as exc:
         return _err(str(exc))
     return _ok({"acceptance": acceptance})
+
+
+def _redact_declared_paths(text: str, declared: list[str]) -> str:
+    # Failure text goes to a model: declared checkout-local paths
+    # stay out of it — basenames only.
+    for p in declared:
+        if not p:
+            continue
+        base = os.path.basename(p) or "<path>"
+        try:
+            text = text.replace(str(Path(p).resolve()), base)
+        except (OSError, RuntimeError):
+            pass
+        text = text.replace(p, base)
+    return text
+
+
+def _valid_declared_path(path: Any) -> bool:
+    return isinstance(path, str) and bool(path) and "\n" not in path
+
+
+@mcp.tool()
+def verify_attempt(
+    core_path: str,
+    source_path: str,
+    solver_timeout_ms: int = 5000,
+    solver_resource_limit: int = 1000000,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Run `evidence verify-source` as one declared attempt (produce+consume).
+
+    Executes the same declared attempt the `verify-attempt` CLI route
+    runs — the request fingerprint binds the Core executable's bytes,
+    the source bytes and the solver budgets — then, only on a selected
+    (`exited`, `exit_code == 0`) result, runs the live representation
+    check and evaluates acceptance.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        source_path: Absolute path to the declared .mm source file.
+        solver_timeout_ms: Bounded solver budget in milliseconds.
+        solver_resource_limit: Bounded solver resource limit.
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the `mumei.verify-attempt-report/v1`
+        document — on success, or `error` on a declared failure. When a
+        result is selected the report carries `candidate`,
+        `evidence_check` and `acceptance` (`accepted: true` only when
+        the check binds the current candidate and is `"valid"`).
+        Acceptance stays representation-level.
+    """
+    try:
+        from agent.verify_attempt import run_attempt
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (("core_path", core_path), ("source_path", source_path)):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    for name, value in (
+        ("solver_timeout_ms", solver_timeout_ms),
+        ("solver_resource_limit", solver_resource_limit),
+        ("attempt_timeout_ms", attempt_timeout_ms),
+    ):
+        if type(value) is not int or value < 1:
+            return _err(f"{name} must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        source=source_path,
+        solver_timeout=str(solver_timeout_ms),
+        solver_resource_limit=str(solver_resource_limit),
+        attempt_timeout=attempt_timeout_ms,
+        check_timeout=None,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_attempt(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [core_path, source_path])
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
+def verify_recheck(
+    core_path: str,
+    evidence_path: str,
+    source_path: str,
+    solver_timeout_ms: int = 5000,
+    solver_resource_limit: int = 1000000,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Recheck a saved Evidence record against a declared source.
+
+    Runs `evidence recheck-source` as one declared attempt — the same
+    wiring as the `verify-recheck` CLI route. The declared budget must
+    match the producer's explicit budget, and `recheck` is claimed only
+    for uniquely-mapped exit codes (0 `consistent`, 3 `inconclusive`);
+    mid-run drift reports `inputs_changed` with no claimed outcome.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        evidence_path: Absolute path to the declared saved
+            `mumei.verification-evidence/v1` record (at most 64 KiB).
+        source_path: Absolute path to the declared .mm source file; the
+            record's own labels/paths are never read.
+        solver_timeout_ms: Solver budget in milliseconds — must equal
+            the producer's explicit budget.
+        solver_resource_limit: Solver resource limit — same rule.
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the `mumei.verify-recheck-report/v1`
+        document — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.verify_recheck import run_recheck
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("evidence_path", evidence_path),
+        ("source_path", source_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    for name, value in (
+        ("solver_timeout_ms", solver_timeout_ms),
+        ("solver_resource_limit", solver_resource_limit),
+        ("attempt_timeout_ms", attempt_timeout_ms),
+    ):
+        if type(value) is not int or value < 1:
+            return _err(f"{name} must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        evidence=evidence_path,
+        source=source_path,
+        solver_timeout=str(solver_timeout_ms),
+        solver_resource_limit=str(solver_resource_limit),
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_recheck(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, evidence_path, source_path]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
+def native_recheck(
+    core_path: str,
+    bundle_dir: str,
+    source_path: str,
+    expected_build_id: str,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Recheck a native bundle against a declared source (C02/C10).
+
+    Runs `native-bundle recheck-llvm` as one declared attempt — the
+    same wiring as the `native-recheck` CLI route. `recheck` is
+    claimed only for uniquely-mapped exit codes (0 `equivalent`,
+    3 `inconclusive`); mid-run drift reports `inputs_changed` with no
+    claimed outcome.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        bundle_dir: Absolute path to the declared `mumei.native-bundle/v1`
+            directory (native-bundle.json, program.ll, program.o,
+            proof-cert.json, program).
+        source_path: Absolute path to the declared .mm source file (at
+            most 64 KiB); the bundle's own labels/paths are never read.
+        expected_build_id: SHA-256 of native-bundle.json obtained
+            through a separately trusted channel (64 lowercase hex).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the `mumei.native-recheck-report/v1`
+        document — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.native_recheck import run_recheck
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("bundle_dir", bundle_dir),
+        ("source_path", source_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        bundle=bundle_dir,
+        source=source_path,
+        expected_build_id=expected_build_id,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_recheck(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, bundle_dir, source_path]
+            )
+        )
+    return _ok({"report": report})
 
 
 @mcp.tool()
