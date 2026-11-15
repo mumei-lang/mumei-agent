@@ -96,6 +96,18 @@ Admitted:
   loop while `var` escapes, and a bare identifier target binds as
   a may-write (the loop may not run). Any other right-hand side
   or a non-identifier left closes.
+* Arrow functions and `function` expressions bound to names —
+  `const g = (v) => v + x` is a `_Callable`; `g(y)` evaluates the
+  body inline with the argument bound and captured names read at
+  the CALL site (closures capture by reference — the latest
+  value over-approximates). Writes inside the body merge back as
+  may-writes; parameter defaults union their deps when the arg
+  is omitted; the body's frames and scope state stay isolated.
+  Passing or returning the value collapses to its `captured`
+  union (every visible binding's deps at the definition site).
+  A local binding shadows a same-named function declaration, and
+  calling a scalar/composite-bound name closes. Recursion hits
+  `MAX_NODES` and closes the caller with `analysis_limit`.
 * Destructured declarations `const {a, b: c = d, ...rest} = o` /
   `const [x, y = d] = arr` — each sub-name binds the member read
   at its path (defaults union the default expression's deps, a
@@ -129,11 +141,10 @@ Admitted:
 
 Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
-member CALLS (`o.m()` — no closure methods), `this`, arrow-function
-values or callbacks,
-generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new` and function
-expressions/`=>` values stay
+member CALLS (`o.m()` — no method model yet), `this`,
+generators, `async`/`await`, `any`/composite/missing parameter
+types, destructured formal parameters, `new` and
+generator/tagged-template function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -252,14 +263,33 @@ class _Composite:
         self.fields = fields
 
 
+class _Callable:
+    """A function value: an `arrow_function`/`function_expression`
+    bound to a name. `params`/`defaults` describe its formal
+    parameters; `captured` over-approximates its closure reads —
+    the union of every visible binding's deps at the definition
+    site — so passing or returning the value is a scalar."""
+
+    __slots__ = ("node", "params", "defaults", "captured")
+
+    def __init__(self, node, params, defaults, captured) -> None:
+        self.node = node
+        self.params = params
+        self.defaults = defaults
+        self.captured = captured
+
+
 def _scalar_of(value) -> frozenset[int]:
     """Flatten a value to scalar deps — reading or passing a whole
-    composite over-approximates to the union of its leaf deps."""
+    composite over-approximates to the union of its leaf deps; a
+    callable flattens to its captured deps."""
     if isinstance(value, _Composite):
         result = frozenset()
         for field in value.fields.values():
             result |= _scalar_of(field)
         return result
+    if isinstance(value, _Callable):
+        return value.captured
     return value
 
 
@@ -275,11 +305,11 @@ def _merge_vals(old, new):
             else:
                 fields[key] = nval
         return _Composite(fields)
-    if isinstance(old, _Composite):
-        return _scalar_of(old) | new
-    if isinstance(new, _Composite):
-        return old | _scalar_of(new)
-    return old | new
+    if isinstance(old, _Composite) or isinstance(new, _Composite):
+        return _scalar_of(old) | _scalar_of(new)
+    # Two callables (or a callable and a scalar) join to the
+    # captured-deps union — the name may hold either callee.
+    return _scalar_of(old) | _scalar_of(new)
 
 
 def _val_leq(new, old) -> bool:
@@ -295,7 +325,7 @@ def _val_leq(new, old) -> bool:
         return _scalar_of(new) <= _scalar_of(old)
     if isinstance(old, _Composite):
         return False
-    return new <= old
+    return _scalar_of(new) <= _scalar_of(old)
 
 
 def _composite_delete(composite, path, span):
@@ -1509,12 +1539,19 @@ class _Builder:
         whole-name alias (`p = o` shares the instance — writes
         propagate to every holder). A member-path result bound to a
         name would let writes through either side diverge, so it
-        collapses to its leaf deps."""
-        if isinstance(value, _Composite) and node.type not in {
-            "object",
-            "array",
-            "identifier",
-        }:
+        collapses to its leaf deps. A callable binds via its literal
+        or a name alias; anything else (a member path, a call
+        result) collapses to the captured deps."""
+        if isinstance(value, (_Composite, _Callable)) and (
+            node.type
+            not in {
+                "object",
+                "array",
+                "identifier",
+                "arrow_function",
+                "function_expression",
+            }
+        ):
             return _scalar_of(value)
         return value
 
@@ -1675,6 +1712,142 @@ class _Builder:
         return _scalar_of(
             self._eval(node, params, locals_, transfers, count)
         )
+
+    def _callable_value(self, node, params, locals_):
+        """`const g = (v) => v + x` — the arrow/function value.
+        `captured` is the union of every visible binding's deps at
+        the definition site, so the closure's free reads are
+        over-approximated even when the callable escapes (returned
+        or passed as an argument)."""
+        names, defaults = self._callable_params(node)
+        captured = frozenset(params.values())
+        for val in locals_.values():
+            captured |= _scalar_of(val)
+        return _Callable(node, names, defaults, captured)
+
+    def _callable_params(self, node):
+        """`(a, b = d)` / `x =>` — the formal parameter names plus
+        any default expressions (evaluated at the call site).
+        Rest/destructured/typed-non-scalar parameters close."""
+        params_node = node.child_by_field_name("parameters")
+        if params_node is None:
+            p = node.child_by_field_name("parameter")
+            if p is None or p.type != "identifier":
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            return (p.text.decode(),), {}
+        names: list[str] = []
+        defaults: dict[int, object] = {}
+        for param in _children(params_node):
+            if param.type not in {
+                "required_parameter",
+                "optional_parameter",
+            }:
+                raise _Unsupported(
+                    "unsupported_expression", _span(param)
+                )
+            pattern = param.child_by_field_name("pattern")
+            ptype = param.child_by_field_name("type")
+            if pattern is None or (
+                ptype is not None
+                and not self._scalar_annotation(ptype)
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(param)
+                )
+            if pattern.type == "identifier":
+                names.append(pattern.text.decode())
+                dflt = param.child_by_field_name("value")
+                if dflt is not None:
+                    defaults[len(names) - 1] = dflt
+            elif pattern.type == "assignment_pattern":
+                left = pattern.child_by_field_name("left")
+                right = pattern.child_by_field_name("right")
+                if left is None or left.type != "identifier":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(param)
+                    )
+                names.append(left.text.decode())
+                if right is not None:
+                    defaults[len(names) - 1] = right
+            else:
+                raise _Unsupported(
+                    "unsupported_expression", _span(param)
+                )
+        return tuple(names), defaults
+
+    def _invoke_callable(
+        self,
+        cval,
+        actual,
+        params,
+        locals_,
+        transfers,
+        count,
+        span,
+    ) -> frozenset[int]:
+        """`g(args)` where `g` binds an arrow/function value —
+        evaluate the body inline. Captured names read the CALL
+        site's bindings (closures capture by reference — the
+        latest value over-approximates); writes inside the body
+        merge back as may-writes so member stores aren't lost;
+        the body's own frames/scope state is isolated and
+        restored."""
+        inner = dict(locals_)
+        for i, pname in enumerate(cval.params):
+            deps = actual[i] if i < len(actual) else frozenset()
+            dnode = cval.defaults.get(i)
+            if dnode is not None:
+                deps |= self.expression(
+                    dnode, params, inner, transfers, count
+                )
+            inner[pname] = deps
+        body_node = cval.node.child_by_field_name("body")
+        if body_node is None:
+            raise _Unsupported("unsupported_expression", span)
+        saved_frames, self.frames = self.frames, []
+        saved_thrown, self.thrown = self.thrown, [False]
+        saved_block, self.block_stack = self.block_stack, []
+        saved_var, self.var_names = self.var_names, set()
+        saved_flocals, self.function_locals = self.function_locals, inner
+        try:
+            if body_node.type == "statement_block":
+                adeps = [frozenset()]
+                saw = [False]
+                self._sequence(
+                    _children(body_node),
+                    params,
+                    inner,
+                    transfers,
+                    count,
+                    adeps,
+                    saw,
+                    False,
+                )
+                result = adeps[0] if saw[0] else frozenset()
+            else:
+                result = _scalar_of(
+                    self._eval(
+                        body_node, params, inner, transfers, count
+                    )
+                )
+        finally:
+            self.frames = saved_frames
+            self.thrown = saved_thrown
+            self.block_stack = saved_block
+            self.var_names = saved_var
+            self.function_locals = saved_flocals
+        # Writes inside the body are may-writes on the caller's
+        # scope — member stores rebase shared `_Composite`
+        # instances on `inner`, so join them back.
+        shadowed = set(cval.params)
+        for name, ival in inner.items():
+            if name in shadowed or name not in locals_:
+                continue
+            if not _val_leq(ival, locals_[name]):
+                locals_[name] = _merge_vals(locals_[name], ival)
+        return result
 
     def _eval(self, node, params, locals_, transfers, count):
         """Evaluate a node to its raw value: a scalar dependency set
@@ -1907,6 +2080,8 @@ class _Builder:
             return self.expression(
                 left, params, locals_, transfers, count
             ) | self.expression(right, params, locals_, transfers, count)
+        if kind in {"arrow_function", "function_expression"}:
+            return self._callable_value(node, params, locals_)
         if kind == "call_expression":
             function = node.child_by_field_name("function")
             arguments = node.child_by_field_name("arguments")
@@ -1917,7 +2092,12 @@ class _Builder:
             ):
                 raise _Unsupported("unsupported_expression", _span(node))
             callee = function.text.decode()
-            if callee not in self.functions:
+            bound = (
+                callee in locals_
+                or callee in self.function_locals
+                or callee in params
+            )
+            if not bound and callee not in self.functions:
                 raise _Unsupported(
                     "call_unresolved", _span(node), callee
                 )
@@ -1927,6 +2107,29 @@ class _Builder:
                 )
                 for arg in _children(arguments)
             )
+            if bound:
+                # A local binding shadows a same-named function
+                # declaration — JS resolution order.
+                raw = self._lookup(
+                    callee, params, locals_, _span(function)
+                )
+                if not isinstance(raw, _Callable):
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                result = self._invoke_callable(
+                    raw,
+                    actual,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                )
+                transfers.append(
+                    TsCall(_span(node), callee, actual, result)
+                )
+                return result
             result = frozenset().union(*actual) if actual else frozenset()
             transfers.append(
                 TsCall(_span(node), callee, actual, result)

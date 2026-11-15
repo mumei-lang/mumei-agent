@@ -2639,6 +2639,33 @@ destructuring `({a} = o)` stays closed, and destructured
 formal parameters need a composite-parameter model — still
 closed at the signature gate.
 
+### C06 TypeScript function values (slice 12)
+
+`const g = (v) => v + x` and `const g = function (v) { ... }`
+bind a `_Callable`. `g(y)` evaluates the body inline: arguments
+bind the arrow's scalar parameters (omitted arguments union
+their default's deps), captured names read the CALL site's
+bindings — closures capture by reference, so the latest value
+over-approximates — and stores inside the body merge back as
+may-writes, so `() => { o.a = y }` rebases the shared composite
+on the caller's scope. The body's frames, `var` scope and
+`throw` state stay isolated. The call records a `TsCall`
+transfer under the binding name.
+
+A callable passed as an argument or returned collapses to its
+`captured` union — every visible binding's deps at the
+definition site — so `h(g)` carries `g`'s free-variable deps as
+the argument's. A local binding shadows a same-named function
+declaration (JS resolution order); calling a name bound to a
+scalar or composite closes. Self-recursion hits `MAX_NODES`
+and closes the caller with `analysis_limit`.
+
+Boundaries: member calls `o.m()` (a callable in a field is
+reachable but the callee shape isn't an identifier — still
+closed), `new`, generators, tagged templates and `async` arrows
+stay closed, as do rest/destructured/typed-non-scalar arrow
+parameters.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

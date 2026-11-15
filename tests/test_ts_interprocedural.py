@@ -753,13 +753,12 @@ def test_ternary_unions_all_operands():
     assert s.available and s.return_dependencies == frozenset({0, 1, 2})
 
 
-def test_arrow_function_value_closes():
+def test_arrow_function_value_admits():
     s = _fn(
         "function f(x: number): number {"
         " const g = (v: number) => v; return g(x); }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_member_call_closes():
@@ -1968,3 +1967,147 @@ def test_destructure_member_call_value_closes():
         " let { a } = o.m(); return a; }"
     )
     assert not s.available
+
+
+# --- slice 12: arrow functions and function expressions
+
+
+def test_arrow_basic_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v + 1; return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "g"
+
+
+def test_arrow_bare_param():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = v => v; return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_arrow_capture():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const g = () => y; return g(x); }"
+    )
+    # Captured `y` read at the call site → dep 1.
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_arrow_capture_latest_value():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let z = x; const g = () => z; z = y; return g(); }"
+    )
+    # Closure reads the call-site `z` → dep 1.
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_function_expression_body():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = function (v: number) { return v + x; };"
+        " return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_arrow_default_param():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const g = (v: number = y) => v; return g(); }"
+    )
+    # Omitted arg → default's deps.
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_arrow_write_merges_back():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let z = x; const g = () => { z = y; }; g(); return z; }"
+    )
+    # The body's store merges back as a may-write.
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_arrow_member_store_merges_back():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = { a: x }; const g = () => { o.a = y; };"
+        " g(); return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_arrow_param_shadow_no_leak():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let z = x; const g = (z: number) => { z = y; };"
+        " g(x); return z; }"
+    )
+    # `z` is the arrow's param — the write stays inside.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_arrow_alias():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v; const h = g; return h(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_arrow_passed_as_arg_over_approximates():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = () => x; return h(g); }"
+    )
+    # `g` isn't callable by `h` — h unresolved.
+    assert not s.available
+    assert s.gaps[0].reason == "call_unresolved"
+
+
+def test_arrow_returned_carries_captured():
+    s = _fn(
+        "function f(x: number): number {"
+        " let z = x; const g = () => z; return g; }"
+    )
+    # Returning the closure — captured deps over-approximate.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_calling_scalar_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let g = x; return g(1); }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_local_shadows_function_decl():
+    s = _fn(
+        "function g(v: number): number { return v; }"
+        "function f(x: number): number {"
+        " let g = x; return g(1); }"
+    )
+    s_f = next(fn for fn in _summarize(
+        "function g(v: number): number { return v; }"
+        "function f(x: number): number {"
+        " let g = x; return g(1); }"
+    ).functions if fn.name == "f")
+    # `g` bound to scalar x — the call can't reach the declaration.
+    assert not s_f.available
+    assert s_f.gaps[0].reason == "unsupported_expression"
+
+
+def test_arrow_no_return_is_dep_free():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => { v; }; return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
