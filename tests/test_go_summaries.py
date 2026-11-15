@@ -1190,3 +1190,175 @@ def test_mcp_attempt_tool_error_redacts_declared_paths(tmp_path):
     assert str(missing) not in out["error"]
     assert str(src) not in out["error"]
     assert str(tmp_path) not in out["error"]
+
+
+def _mcp_manifest(tmp_path):
+    """Produce a declared manifest through the MCP produce tool."""
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, _json.dumps(schema_fixture()).encode())
+    manifest = _json.loads(
+        mcp_server.go_summaries(_json.dumps([str(src)]), str(helper))
+    )["manifest"]
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
+    return src, helper, manifest, manifest_path
+
+
+def test_mcp_check_tool_emits_partition(tmp_path):
+    """The MCP check tool emits the same declared partition."""
+    import json as _json
+    from agent import mcp_server
+
+    src, helper, manifest, manifest_path = _mcp_manifest(tmp_path)
+    out = _json.loads(
+        mcp_server.go_summaries_check(
+            _json.dumps([str(src)]), str(helper), str(manifest_path)
+        )
+    )
+    assert "check" in out
+    check = out["check"]
+    assert check["schema_version"] == "mumei.go-summary-check/v1"
+    assert check["context_match"] is True
+    assert check["reusable"] == sorted(
+        f["binding_id"] for f in manifest["functions"]
+    )
+    assert check["stale"] == []
+    assert check["missing"] == []
+
+
+def test_mcp_reuse_tool_emits_merged_manifest(tmp_path):
+    """The MCP reuse tool emits the merged manifest document."""
+    import json as _json
+    from agent import mcp_server
+
+    src, helper, manifest, manifest_path = _mcp_manifest(tmp_path)
+    out = _json.loads(
+        mcp_server.go_summaries_reuse(
+            _json.dumps([str(src)]), str(helper), str(manifest_path)
+        )
+    )
+    assert "manifest" in out
+    merged = out["manifest"]
+    assert (
+        merged["schema_version"] == "mumei.go-scalar-parameter-deps/v1"
+    )
+    assert merged["functions"] == manifest["functions"]
+
+
+def test_mcp_reuse_tool_rejects_foreign_target_arch(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src, helper, _manifest, manifest_path = _mcp_manifest(tmp_path)
+    out = _json.loads(
+        mcp_server.go_summaries_reuse(
+            _json.dumps([str(src)]),
+            str(helper),
+            str(manifest_path),
+            target_arch="arm64",
+        )
+    )
+    assert "error" in out
+
+
+def test_mcp_accept_tool_accepts_declared_binding(tmp_path):
+    """The MCP accept tool runs the strict whole-set gate."""
+    import json as _json
+    from agent import mcp_server
+
+    src, helper, manifest, manifest_path = _mcp_manifest(tmp_path)
+    binding = manifest["functions"][0]["binding_id"]
+    out = _json.loads(
+        mcp_server.go_summaries_accept(
+            _json.dumps([str(src)]),
+            str(helper),
+            str(manifest_path),
+            binding,
+        )
+    )
+    assert "accept" in out
+    accept = out["accept"]
+    assert accept["schema_version"] == "mumei.go-summary-accept/v1"
+    assert accept["accepted"] is True
+    assert accept["binding_id"] == binding
+    assert "summary" in accept
+
+
+def test_mcp_accept_tool_rejects_unknown_binding(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src, helper, _manifest, manifest_path = _mcp_manifest(tmp_path)
+    out = _json.loads(
+        mcp_server.go_summaries_accept(
+            _json.dumps([str(src)]),
+            str(helper),
+            str(manifest_path),
+            "sha256:deadbeef:0:0:0:0",
+        )
+    )
+    assert "accept" in out
+    accept = out["accept"]
+    assert accept["accepted"] is False
+    assert accept["reason"] == "unknown_binding"
+
+
+def test_mcp_consume_tools_validate_declared_args(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, b"{}")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    src_json = _json.dumps([str(src)])
+    for fn, extra in (
+        (mcp_server.go_summaries_check, ()),
+        (mcp_server.go_summaries_reuse, ()),
+        (mcp_server.go_summaries_accept, ("sha256:x:0:0:0:0",)),
+    ):
+        assert "error" in _json.loads(
+            fn(src_json, str(helper), "", *extra)
+        )
+        assert "error" in _json.loads(
+            fn(src_json, str(helper), "a\nb", *extra)
+        )
+        assert "error" in _json.loads(
+            fn(src_json, str(helper), str(manifest_path), *extra,
+               timeout_s=0)
+        )
+        assert "error" in _json.loads(
+            fn("not json", str(helper), str(manifest_path), *extra)
+        )
+    # binding must be a nonempty single-line identity
+    assert "error" in _json.loads(
+        mcp_server.go_summaries_accept(
+            src_json, str(helper), str(manifest_path), ""
+        )
+    )
+    assert "error" in _json.loads(
+        mcp_server.go_summaries_accept(
+            src_json, str(helper), str(manifest_path), "a\nb"
+        )
+    )
+
+
+def test_mcp_consume_tool_error_redacts_declared_paths(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, b"{}")
+    missing = tmp_path / "no-such-manifest"
+    out = _json.loads(
+        mcp_server.go_summaries_check(
+            _json.dumps([str(src)]), str(helper), str(missing)
+        )
+    )
+    assert "error" in out
+    assert str(missing) not in out["error"]
+    assert str(src) not in out["error"]
+    assert str(tmp_path) not in out["error"]

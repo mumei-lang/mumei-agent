@@ -3222,6 +3222,29 @@ observation and the same drift gate. The tool emits
 an accepted manifest.
 
 
+### C06 declared summary consume MCP tools (go_summaries_check / go_summaries_reuse / go_summaries_accept)
+
+`go_summaries_check`, `go_summaries_reuse` and
+`go_summaries_accept` expose the three go consume routes over
+MCP. Declared inputs arrive as the same JSON encodings the
+`go_summaries` tool already speaks (`source_files` as an array,
+`imports_json` as an object), parsed through the shared
+`_go_summaries_declared_args`, with `manifest_path` naming the
+declared `mumei.go-scalar-parameter-deps/v1` manifest and — for
+accept — `binding` naming the binding identity to accept
+(`sha256:<digest>:<start>:<line>:<len>`, not a function name). Each
+tool runs the identical document construction the CLI route emits —
+`summary_check_document`, `summary_reuse_set` and
+`summary_accept_document` are the single source both surfaces
+share — so `context_match` plus the
+`reusable`/`stale`/`missing` partition, the per-function freshness
+merge (including the manifest-architecture guard) and the strict
+whole-set accept gate all behave exactly as the routes do. The
+tools return `{"check": ...}`, `{"manifest": ...}` and
+`{"accept": ...}` respectively; declared-input failures return
+`error` with checkout-local paths redacted to basenames.
+
+
 ### C06 declared summary attempt route (go-summaries-attempt)
 
 `python -m agent go-summaries-attempt` is the fifth consumable route:
