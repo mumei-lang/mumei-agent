@@ -2987,6 +2987,35 @@ a summary after any change anywhere in the unit. `--output` may not
 equal any declared input. No scheduling or audit route is wired yet;
 Evidence normalization/acceptance stays open.
 
+### C06 declared summary attempt route (go-summaries-attempt)
+
+`python -m agent go-summaries-attempt` is the fifth consumable route:
+it runs the produce route itself as one declared attempt inside the
+C11 lifecycle. The route spawns `python -m agent go-summaries` with
+the same declared inputs (`--go-types`, `--source`, `--import`,
+`--target-arch`, `--timeout`) through `dispatch_and_publish`: a fresh
+`AttemptSequence` keyed to a request fingerprint that binds the helper
+binary's bytes and every declared input file's bytes under
+`mumei.go-summaries-attempt-request/v1`, one reserved attempt observed
+by `AttemptRunner` under the required `--attempt-timeout <MS>` bound
+(plus an optional `--memory-bound-mb` POSIX ceiling), reconcile and
+compare-and-set publication. An `exited` run's captured stdout becomes
+the sequence's selected result; failed, timed-out or cancelled runs
+publish the terminal lineage with no selection.
+
+The emitted `mumei.go-summaries-attempt-report/v1` carries the
+canonical lineage, the `mumei.verifier-run-result/v1` normalized
+descriptor and — only when a result was selected — the
+`mumei.verifier-evidence-candidate/v1` handoff descriptor, so a host
+can later restore the lineage through `AttemptSequence.from_dict` and
+evaluate a recorded check against the candidate. The report carries
+no manifest bytes: the child's manifest is observed only through the
+bounded capture claim, a nonzero observed exit is still a completed
+observation (the outcome lives in the report, not this route's exit
+status) and the spawned child inherits only the caller's environment.
+No retry policy, scheduling or audit route is wired; Evidence
+normalization/acceptance stays open.
+
 
 ### C06 declared summary adapter descriptor
 

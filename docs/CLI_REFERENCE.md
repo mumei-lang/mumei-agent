@@ -43,6 +43,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-check` | 7 | Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report. |
 | `go-summaries-reuse` | 7 | Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's summaries for the functions the fresh report confirms unchanged. |
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
+| `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -562,6 +563,24 @@ Run a provisioned go-types helper on declared Go sources and accept one function
 | `--output` | `<<PATH>>` | no | — | Write the accept report JSON here instead of stdout. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to accept from. |
 | `--binding` | `<<ID>>` | yes | — | Binding identity of the function whose declared summary to accept. |
+
+
+## `mumei-agent go-summaries-attempt`
+
+Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--go-types` | `<<PATH>>` | yes | — | Path to the provisioned tools/go-types helper binary. |
+| `--source` | `<<PATH>>` | yes | — | Go source file to summarize. Repeat for a multi-file package unit; each file is declared under its basename and basenames must be unique. |
+| `--target-arch` | `{386, amd64, arm64}` | no | amd64 | Target architecture for gc sizes (default: amd64). |
+| `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
+| `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 
 
 ## `mumei-agent mcp-server`
