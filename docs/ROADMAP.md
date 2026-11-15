@@ -527,6 +527,52 @@ acceptance. C11 stays partial; Core meaning and acceptance, C12's demand
 gate and existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged.
 
+### C02 declared evidence-check acceptance normalization
+
+`AttemptEvidenceCheck.from_dict(data)` restores a stored check record:
+the exact key set and `mumei.verifier-evidence-check/v1` schema are
+required, then the constructor re-checks every invariant — a foreign
+schema, unknown keys or malformed members are static errors, and the
+record still carries no bytes and asserts no acceptance.
+`AttemptEvidenceCandidate.from_dict(data)` restores the handoff
+descriptor under the same discipline (`mumei.verifier-evidence-candidate/v1`),
+so a stored candidate and its check record both survive a declared
+round trip. `AttemptNormalizedResult.from_dict(data)` restores the
+`mumei.verifier-run-result/v1` record the candidate binds: the exact
+key set, the conditional `exit_code` member and the `stdout`
+sub-record's optional `complete: false` are all re-checked, so a
+stored run result round-trips under the same declared discipline. The
+detached attempt requests restore the same way:
+`AttemptExecutionRequest.from_dict` and `AttemptCancelRequest.from_dict`
+rebuild `mumei.verifier-attempt-execution/v1` and
+`mumei.verifier-attempt-cancel/v1` records fail-closed.
+
+`agent.core_evidence.evaluate_evidence_check(sequence, check)` normalizes
+a declared record into an acceptance descriptor
+`mumei.evidence-check-acceptance/v1`: `candidate_match` holds only when
+the record binds the sequence's CURRENT `evidence_candidate()` — a stale
+or foreign check never counts — and `accepted` holds only when the record
+is current AND its outcome is `"valid"`. This is representation-level
+acceptance: the six semantic checks (`claim_truth`, `file_identity`,
+`freshness`, `producer_authenticity`, `semantic_correspondence`,
+`artifact_semantics`) stay in `checks_not_performed`, and nothing here is
+Evidence, a verdict or a grade promotion. A sequence with no selected
+result raises `ValueError` — there is no current candidate to evaluate.
+
+```python
+descriptor = evaluate_evidence_check(selected, check)
+assert descriptor["accepted"] == (
+    descriptor["candidate_match"] and check.outcome == "valid"
+)
+```
+
+Evaluation adds no new authority: it reads declared values only and
+performs no I/O, spawn or Core call. Core meaning and acceptance,
+freshness-at-acceptance-time beyond record currency, cross-sequence
+ordering and every `checks_not_performed` entry remain unassessed
+host/Core duties. C02/C11 stay partial; existing assurance/Lean/native/
+LLVM/deferred-WASM policies are unchanged.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

@@ -158,6 +158,42 @@ def record_evidence_check(
     return sequence.evidence_check(candidate, outcome)
 
 
+def evaluate_evidence_check(
+    sequence: AttemptSequence, check: AttemptEvidenceCheck
+) -> dict:
+    """Normalize a declared check record into an acceptance descriptor.
+
+    Emits ``mumei.evidence-check-acceptance/v1``: whether the record binds
+    the sequence's CURRENT `evidence_candidate()` (`candidate_match` — a
+    stale or foreign check never counts) and `accepted`, which holds only
+    when the record is current AND its outcome is `"valid"`. This is
+    representation-level acceptance only — the six semantic checks remain
+    listed in `checks_not_performed`, and nothing here is Evidence,
+    a verdict or a grade promotion. A sequence with no selected result
+    raises `ValueError`: there is no current candidate to evaluate."""
+    if (
+        type(sequence) is not AttemptSequence
+        or type(check) is not AttemptEvidenceCheck
+    ):
+        raise ValueError("unsupported evidence check evaluation request")
+    candidate = sequence.evidence_candidate()
+    match = (
+        check.request_fingerprint == candidate.request_fingerprint
+        and check.attempt_number == candidate.attempt_number
+        and check.output_fingerprint == candidate.output_fingerprint
+    )
+    return {
+        "schema_version": "mumei.evidence-check-acceptance/v1",
+        "request_fingerprint": check.request_fingerprint,
+        "attempt_number": check.attempt_number,
+        "output_fingerprint": check.output_fingerprint,
+        "outcome": check.outcome,
+        "candidate_match": match,
+        "accepted": match and check.outcome == "valid",
+        "checks_not_performed": list(_DIAGNOSTIC["checks_not_performed"]),
+    }
+
+
 def _check_cancelled(cancel_event: threading.Event | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise CoreCheckCancelled(

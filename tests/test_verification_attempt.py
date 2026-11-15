@@ -3956,3 +3956,108 @@ def test_sequence_from_dict_restore_preserves_store_publish():
     store = AttemptSequenceStore()
     store.publish(restored)
     assert store.current == selected
+
+
+# --- C02 declared run-result restoration --------------------------------------
+
+
+@pytest.mark.parametrize("outcome", ["exited", "failed", "timed_out", "cancelled"])
+def test_normalized_result_round_trip(outcome):
+    code = 0 if outcome == "exited" else None
+    result = normalized_result(outcome=outcome, exit_code=code)
+    assert AttemptNormalizedResult.from_dict(result.to_dict()) == result
+
+
+def test_normalized_result_round_trip_incomplete():
+    result = normalized_result(outcome="timed_out", exit_code=None, complete=False)
+    restored = AttemptNormalizedResult.from_dict(result.to_dict())
+    assert restored == result
+    assert restored.complete is False
+
+
+def test_normalized_result_from_dict_rejects_foreign_schema():
+    data = normalized_result().to_dict()
+    data["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+def test_normalized_result_from_dict_rejects_unknown_keys():
+    data = normalized_result().to_dict()
+    data["extra"] = 1
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+def test_normalized_result_from_dict_rejects_exit_code_on_non_exited():
+    data = normalized_result(outcome="failed", exit_code=None).to_dict()
+    data["exit_code"] = 0
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+def test_normalized_result_from_dict_rejects_complete_true():
+    data = normalized_result().to_dict()
+    data["stdout"]["complete"] = True
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+def test_normalized_result_from_dict_rejects_malformed_stdout():
+    data = normalized_result().to_dict()
+    data["stdout"] = {"sha256": "b" * 64}
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+# --- declared attempt-request restoration --------------------------------------
+
+
+def test_execution_request_round_trip():
+    req = AttemptExecutionRequest(FINGERPRINT, 1, 10)
+    assert AttemptExecutionRequest.from_dict(req.to_dict()) == req
+
+
+def test_execution_request_from_dict_rejects_malformed():
+    data = AttemptExecutionRequest(FINGERPRINT, 1, 10).to_dict()
+    data["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError):
+        AttemptExecutionRequest.from_dict(data)
+    data = AttemptExecutionRequest(FINGERPRINT, 1, 10).to_dict()
+    data["extra"] = 1
+    with pytest.raises(ValueError):
+        AttemptExecutionRequest.from_dict(data)
+    data = AttemptExecutionRequest(FINGERPRINT, 1, 10).to_dict()
+    data["timeout_ms"] = -1
+    with pytest.raises(ValueError):
+        AttemptExecutionRequest.from_dict(data)
+
+
+def test_cancel_request_round_trip():
+    req = AttemptCancelRequest(FINGERPRINT, 1)
+    assert AttemptCancelRequest.from_dict(req.to_dict()) == req
+
+
+def test_cancel_request_from_dict_rejects_malformed():
+    data = AttemptCancelRequest(FINGERPRINT, 1).to_dict()
+    data["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError):
+        AttemptCancelRequest.from_dict(data)
+    data = AttemptCancelRequest(FINGERPRINT, 1).to_dict()
+    data["extra"] = 1
+    with pytest.raises(ValueError):
+        AttemptCancelRequest.from_dict(data)
+
+
+def test_normalized_result_from_dict_rejects_null_exit_code_on_non_exited():
+    data = normalized_result(outcome="failed", exit_code=None).to_dict()
+    data["exit_code"] = None
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+def test_normalized_result_from_dict_requires_exit_code_on_exited():
+    data = normalized_result().to_dict()
+    del data["exit_code"]
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
