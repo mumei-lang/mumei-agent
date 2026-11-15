@@ -925,6 +925,29 @@ fn f(p: P, x: u64) -> u64 { let mut q = p; q.update(x); q.v }""",
     assert s.available and s.return_dependencies == frozenset({0, 1})
 
 
+def test_review3_global_write_then_param_write_stays_unknown():
+    # `unknown` is absorbing: a mut-global write followed by a
+    # param-root write must not downgrade to `state_writes` —
+    # the caller would lose the global side effect.
+    s = _fn(
+        """static mut G: u64 = 0;
+fn f(p: &mut u64, x: u64) { unsafe { G = x; } *p = x; }""",
+        "f",
+    )
+    assert s.effects == "unknown"
+
+
+def test_review3_param_write_then_opaque_call_stays_unknown():
+    # Same absorption in the other order: an opaque call after a
+    # tracked param write keeps `unknown`.
+    s = _fn(
+        """extern "C" { fn ext(); }
+fn g(p: &mut u64, x: u64) { *p = x; unsafe { ext(); } }""",
+        "g",
+    )
+    assert s.effects == "unknown"
+
+
 def test_review2_opaque_mut_ref_arg_gains_deps():
     s = _fn(
         """extern "C" { fn ext(p: &mut u64, x: u64); }

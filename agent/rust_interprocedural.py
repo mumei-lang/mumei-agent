@@ -943,7 +943,10 @@ class _Builder:
                     )
                     # A write through a caller-owned reference is
                     # observable — the manifest must not read pure.
-                    summary.effects = "state_writes"
+                    # `unknown` stays absorbing: an earlier global or
+                    # opaque effect is not downgraded.
+                    if summary.effects != "unknown":
+                        summary.effects = "state_writes"
                 if root in self.mut_globals:
                     # `static mut` writes are observable.
                     summary.effects = "unknown"
@@ -977,7 +980,8 @@ class _Builder:
                     pw.get(param_index[root], frozenset())
                     | actual_union
                 )
-                summary.effects = "state_writes"
+                if summary.effects != "unknown":
+                    summary.effects = "state_writes"
 
     def _call(self, node, locals_, param_index, summary, void=False):
         fn_expr = node.child_by_field_name("function")
@@ -1123,8 +1127,7 @@ class _Builder:
                 arglist, roots, actual_union,
                 locals_, param_index, summary,
             )
-            if summary.effects != "state_writes":
-                summary.effects = "unknown"
+            summary.effects = "unknown"
             return frozenset() if void else result
         if name in self._in_progress:
             # Recursion — no fixpoint in the one-pass model;
@@ -1137,8 +1140,7 @@ class _Builder:
                 arglist, roots, actual_union,
                 locals_, param_index, summary,
             )
-            if summary.effects != "state_writes":
-                summary.effects = "unknown"
+            summary.effects = "unknown"
             return frozenset() if void else actual_union
         callee = self.summaries.get(name)
         if callee is None:
@@ -1156,8 +1158,7 @@ class _Builder:
             summary.calls.append(
                 RustCall(_span(node), name, actual_t, None)
             )
-            if summary.effects != "state_writes":
-                summary.effects = "unknown"
+            summary.effects = "unknown"
             return actual_union
         deps = frozenset()
         for i in callee.return_dependencies:
@@ -1181,8 +1182,7 @@ class _Builder:
                     projected |= actual[j]
             rname = roots[pidx]
             if rname is None:
-                if summary.effects != "state_writes":
-                    summary.effects = "unknown"
+                summary.effects = "unknown"
                 continue
             locals_[rname] = (
                 locals_.get(rname, frozenset()) | projected
@@ -1192,7 +1192,8 @@ class _Builder:
             if rname in self.mut_globals:
                 summary.effects = "unknown"
             if rname in param_index:
-                summary.effects = "state_writes"
+                if summary.effects != "unknown":
+                    summary.effects = "state_writes"
                 # The callee wrote through a reference this
                 # function itself received — that is this
                 # function's own param write for its callers.
@@ -1206,7 +1207,7 @@ class _Builder:
                     pw.get(param_index[rname], frozenset())
                     | projected
                 )
-        if callee.effects == "unknown" and summary.effects != "state_writes":
+        if callee.effects == "unknown":
             summary.effects = "unknown"
         return frozenset() if void else deps
 
@@ -1344,8 +1345,7 @@ class _Builder:
             summary.calls.append(
                 RustCall(_span(node), cname, (deps,), deps)
             )
-            if summary.effects != "state_writes":
-                summary.effects = "unknown"
+            summary.effects = "unknown"
             return deps
         if t in {
             "tuple_expression", "range_expression",
