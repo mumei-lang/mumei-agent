@@ -1393,13 +1393,12 @@ def test_missing_field_read_is_dep_free():
     assert s.available and s.return_dependencies == frozenset()
 
 
-def test_object_spread_closes():
+def test_object_spread_admits():
     s = _fn(
         "function f(x: number): number {"
         " let o = {a: x}; let p = {...o}; return p.a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_method_call_on_object_still_closes():
@@ -1683,13 +1682,12 @@ def test_array_element_alias_collapses():
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_array_spread_closes():
+def test_array_spread_admits():
     s = _fn(
         "function f(x: number): number {"
         " let a = [x]; let b = [...a]; return b[0]; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 # --- slice 9: string/null/undefined literals, templates, in/instanceof, delete
@@ -1769,5 +1767,97 @@ def test_delete_identifier_arg_admits():
     s = _fn(
         "function f(x: number): number {"
         " let y = x; let d = delete y; return d ? x : 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 10: spread/computed keys in literals, optional chain, non-null
+
+
+def test_object_spread_copies_fields():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x, b: 1 }; let p = { ...o, b: 2 };"
+        " return p.a; }"
+    )
+    # p.a copied from o.a → dep 0.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_spread_later_field_overrides():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: 9, b: x }; let p = { ...o, b: 2 };"
+        " return p.b; }"
+    )
+    # p.b overridden → dep-free.
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_object_spread_is_not_alias():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = { a: x }; let p = { ...o }; p.a = y; return o.a; }"
+    )
+    # Copy-on-write: p.a = y must NOT reach o.a → still dep 0.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_spread_scalar_collapses():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { ...x, a: 1 }; return o; }"
+    )
+    # Scalar spread adds unknowable fields → whole literal scalar.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_computed_key_collapses_object():
+    s = _fn(
+        "function f(x: number, k: number): number {"
+        " let o = { a: 1, [k]: x }; return o; }"
+    )
+    # `{[k]: x}` — unknown field placement → whole literal scalar:
+    # deps x + k.
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_array_spread_appends_positions():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [x, 1]; let b = [...a, 2]; return b[0] + b[2]; }"
+    )
+    # b[0] = a[0] = x dep; b[2] = 2 dep-free.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_spread_scalar_collapses():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [...x, 1]; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_optional_chain_member_reads():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x }; return o?.a; }"
+    )
+    # `?.` reads like `.` for dep purposes (undefined adds none).
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_optional_chain_subscript():
+    s = _fn(
+        "function f(x: number): number {"
+        ' let o = { a: x }; return o?.["a"]; }'
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_non_null_passthrough():
+    s = _fn(
+        "function f(x: number): number { return x!; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})

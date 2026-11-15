@@ -79,8 +79,8 @@ Admitted:
   while a composite bound anywhere else collapses to its leaf
   deps (`{a: o2}` field values, `q = o.a` member-path bindings,
   `o.f = o2` member stores, `{o}` shorthand), so no sub-object
-  alias can diverge. Spread/method/computed-key object members
-  and member access on a scalar or unbound base stay closed.
+  alias can diverge. Method/getter/setter object members and
+  member access on a scalar or unbound base stay closed.
 * Array literals `[e0, e1]` bound to a name — a `_Composite` with
   positional keys: `a[0]`/`a["0"]` reads field `"0"` precisely,
   `a[i]` unions every element plus the index's deps, `a[i] = e`
@@ -96,6 +96,12 @@ Admitted:
   loop while `var` escapes, and a bare identifier target binds as
   a may-write (the loop may not run). Any other right-hand side
   or a non-identifier left closes.
+* Spread members in object/array literals — `{...o}` copies the
+  source composite's fields (a fresh instance — writes don't
+  reach `o`), `[...a]` appends its positional fields; a scalar
+  spread or a computed `{[k]: v}` key adds unknown fields, so the
+  whole literal collapses to a scalar dep union. Optional-chain
+  `o?.f`/`o?.[k]` and non-null `x!` read like their plain forms.
 * String/`null`/`undefined` literals (dep-free), template strings
   (the result carries the union of the interpolations' deps), the
   `in`/`instanceof` binary operators (operand-dep union), and
@@ -1451,18 +1457,18 @@ class _Builder:
             )
         if kind == "object":
             # `{a: x, b: {c: y}, short}` — a composite tracking deps
-            # per field; spread/method/computed-key members close.
+            # per field. `{...o}` copies the source composite's
+            # fields (later members override); a scalar spread or a
+            # computed `{[k]: v}` key adds unknown fields the model
+            # can't name, so the whole literal collapses to a scalar
+            # union. Method/getter/setter members close.
             fields: dict = {}
+            spilled = frozenset()
             for child in _children(node):
                 if child.type == "pair":
                     key = child.child_by_field_name("key")
                     fval = child.child_by_field_name("value")
-                    if (
-                        key is None
-                        or fval is None
-                        or key.type
-                        not in {"property_identifier", "string", "number"}
-                    ):
+                    if key is None or fval is None:
                         raise _Unsupported(
                             "unsupported_expression", _span(child)
                         )
@@ -1475,6 +1481,25 @@ class _Builder:
                         # `{a: o2}` aliases `o2` at field level —
                         # writes would diverge, so collapse.
                         fdeps = _scalar_of(fdeps)
+                    if key.type == "computed_property_name":
+                        # `{[k]: v}` — the key isn't nameable; the
+                        # field it adds can't be tracked, so the
+                        # literal collapses.
+                        spilled |= _scalar_of(fdeps)
+                        for inner in _children(key):
+                            spilled |= self.expression(
+                                inner, params, locals_, transfers,
+                                count,
+                            )
+                        continue
+                    if key.type not in {
+                        "property_identifier",
+                        "string",
+                        "number",
+                    }:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(child)
+                        )
                     fields[
                         key.text.decode().strip("\"'")
                         if key.type == "string"
@@ -1491,21 +1516,56 @@ class _Builder:
                             _span(child),
                         )
                     )
+                elif child.type == "spread_element":
+                    src = self._eval(
+                        next(iter(_children(child))),
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                    )
+                    if isinstance(src, _Composite):
+                        fields.update(src.fields)
+                    else:
+                        # `{...scalar}` adds unknowable fields.
+                        spilled |= src
                 else:
                     raise _Unsupported(
                         "unsupported_expression", _span(child)
                     )
+            if spilled:
+                return spilled | _scalar_of(_Composite(fields))
             return _Composite(fields)
         if kind == "array":
             # `[e0, e1]` — a composite with positional keys; `a[0]`
             # reads field "0", a dynamic `a[i]` unions the elements,
             # and `a.length` reads a missing field (dep-free).
+            # `[...a]` appends the source's positional fields in
+            # numeric order; a scalar spread or a composite holding
+            # non-positional fields can't enumerate, so the literal
+            # collapses to a scalar union.
             afields: dict = {}
-            for i, child in enumerate(_children(node)):
+            spilled = frozenset()
+            i = 0
+            for child in _children(node):
                 if child.type == "spread_element":
-                    raise _Unsupported(
-                        "unsupported_expression", _span(child)
+                    inner = next(iter(_children(child)), None)
+                    if inner is None:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(child)
+                        )
+                    src = self._eval(
+                        inner, params, locals_, transfers, count
                     )
+                    if isinstance(src, _Composite) and all(
+                        k.isdigit() for k in src.fields
+                    ):
+                        for k in sorted(src.fields, key=int):
+                            afields[str(i)] = src.fields[k]
+                            i += 1
+                    else:
+                        spilled |= _scalar_of(src)
+                    continue
                 fdeps = self._eval(
                     child, params, locals_, transfers, count
                 )
@@ -1516,6 +1576,9 @@ class _Builder:
                     # `[o]` aliases `o` at field level — collapse.
                     fdeps = _scalar_of(fdeps)
                 afields[str(i)] = fdeps
+                i += 1
+            if spilled:
+                return spilled | _scalar_of(_Composite(afields))
             return _Composite(afields)
         if kind in {"member_expression", "subscript_expression"}:
             return self._member_read(

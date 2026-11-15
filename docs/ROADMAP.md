@@ -2602,6 +2602,23 @@ Boundaries: `delete` on a scalar base closes (unsupported), as
 does `delete` of an unbound base (binding_unavailable); `??`,
 division/modulo/exponent and shifts stay deliberately closed.
 
+### C06 TypeScript literal spreads and optional chain (slice 10)
+
+`{...o}` copies the source composite's fields into a fresh
+instance — writes through the copy never reach `o` (real JS
+spread semantics, and cheap under copy-on-write). `[...a]`
+appends the source's positional fields in numeric order. A
+scalar spread (`{...x}`, `[...x]`) or a computed `{[k]: v}` key
+adds fields the model can't name, so the whole literal collapses
+to a scalar dep union — a member read on it then closes, never
+under-approximates. `o?.f` / `o?.[k]` read like their plain
+forms (the `undefined` alternative carries no deps) and `x!`
+already passed through as an assertion.
+
+Boundaries: object method/getter/setter members still close,
+and a composite spread's non-positional fields collapse the
+array literal.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
