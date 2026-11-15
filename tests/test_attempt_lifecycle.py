@@ -2,16 +2,15 @@
 
 Each boundary was delivered behind its own static gate; these tests
 drive the whole declared chain — manifest → probe request → observed
-outcome → planning → attempt lineage → dispatch → captured output →
-selection → evidence candidate → detached snapshots — so a regression
-in any composition fails one test, not five separate ones. Nothing
-here asserts acceptance: every value remains a host declaration.
+outcome → planning → prepared request → attempt lineage → dispatch →
+captured output → selection → evidence candidate → detached snapshots —
+so a regression in any composition fails one test, not five separate
+ones. Nothing here asserts acceptance: every value remains a host
+declaration.
 """
 
 import hashlib
 import sys
-
-import pytest
 
 from agent.adapter_probe import (
     AdapterProbeHistory,
@@ -21,25 +20,28 @@ from agent.adapter_probe import (
     probe_retry_requests,
     run_probe,
 )
-from agent.attempt_runner import (
-    AttemptRunner,
-    dispatch_and_publish,
-)
+from agent.attempt_runner import dispatch_and_publish
 from agent.verification_attempt import (
     AttemptSequence,
     AttemptSequenceStore,
 )
 from agent.verification_planner import (
     PROTOCOL_VERSION,
+    SOURCE_INPUT_FORMAT,
     AdapterDescriptor,
     AdapterRegistry,
     PlannerPolicy,
+    ResultContract,
     RouteRequirements,
 )
 
-FINGERPRINT = "a" * 64
 ADAPTER_ID = "zendingsol.host.lifecycle_fake"
 PROFILE = "zendingsol.host.lifecycle_fake/v0"
+SOURCE = b"FAKE_PRIVATE_LIFECYCLE_SOURCE"
+CONTRACT = ResultContract(
+    PROFILE, "deductive_proof", "unbounded",
+    "mumei.source-model/v1", "assumed",
+)
 
 
 def _manifest(**kw):
@@ -52,6 +54,9 @@ def _manifest(**kw):
         "max_timeout_ms": 30_000,
         "max_memory_mb": 256,
         "probe_argv": [sys.executable, "-c", "import sys; sys.exit(0)"],
+        "result_contracts": [CONTRACT.to_dict()],
+        "input_formats": [SOURCE_INPUT_FORMAT],
+        "required_permissions": [],
     }
     base.update(kw)
     return base
@@ -64,7 +69,18 @@ def _registry(**kw):
 
 
 def _request():
-    return RouteRequirements(PROFILE, "deductive_proof", frozenset())
+    return RouteRequirements(
+        PROFILE,
+        CONTRACT.method,
+        result_contract=CONTRACT,
+        input_format=SOURCE_INPUT_FORMAT,
+    )
+
+
+def _policy():
+    return PlannerPolicy(
+        allowed_permissions=frozenset(), timeout_ms=30_000
+    )
 
 
 def test_manifest_probe_plan_dispatch_publish_composes():
@@ -77,15 +93,26 @@ def test_manifest_probe_plan_dispatch_publish_composes():
     observations = observe_probes((probe,))
     assert len(observations) == 1
     assert observations[0].availability == "available"
-    plan = registry.plan(
-        _request(), PlannerPolicy(), observations
-    )
-    assert plan.selected is not None
 
-    # Attempt lineage → dispatch-and-publish → captured output →
-    # canonical selection → evidence candidate.
+    # The planned request binds the lineage — fingerprint and timeout
+    # come from the prepared request, not hard-coded values.
+    prepared = registry.prepare_source(
+        _request(),
+        _policy(),
+        observations,
+        SOURCE,
+        hashlib.sha256(SOURCE).hexdigest(),
+    )
+    sequence = AttemptSequence.from_prepared(prepared)
+    assert sequence.request_fingerprint == prepared.to_dict()[
+        "request_fingerprint"
+    ]
+    assert sequence.timeout_ms == prepared.plan.selected.timeout_ms
+
+    # Lineage → dispatch-and-publish → captured output → canonical
+    # selection → evidence candidate.
     store = AttemptSequenceStore()
-    store.publish(AttemptSequence(FINGERPRINT, 10_000))
+    store.publish(sequence)
     dispatch = dispatch_and_publish(
         store,
         (sys.executable, "-c", "import sys; sys.stdout.write('ok')"),
@@ -97,7 +124,7 @@ def test_manifest_probe_plan_dispatch_publish_composes():
         "output_fingerprint"
     ]
     candidate = lineage.evidence_candidate()
-    assert candidate.request_fingerprint == FINGERPRINT
+    assert candidate.request_fingerprint == sequence.request_fingerprint
     assert candidate.attempt_number == 1
     assert candidate.output_fingerprint == lineage.selected_result[1]
 
@@ -112,7 +139,8 @@ def test_manifest_probe_plan_dispatch_publish_composes():
 
 
 def test_probe_history_composes_with_retry_scheduling():
-    descriptor = _registry().descriptor(ADAPTER_ID)
+    registry = _registry()
+    descriptor = registry.descriptor(ADAPTER_ID)
     probe = probe_request_for(descriptor, stamp=1, tool_version="0.1.0")
     outcome = run_probe(probe)
 
@@ -120,29 +148,26 @@ def test_probe_history_composes_with_retry_scheduling():
     history = history.record(probe, outcome)
     assert history.attempt_count == 1
 
-    # The recorded history schedules the next ordinal, not a replay.
-    registry = _registry()
+    # An available outcome selects the adapter — no retry is scheduled.
     retries = probe_retry_requests(
-        registry, _request(), PlannerPolicy(),
+        registry, _request(), _policy(),
         (outcome.observation,), (history,),
         stamp=2, tool_version="0.1.0",
     )
     assert retries == ()
 
     # An adapter still excluded by observation gets the next ordinal.
-    registry = _registry(
+    missing_registry = _registry(
         probe_argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
     )
-    missing = _registry(
-        probe_argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
-    ).descriptor(ADAPTER_ID)
+    missing = missing_registry.descriptor(ADAPTER_ID)
     miss_probe = probe_request_for(missing, stamp=1, tool_version="0.1.0")
     miss_outcome = run_probe(miss_probe)
     miss_history = AdapterProbeHistory.start(miss_probe).record(
         miss_probe, miss_outcome
     )
     retries = probe_retry_requests(
-        registry, _request(), PlannerPolicy(),
+        missing_registry, _request(), _policy(),
         (miss_outcome.observation,), (miss_history,),
         stamp=2, tool_version="0.1.0",
     )
@@ -154,7 +179,7 @@ def test_probe_history_composes_with_retry_scheduling():
 def test_plan_with_probes_runs_the_full_observe_replan_loop():
     registry = _registry()
     plan = plan_with_probes(
-        registry, _request(), PlannerPolicy(), stamp=1,
+        registry, _request(), _policy(), stamp=1,
         tool_version="0.1.0",
     )
     assert plan.plan.selected is not None
@@ -169,6 +194,7 @@ def test_missing_probe_excludes_candidate_without_substitution():
         probe_argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
     )
     plan = plan_with_probes(
-        registry, _request(), PlannerPolicy(), stamp=1
+        registry, _request(), _policy(), stamp=1,
+        tool_version="0.1.0",
     )
     assert plan.plan.selected is None
