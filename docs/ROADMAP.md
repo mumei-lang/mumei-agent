@@ -3010,6 +3010,25 @@ owns acceptance. No production verification path consults this
 registry yet; planner/audit wiring for the summary routes stays open.
 
 
+### C06 summary-route probe wiring
+
+`plan_summary_route(profile, policy, stamp=...)` composes
+`summary_registry()` with `plan_with_probes`: when `go-summaries` is
+excluded only because nothing observed it, its declared `probe_argv`
+runs through `AttemptRunner` and the adapter is re-planned with the
+fresh `RuntimeObservation`. `summary_descriptors()` /
+`summary_registry()` are the shared enumeration — adding a language's
+descriptor is a one-line change there.
+
+Probing is availability only: the version is host-declared
+(`tool_version`), so an unversioned observation still excludes
+(`tool_version_unknown`) and a structural exclusion — denied
+location, missing permission — is never probed at all. The returned
+`AdapterProbePlan` carries the updated `AdapterProbeHistory` records
+for retry scheduling. No audit, MCP or scheduled verification path
+calls this yet; that wiring stays open.
+
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe

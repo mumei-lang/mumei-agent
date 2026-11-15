@@ -7,6 +7,9 @@ import pytest
 from agent.summaries_adapters import (
     SUMMARY_DERIVATION,
     go_summaries_adapter,
+    plan_summary_route,
+    summary_descriptors,
+    summary_registry,
     summary_requirements,
 )
 from agent.go_interprocedural import PROFILE as GO_SUMMARY_PROFILE
@@ -103,3 +106,63 @@ def test_prepare_source_binds_the_summary_request():
 def test_requirements_reject_foreign_profile():
     with pytest.raises(ValueError):
         summary_requirements("not a label!")
+
+
+# --- probe-wired planning ----------------------------------------------------
+
+_PERMISSIONS = frozenset({"filesystem.read", "process.spawn"})
+
+
+def test_registry_holds_every_descriptor():
+    registry = summary_registry()
+    result = registry.plan(
+        summary_requirements(GO_SUMMARY_PROFILE),
+        PlannerPolicy(allowed_permissions=_PERMISSIONS),
+        (RuntimeObservation("agent.go-summaries", "available", "1.0.0"),),
+    )
+    assert result.selected.adapter_id == "agent.go-summaries"
+    assert [d.adapter_id for d in summary_descriptors()] == [
+        "agent.go-summaries"
+    ]
+
+
+def test_plan_summary_route_probes_and_selects():
+    result = plan_summary_route(
+        GO_SUMMARY_PROFILE,
+        PlannerPolicy(allowed_permissions=_PERMISSIONS),
+        stamp=7,
+        tool_version="1.0.0",
+    )
+    assert result.plan.selected is not None
+    assert result.plan.selected.adapter_id == "agent.go-summaries"
+    observation = result.observations[0]
+    assert observation.availability == "available"
+    assert observation.tool_version == "1.0.0"
+    history = result.histories[0]
+    assert history.adapter_id == "agent.go-summaries"
+    assert history.attempt_count >= 1
+
+
+def test_plan_summary_route_stays_excluded_without_version():
+    result = plan_summary_route(
+        GO_SUMMARY_PROFILE,
+        PlannerPolicy(allowed_permissions=_PERMISSIONS),
+        stamp=7,
+    )
+    assert result.plan.selected is None
+    decision = result.plan.decisions[0]
+    assert "tool_version_unknown" in decision.reasons
+
+
+def test_plan_summary_route_never_probes_structural_exclusion():
+    result = plan_summary_route(
+        GO_SUMMARY_PROFILE,
+        PlannerPolicy(
+            allowed_permissions=_PERMISSIONS,
+            allowed_locations=frozenset({"remote"}),
+        ),
+        stamp=7,
+    )
+    assert result.plan.selected is None
+    assert result.observations == ()
+    assert result.histories == ()
