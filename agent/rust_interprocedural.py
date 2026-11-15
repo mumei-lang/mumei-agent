@@ -408,7 +408,19 @@ class _Builder:
                     if inner is not None else None
                 )
             return self._block(st, locals_, param_index, summary)
-        if t in {"break_expression", "continue_expression"}:
+        if t == "break_expression":
+            # `break v` — `loop { }` yields the value; under the
+            # may-model the break deps join the loop's result.
+            deps = frozenset()
+            for c in _children(st):
+                try:
+                    deps |= self._expr(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported:
+                    continue
+            return deps
+        if t == "continue_expression":
             return None
         if t in {
             "assignment_expression", "compound_assignment_expr",
@@ -895,7 +907,17 @@ class _Builder:
             return self._loop(node, locals_, param_index, summary)
         if t == "block":
             return self._block(node, locals_, param_index, summary) or frozenset()
-        if t in {"break_expression", "continue_expression"}:
+        if t == "break_expression":
+            deps = frozenset()
+            for c in _children(node):
+                try:
+                    deps |= self._expr(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported:
+                    continue
+            return deps
+        if t == "continue_expression":
             return frozenset()
         if t == "closure_expression":
             # `|a, b| body` — the closure value's deps are the

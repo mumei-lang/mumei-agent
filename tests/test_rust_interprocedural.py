@@ -391,3 +391,17 @@ def test_slice5_recursion_opaque():
     assert s.available
     assert s.return_dependencies == frozenset({0})
     assert s.effects == "unknown"
+
+
+def test_slice6_loop_break_value():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let y = loop {
+        if x > 0 { break x; }
+        break 0;
+    };
+    y
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
