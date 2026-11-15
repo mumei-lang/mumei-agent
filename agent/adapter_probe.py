@@ -415,10 +415,18 @@ class AdapterProbeHistory:
             raise ValueError("probe history fingerprint mismatch")
         if type(outcome) is not AdapterProbeOutcome:
             raise ValueError("probe history requires a probe outcome")
+        result = outcome.result
+        if (
+            result.request_fingerprint != self.request_fingerprint
+            or result.attempt_number != request.attempt_number
+        ):
+            raise ValueError("probe history outcome does not match request")
+        if result.attempt_number != len(self.outcomes) + 1:
+            raise ValueError("probe history attempt ordinal mismatch")
         if len(self.outcomes) >= MAX_PROBE_HISTORY:
             raise ValueError("probe history attempt bound reached")
         return AdapterProbeHistory(
             self.adapter_id,
             self.request_fingerprint,
-            self.outcomes + (outcome.result,),
+            self.outcomes + (result,),
         )

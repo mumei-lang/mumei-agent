@@ -416,7 +416,8 @@ def test_probe_history_records_outcomes():
     hist = hist.record(req, out)
     assert hist.attempt_count == 1
     assert hist.outcomes[0].outcome == "exited"
-    hist = hist.record(req, run_probe(req))
+    req2 = _req(attempt_number=2)
+    hist = hist.record(req2, run_probe(req2))
     assert hist.attempt_count == 2
 
 
@@ -439,14 +440,33 @@ def test_probe_history_rejects_adapter_mismatch():
         hist.record(other, run_probe(other))
 
 
-def test_probe_history_bound():
+def test_probe_history_rejects_foreign_outcome():
+    hist = AdapterProbeHistory.start(_req())
+    other = _req(argv=(sys.executable, "-c", "pass"))
+    foreign = run_probe(other)
+    with pytest.raises(ValueError, match="match request"):
+        hist.record(_req(), foreign)
+
+
+def test_probe_history_rejects_out_of_order_attempt():
+    hist = AdapterProbeHistory.start(_req())
+    req2 = _req(attempt_number=2)
+    with pytest.raises(ValueError, match="ordinal"):
+        hist.record(req2, run_probe(req2))
     req = _req()
-    hist = AdapterProbeHistory.start(req)
-    out = run_probe(req)
-    for _ in range(MAX_PROBE_HISTORY):
-        hist = hist.record(req, out)
+    hist = hist.record(req, run_probe(req))
+    with pytest.raises(ValueError, match="ordinal"):
+        hist.record(req, run_probe(req))
+
+
+def test_probe_history_bound():
+    hist = AdapterProbeHistory.start(_req())
+    for n in range(1, MAX_PROBE_HISTORY + 1):
+        req = _req(attempt_number=n)
+        hist = hist.record(req, run_probe(req))
+    req = _req(attempt_number=MAX_PROBE_HISTORY + 1)
     with pytest.raises(ValueError, match="bound"):
-        hist.record(req, out)
+        hist.record(req, run_probe(req))
 
 
 def test_probe_history_validation():
