@@ -309,6 +309,42 @@ def test_feed_stdin_stop_event_bounds_a_full_pipe():
     os.close(read_fd)
 
 
+def test_feed_stdin_writes_through_a_high_numbered_fd():
+    """select() refuses fds >= FD_SETSIZE; a host holding that many
+    descriptors must still deliver the feed (poll has no fd bound)."""
+    import types
+
+    spares = []
+    try:
+        while len(spares) < 1030:
+            spares.append(os.open(os.devnull, os.O_RDONLY))
+        read_fd, write_fd = os.pipe()
+        spares.append(read_fd)
+        if write_fd < 1024:
+            pytest.skip("host fd ceiling keeps pipe descriptors below 1024")
+        proc = types.SimpleNamespace(stdin=os.fdopen(write_fd, "wb"))
+        stop = threading.Event()
+        payload = b"x" * 8192
+        feeder = threading.Thread(
+            target=attempt_runner._feed_stdin,
+            args=(proc, payload, stop),
+            daemon=True,
+        )
+        feeder.start()
+        got = b""
+        while len(got) < len(payload):
+            chunk = os.read(read_fd, len(payload) - len(got))
+            if not chunk:
+                break
+            got += chunk
+        feeder.join(5)
+        assert not feeder.is_alive()
+        assert got == payload
+    finally:
+        for fd in spares:
+            os.close(fd)
+
+
 def test_run_results_feed_sequence_reconciliation():
     runner = AttemptRunner()
     req = request()

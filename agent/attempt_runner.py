@@ -73,6 +73,28 @@ MAX_MEMORY_BOUND_MB = 1_048_576
 MAX_FEED_BYTES = 65_536
 
 
+def _writable_poller(fd: int) -> "select.poll | None":
+    """A writability waiter with no fd-number ceiling, or None.
+
+    `select.select` refuses descriptors >= FD_SETSIZE (1024) on POSIX:
+    a long-running host holding that many descriptors (an MCP server
+    on a busy box) hands the feed pipe a high-numbered fd, every
+    select() raises ValueError, and the feed silently becomes empty.
+    `poll` has no such bound; `select` stays only as the fallback."""
+    try:
+        poller = select.poll()
+    except AttributeError:
+        return None
+    try:
+        poller.register(
+            fd,
+            select.POLLOUT | select.POLLERR | select.POLLHUP | select.POLLNVAL,
+        )
+    except (OSError, ValueError):
+        return None
+    return poller
+
+
 def _feed_stdin(
     process: subprocess.Popen, data: bytes, stop: threading.Event
 ) -> None:
@@ -91,15 +113,29 @@ def _feed_stdin(
         os.set_blocking(fd, False)
     except OSError:
         pass
+    poller = _writable_poller(fd)
     view = memoryview(data)
     offset = 0
     while offset < len(view) and not stop.is_set():
-        try:
-            _, writable, _ = select.select([], [fd], [], POLL_SECONDS)
-        except (OSError, ValueError):
-            break
-        if not writable:
-            continue
+        if poller is not None:
+            try:
+                events = poller.poll(int(POLL_SECONDS * 1000) or 1)
+            except OSError:
+                break
+            if not events:
+                continue
+            mask = events[0][1]
+            if mask & select.POLLNVAL:
+                break
+            if not mask & (select.POLLOUT | select.POLLERR | select.POLLHUP):
+                continue
+        else:
+            try:
+                _, writable, _ = select.select([], [fd], [], POLL_SECONDS)
+            except (OSError, ValueError):
+                break
+            if not writable:
+                continue
         try:
             offset += os.write(fd, view[offset:])
         except BlockingIOError:
