@@ -314,10 +314,22 @@ def test_feed_stdin_writes_through_a_high_numbered_fd():
     descriptors must still deliver the feed (poll has no fd bound)."""
     import types
 
+    try:
+        import resource
+    except ImportError:
+        resource = None
+    if resource is not None:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY and soft < 1040:
+            pytest.skip("host fd limit keeps pipe descriptors below 1024")
+
     spares = []
     try:
-        while len(spares) < 1030:
-            spares.append(os.open(os.devnull, os.O_RDONLY))
+        try:
+            while len(spares) < 1030:
+                spares.append(os.open(os.devnull, os.O_RDONLY))
+        except OSError:
+            pytest.skip("host fd limit keeps pipe descriptors below 1024")
         read_fd, write_fd = os.pipe()
         spares.append(read_fd)
         if write_fd < 1024:
