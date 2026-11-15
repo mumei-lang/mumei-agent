@@ -443,3 +443,37 @@ def publish_dispatch(
     if expected is None:
         raise ValueError("dispatch publication requires an expected sequence")
     return store.compare_and_set(expected, updated)
+
+
+def dispatch_next_attempt(
+    sequence: AttemptSequence,
+    argv: tuple[str, ...],
+    *,
+    runner: "AttemptRunner | None" = None,
+    cancel_event: "threading.Event | None" = None,
+    memory_bound_mb: int | None = None,
+    report_stamp: int | None = None,
+) -> AttemptDispatch:
+    """Reserve the next attempt and run it through the same dispatch driver.
+
+    `begin_attempt` supplies the reservation: a sequence closed by a
+    selected result fails statically, and a running or cancelling current
+    record fails because predecessors must be terminal. On a fresh
+    sequence this reserves and runs attempt one; after a terminal record
+    it is the declared retry. A stamped sequence requires a fresh
+    `report_stamp`, forwarded to `dispatch_attempt` and checked before
+    spawn. This is still not a retry policy: nothing here decides whether
+    another attempt is worthwhile, picks `argv` again, bounds the attempt
+    count or inspects the previous outcome — the host declares each next
+    attempt by calling.
+    """
+    if type(sequence) is not AttemptSequence:
+        raise ValueError("attempt dispatch requires an attempt sequence")
+    return dispatch_attempt(
+        sequence.begin_attempt(),
+        argv,
+        runner=runner,
+        cancel_event=cancel_event,
+        memory_bound_mb=memory_bound_mb,
+        report_stamp=report_stamp,
+    )

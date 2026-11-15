@@ -352,6 +352,35 @@ normalization/acceptance remains open, and C12's demand gate plus
 existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged.
 
+### C11 reserve-and-dispatch driver for the next attempt
+
+`agent.attempt_runner.dispatch_next_attempt(sequence, argv, *, runner=None,
+cancel_event=None, memory_bound_mb=None, report_stamp=None)` reserves the
+next attempt and runs it through the same declared-dispatch driver:
+`begin_attempt` supplies the reservation (a sequence closed by a selected
+result fails statically, and a running or cancelling current record fails
+because predecessors must be terminal), then `dispatch_attempt` runs it —
+on a fresh sequence this runs attempt one, after a terminal record it is
+the declared retry. A stamped sequence requires a fresh `report_stamp`,
+checked before spawn, and the returned `AttemptDispatch` carries the same
+reconciled-sequence/observed-run pair.
+
+```python
+from agent.attempt_runner import dispatch_next_attempt
+
+dispatch = dispatch_next_attempt(sequence, ("python", "-c", "..."))
+dispatch = dispatch_next_attempt(dispatch.sequence, argv)  # declared retry
+assert dispatch.sequence.current.attempt_number == 2
+```
+
+The driver adds no new authority: nothing here decides whether another
+attempt is worthwhile, re-picks `argv`, bounds the attempt count or
+inspects the previous outcome — each next attempt is declared by the host
+calling. No scheduling, ordering, result selection, output snapshot,
+publication, Evidence normalization/acceptance, external verifier,
+dependency or default audit/CLI/MCP route is added. C11 stays partial;
+Core meaning and acceptance are unchanged.
+
 ### C11 evidence-candidate handoff descriptors
 
 `AttemptSequence.evidence_candidate()` returns an `AttemptEvidenceCandidate`
