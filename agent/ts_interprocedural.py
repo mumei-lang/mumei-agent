@@ -144,6 +144,10 @@ Admitted:
   (`{a: o.f} = src`) via `_member_store`, and `for` loop
   patterns `for (const {a} of rows)` — declared names land in
   the loop scope, a bare pattern assigns.
+* Tagged templates `tag`...${x}...`` — the tag resolves like a
+  call: declared name → transfer, bound `_Callable` (name or
+  member) → inline invoke. Actuals are the dep-free cooked
+  strings array then each substitution's deps.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -172,7 +176,7 @@ declarations close the whole unit (`unsupported_unit`); classes,
 `this`, getters/setters,
 generators, `any`/composite/missing parameter
 types,
-`new` and generator/tagged-template function values stay
+`new` and generator function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -2052,6 +2056,30 @@ class _Builder:
                 locals_[name] = _merge_vals(locals_[name], ival)
         return result
 
+    def _call_actuals(
+        self, arguments, params, locals_, transfers, count, node
+    ):
+        """`f(a, b)` actuals, or `tag`...${x}...`` — a tagged
+        template calls the tag with the cooked-strings array
+        (dep-free) then each substitution's value."""
+        if arguments.type == "template_string":
+            actuals: list = [frozenset()]
+            for child in _children(arguments):
+                if child.type == "template_substitution":
+                    for inner in _children(child):
+                        actuals.append(
+                            self.expression(
+                                inner, params, locals_, transfers, count
+                            )
+                        )
+            return tuple(actuals)
+        if arguments.type != "arguments":
+            raise _Unsupported("unsupported_expression", _span(node))
+        return tuple(
+            self.expression(arg, params, locals_, transfers, count)
+            for arg in _children(arguments)
+        )
+
     def _eval(self, node, params, locals_, transfers, count):
         """Evaluate a node to its raw value: a scalar dependency set
         or a `_Composite` for object shapes."""
@@ -2331,11 +2359,8 @@ class _Builder:
                 # `o.f(x)` — the field may hold a `_Callable`
                 # (`{f: v => v}`). There is no `this` binding —
                 # a body reading `this` closes inside.
-                actual_m = tuple(
-                    self.expression(
-                        arg, params, locals_, transfers, count
-                    )
-                    for arg in _children(arguments)
+                actual_m = self._call_actuals(
+                    arguments, params, locals_, transfers, count, node
                 )
                 raw = self._member_read(
                     function, params, locals_, transfers, count
@@ -2374,11 +2399,8 @@ class _Builder:
                 raise _Unsupported(
                     "call_unresolved", _span(node), callee
                 )
-            actual = tuple(
-                self.expression(
-                    arg, params, locals_, transfers, count
-                )
-                for arg in _children(arguments)
+            actual = self._call_actuals(
+                arguments, params, locals_, transfers, count, node
             )
             if bound:
                 # A local binding shadows a same-named function

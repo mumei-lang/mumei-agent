@@ -2759,6 +2759,20 @@ dep-free, so sub-names bind nothing.
 Boundaries: the iterated right-hand side still must be a
 composite (`_Composite`) — iterating a scalar stays closed.
 
+### C06 TypeScript tagged templates (slice 20)
+
+`tag`...${x}...`` parses as a `call_expression` whose
+`arguments` is a `template_string`. `_call_actuals` builds the
+actuals: the dep-free cooked-strings array then each
+substitution's deps — after which the tag resolves exactly
+like a call (declared name → `TsCall` transfer, bound
+`_Callable` on a name or member → inline invoke).
+
+Boundaries: the tag's first formal sees a dep-free array —
+the model has no `TemplateStringsArray` shape; a tag whose
+result depends on the literal text itself is silent in the
+deps (strings are always dep-free in the model).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

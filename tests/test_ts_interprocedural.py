@@ -2487,3 +2487,43 @@ def test_for_of_bare_pattern_assigns():
         " return a; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 20: tagged templates
+
+
+def test_tagged_template_name_call():
+    s = _fn(
+        "function tag(s: number, v: number): number { return v; }"
+        "function f(x: number): number { return tag`${x}`; }",
+        name="f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "tag"
+    assert s.calls[0].arguments == (frozenset(), frozenset({0}))
+
+
+def test_tagged_template_callable_tag():
+    s = _fn(
+        "function f(x: number): number {"
+        " const tag = (s: number, v: number) => v;"
+        " return tag`${x}`; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_tagged_template_member_tag():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {tag: (s: number, v: number) => v};"
+        " return o.tag`a${x}b${x+1}`; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_tagged_template_unresolved_tag_closes():
+    s = _fn(
+        "function f(x: number): number { return tag`${x}`; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "call_unresolved"
