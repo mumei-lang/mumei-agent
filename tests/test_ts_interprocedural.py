@@ -4565,7 +4565,7 @@ def test_summary_set_to_dict_shape():
         " function f(x: number): number { return g(x); }"
     )
     d = s.to_dict()
-    assert d["profile"] == "mumei.ts-interprocedural/v1"
+    assert d["schema_version"] == "mumei.ts-interprocedural/v1"
     assert len(d["context_key"]) == 64
     (f_summary,) = [
         fn for fn in d["functions"] if fn["name"] == "f"
@@ -4592,7 +4592,7 @@ def test_cli_route_emits_json(tmp_path, capsys):
     )
     ts.main(type("A", (), {"source": str(src)})())
     out = json.loads(capsys.readouterr().out)
-    assert out["profile"] == "mumei.ts-interprocedural/v1"
+    assert out["schema_version"] == "mumei.ts-interprocedural/v1"
     assert out["functions"][0]["return_dependencies"] == [0]
 
 
@@ -6259,3 +6259,95 @@ def test_rebound_actual_keeps_inplace_writes():
         "}"
     )
     assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_manifest_round_trip_restores_the_summary_set():
+    s = ts.summarize_typescript(
+        "function f(x: number, y: number): number {"
+        "  let g = (v: number) => v + 1;"
+        "  return g(x) + y;"
+        "}"
+    )
+    restored = ts.TsSummarySet.from_dict(json.loads(json.dumps(s.to_dict())))
+    assert restored == s
+
+
+def test_manifest_restoration_rejects_a_wrong_schema():
+    s = ts.summarize_typescript(
+        "function f(x: number): number { return x; }"
+    )
+    bad = s.to_dict()
+    bad["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(bad)
+
+
+def test_manifest_restoration_rejects_unknown_and_missing_keys():
+    s = ts.summarize_typescript(
+        "function f(x: number): number { return x; }"
+    )
+    good = s.to_dict()
+    bad = dict(good, extra_key=1)
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(bad)
+    bad = dict(good)
+    del bad["context_key"]
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(bad)
+
+
+def test_manifest_restoration_rejects_a_contradictory_available_flag():
+    s = ts.summarize_typescript(
+        "function f(x: number): number { return x; }"
+    )
+    good = s.to_dict()
+    forged = dict(good)
+    forged["functions"] = [
+        dict(good["functions"][0], available=False)
+    ]
+    # `available: false` alongside a derived result claims the
+    # record has a gap it does not declare — malformed.
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(forged)
+
+
+def test_manifest_restoration_rejects_wrong_types():
+    s = ts.summarize_typescript(
+        "function f(x: number): number { return x; }"
+    )
+    good = s.to_dict()
+    bad = dict(good, context_key=123)
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(bad)
+    bad = dict(good)
+    bad["functions"] = [dict(good["functions"][0], result={"oops": 1})]
+    fn = dict(good["functions"][0])
+    fn["calls"] = [
+        {
+            "span": {"start": 0, "end": 1},
+            "callee": "g",
+            "arguments": [["x"]],
+            "result": [0],
+        }
+    ]
+    bad["functions"] = [fn]
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(bad)
+
+
+def test_context_key_covers_resolved_module_bytes():
+    mod_a = "export function g(v: number) { return v; }"
+    mod_b = "export function g(v: number) { return v + 1; }"
+    src = "import {g} from './m';\nfunction f(x: number): number { return g(x); }"
+    resolver_a = lambda spec: mod_a if spec == "./m" else None
+    resolver_b = lambda spec: mod_b if spec == "./m" else None
+    sa = ts.summarize_typescript(src, resolver=resolver_a)
+    sb = ts.summarize_typescript(src, resolver=resolver_b)
+    # Same primary file, different resolved module — the context
+    # key must differ or a stale manifest would be reused.
+    assert sa.context_key != sb.context_key
+    # An unresolvable specifier records nothing — same as no resolver.
+    resolver_none = lambda spec: None
+    sc = ts.summarize_typescript(src, resolver=resolver_none)
+    sd = ts.summarize_typescript(src)
+    assert sc.context_key == sd.context_key

@@ -641,6 +641,55 @@ _COLLECTION_METHODS = {
 }
 
 
+# Declared-manifest restoration bounds and validators — the same
+# fail-closed shape `GoSummarySet.from_dict` enforces: a manifest is
+# declared data, so unknown keys, wrong types and oversize
+# collections are malformed, never partially adopted.
+MAX_MANIFEST_MEMBERS = 8192
+
+
+def _require_manifest(condition: bool) -> None:
+    if not condition:
+        raise ValueError("declared summary manifest is malformed")
+
+
+def _manifest_record(
+    value, required: tuple[str, ...], optional: tuple[str, ...] = ()
+) -> dict:
+    if not isinstance(value, dict) or not (
+        set(required) <= set(value) <= set(required) | set(optional)
+    ):
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _string(value) -> str:
+    if type(value) is not str:
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _boolean(value) -> bool:
+    if type(value) is not bool:
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _list(value) -> list:
+    if type(value) is not list:
+        raise ValueError("declared summary manifest is malformed")
+    return value
+
+
+def _deps_from_list(value) -> frozenset[int]:
+    deps = _list(value)
+    _require_manifest(
+        len(deps) <= MAX_MANIFEST_MEMBERS
+        and all(type(d) is int and d >= 0 for d in deps)
+    )
+    return frozenset(deps)
+
+
 @dataclass(frozen=True)
 class TsSpan:
     """Source byte span (single file — no file index yet)."""
@@ -650,6 +699,16 @@ class TsSpan:
 
     def to_dict(self) -> dict:
         return {"start": self.start, "end": self.end}
+
+    @classmethod
+    def from_dict(cls, value) -> "TsSpan":
+        v = _manifest_record(value, ("start", "end"))
+        _require_manifest(
+            type(v["start"]) is int
+            and type(v["end"]) is int
+            and 0 <= v["start"] <= v["end"]
+        )
+        return cls(v["start"], v["end"])
 
 
 @dataclass(frozen=True)
@@ -665,6 +724,15 @@ class TsGap:
         if self.callee:
             out["callee"] = self.callee
         return out
+
+    @classmethod
+    def from_dict(cls, value) -> "TsGap":
+        v = _manifest_record(value, ("reason", "span"), ("callee",))
+        return cls(
+            _string(v["reason"]),
+            TsSpan.from_dict(v["span"]),
+            _string(v["callee"]) if "callee" in v else "",
+        )
 
 
 @dataclass(frozen=True)
@@ -684,6 +752,20 @@ class TsCall:
             "arguments": [sorted(a) for a in self.arguments],
             "result": sorted(self.result),
         }
+
+    @classmethod
+    def from_dict(cls, value) -> "TsCall":
+        v = _manifest_record(
+            value, ("span", "callee", "arguments", "result")
+        )
+        arguments = _list(v["arguments"])
+        _require_manifest(len(arguments) <= MAX_MANIFEST_MEMBERS)
+        return cls(
+            TsSpan.from_dict(v["span"]),
+            _string(v["callee"]),
+            tuple(_deps_from_list(a) for a in arguments),
+            _deps_from_list(v["result"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -718,6 +800,53 @@ class TsFunctionSummary:
             "effects": self.effects,
         }
 
+    @classmethod
+    def from_dict(cls, value) -> "TsFunctionSummary":
+        v = _manifest_record(
+            value,
+            (
+                "name",
+                "available",
+                "parameters",
+                "return_dependencies",
+                "calls",
+                "gaps",
+                "pinned",
+                "effects",
+            ),
+        )
+        parameters = _list(v["parameters"])
+        calls = _list(v["calls"])
+        gaps = _list(v["gaps"])
+        pinned = _list(v["pinned"])
+        _require_manifest(
+            len(parameters) <= MAX_MANIFEST_MEMBERS
+            and len(calls) <= MAX_MANIFEST_MEMBERS
+            and len(gaps) <= MAX_MANIFEST_MEMBERS
+            and len(pinned) <= MAX_MANIFEST_MEMBERS
+        )
+        deps = v["return_dependencies"]
+        restored_deps = None if deps is None else _deps_from_list(deps)
+        restored_gaps = tuple(TsGap.from_dict(g) for g in gaps)
+        available = _boolean(v["available"])
+        # A manifest may not contradict itself: `available` tracks
+        # exactly "a result was derived and no gap was recorded" —
+        # a forged flag cannot borrow trust the record lacks.
+        _require_manifest(
+            available == (restored_deps is not None)
+            and available == (not restored_gaps)
+        )
+        return cls(
+            _string(v["name"]),
+            available,
+            tuple(_string(p) for p in parameters),
+            restored_deps,
+            tuple(TsCall.from_dict(c) for c in calls),
+            restored_gaps,
+            tuple(_string(p) for p in pinned),
+            _string(v["effects"]),
+        )
+
 
 @dataclass(frozen=True)
 class TsSummarySet:
@@ -727,10 +856,30 @@ class TsSummarySet:
 
     def to_dict(self) -> dict:
         return {
-            "profile": self.profile,
+            "schema_version": self.profile,
             "context_key": self.context_key,
             "functions": [f.to_dict() for f in self.functions],
         }
+
+    @classmethod
+    def from_dict(cls, value) -> "TsSummarySet":
+        """Restore a declared manifest — strict, bounded, fail-closed.
+
+        The manifest is declared data, not trusted input: unknown or
+        missing keys, wrong types and oversize collections are all
+        malformed — the caller fails closed rather than adopting a
+        partial set."""
+        v = _manifest_record(
+            value,
+            ("schema_version", "context_key", "functions"),
+        )
+        _require_manifest(v["schema_version"] == PROFILE)
+        functions = _list(v["functions"])
+        _require_manifest(len(functions) <= MAX_MANIFEST_MEMBERS)
+        return cls(
+            _string(v["context_key"]),
+            tuple(TsFunctionSummary.from_dict(f) for f in functions),
+        )
 
 
 class _Unsupported(Exception):
@@ -1279,6 +1428,7 @@ class _Builder:
         resolver=None,
         resolving=frozenset(),
         module_cache=None,
+        module_digests=None,
     ) -> None:
         self.functions: dict[str, object] = {}
         self.classes: dict[str, object] = {}
@@ -1308,6 +1458,13 @@ class _Builder:
         self.resolving = resolving
         self.module_cache = (
             module_cache if module_cache is not None else {}
+        )
+        # sha256 of every module source the resolver returned —
+        # shared across the unit like `module_cache` so the
+        # context key covers the whole analyzed input, not just
+        # the primary file's bytes.
+        self.module_digests = (
+            module_digests if module_digests is not None else {}
         )
         # Local name -> value bound by a resolved import.
         self.imported_bindings: dict = {}
@@ -1846,6 +2003,9 @@ class _Builder:
             if isinstance(raw, str):
                 raw = raw.encode()
             if isinstance(raw, bytes) and len(raw) <= MAX_SOURCE_BYTES:
+                self.module_digests[spec] = hashlib.sha256(
+                    raw
+                ).hexdigest()
                 root = _syntax(raw)
                 if root is not None:
                     builder = _Builder(
@@ -1853,6 +2013,7 @@ class _Builder:
                         resolver=self.resolver,
                         resolving=self.resolving | {spec},
                         module_cache=self.module_cache,
+                        module_digests=self.module_digests,
                     )
         self.module_cache[spec] = builder
         return builder
@@ -7155,10 +7316,23 @@ def summarize_typescript(
             hashlib.sha256(raw).hexdigest(),
             (),
         )
-    builder = _Builder(root, resolver=resolver)
+    module_digests: dict[str, str] = {}
+    builder = _Builder(
+        root, resolver=resolver, module_digests=module_digests
+    )
+    functions = builder.summarize_all()
+    context = hashlib.sha256(raw)
+    for spec, digest in sorted(module_digests.items()):
+        # The unit's identity covers every resolved module's bytes —
+        # an imported source change must invalidate reuse, not just
+        # the primary file's.
+        context.update(spec.encode())
+        context.update(b"\x00")
+        context.update(digest.encode())
+        context.update(b"\x00")
     return TsSummarySet(
-        hashlib.sha256(raw).hexdigest(),
-        builder.summarize_all(),
+        context.hexdigest(),
+        functions,
     )
 
 
@@ -7214,7 +7388,7 @@ def main(args=None) -> None:
         print(
             json.dumps(
                 {
-                    "profile": PROFILE,
+                    "schema_version": PROFILE,
                     "error": {
                         "reason": "source_unreadable",
                         "detail": exc.strerror or str(exc),
@@ -7228,7 +7402,7 @@ def main(args=None) -> None:
         print(
             json.dumps(
                 {
-                    "profile": PROFILE,
+                    "schema_version": PROFILE,
                     "error": {
                         "reason": "source_too_large",
                         "limit_bytes": MAX_SOURCE_BYTES,
