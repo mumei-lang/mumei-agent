@@ -881,3 +881,58 @@ contract Other {
     assert s.available
     assert s.effects == "unknown"
     assert any(c.callee == "ext.f" for c in s.calls)
+
+
+def test_slice9_using_for_method_syntax():
+    s = _fn(
+        """library L {
+    function mul(uint a, uint b) internal returns (uint) {
+        return a;
+    }
+}
+contract C {
+    using L for uint;
+    function f(uint a) public returns (uint) {
+        return a.mul(2);
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice9_using_receiver_dep_flows():
+    # The receiver `a` becomes arg0 — its dep must reach the call.
+    s = _fn(
+        """library L {
+    function mul(uint a, uint b) internal returns (uint) {
+        return a;
+    }
+}
+contract C {
+    using L for uint;
+    function f(uint a, uint b) public returns (uint) {
+        return b.mul(a);
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_slice9_using_missing_member_stays_opaque():
+    s = _fn(
+        """library L {
+    function mul(uint a, uint b) internal returns (uint) {
+        return a;
+    }
+}
+contract C {
+    using L for uint;
+    function f(uint a) public returns (uint) {
+        return a.miss(2);
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "unknown"

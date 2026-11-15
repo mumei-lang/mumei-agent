@@ -196,6 +196,7 @@ class _Builder:
         self.modifiers: dict[str, object] = {}
         self._parents: dict[str, list[str]] = {}
         self._contract_names: set[str] = set()
+        self._usings: dict[str, list[str]] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -302,6 +303,28 @@ class _Builder:
                         contract, []
                     ).append(aname.text.decode())
         for member in _children(body):
+            if member.type == "using_directive":
+                alias = next(
+                    (
+                        c
+                        for c in _children(member)
+                        if c.type == "type_alias"
+                    ),
+                    None,
+                )
+                lname = next(
+                    (
+                        c
+                        for c in _children(alias or member)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if lname is not None:
+                    self._usings.setdefault(
+                        contract, []
+                    ).append(lname.text.decode())
+                continue
             if member.type == "state_variable_declaration":
                 tnode = next(
                     (
@@ -1456,6 +1479,26 @@ class _Builder:
                 targets = self._lookup_fns(
                     obase_in.text.decode(), name
                 )
+            else:
+                # `x.f(a)` under `using L for T` — the receiver
+                # becomes the library function's first arg.
+                for lib in self._usings.get(current, ()):
+                    found = self._lookup_fns(lib, name)
+                    if found:
+                        try:
+                            bdeps = self._expr(
+                                obase,
+                                locals_,
+                                param_index,
+                                summary,
+                            )
+                        except _Unsupported:
+                            bdeps = frozenset()
+                        actual.insert(0, bdeps)
+                        actual_t = tuple(actual)
+                        actual_union |= bdeps
+                        targets = found
+                        break
             ext_member = None if targets else ext_member
         else:
             targets = self._lookup_fns(

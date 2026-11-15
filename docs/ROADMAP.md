@@ -2692,6 +2692,16 @@ in-process; no audit/CLI/MCP route changes.
   contracts: `ext.f` stays `ext.f` even when another contract
   defines `f`.
 
+### C06 Solidity using-for method syntax (slice 9)
+
+- `using L for uint;` in a contract registers the library;
+  `x.f(a)` where `x` isn't a declared contract name tries each
+  registered library in order and resolves `L.f(x, a)` — the
+  receiver becomes the callee's first argument (deps flow
+  through the arg0 slot; an unresolvable receiver is dep-free).
+- A property no registered library provides stays an opaque
+  member call (`effects = "unknown"`).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
