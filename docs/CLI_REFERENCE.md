@@ -47,6 +47,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
+| `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
@@ -646,6 +647,19 @@ Check a declared evidence record's source binding against a declared source file
 | `--evidence` | `<PATH>` | yes | — | Declared verification-evidence record (mumei.verification-evidence/v1 JSON). |
 | `--source` | `<PATH>` | yes | — | Declared source file the record is checked against. |
 | `--output` | `<PATH>` | no | — | Write the identity descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent evidence-compare`
+
+Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--evidence-a` | `<PATH>` | yes | — | First declared verification-evidence record (mumei.verification-evidence/v1 JSON). |
+| `--evidence-b` | `<PATH>` | yes | — | Second declared verification-evidence record (mumei.verification-evidence/v1 JSON). |
+| `--output` | `<PATH>` | no | — | Write the comparison descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent verify-attempt`
