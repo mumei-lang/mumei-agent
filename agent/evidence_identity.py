@@ -66,7 +66,10 @@ def _read_evidence_subject(path: str) -> tuple[str, str]:
     data = _read_declared_bytes(path)
     try:
         value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # ValueError covers a malformed document and the integer-digit
+        # conversion limit; RecursionError covers pathological nesting.
+        # Both stay static errors, never a mismatch answer.
         raise ValueError("evidence document is not UTF-8 JSON") from exc
     if type(value) is not dict or value.get("schema_version") != EVIDENCE_SCHEMA:
         raise ValueError("evidence document is not mumei.verification-evidence/v1")
@@ -89,10 +92,38 @@ def _file_sha256(path: str) -> str:
     return hashlib.sha256(_read_declared_bytes(path)).hexdigest()
 
 
+def compute_identity_descriptor(evidence_path: str, source_path: str) -> dict:
+    """Compare a declared evidence record's bound source digest.
+
+    Reads the record's `subject` (strict closed key set) and the source
+    bytes under the bounded read, then returns the
+    `mumei.evidence-file-identity/v1` descriptor — `identity` is
+    `"match"` when the record's `subject.sha256` equals the current
+    source digest, `"mismatch"` otherwise. Raises `ValueError`/`OSError`
+    on any malformed or unreadable declared input; callers treat those
+    as static errors, never as a mismatch answer.
+    """
+    subject_id, subject_sha256 = _read_evidence_subject(evidence_path)
+    source_sha256 = _file_sha256(source_path)
+    return {
+        "schema_version": DESCRIPTOR_SCHEMA,
+        "evidence_schema_version": EVIDENCE_SCHEMA,
+        "subject_id": subject_id,
+        "subject_sha256": subject_sha256,
+        "source_sha256": source_sha256,
+        "identity": "match" if subject_sha256 == source_sha256 else "mismatch",
+        "checks_not_performed": [
+            "claim_truth",
+            "freshness",
+            "producer_authenticity",
+            "semantic_correspondence",
+            "artifact_semantics",
+        ],
+    }
+
+
 def main_identity(args: argparse.Namespace | None = None) -> int:
     try:
-        subject_id, subject_sha256 = _read_evidence_subject(args.evidence)
-        source_sha256 = _file_sha256(args.source)
         output_path = getattr(args, "output", None)
         if output_path is not None:
             out_path = Path(output_path)
@@ -105,21 +136,7 @@ def main_identity(args: argparse.Namespace | None = None) -> int:
                         )
                 except FileNotFoundError:
                     continue
-        descriptor = {
-            "schema_version": DESCRIPTOR_SCHEMA,
-            "evidence_schema_version": EVIDENCE_SCHEMA,
-            "subject_id": subject_id,
-            "subject_sha256": subject_sha256,
-            "source_sha256": source_sha256,
-            "identity": "match" if subject_sha256 == source_sha256 else "mismatch",
-            "checks_not_performed": [
-                "claim_truth",
-                "freshness",
-                "producer_authenticity",
-                "semantic_correspondence",
-                "artifact_semantics",
-            ],
-        }
+        descriptor = compute_identity_descriptor(args.evidence, args.source)
         text = json.dumps(descriptor, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)

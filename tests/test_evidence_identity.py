@@ -157,3 +157,26 @@ def test_cli_end_to_end(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["identity"] == "match"
+
+
+def test_deeply_nested_evidence_is_static_error_not_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    # ~30k nesting depth exceeds the json decoder's recursion limit;
+    # a RecursionError must surface as a static error, never a crash.
+    evidence = _write(tmp_path, "e.json", "[" * 30_000 + "]" * 30_000)
+    source = _write(tmp_path, "s.mm", SOURCE)
+    assert main_identity(_args(evidence, source)) == 1
+    assert "not UTF-8 JSON" in capsys.readouterr().err
+
+
+def test_integer_digit_limit_evidence_is_static_error(
+    tmp_path: Path, capsys
+) -> None:
+    # A 5000-digit integer literal hits CPython's int conversion limit
+    # (ValueError, not JSONDecodeError) — still a static error.
+    doc = '{"schema_version": "mumei.verification-evidence/v1", "pad": ' + "1" * 5000 + "}"
+    evidence = _write(tmp_path, "e.json", doc)
+    source = _write(tmp_path, "s.mm", SOURCE)
+    assert main_identity(_args(evidence, source)) == 1
+    assert "not UTF-8 JSON" in capsys.readouterr().err

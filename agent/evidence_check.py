@@ -59,7 +59,9 @@ def _read_declared(path: str) -> dict:
         raise ValueError("declared document exceeds the bounded read limit")
     try:
         value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # ValueError covers a malformed document and the integer-digit
+        # conversion limit; RecursionError covers pathological nesting.
         raise ValueError("declared document is not UTF-8 JSON") from exc
     if type(value) is not dict:
         raise ValueError("declared document must be a JSON object")
