@@ -28,20 +28,28 @@ The fragment is deliberately small:
   its deps, and the callee's own summary composes the
   result.
 * A call whose callee is unavailable or unsupported closes
-  the caller (the callee's gap is its own); state-variable
-  reads, member calls (`this.f`, `obj.f`), loops and
-  same-contract modifiers with scalar params are modelled
-  (an unresolvable or non-scalar modifier degrades to an
-  opaque call and marks effects `unknown`). Multi-return
-  tuples are position-insensitive — every slot reads the
-  union. Unnamed results, structs/arrays/mappings and
-  inherited modifiers stay closed — a gap records why.
+  the caller when its result is used (a discarded result is
+  an opaque recorded call); state-variable reads and writes
+  (`state_writes` effects propagate through calls), member
+  calls (`this.f`, `obj.f`, `using`-library dispatch),
+  inheritance hierarchies, constructors/`new C(...)`,
+  loops (`for`/`while`/`do`), `try`/`catch`, modifiers with
+  scalar params, index access on storage containers
+  (`arr[i]`/`m[k]`), `push`/`pop`/`length`, `delete`,
+  `emit`, struct literals and `f{value: x}(...)` call
+  options, named-return slots and multi-return tuples
+  (position-insensitive — every slot reads the union), free
+  functions and overloads are modelled. `assembly`,
+  `function` pointers, `var` decls and multi-file imports
+  stay closed — a gap records why.
 
 This is a conservative dependency analysis, not value
-evaluation, correctness or proof: effects are always
-`unknown` (storage, ether, events and external calls are
-not modelled). `SolSummarySet.context_key` binds the source
-hash and profile so reuse requires identical input.
+evaluation, correctness or proof. `effects` is
+`none_in_supported_fragment`, `state_writes` (storage
+mutation, propagated through calls) or `unknown` (opaque
+calls, `emit`, `selfdestruct`, unresolved modifiers).
+`SolSummarySet.context_key` binds the source hash and
+profile so reuse requires identical input.
 """
 
 from __future__ import annotations
@@ -242,9 +250,14 @@ class _Builder:
                 )
                 if fname is None:
                     continue
-                ukey = fname.text.decode()
+                base = fname.text.decode()
+                # Overloaded free functions register under
+                # unique keys (`f`, `f#2`, ...) grouped by the
+                # bare name — matching contract overloads.
+                n = len(self._free_fns.get(base, []))
+                ukey = base if n == 0 else f"{base}#{n + 1}"
                 self._free_fns.setdefault(
-                    ukey, []
+                    base, []
                 ).append(ukey)
                 self.functions[ukey] = top
                 self.contracts[ukey] = ""
@@ -526,13 +539,19 @@ class _Builder:
             for c in _children(fn_node)
             if c.type == "modifier_invocation"
         ]
+        self._writes.append(set())
+        self._decls.append(set())
         try:
-            rets = self._run_body(
-                body, locals_, param_index, summary, mods
-            )
-        except _Unsupported as exc:
-            summary.gaps.append(SolGap(exc.reason, exc.byte))
-            return summary
+            try:
+                rets = self._run_body(
+                    body, locals_, param_index, summary, mods
+                )
+            except _Unsupported as exc:
+                summary.gaps.append(SolGap(exc.reason, exc.byte))
+                return summary
+        finally:
+            self._writes.pop()
+            self._decls.pop()
         if rets is None and ret is None:
             # No `returns` clause — the function produces no
             # results; a missing `return` is fine.
@@ -917,27 +936,12 @@ class _Builder:
                 cond, None, body, locals_, param_index, summary
             )
         if t == "for_statement":
-            kids = _children(st)
-            body = kids[-1] if kids and kids[-1].type in {
-                "statement", "block_statement"
-            } else None
-            inner_parts = [
-                c
-                for c in kids[:-1]
-                if c.type
-                in {
-                    "variable_declaration_statement",
-                    "expression_statement",
-                    "expression",
-                }
-            ]
-            init = inner_parts[0] if inner_parts else None
-            cond_node = (
-                inner_parts[1] if len(inner_parts) > 1 else None
-            )
-            update = (
-                inner_parts[2] if len(inner_parts) > 2 else None
-            )
+            init = st.child_by_field_name("initial")
+            if init is not None and init.type == ";":
+                init = None
+            cond_node = st.child_by_field_name("condition")
+            update = st.child_by_field_name("update")
+            body = st.child_by_field_name("body")
             cond = None
             if cond_node is not None:
                 if cond_node.type == "expression":
@@ -1008,6 +1012,11 @@ class _Builder:
                     None,
                 )
             )
+            # An event emission is an observable side effect —
+            # beyond storage writes, keep it as unknown.
+            if summary.effects != "state_writes":
+                summary.effects = "unknown"
+                self._effects_touched = True
             return None
         if t == "unchecked":
             # Named keyword child of `unchecked { ... }` — the
@@ -1069,6 +1078,10 @@ class _Builder:
             deps = inner.get(name, frozenset())
             if deps != locals_[name] or name in touched:
                 locals_[name] = locals_[name] | deps | merged
+        if ret is not None:
+            # `while (n > 0) { return x; }` — whether the body
+            # ran at all depends on the condition.
+            ret = ret | merged
         return ret
 
     def _assign_or_call(
@@ -1076,6 +1089,13 @@ class _Builder:
     ) -> frozenset[int]:
         """Statement-position expression — `x = e`, `x op= e`,
         `x++`, or a call whose result is discarded."""
+        if (
+            expr.type == "expression"
+            and len(_children(expr)) == 1
+        ):
+            # `mystery();` wraps the call in an `expression`
+            # node — unwrap it so the void-call path applies.
+            expr = _children(expr)[0]
         if expr.type in {
             "assignment_expression",
             "augmented_assignment_expression",
@@ -1246,8 +1266,20 @@ class _Builder:
             locals_[lident.text.decode()] = deps
             if self._writes:
                 self._writes[-1].add(lident.text.decode())
-            if lident.text.decode() in self._state_vars_of(
-                getattr(self, "_current_contract", "")
+            lname = lident.text.decode()
+            shadowed = (
+                lname in param_index
+                or (
+                    self._decls
+                    and lname in self._decls[-1]
+                )
+            )
+            if (
+                not shadowed
+                and lname
+                in self._state_vars_of(
+                    getattr(self, "_current_contract", "")
+                )
             ):
                 summary.effects = "state_writes"
                 self._effects_touched = True
@@ -1271,8 +1303,20 @@ class _Builder:
                 )
             if self._writes:
                 self._writes[-1].add(tident.text.decode())
-            if tident.text.decode() in self._state_vars_of(
-                getattr(self, "_current_contract", "")
+            tname = tident.text.decode()
+            shadowed = (
+                tname in param_index
+                or (
+                    self._decls
+                    and tname in self._decls[-1]
+                )
+            )
+            if (
+                not shadowed
+                and tname
+                in self._state_vars_of(
+                    getattr(self, "_current_contract", "")
+                )
             ):
                 summary.effects = "state_writes"
                 self._effects_touched = True
@@ -1941,6 +1985,15 @@ class _Builder:
             for idx in sorted(callee.return_dependencies):
                 if idx < len(actual_t):
                     result |= actual_t[idx]
+        for callee in usable:
+            if callee.effects == "state_writes":
+                summary.effects = "state_writes"
+                self._effects_touched = True
+            elif callee.effects == "unknown" and (
+                summary.effects != "state_writes"
+            ):
+                summary.effects = "unknown"
+                self._effects_touched = True
         summary.calls.append(
             SolCall(_span(node), name, actual_t, result)
         )
