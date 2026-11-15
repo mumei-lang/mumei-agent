@@ -3471,6 +3471,16 @@ evaluates like an identifier default. `a.fill(v)` mutates
 in place — every element takes the actual union via the
 same copy-on-write rebind `push` uses.
 
+### C06 TypeScript labeled continues, catchless-throw propagation, array holes (slice 59)
+
+`outer: for (let v of a) { continue outer; }` admits — a
+labeled `for..of`/`for..in` claims its label like the other
+loop kinds. A `try` with no `catch` keeps the thrown deps
+in `thrown_deps` so an enclosing `catch` (or the function
+boundary) still sees them through a `finally`. Array
+literals count commas as positions — `[, x]` puts `x` at
+index 1 instead of 0.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

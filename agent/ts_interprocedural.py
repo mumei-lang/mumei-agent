@@ -326,6 +326,9 @@ Admitted:
   time — a scalar actual over-approximates each sub-name
   to the whole union; `a.fill(v)` may-writes its actual
   into every element.
+* Labeled `for..of` claims its label for `continue L`; a
+  catchless `try` keeps thrown deps for an enclosing
+  handler; array literals count comma holes as positions.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -2769,8 +2772,8 @@ class _Builder:
             propagated = self.thrown[0]
             self.thrown[0] = False
             catch_deps = self.thrown_deps[0]
-            self.thrown_deps[0] = frozenset()
             if catch_body is not None:
+                self.thrown_deps[0] = frozenset()
                 # The `catch` parameter binds the union of thrown
                 # deps (any throw reaching it could produce it —
                 # the sound over-approximation). A destructured
@@ -2841,6 +2844,7 @@ class _Builder:
             if body.type in {
                 "while_statement",
                 "for_statement",
+                "for_in_statement",
                 "do_statement",
                 "switch_statement",
             }:
@@ -5300,7 +5304,20 @@ class _Builder:
             afields: dict = {}
             spilled = frozenset()
             i = 0
-            for child in _children(node):
+            expecting = True
+            for child in node.children:
+                if child.type in {"[", "]"}:
+                    continue
+                if child.type == ",":
+                    # A comma while an element is expected is a
+                    # hole — `[ ,x]` puts `x` at index 1.
+                    if expecting:
+                        i += 1
+                    else:
+                        expecting = True
+                    continue
+                if not child.is_named:
+                    continue
                 if child.type == "spread_element":
                     inner = next(iter(_children(child)), None)
                     if inner is None:
@@ -5318,6 +5335,8 @@ class _Builder:
                             i += 1
                     else:
                         spilled |= _scalar_of(src)
+                        i += 1
+                    expecting = False
                     continue
                 fdeps = self._eval(
                     child, params, locals_, transfers, count
@@ -5330,6 +5349,7 @@ class _Builder:
                     fdeps = _scalar_of(fdeps)
                 afields[str(i)] = fdeps
                 i += 1
+                expecting = False
             if spilled:
                 return spilled | _scalar_of(_Composite(afields))
             return _Composite(afields)

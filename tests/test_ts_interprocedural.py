@@ -5570,3 +5570,47 @@ def test_fill_writes_actual_into_elements():
         " let a = [0]; a.fill(x); return a[0]; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_labeled_continue_admits():
+    s = _fn(
+        "function f(x: number) {"
+        " let a = [x]; let s = 0;"
+        " outer: for (let v of a) { s += v; continue outer; }"
+        " return s; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_throw_propagates_past_catchless_try():
+    s = _fn(
+        "function f(x: number) {"
+        " try { try { throw x; } finally { } }"
+        " catch (e) { return e; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_rethrow_keeps_deps_through_finally():
+    s = _fn(
+        "function f(x: number) {"
+        " try { try { throw x; } catch (e) { throw e + 1; } }"
+        " catch (e2) { return e2; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_hole_positions():
+    s = _fn(
+        "function f(x: number) {"
+        " let a = [, x, ]; return a[1]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_middle_hole_positions():
+    s = _fn(
+        "function f(x: number) {"
+        " let a = [x, , x]; return a[2]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
