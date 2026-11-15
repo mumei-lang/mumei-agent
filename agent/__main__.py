@@ -54,6 +54,7 @@ _SUBCOMMANDS = {
     "evidence-identity-check",
     "verify-attempt",
     "verify-recheck",
+    "native-attempt",
     "native-recheck",
 }
 
@@ -722,6 +723,24 @@ def main() -> None:
         native_recheck_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_recheck_main(args))
+    elif command == "native-attempt":
+        import argparse
+        from agent.native_attempt import (
+            build_attempt_parser as native_attempt_build_parser,
+            main_attempt as native_attempt_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-attempt",
+            description=(
+                "Run a declared Core native bundle production as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared Build ID."
+            ),
+        )
+        native_attempt_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_attempt_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
