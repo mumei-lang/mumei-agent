@@ -9118,8 +9118,15 @@ def test_summary_manifest_marks_imported_transfers(go_types_helper):
         target_arch="amd64",
     )
     summaries = ip.summarize_go_package(files, snapshot)
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
     entry = next(
-        f for f in summaries.to_dict()["functions"] if f["key"] == "F"
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
     )
     (call,) = entry["calls"]
     assert call["imported"] is True
@@ -9141,13 +9148,18 @@ def test_summary_manifest_file_span_carries_file_index(go_types_helper):
         "b.go": "package p\nfunc G(y int64) int64 { return y }\n",
     }
     snapshot = load_go_package_snapshot(
-        compiler_report(go_types_helper, json.dumps(files), "amd64"),
-        list(files.values()),
-        target_arch="amd64",
+        package_report(go_types_helper, files), files, target_arch="amd64"
     )
     summaries = ip.summarize_go_package(files, snapshot)
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
     entry = next(
-        f for f in summaries.to_dict()["functions"] if f["key"] == "F"
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
     )
     assert entry["calls"][0]["span"]["file"] >= 0
 
