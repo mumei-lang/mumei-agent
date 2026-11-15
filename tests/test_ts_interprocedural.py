@@ -4040,3 +4040,84 @@ def test_object_literal_computed_method_skipped():
         " return o.m; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 41: destructured catch params, using, debugger -------
+
+
+def test_catch_object_pattern_binds_thrown():
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch ({m}) { return m; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_catch_array_pattern_binds_thrown():
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch ([a]) { return a; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_catch_pattern_scoped_to_clause():
+    # The destructured binding is restored after the clause.
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch ({m}) { } return m; }"
+    )
+    assert not s.available
+    assert any(g.reason == "binding_unavailable" for g in s.gaps)
+
+
+def test_catch_pattern_nested_and_pair():
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch ({m: {n}}) { return n; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch ({a: m}) { return m; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_catch_pattern_default_and_rest():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " try { throw x; } catch ({m = y}) { return m; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch ({m, ...rest}) { return rest; }"
+        " return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_using_declaration_binds():
+    s = _fn(
+        "function g(v: number): number { return v; }"
+        " function f(x: number): number {"
+        " using r = g(x); return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_using_pattern_binds():
+    s = _fn(
+        "function g(v: number): number { return v; }"
+        " function f(x: number): number {"
+        " using {a, b} = g(x); return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_debugger_is_noop():
+    s = _fn(
+        "function f(x: number): number { debugger; return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

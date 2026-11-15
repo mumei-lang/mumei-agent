@@ -19,6 +19,10 @@ Admitted:
   identifier to a supported expression or to nothing (`let x;`
   binds `undefined` — no dependencies; an optional
   `number`/`boolean` annotation is checked when present).
+  `using r = e` / `await using` declarations bind like `const`
+  (the disposal protocol is dep-invisible; the grammar keeps an
+  assignment-shaped node with `has_error`), and `debugger;` is a
+  no-op like `;`.
 * Scalar literals (`number`, `true`, `false`), identifier reads of
   bound parameters/locals, parentheses, pure unary (`!`, `-`, `+`,
   `~`), `void` (evaluates for calls, yields no deps) and `typeof`
@@ -51,8 +55,11 @@ Admitted:
   expression for calls and unions its deps into `thrown_deps`,
   then every later statement is a may-write until a `catch`
   consumes the thrown flag; `finally` always runs — a
-  `catch (e)` binds `e` to the union of the thrown deps, the
-  sound over-approximation for whichever throw reached it), and
+  `catch (e)` binds `e` to the union of the thrown deps and a
+  destructured `catch ({m})`/`catch ([m])` binds every pattern
+  name to that union (the thrown value is scalarized — each
+  name over-approximates to it), the sound over-approximation
+  for whichever throw reached it), and
   `L: stmt` labels — a labeled loop or switch claims
   the label on its own frame, any other labeled statement gets a
   plain frame, so `break L` exits exactly the labeled statement and
@@ -1590,6 +1597,47 @@ class _Builder:
             return value.fields.get(key, frozenset())
         return value
 
+    @staticmethod
+    def _pattern_bound_names(pattern):
+        """Every identifier a destructuring pattern binds — used to
+        scope-restore `catch ({m})` parameters. Default expressions
+        (`{m = d}`) and member/subscript targets contribute no
+        names."""
+        names: list = []
+        stack = [pattern]
+        while stack:
+            n = stack.pop()
+            if n.type in {
+                "identifier",
+                "shorthand_property_identifier",
+                "shorthand_property_identifier_pattern",
+            }:
+                names.append(n.text.decode())
+            elif n.type in {
+                "assignment_pattern",
+                "object_assignment_pattern",
+            }:
+                # Only `left` binds — `right` is a default expr.
+                left = n.child_by_field_name("left")
+                if left is not None:
+                    stack.append(left)
+            elif n.type == "pair_pattern":
+                value = n.child_by_field_name("value")
+                if value is not None:
+                    stack.append(value)
+            elif n.type in {
+                "object_pattern",
+                "array_pattern",
+                "rest_pattern",
+            }:
+                stack.extend(
+                    c for c in n.children if c.is_named
+                )
+            # Anything else (member/subscript targets, stray
+            # expressions) binds no names — declare-mode
+            # destructuring rejects them anyway.
+        return names
+
     def statement(
         self,
         node,
@@ -1624,7 +1672,7 @@ class _Builder:
                         locals_[name] = prev
                 self.block_stack.pop()
             return
-        if kind == "comment" or kind == "empty_statement":
+        if kind in {"comment", "empty_statement", "debugger_statement"}:
             return
         if kind == "return_statement":
             exprs = _children(node)
@@ -1997,7 +2045,12 @@ class _Builder:
                 catch_param = handler.child_by_field_name("parameter")
                 if catch_body is None or (
                     catch_param is not None
-                    and catch_param.type != "identifier"
+                    and catch_param.type
+                    not in {
+                        "identifier",
+                        "object_pattern",
+                        "array_pattern",
+                    }
                 ):
                     raise _Unsupported(
                         "unsupported_statement", _span(handler)
@@ -2020,33 +2073,53 @@ class _Builder:
             if catch_body is not None:
                 # The `catch` parameter binds the union of thrown
                 # deps (any throw reaching it could produce it —
-                # the sound over-approximation). The clause only
-                # runs on a thrown path, so its writes are always
-                # may-writes; a rethrow inside stays flagged.
-                pname = (
-                    catch_param.text.decode()
-                    if catch_param is not None
-                    else None
-                )
+                # the sound over-approximation). A destructured
+                # `catch ({m})`/`catch ([m])` binds every pattern
+                # name to that union — the thrown value is
+                # scalarized, so each name over-approximates to it.
+                # The clause only runs on a thrown path, so its
+                # writes are always may-writes; a rethrow inside
+                # stays flagged.
                 missing = object()
-                prev = (
-                    locals_.get(pname, missing)
-                    if pname is not None
-                    else missing
+                bound_names = (
+                    ()
+                    if catch_param is None
+                    else (catch_param.text.decode(),)
+                    if catch_param.type == "identifier"
+                    else tuple(self._pattern_bound_names(catch_param))
                 )
-                if pname is not None:
-                    locals_[pname] = catch_deps
+                prev = (
+                    {n: locals_.get(n, missing) for n in bound_names}
+                    if catch_param is not None
+                    else {}
+                )
+                if catch_param is not None:
+                    if catch_param.type == "identifier":
+                        locals_[catch_param.text.decode()] = catch_deps
+                    else:
+                        self._destructure(
+                            catch_param,
+                            catch_deps,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            False,
+                            True,
+                            _span(catch_param),
+                            True,
+                        )
                 try:
                     self.statement(
                         catch_body, params, locals_, transfers, count,
                         deps, saw_return, True,
                     )
                 finally:
-                    if pname is not None:
-                        if prev is missing:
-                            locals_.pop(pname, None)
+                    for n, p in prev.items():
+                        if p is missing:
+                            locals_.pop(n, None)
                         else:
-                            locals_[pname] = prev
+                            locals_[n] = p
                 propagated = self.thrown[0]
             self.thrown[0] = False
             if fin_body is not None:
@@ -2217,6 +2290,28 @@ class _Builder:
             or (not augmented and op is not None and op.type != "=")
         ):
             raise _Unsupported("unsupported_statement", _span(node))
+        if any(
+            c.type == "using" for c in node.children if not c.is_named
+        ):
+            # `using r = e` / `using {a,b} = e` — a declaration the
+            # grammar can't parse (the assignment shape survives
+            # with has_error). The disposal protocol is
+            # dep-invisible: bind like `const`. `await using`
+            # reaches here as the await operand.
+            value = self._eval(right, params, locals_, transfers, count)
+            if left.type in {"object_pattern", "array_pattern"}:
+                self._destructure(
+                    left, value, params, locals_, transfers, count,
+                    False, conditional, _span(left), True,
+                )
+                return
+            if left.type != "identifier":
+                raise _Unsupported("unsupported_statement", _span(left))
+            self._bind_target(
+                left.text.decode(), value, False, conditional,
+                params, locals_, True, _span(left),
+            )
+            return
         value = self._eval(right, params, locals_, transfers, count)
         if left.type == "identifier":
             name = left.text.decode()

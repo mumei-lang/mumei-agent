@@ -3193,6 +3193,18 @@ lowercase tags are host elements. Computed class/literal member
 names `[k]` are skipped — uncallable but no longer fatal; the
 name expression still evaluates.
 
+### C06 TypeScript destructured catch + using (slice 41)
+
+`catch ({m})` / `catch ([m])` destructure the thrown union —
+every pattern name binds the union of thrown deps (the thrown
+value is scalarized, so each name over-approximates to it),
+scoped to the clause exactly like an identifier parameter
+(nested/pair/default/rest patterns included). `using r = e`,
+`using {a,b} = e` and `await using` bind like `const` — the
+disposal protocol is dep-invisible and the grammar's
+assignment-shaped `has_error` node is detected by its `using`
+marker. `debugger;` is a no-op like `;`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
