@@ -4170,8 +4170,11 @@ def test_imported_method_on_composite_var_receiver(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
+    vs = next(m for m in snapshot.imported_members if m.name == "VS")
     transfers = [
-        t for t in result.calls if t.imported and t.arguments == ()
+        t
+        for t in result.calls
+        if t.imported and t.arguments == () and t.target == vs.id
     ]
     assert transfers  # the `lib.VS` receiver read is on record
 
