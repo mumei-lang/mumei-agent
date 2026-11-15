@@ -2724,6 +2724,17 @@ in-process; no audit/CLI/MCP route changes.
   mark `effects = "state_writes"`. Typed local arrays stay
   closed at declaration.
 
+### C06 Solidity container builtins (slice 12)
+
+- Storage `arr.push(v)` / `arr.pop()` mutate the state slot
+  like an index write: `state_writes`, the arg deps flow into
+  the slot, `pop()` returns the slot's deps. The receiver's
+  root must be a declared state var.
+- Remaining member reads (`arr.length`, `s.f`, `m[k].f`,
+  `this.xs.n`) are opaque external reads — dep-free plus the
+  tolerant base deps — since scalar receivers cannot have
+  members in Solidity.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -1400,9 +1400,21 @@ class _Builder:
                 return locals_.get(
                     idents[1].text.decode(), frozenset()
                 )
-            raise _Unsupported(
-                "binding_unavailable", _span(node)
-            )
+            # Any other member read (`arr.length`, `s.f`,
+            # `m[k].f` ...) is an opaque external read: scalar
+            # receivers cannot have members, so the base is a
+            # non-scalar whose deps — if any — union with an
+            # empty read result.
+            obj = node.child_by_field_name("object")
+            deps = frozenset()
+            if obj is not None:
+                try:
+                    deps = self._expr(
+                        obj, locals_, param_index, summary
+                    )
+                except _Unsupported:
+                    pass
+            return deps
         if t in {
             "payable_conversion_expression",
             "type_conversion_expression",
@@ -1636,6 +1648,52 @@ class _Builder:
             )
             return actual_union
         if not targets and ext_member is not None:
+            # Storage-container builtins: `arr.push(v)`,
+            # `arr.pop()` mutate the storage slot like an index
+            # write. The receiver's root identifier must be a
+            # declared state var.
+            rb = ext_member[0]
+            while (
+                rb is not None
+                and rb.type in {"member_expression", "array_access"}
+            ):
+                rb = rb.child_by_field_name(
+                    "object"
+                ) or rb.child_by_field_name("base")
+            if (
+                rb is not None
+                and rb.type == "expression"
+                and len(_children(rb)) == 1
+            ):
+                rb = _children(rb)[0]
+            if (
+                ext_member[1] in {"push", "pop"}
+                and rb is not None
+                and rb.type == "identifier"
+                and rb.text.decode()
+                in self._all_state_vars_of(current)
+            ):
+                rname = rb.text.decode()
+                slot = locals_.setdefault(rname, frozenset())
+                slot |= actual_union
+                locals_[rname] = slot
+                if self._writes:
+                    self._writes[-1].add(rname)
+                summary.effects = "state_writes"
+                self._effects_touched = True
+                summary.calls.append(
+                    SolCall(
+                        _span(node),
+                        f"{ext_member[0].text.decode()}.{ext_member[1]}",
+                        actual_t,
+                        None if ext_member[1] == "push" else slot,
+                    )
+                )
+                return (
+                    frozenset()
+                    if ext_member[1] == "push"
+                    else slot
+                )
             # External/library member call — opaque callee whose
             # result conservatively carries the args' and the
             # receiver expression's deps. The receiver itself is

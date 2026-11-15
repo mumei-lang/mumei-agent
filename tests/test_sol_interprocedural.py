@@ -1044,3 +1044,62 @@ def test_slice11_nested_index_write():
         "f",
     )
     assert s.available and s.effects == "state_writes"
+
+
+def test_slice12_storage_length_read_dep_free():
+    s = _fn(
+        """contract C {
+    uint[] arr;
+    function f(uint a) public returns (uint) {
+        uint n = arr.length;
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice12_push_marks_state_and_flows():
+    s = _fn(
+        """contract C {
+    uint[] arr;
+    function f(uint a) public returns (uint) {
+        arr.push(a);
+        return arr[0];
+    }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_slice12_pop_returns_slot():
+    s = _fn(
+        """contract C {
+    uint[] arr;
+    function f(uint a) public returns (uint) {
+        arr.push(a);
+        uint x = arr.pop();
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice12_this_member_read_dep_free():
+    s = _fn(
+        """contract C {
+    uint[] arr;
+    function f(uint a) public returns (uint) {
+        uint n = this.arr.length;
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
