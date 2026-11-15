@@ -4,6 +4,7 @@ representation check."""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -185,3 +186,73 @@ def test_cli_dispatch(tmp_path):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["acceptance"]["accepted"] is True
+
+
+@pytest.fixture
+def real_core():
+    path = os.environ.get("MUMEI_BIN")
+    if path and Path(path).is_absolute() and Path(path).is_file():
+        return path
+    found = shutil.which("mumei")
+    if found:
+        return found
+    pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+
+
+ESTABLISHED_SOURCE = (
+    "atom id_fn(x: i64) -> i64\n"
+    "requires: true;\n"
+    "ensures: result == x;\n"
+    "body: x;\n"
+)
+
+REFUTED_SOURCE = (
+    "atom bad_fn(x: i64) -> i64\n"
+    "requires: true;\n"
+    "ensures: result == x + 1;\n"
+    "body: x;\n"
+)
+
+
+@pytest.mark.integration
+def test_real_core_produces_and_accepts_live_evidence(
+    tmp_path, capsys, real_core
+):
+    """End-to-end against the real Core: `evidence verify-source` must
+    accept our argv (solver budgets) and emit a real
+    mumei.verification-evidence/v1 record that the same binary's
+    `evidence check` then validates."""
+    source = tmp_path / "id_fn.mm"
+    source.write_text(ESTABLISHED_SOURCE)
+    code, out, err = _run(
+        capsys, _args(Path(real_core), source)
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    candidate = report["candidate"]
+    assert (
+        candidate["schema_version"]
+        == "mumei.verifier-evidence-candidate/v1"
+    )
+    # `accepted` here is only possible when the produced bytes were a
+    # real mumei.verification-evidence/v1 record the same binary's
+    # `evidence check` validated — the argv/shape compatibility a stub
+    # cannot prove.
+    assert report["evidence_check"]["outcome"] == "valid"
+    acceptance = report["acceptance"]
+    assert acceptance["accepted"] is True
+    assert acceptance["candidate_match"] is True
+
+
+@pytest.mark.integration
+def test_real_core_refuted_source_publishes_lineage_only(
+    tmp_path, capsys, real_core
+):
+    source = tmp_path / "bad_fn.mm"
+    source.write_text(REFUTED_SOURCE)
+    code, out, _ = _run(capsys, _args(Path(real_core), source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["normalized"]["exit_code"] == 1
+    assert report["sequence"].get("selected_result") is None
+    assert "acceptance" not in report
