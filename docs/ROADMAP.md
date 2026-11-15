@@ -573,6 +573,85 @@ ordering and every `checks_not_performed` entry remain unassessed
 host/Core duties. C02/C11 stay partial; existing assurance/Lean/native/
 LLVM/deferred-WASM policies are unchanged.
 
+### C02 declared evidence-check acceptance route (evidence-check-accept)
+
+`python -m agent evidence-check-accept --sequence <path> --check <path>`
+loads a stored sequence and a stored `mumei.verifier-evidence-check/v1`
+record, runs `evaluate_evidence_check` and prints the
+`mumei.evidence-check-acceptance/v1` descriptor — the consume side of
+the produce+consume pair. `accepted` holds only when the stored record
+binds the sequence's CURRENT `evidence_candidate()` AND its outcome is
+`"valid"`: a stale or foreign record always yields `accepted: false`,
+so the route cannot forge acceptance. Declared inputs are bounded,
+checked for shape before any evaluation and may not be overwritten by
+`--output`. This stays representation-level — claim truth, freshness,
+authenticity and correspondence remain unassessed duties. C02 stays
+partial.
+
+### C02 declared verify-attempt route (verify-attempt)
+
+`python -m agent verify-attempt --core <path> --source <path>` closes
+the produce+consume loop: it runs `<core> evidence verify-source <src>
+--json` as one declared attempt — the `mumei.verify-attempt-request/v1`
+fingerprint binds the Core executable's bytes, the source bytes and the
+bounded solver budgets — publishes the reconciled sequence, and only
+when a result is selected (`exited` with `exit_code == 0`, i.e.
+`EstablishedWithinProfile`) runs `record_evidence_check` +
+`evaluate_evidence_check` against the live Core, emitting
+`mumei.verify-attempt-report/v1` (sequence + normalized + candidate +
+evidence_check + acceptance). This is the first route where `accepted`
+can be `true`: the produced bytes are `mumei.verification-evidence/v1`
+— evidence-shaped, unlike the summary manifests that made the
+withdrawn `--evidence-core` wiring deterministically `accepted:false`.
+Refuted (exit 1) / inconclusive (exit 3) runs publish the terminal
+lineage with no selection; `--output` may not overwrite declared
+inputs and sources over Core's 64 KiB input bound are rejected before
+dispatch. Acceptance stays representation-level — claim truth,
+freshness, authenticity and correspondence remain unassessed duties.
+C02 stays partial.
+
+### C02 declared verify-recheck route (verify-recheck)
+
+`python -m agent verify-recheck --core <path> --evidence <path>
+--source <path>` is the freshness companion of verify-attempt: it runs
+`<core> evidence recheck-source <evidence> --source <src> --json` as
+one declared attempt — the `mumei.verify-recheck-request/v1`
+fingerprint binds the Core executable's bytes, the saved Evidence
+record's bytes, the caller-supplied source's bytes and the bounded
+solver budgets — re-running the same restricted source query against a
+SAVED record so stale, tampered or profile-drifted records surface
+without any saved label/path being read. Only an `exited` run with
+`exit_code == 0` (`Consistent`) selects the produced
+`mumei.source-evidence-recheck/v1` diagnostic. The `recheck` field
+names only unambiguous codes (`0 → consistent`, `3 → inconclusive`):
+exit 1 conflates `Refuted` with every static failure including
+`Invalid`/`InconsistentSavedEvidence` — the stale-or-tampered case —
+so it is claimed only through the lineage's `exit_code`. Mid-run input
+drift suppresses selection and any claimed outcome, reported as
+`inputs_changed`. No evidence_check runs: the recheck diagnostic is
+not verification-evidence-shaped — its exit code IS the verdict.
+C02 stays partial.
+
+### C02/C10 declared native-recheck route (native-recheck)
+
+`python -m agent native-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares a native
+consumer recheck as one attempt: `<core> native-bundle recheck-llvm
+--expected-build-id <id> --json <bundle> <source>` under a
+`mumei.native-recheck-request/v1` fingerprint binding the Core
+executable's bytes, every bundle member the consumer reads
+(`native-bundle.json`, `program.ll`, `program.o`, `proof-cert.json`,
+`program`), the source's bytes and the trusted-channel build ID. Only
+an `exited` run with `exit_code == 0` (`EquivalentWithinProfile`)
+selects the produced `mumei.native-consumer-evidence/v1` report (the
+three-record envelope: bundle identity, fresh source postcondition,
+source-to-LLVM user-body correspondence). `recheck` names only
+`0 → equivalent` and `3 → inconclusive`; exit 1 conflates
+Different/UndefinedBehavior with every static failure, and mid-run
+drift reports `inputs_changed` with no claimed outcome. No
+evidence_check: the envelope's own `acceptance` is `not_evaluated`.
+C02/C10 stay partial.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
