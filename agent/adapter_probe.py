@@ -429,6 +429,8 @@ def plan_with_probes(
         raise ValueError("invalid probe planning stamp")
     if not isinstance(rounds, int) or not 1 <= rounds <= MAX_PLAN_ROUNDS:
         raise ValueError("probe planning rounds out of bounds")
+    if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
+        raise ValueError("probe parallelism bound must be a positive int")
     if runner is None:
         runner = AttemptRunner()
     # Latest observation per adapter — the result must be

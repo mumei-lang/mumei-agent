@@ -401,7 +401,13 @@ def test_observe_probes_parallel_preserves_request_order():
         adapter_id="slow.probe",
     )
     fast = _dc.replace(
-        _req(argv=(sys.executable, "-c", "import sys; sys.exit(2)")),
+        _req(
+            argv=(
+                sys.executable,
+                "-c",
+                "import time, sys; time.sleep(0.4); sys.exit(2)",
+            )
+        ),
         adapter_id="fast.probe",
     )
     start = time.monotonic()
@@ -411,7 +417,8 @@ def test_observe_probes_parallel_preserves_request_order():
     # answers first even though it finishes last.
     assert [o.adapter_id for o in obs] == ["slow.probe", "fast.probe"]
     assert [o.availability for o in obs] == ["available", "missing"]
-    # Two ~0.4s probes serially would take ~0.9s+ including spawn.
+    # Both probes sleep 0.4s: sequential execution takes ~0.9s+
+    # including spawn, so a regression to serial order fails here.
     assert elapsed < 0.75
 
 
@@ -521,6 +528,12 @@ def test_plan_with_probes_validation():
             plan_with_probes(
                 registry, _route(), PlannerPolicy(), stamp=1,
                 rounds=bad,
+            )
+    for bad in (0, -1, 1.5, True, "2"):
+        with pytest.raises(ValueError, match="parallelism bound"):
+            plan_with_probes(
+                registry, _route(), PlannerPolicy(), stamp=1,
+                max_parallel=bad,
             )
 
 
