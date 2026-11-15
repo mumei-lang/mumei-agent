@@ -252,6 +252,28 @@ def _children(node):
     return [c for c in node.children if c.is_named]
 
 
+def _type_name(tnode):
+    """Innermost named type under reference/mut wrappers —
+    `p: &mut P` yields `P`. `None` for unnameable types."""
+    if tnode is None:
+        return None
+    if tnode.type in ("type_identifier", "primitive_type"):
+        return tnode.text.decode()
+    named = [
+        d
+        for d in _descendants(tnode)
+        if d.type in ("type_identifier", "primitive_type")
+    ]
+    return named[-1].text.decode() if named else None
+
+
+def _is_mut_ref(node):
+    """A `&mut x` argument — a slot an opaque callee may write."""
+    return node is not None and node.type == "reference_expression" and any(
+        c.type == "mutable_specifier" for c in _children(node)
+    )
+
+
 def _arg_root(node):
     """Innermost identifier under reference/member/index
     wrappers — the slot a `&mut` argument writes through."""
@@ -345,6 +367,7 @@ class _Builder:
         self.globals: set = set()
         self.mut_globals: set = set()
         self._in_progress: set = set()
+        self._type_envs: list = []
 
     # -- unit scan -------------------------------------------------
 
@@ -438,79 +461,92 @@ class _Builder:
     # -- per-function summary --------------------------------------
 
     def _summarize(self, name, fn_node) -> RustFunctionSummary:
+        # `T.m` / `T.m#n` — the impl type `self` binds to.
+        stem = name.split("#", 1)[0]
+        self_type = stem.rsplit(".", 1)[0] if "." in stem else None
         self._in_progress.add(name)
         self._writes.append(set())
         self._decls.append(set())
-        params = fn_node.child_by_field_name("parameters")
-        param_names = []
-        locals_: dict = {}
-        param_index: dict = {}
-        if params is not None:
-            idx = 0
-            for p in _children(params):
-                if p.type == "self_parameter":
-                    param_names.append("self")
-                    param_index["self"] = idx
-                    locals_["self"] = frozenset({idx})
+        types: dict = {}
+        self._type_envs.append(types)
+        try:
+            params = fn_node.child_by_field_name("parameters")
+            param_names = []
+            locals_: dict = {}
+            param_index: dict = {}
+            if params is not None:
+                idx = 0
+                for p in _children(params):
+                    if p.type == "self_parameter":
+                        param_names.append("self")
+                        param_index["self"] = idx
+                        locals_["self"] = frozenset({idx})
+                        if self_type is not None:
+                            types["self"] = self_type
+                        idx += 1
+                        continue
+                    if p.type not in ("parameter", "variadic_parameter"):
+                        continue
+                    pat = p.child_by_field_name("pattern")
+                    ptype = _type_name(p.child_by_field_name("type"))
+                    if pat is not None and pat.type == "identifier":
+                        # Any identifier param — scalar or not —
+                        # gets a dep index (over-approx: reads carry
+                        # the param's dep).
+                        pname = pat.text.decode()
+                        param_names.append(pname)
+                        param_index[pname] = idx
+                        locals_[pname] = frozenset({idx})
+                        if ptype is not None:
+                            types[pname] = ptype
+                    elif pat is not None:
+                        # Destructured `(a, b)` / `S { x }` patterns —
+                        # bind each identifier inside to the dep index.
+                        bound = [
+                            d for d in _descendants(pat)
+                            if d.type == "identifier"
+                        ]
+                        if bound:
+                            for d in bound:
+                                locals_[d.text.decode()] = frozenset(
+                                    {idx}
+                                )
+                        param_names.append(pat.text.decode())
+                    else:
+                        param_names.append("_")
+                    # Wildcards (`_`), pattern-less and unbound
+                    # patterns still consume a parameter slot —
+                    # `params` keeps a placeholder name so a dep
+                    # index stays aligned with the entry at that
+                    # position.
                     idx += 1
-                    continue
-                if p.type not in ("parameter", "variadic_parameter"):
-                    continue
-                pat = p.child_by_field_name("pattern")
-                if pat is not None and pat.type == "identifier":
-                    # Any identifier param — scalar or not —
-                    # gets a dep index (over-approx: reads carry
-                    # the param's dep).
-                    pname = pat.text.decode()
-                    param_names.append(pname)
-                    param_index[pname] = idx
-                    locals_[pname] = frozenset({idx})
-                elif pat is not None:
-                    # Destructured `(a, b)` / `S { x }` patterns —
-                    # bind each identifier inside to the dep index.
-                    bound = [
-                        d for d in _descendants(pat)
-                        if d.type == "identifier"
-                    ]
-                    if bound:
-                        for d in bound:
-                            locals_[d.text.decode()] = frozenset(
-                                {idx}
-                            )
-                    param_names.append(pat.text.decode())
-                else:
-                    param_names.append("_")
-                # Wildcards (`_`), pattern-less and unbound
-                # patterns still consume a parameter slot —
-                # `params` keeps a placeholder name so a dep
-                # index stays aligned with the entry at that
-                # position.
-                idx += 1
-        summary = RustFunctionSummary(
-            name=name, params=(), available=False,
-            return_dependencies=None,
-        )
-        body = fn_node.child_by_field_name("body")
-        ret = (
-            self._block(body, locals_, param_index, summary)
-            if body is not None
-            else None
-        )
-        self._writes.pop()
-        self._decls.pop()
-        self._in_progress.discard(name)
-        ret_mark = getattr(summary, "return_mark", None)
-        if (
-            ret is None
-            and ret_mark is None
-            and fn_node.child_by_field_name("return_type") is not None
-        ):
-            raise _Unsupported("missing_return", _span(fn_node))
-        ret = (ret or frozenset()) | (ret_mark or frozenset())
-        summary.params = tuple(param_names)
-        summary.return_dependencies = ret
-        summary.available = True
-        return summary
+            summary = RustFunctionSummary(
+                name=name, params=(), available=False,
+                return_dependencies=None,
+            )
+            body = fn_node.child_by_field_name("body")
+            ret = (
+                self._block(body, locals_, param_index, summary)
+                if body is not None
+                else None
+            )
+            ret_mark = getattr(summary, "return_mark", None)
+            if (
+                ret is None
+                and ret_mark is None
+                and fn_node.child_by_field_name("return_type") is not None
+            ):
+                raise _Unsupported("missing_return", _span(fn_node))
+            ret = (ret or frozenset()) | (ret_mark or frozenset())
+            summary.params = tuple(param_names)
+            summary.return_dependencies = ret
+            summary.available = True
+            return summary
+        finally:
+            self._type_envs.pop()
+            self._writes.pop()
+            self._decls.pop()
+            self._in_progress.discard(name)
 
     # -- statements -------------------------------------------------
 
@@ -544,12 +580,15 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_statement", _span(st)
                 )
+            ltype = _type_name(st.child_by_field_name("type"))
             for bname in bound:
                 locals_[bname] = deps
                 if self._writes:
                     self._writes[-1].add(bname)
                 if self._decls:
                     self._decls[-1].add(bname)
+                if ltype is not None and self._type_envs:
+                    self._type_envs[-1][bname] = ltype
             return None
         if t == "return_expression":
             val = next(
@@ -895,11 +934,43 @@ class _Builder:
                         pw.get(param_index[root], frozenset())
                         | deps
                     )
+                    # A write through a caller-owned reference is
+                    # observable — the manifest must not read pure.
+                    summary.effects = "state_writes"
                 if root in self.mut_globals:
                     # `static mut` writes are observable.
                     summary.effects = "unknown"
             return deps
         raise _Unsupported("unsupported_statement", _span(expr))
+
+    def _merge_mut_writes(
+        self, arglist, roots, actual_union,
+        locals_, param_index, summary,
+    ):
+        """`f(&mut x)` through an opaque callee — the pointee
+        may gain any argument's deps."""
+        if arglist is None:
+            return
+        for arg, root in zip(_children(arglist), roots):
+            if root is None or not _is_mut_ref(arg):
+                continue
+            locals_[root] = (
+                locals_.get(root, frozenset()) | actual_union
+            )
+            if self._writes:
+                self._writes[-1].add(root)
+            if root in self.mut_globals:
+                summary.effects = "unknown"
+            if root in param_index:
+                pw = getattr(summary, "param_writes", None)
+                if pw is None:
+                    pw = {}
+                    summary.param_writes = pw
+                pw[param_index[root]] = (
+                    pw.get(param_index[root], frozenset())
+                    | actual_union
+                )
+                summary.effects = "state_writes"
 
     def _call(self, node, locals_, param_index, summary, void=False):
         fn_expr = node.child_by_field_name("function")
@@ -979,14 +1050,26 @@ class _Builder:
                     fld.text.decode(), set()
                 )
                 if len(ukeys) == 1:
-                    name = next(iter(ukeys))
-                    actual.insert(0, recv_deps)
-                    actual_t = tuple(actual)
+                    cand = next(iter(ukeys))
+                    # `T.m` — resolve `x.m()` only when the
+                    # receiver's declared type is `T`; an
+                    # untyped receiver stays opaque rather than
+                    # borrowing another type's method.
+                    req = cand.split("#", 1)[0].rsplit(".", 1)[0]
                     recv_root = (
                         _arg_root(recv)
                         if recv is not None else None
                     )
-                    roots.insert(0, recv_root)
+                    recv_type = (
+                        self._type_envs[-1].get(recv_root)
+                        if recv_root is not None and self._type_envs
+                        else None
+                    )
+                    if recv_type == req:
+                        name = cand
+                        actual.insert(0, recv_deps)
+                        actual_t = tuple(actual)
+                        roots.insert(0, recv_root)
         if (
             name is None
             and fld is not None
@@ -1010,9 +1093,14 @@ class _Builder:
                     )
                 )
                 return frozenset() if void else slot
-        if name is None or name not in self.functions:
+        if (
+            name is None
+            or name not in self.functions
+            or name in locals_
+        ):
             # method calls, fn-pointers, enum constructors
-            # (`Some(x)`), external `crate::f` — opaque record.
+            # (`Some(x)`), external `crate::f`, and locals
+            # shadowing a file-level function name — opaque record.
             bound = (
                 locals_.get(name, frozenset())
                 if name is not None
@@ -1024,6 +1112,10 @@ class _Builder:
                 RustCall(_span(node), cname, actual_t,
                          None if void else result)
             )
+            self._merge_mut_writes(
+                arglist, roots, actual_union,
+                locals_, param_index, summary,
+            )
             if summary.effects != "state_writes":
                 summary.effects = "unknown"
             return frozenset() if void else result
@@ -1033,6 +1125,10 @@ class _Builder:
             summary.calls.append(
                 RustCall(_span(node), name, actual_t,
                          None if void else actual_union)
+            )
+            self._merge_mut_writes(
+                arglist, roots, actual_union,
+                locals_, param_index, summary,
             )
             if summary.effects != "state_writes":
                 summary.effects = "unknown"
@@ -1089,6 +1185,7 @@ class _Builder:
             if rname in self.mut_globals:
                 summary.effects = "unknown"
             if rname in param_index:
+                summary.effects = "state_writes"
                 # The callee wrote through a reference this
                 # function itself received — that is this
                 # function's own param write for its callers.
@@ -1204,32 +1301,7 @@ class _Builder:
                 )
             except _Unsupported:
                 return frozenset()
-        if t == "closure_expression":
-            # `|a, b| body` — the closure value's deps are the
-            # body's deps with its parameters bound to nothing;
-            # captured names carry their real deps.
-            cparams = node.child_by_field_name("parameters")
-            cbody = node.child_by_field_name("body")
-            if cbody is None:
-                return frozenset()
-            inner = dict(locals_)
-            if cparams is not None:
-                for p in _children(cparams):
-                    if p.type == "parameter":
-                        pp = p.child_by_field_name("pattern")
-                        for bname in (
-                            _pattern_bindings(pp)
-                            if pp is not None else ()
-                        ):
-                            inner[bname] = frozenset()
-                    elif p.type == "identifier":
-                        inner[p.text.decode()] = frozenset()
-            try:
-                return self._expr(
-                    cbody, inner, param_index, summary
-                )
-            except _Unsupported:
-                return frozenset()
+
         if t == "unsafe_block":
             inner = next(
                 (c for c in _children(node)
@@ -1439,6 +1511,42 @@ def _read_declared_source(path, schema):
     return raw
 
 
+def _reject_overwrite(output, declared_paths, schema):
+    """`--output` may not overwrite a declared input — writing the
+    report would destroy the bytes the report describes."""
+    import os
+    from pathlib import Path
+
+    if output is None:
+        return
+    for declared in declared_paths:
+        try:
+            same = (
+                Path(output).resolve() == Path(declared).resolve()
+            )
+        except RuntimeError:
+            same = True
+        if not same:
+            try:
+                same = os.path.samefile(output, declared)
+            except OSError:
+                same = False
+        if same:
+            _emit(
+                {
+                    "schema_version": schema,
+                    "error": {
+                        "reason": "output_overwrites_source",
+                        "detail": (
+                            "declared output path would overwrite a "
+                            "declared input"
+                        ),
+                    },
+                },
+                2,
+            )
+
+
 CHECK_PROFILE = "mumei.rust-summary-check/v1"
 
 
@@ -1609,6 +1717,13 @@ def main_accept(args=None) -> None:
             report["reason"] = "unknown_function"
         elif len(matches) > 1:
             report["reason"] = "ambiguous_function"
+        elif matches[0].name not in {
+            f.name for f in declared.functions
+        }:
+            # The strict gate accepts declared summaries only —
+            # a function absent from the manifest cannot be
+            # accepted however fresh the context.
+            report["reason"] = "undeclared_function"
         else:
             report["accepted"] = True
             report["summary"] = matches[0].to_dict()
@@ -1655,6 +1770,11 @@ def main_check(args=None) -> None:
         args = build_check_parser().parse_args()
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
+    _reject_overwrite(
+        getattr(args, "output", None),
+        (args.source, args.manifest),
+        CHECK_PROFILE,
+    )
     live = _summarize_declared(raw, CHECK_PROFILE)
     reusable, stale, missing = _reuse_partition(declared, live)
     document = json.dumps(
@@ -1691,6 +1811,11 @@ def main_reuse(args=None) -> None:
         args = build_reuse_parser().parse_args()
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
+    _reject_overwrite(
+        getattr(args, "output", None),
+        (args.source, args.manifest),
+        CHECK_PROFILE,
+    )
     live = _summarize_declared(raw, CHECK_PROFILE)
     reusable, _, _ = _reuse_partition(declared, live)
     declared_by_name = {f.name: f for f in declared.functions}
@@ -1789,34 +1914,9 @@ def main_attempt(args=None) -> None:
 
     if args is None:
         args = build_attempt_parser().parse_args()
-    if args.output is not None:
-        try:
-            same = (
-                Path(args.output).resolve() == Path(args.source).resolve()
-            )
-        except RuntimeError:
-            same = True
-        if not same:
-            try:
-                import os
-
-                same = os.path.samefile(args.output, args.source)
-            except OSError:
-                same = False
-        if same:
-            _emit(
-                {
-                    "schema_version": ATTEMPT_REPORT_PROFILE,
-                    "error": {
-                        "reason": "output_overwrites_source",
-                        "detail": (
-                            "declared output path would overwrite a "
-                            "declared source"
-                        ),
-                    },
-                },
-                2,
-            )
+    _reject_overwrite(
+        args.output, (args.source,), ATTEMPT_REPORT_PROFILE
+    )
     raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
     from agent.attempt_runner import dispatch_attempt
     from agent.verification_attempt import (

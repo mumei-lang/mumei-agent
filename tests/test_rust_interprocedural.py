@@ -905,3 +905,117 @@ def test_attempt_route_skips_candidate_when_inputs_change(
     report = json.loads(capsys.readouterr().out)
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
+
+
+def test_review2_param_write_marks_state_writes():
+    s = _fn("fn f(p: &mut u64, v: u64) { *p = v; }", "f")
+    assert s.effects == "state_writes"
+
+
+def test_review2_opaque_mut_ref_arg_gains_deps():
+    s = _fn(
+        """extern "C" { fn ext(p: &mut u64, x: u64); }
+fn f(s: u64, y: u64) -> u64 { let mut l = s; unsafe { ext(&mut l, y); } l }""",
+        "f",
+    )
+    # `l` is written through by an opaque callee — a later read
+    # must see the write's argument deps.
+    assert s.return_dependencies == frozenset({0, 1})
+
+
+def test_review2_local_shadows_file_function():
+    s = _fn(
+        """fn g(x: u64) -> u64 { x }
+fn f(y: u64) -> u64 { let g = |a: u64| a + y; g(0) }""",
+        "f",
+    )
+    # `g` is a local closure — the call may not borrow the
+    # file-level `g`'s summary.
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review2_method_requires_receiver_type():
+    s = _fn(
+        """struct P { v: u64 }
+impl P { fn get(&self) -> u64 { self.v } }
+struct Q { w: u64 }
+fn f(q: Q, y: u64) -> u64 { q.get() + y }""",
+        "f",
+    )
+    # `q: Q` may not resolve `P::get` — the call stays opaque
+    # and the receiver's dep survives.
+    assert s.return_dependencies == frozenset({0, 1})
+
+
+def test_review2_typed_method_still_resolves():
+    s = _fn(
+        """struct P { v: u64 }
+impl P { fn get(&self) -> u64 { self.v } }
+fn f(p: P) -> u64 { p.get() }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review2_failed_parse_not_recursive():
+    s = summarize_rust(
+        """fn g(x: u64) -> u64 { loop { for i in 0.. {} } }
+fn f(y: u64) -> u64 { g(y) }"""
+    )
+    fs = {x.name: x for x in s.functions}
+    assert not fs["g"].available
+    assert fs["f"].return_dependencies is None
+    assert fs["f"].effects == "unknown"
+
+
+def test_review2_accept_rejects_undeclared_function(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from agent.rust_interprocedural import summarize_rust
+
+    src = tmp_path / "s.rs"
+    src.write_text("fn f(x: u64) -> u64 { x }\nfn g(y: u64) -> u64 { y }")
+    manifest = tmp_path / "m.json"
+    live = summarize_rust(src.read_text())
+    declared = type(live)(
+        context_key=live.context_key,
+        profile=live.profile,
+        functions=[f for f in live.functions if f.name == "f"],
+    )
+    manifest.write_text(json.dumps(declared.to_dict()))
+    out = subprocess.run(
+        [
+            sys.executable, "-m", "agent", "rust-summaries-accept",
+            str(src), "--manifest", str(manifest), "--function", "g",
+        ],
+        capture_output=True, text=True,
+    )
+    report = json.loads(out.stdout)
+    assert report["context_match"] is True
+    assert report["accepted"] is False
+    assert report["reason"] == "undeclared_function"
+
+
+def test_review2_check_output_cannot_overwrite_inputs(tmp_path):
+    import subprocess
+    import sys
+
+    src = tmp_path / "s.rs"
+    src.write_text("fn f(x: u64) -> u64 { x }")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(summarize_rust(src.read_text()).to_dict())
+    )
+    for target in (src, manifest):
+        out = subprocess.run(
+            [
+                sys.executable, "-m", "agent", "rust-summaries-check",
+                str(src), "--manifest", str(manifest),
+                "--output", str(target),
+            ],
+            capture_output=True, text=True,
+        )
+        assert out.returncode == 2
+        assert "output_overwrites_source" in out.stdout
+    assert src.read_text() == "fn f(x: u64) -> u64 { x }"
