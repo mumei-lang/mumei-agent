@@ -5614,3 +5614,57 @@ def test_array_middle_hole_positions():
         " let a = [x, , x]; return a[2]; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_var_hoist_write_before_decl():
+    s = _fn(
+        "function f(x: number) { y = x; var y = 0; return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_var_hoist_read_before_decl():
+    s = _fn(
+        "function f(x: number) { return y + x; var y = 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_callable_member_write_widens_captured():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = (a) => a; g.extra = x; return g.extra; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_literal_computed_method_key():
+    s = _fn(
+        "class C { ['m'](a) { return a; } }"
+        " function f(x: number) { return new C().m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_literal_computed_field_key():
+    s = _fn(
+        "class C { ['f'] = 1; }"
+        " function f(x: number) { return new C().f + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_computed_field_seed():
+    s = _fn(
+        "class C { [k] = 1; }"
+        " function f(x: number, k: string) { return new C()[k] + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_extends_seeds_fields():
+    s = _fn(
+        "class A extends B { m() { return 1; } }"
+        " function f(x: number, B) { return new A(x).a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})

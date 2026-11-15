@@ -329,6 +329,11 @@ Admitted:
 * Labeled `for..of` claims its label for `continue L`; a
   catchless `try` keeps thrown deps for an enclosing
   handler; array literals count comma holes as positions.
+* `var` names hoist to function scope; literal computed
+  member keys resolve (`['m'](){}`), dynamic computed
+  fields seed `"*"`; `g.extra = v` widens a callable's
+  captured; an opaque `extends` seeds `"*"` with heritage
+  deps plus the call's actuals.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -836,12 +841,14 @@ class _Class:
     __slots__ = (
         "ctor", "methods", "statics", "field_inits", "captured",
         "parent", "getters", "setters", "sgetters", "ssetters",
+        "dyn_field_deps", "opaque_extends",
     )
 
     def __init__(
         self, ctor, methods, statics, field_inits, captured,
         parent=None, getters=None, setters=None,
         sgetters=None, ssetters=None,
+        dyn_field_deps=frozenset(), opaque_extends=frozenset(),
     ):
         self.ctor = ctor
         self.methods = methods
@@ -853,6 +860,14 @@ class _Class:
         self.setters = setters if setters is not None else {}
         self.sgetters = sgetters if sgetters is not None else {}
         self.ssetters = ssetters if ssetters is not None else {}
+        # Deps of fields declared with a non-literal computed
+        # name (`[k] = e`) — every instance seeds `"*"` with it
+        # so a dynamic member read sees the write.
+        self.dyn_field_deps = dyn_field_deps
+        # Deps of a non-`_Class` `extends` expression — the
+        # opaque parent ctor may write any `this` field with the
+        # subclass's actuals, so instances seed `"*"` with them.
+        self.opaque_extends = opaque_extends
 
 
 # `new Map()`/`new Set()`/weak variants yield a `_Composite`
@@ -896,6 +911,16 @@ def _scalar_of(value) -> frozenset[int]:
 _MAP_SET_KLASS = _Class(
     None, {}, {}, {}, frozenset()
 )
+
+
+def _computed_key(node):
+    """Literal key of a `computed_property_name` child —
+    `['m']`/`[0]` resolve, anything dynamic returns None."""
+    if node.type == "string":
+        return node.text.decode().strip("\"'")
+    if node.type == "number":
+        return node.text.decode()
+    return None
 
 
 def _callee_name(node):
@@ -1816,6 +1841,46 @@ class _Builder:
         for child in _children(node):
             self._register_nested_functions(child, params, locals_)
 
+    def _hoist_var_names(self, body_node):
+        """Every `var` declarator name visible anywhere inside a
+        function body — `var` hoists to the enclosing function,
+        so a use before the declarator still sees the binding.
+        Nested function/class scopes are excluded: their `var`s
+        hoist inside their own frame, never into this one."""
+        names: set = set()
+        stack = list(_children(body_node)) if body_node is not None else []
+        while stack:
+            n = stack.pop()
+            if n.type in {
+                "arrow_function",
+                "function_expression",
+                "function_declaration",
+                "generator_function_declaration",
+                "generator_function",
+                "class_declaration",
+                "abstract_class_declaration",
+                "class",
+                "method_definition",
+            }:
+                continue
+            if n.type == "variable_declaration":
+                for decl in _children(n):
+                    if decl.type != "variable_declarator":
+                        continue
+                    pname = decl.child_by_field_name("name")
+                    if pname is None:
+                        continue
+                    if pname.type == "identifier":
+                        names.add(pname.text.decode())
+                    elif pname.type in {
+                        "object_pattern",
+                        "array_pattern",
+                    }:
+                        names.update(self._pattern_bound_names(pname))
+                continue
+            stack.extend(_children(n))
+        return names
+
     def summarize_all(self) -> tuple[TsFunctionSummary, ...]:
         # Summarizing a body can register nested function
         # declarations — walk the table to a fixed point.
@@ -1977,6 +2042,12 @@ class _Builder:
         # body subtree so calls resolve wherever they appear.
         for inner_decl in body.children:
             self._register_nested_functions(inner_decl, params, locals_)
+        # `var` declarations hoist to function scope — seed the
+        # name set and an `undefined` (∅) binding so reads and
+        # writes before the declarator see the name.
+        for vname in self._hoist_var_names(body):
+            self.var_names.add(vname)
+            locals_.setdefault(vname, frozenset())
         self.frames = []
         saw_return = [False]
         saved_yields, self.yield_deps = self.yield_deps, []
@@ -3685,6 +3756,33 @@ class _Builder:
             # a composite static we don't descend.
             old.statics[path[0]] = _scalar_of(value)
             return
+        if isinstance(old, _Callable):
+            # `g.extra = v` — an own property on a function
+            # object. There are no tracked fields, so the deps
+            # widen the callable's captured set: every later
+            # `g.anything` read over-approximates to it (member
+            # reads on a callable already fall back to
+            # `captured`).
+            vdeps = _scalar_of(value)
+            widened = _Callable(
+                old.node,
+                old.params,
+                old.defaults,
+                old.captured | vdeps,
+                old.rest,
+                old.is_method,
+            )
+            widened.param_props = old.param_props
+            widened.origin = old.origin
+            widened.bound = old.bound
+            widened.patterns = old.patterns
+            for name, val in locals_.items():
+                if val is old:
+                    locals_[name] = widened
+            for name, val in self.module_locals.items():
+                if val is old:
+                    self.module_locals[name] = widened
+            return
         if not isinstance(old, _Composite):
             raise _Unsupported("unsupported_expression", _span(node))
         if has_dynamic:
@@ -4079,6 +4177,10 @@ class _Builder:
         saved_var, self.var_names = self.var_names, set()
         saved_flocals, self.function_locals = self.function_locals, inner
         saved_yields, self.yield_deps = self.yield_deps, []
+        # `var` declarations hoist to this invocation's frame.
+        for vname in self._hoist_var_names(body_node):
+            self.var_names.add(vname)
+            inner.setdefault(vname, frozenset())
         for pnode, psource in destructured_params:
             self._destructure(
                 pnode,
@@ -4212,6 +4314,7 @@ class _Builder:
         methods: dict = {}
         statics: dict = {}
         field_inits: dict = {}
+        dyn_field_deps = frozenset()
         getters: dict = {}
         setters: dict = {}
         sgetters: dict = {}
@@ -4252,9 +4355,23 @@ class _Builder:
                         )
                         _mc.patterns = cpat
                         _mc.origin = self
-                        methods[f"[computed:{member.start_byte}]"] = (
-                            _mc
+                        key_node = next(iter(_children(mname)), None)
+                        lit = (
+                            _computed_key(key_node)
+                            if key_node is not None
+                            else None
                         )
+                        if lit is not None:
+                            # `['m']() {}` — a literal computed
+                            # name keys like a named member.
+                            if "static" in markers:
+                                statics[lit] = _mc
+                            else:
+                                methods[lit] = _mc
+                        else:
+                            methods[f"[computed:{member.start_byte}]"] = (
+                                _mc
+                            )
                     except _Unsupported:
                         pass
                     continue
@@ -4335,7 +4452,51 @@ class _Builder:
                     # signature-only field, never initialized.
                     continue
                 fname = member.child_by_field_name("name")
-                if fname is None or fname.type not in {
+                if fname is None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(member)
+                    )
+                if fname.type == "computed_property_name":
+                    # `[k] = e` — the name expression evaluates
+                    # in class scope for transfers; a literal
+                    # name keys the field precisely, anything
+                    # else folds its deps into the `"*"`
+                    # may-write bucket (instance) or `captured`
+                    # (static).
+                    key_node = next(iter(_children(fname)), None)
+                    if key_node is None:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(member)
+                        )
+                    self.expression(
+                        key_node, params, locals_, [], [0]
+                    )
+                    init = member.child_by_field_name("value")
+                    lit = _computed_key(key_node)
+                    if "static" in markers:
+                        deps = (
+                            _scalar_of(
+                                self._eval(
+                                    init, params, locals_, [], [0]
+                                )
+                            )
+                            if init is not None
+                            else frozenset()
+                        )
+                        if lit is not None:
+                            statics[lit] = deps
+                        else:
+                            captured |= deps
+                    elif lit is not None:
+                        field_inits[lit] = init
+                    elif init is not None:
+                        dyn_field_deps |= _scalar_of(
+                            self._eval(
+                                init, params, locals_, [], [0]
+                            )
+                        )
+                    continue
+                if fname.type not in {
                     "property_identifier",
                     "private_property_identifier",
                 }:
@@ -4400,6 +4561,8 @@ class _Builder:
                 block_locals[cname.text.decode()] = _Class(
                     ctor, methods, statics, field_inits, captured,
                     parent, getters, setters,
+                    dyn_field_deps=dyn_field_deps,
+                    opaque_extends=heritage_deps,
                 )
             block_deps = [frozenset()]
             block_saw = [False]
@@ -4470,6 +4633,7 @@ class _Builder:
         return _Class(
             ctor, methods, statics, field_inits, all_deps, parent,
             getters, setters, sgetters, ssetters,
+            dyn_field_deps, heritage_deps,
         )
 
     def _eval_decorator(self, node, params, locals_, captured):
@@ -4667,6 +4831,16 @@ class _Builder:
                 )
                 inner["this"] = _composite_set(
                     inner["this"], [fname], deps, False, span
+                )
+            dyn_seed = cls.dyn_field_deps | cls.opaque_extends
+            if cls.opaque_extends:
+                # An opaque parent ctor may write any `this`
+                # field from the subclass's actuals (`super(x)`).
+                for a in actual:
+                    dyn_seed |= a
+            if dyn_seed:
+                inner["this"] = _composite_set(
+                    inner["this"], ["*"], dyn_seed, False, span
                 )
             if cls.ctor is not None:
                 instance = self._invoke_callable(

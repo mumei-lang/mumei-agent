@@ -3481,6 +3481,21 @@ boundary) still sees them through a `finally`. Array
 literals count commas as positions — `[, x]` puts `x` at
 index 1 instead of 0.
 
+### C06 TypeScript var hoisting, computed members, callable stores (slice 60)
+
+`var` declarator names hoist to the enclosing function —
+a read or write before the declarator sees the binding
+(undefined, ∅). Computed member names `['m'](){}`/`['f']=e`
+with a literal key register under that key; a dynamic
+computed field folds its initializer's deps into the
+instance's `"*"` may-write bucket (a static's into the
+class `captured`). A member store on a `_Callable`
+(`g.extra = v`) widens the callable's captured set — member
+reads already over-approximate to it. `extends` on a
+non-`_Class` expression seeds the instance's `"*"` with the
+heritage deps plus the call's actuals — an opaque parent
+ctor may write any `this` field.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
