@@ -178,6 +178,18 @@ Admitted:
   `delete o.f` (copy-on-write field removal propagated to aliases;
   a dynamic `delete o[k]` keeps every field — the surviving deps
   are the over-approximation).
+* `import`/`export` — `import {a, b as c}`, `import * as ns`,
+  `import d` bind each imported name to an `_External` marker:
+  reads are dep-free, member reads stay external, and a call
+  (or `new`) through one records a `TsCall` transfer yielding
+  the union of its actuals — the same opaque-callee
+  over-approximation as a declared-function result.
+  `import type` and bare `import 'm'` bind nothing. `export`
+  strips to the declaration it wraps (`export function`,
+  `export class`, `export default function` register
+  normally; `export {}`/`export const` bind nothing the
+  function model reads). Imports are top-level only — one
+  inside a body closes.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -189,8 +201,9 @@ Admitted:
   name-resolved call). Everything else — calls through a
   non-callable field, unresolved names — stays closed.
 
-Closed with declared gaps: `import`/`export` and ambient/`declare`
-declarations close the whole unit (`unsupported_unit`);
+Closed with declared gaps: ambient/`declare`
+declarations and other unknown top-level nodes close the
+whole unit (`unsupported_unit`);
 `extends` on a non-class value, getters/setters,
 generators, `any`/composite/missing parameter
 types, `eval`, `with`, `new` on a non-class/non-function
@@ -228,7 +241,14 @@ _UNARY_OPS = {"!", "-", "+", "~"}
 _AUGMENTED_OPS = {op + "=" for op in _BINARY_OPS if op not in {"==", "===", "!=", "!==", "<", "<=", ">", ">="}}
 
 # Top-level children that keep the unit a fragment unit.
-_TOP_LEVEL = {"function_declaration", "class_declaration", "comment"}
+_TOP_LEVEL = {
+    "function_declaration",
+    "class_declaration",
+    "comment",
+    "import_statement",
+    "export_statement",
+    "empty_statement",
+}
 
 
 @dataclass(frozen=True)
@@ -342,6 +362,15 @@ class _Callable:
         self.is_method = is_method
 
 
+class _External:
+    """An imported name: the callee/ctor lives outside the unit.
+    A call through it records a `TsCall` transfer and yields the
+    union of its actuals (the opaque-callee over-approximation);
+    any member read stays external (a namespace import)."""
+
+    __slots__ = ()
+
+
 class _Class:
     """A class value: `ctor` (`_Callable` or None), `methods` /
     `statics` (name -> `_Callable` for methods, scalar deps for
@@ -381,6 +410,8 @@ def _scalar_of(value) -> frozenset[int]:
         return value.captured
     if isinstance(value, _Class):
         return value.captured
+    if isinstance(value, _External):
+        return frozenset()
     return value
 
 
@@ -483,10 +514,11 @@ class _Builder:
         self.functions: dict[str, object] = {}
         self.classes: dict[str, object] = {}
         self._class_cache: dict[str, object] = {}
-        # A unit is closed when any top-level node is not a function
-        # declaration or comment — imports/exports, ambient declares,
-        # classes, namespaces and top-level statements all qualify.
+        # A unit is closed when any top-level node is not an
+        # admitted kind — ambient declares, namespaces and
+        # top-level statements all qualify.
         self.unit_gap: TsGap | None = None
+        self.imports: set[str] = set()
         for child in root.named_children:
             if child.type in _TOP_LEVEL:
                 if child.type == "function_declaration":
@@ -497,22 +529,28 @@ class _Builder:
                     name = child.child_by_field_name("name")
                     if name is not None:
                         self.classes[name.text.decode()] = child
-            else:
-                # `export function f` wraps the declaration — register
-                # the name so the summary exists to carry the gap.
+                if child.type == "import_statement":
+                    self._register_import(child)
                 if child.type == "export_statement":
-                    inner = next(
-                        (
-                            c
-                            for c in child.named_children
-                            if c.type == "function_declaration"
-                        ),
-                        None,
-                    )
-                    if inner is not None:
-                        name = inner.child_by_field_name("name")
-                        if name is not None:
-                            self.functions[name.text.decode()] = inner
+                    # `export` wraps a declaration — strip the
+                    # marker and register what it declares; a
+                    # `export {}`/`export default`/`export *` or
+                    # a value declaration binds nothing the
+                    # function model reads.
+                    for inner in child.named_children:
+                        if inner.type == "function_declaration":
+                            name = inner.child_by_field_name("name")
+                            if name is not None:
+                                self.functions[
+                                    name.text.decode()
+                                ] = inner
+                        if inner.type == "class_declaration":
+                            name = inner.child_by_field_name("name")
+                            if name is not None:
+                                self.classes[
+                                    name.text.decode()
+                                ] = inner
+            else:
                 if self.unit_gap is None:
                     self.unit_gap = TsGap("unsupported_unit", _span(child))
         self.frames: list[dict[str, bool]] = []
@@ -528,6 +566,52 @@ class _Builder:
         # Labels the next loop/switch frame claims — a `break L` or
         # `continue L` looks its frame up by name.
         self.pending_labels: list[str] = []
+
+    def _register_import(self, node) -> None:
+        """`import {a, b as c} from 'm'` / `import * as ns` /
+        `import d` — each bound name is registered as an
+        `_External` in `self.imports`: reading it yields a
+        dep-free marker, a call through it records a transfer
+        and yields the actuals' union. `import type` binds
+        nothing (type-level only) and a bare `import 'm'`
+        registers no names."""
+        clause = next(
+            (c for c in node.children if c.type == "import_clause"),
+            None,
+        )
+        if clause is None:
+            return
+        # `import type {T}` — an anonymous `type` child marks a
+        # type-only import; nothing it names is a runtime value.
+        if any(
+            c.type == "type" and not c.is_named for c in node.children
+        ):
+            return
+        for child in _children(clause):
+            if child.type == "named_imports":
+                for spec in _children(child):
+                    if spec.type != "import_specifier":
+                        continue
+                    if any(
+                        c.type == "type" and not c.is_named
+                        for c in spec.children
+                    ):
+                        continue
+                    alias = spec.child_by_field_name("alias")
+                    iname = (
+                        alias
+                        if alias is not None
+                        else spec.child_by_field_name("name")
+                    )
+                    if iname is not None:
+                        self.imports.add(iname.text.decode())
+            elif child.type == "namespace_import":
+                iname = next(iter(_children(child)), None)
+                if iname is not None:
+                    self.imports.add(iname.text.decode())
+            elif child.type == "identifier":
+                # Default import — the clause's bare name.
+                self.imports.add(child.text.decode())
 
     def _register_nested_functions(self, node) -> None:
         """Register every `function inner() {}` declaration under
@@ -1823,6 +1907,8 @@ class _Builder:
             not in {"identifier", "class", "class_declaration"}
         ):
             return _scalar_of(value)
+        if isinstance(value, _External) and node.type != "identifier":
+            return _scalar_of(value)
         return value
 
     def _lookup(self, name, params, locals_, span):
@@ -1840,6 +1926,8 @@ class _Builder:
                     self.classes[name], params, locals_
                 )
             return self._class_cache[name]
+        if name in self.imports:
+            return _External()
         raise _Unsupported("binding_unavailable", span)
 
     def _read_name(self, node, params, locals_, span) -> frozenset[int]:
@@ -1929,6 +2017,10 @@ class _Builder:
         else:
             val = self._lookup(base, params, locals_, _span(node))
         for idx, key in enumerate(path):
+            if isinstance(val, _External):
+                # Any member of an imported name stays external
+                # (`ns.f`, `ns.a.b`) — the callee lives outside.
+                return val
             if isinstance(val, _Class):
                 # `C.sm` / `C.sf` — statics and methods on the
                 # class object itself.
@@ -2742,6 +2834,22 @@ class _Builder:
                     )
                 )
                 return result_n
+            if isinstance(raw_n, _External):
+                # `new` on an imported ctor — the instance shape
+                # is unknown; the value conservatively carries
+                # every actual's deps.
+                result_n = frozenset()
+                for a in actual_n:
+                    result_n |= a
+                transfers.append(
+                    TsCall(
+                        _span(node),
+                        "new " + ctor_node.text.decode(),
+                        actual_n,
+                        result_n,
+                    )
+                )
+                return result_n
             if isinstance(raw_n, _Callable) and raw_n.is_method:
                 # `new f()` on a `function` value — `this` is a
                 # fresh composite; the instance is the value.
@@ -2786,6 +2894,19 @@ class _Builder:
                 raw = self._member_read(
                     function, params, locals_, transfers, count
                 )
+                if isinstance(raw, _External):
+                    result_m = frozenset()
+                    for a in actual_m:
+                        result_m |= a
+                    transfers.append(
+                        TsCall(
+                            _span(node),
+                            function.text.decode(),
+                            actual_m,
+                            result_m,
+                        )
+                    )
+                    return result_m
                 if not isinstance(raw, _Callable):
                     raise _Unsupported(
                         "unsupported_expression", _span(node)
@@ -2876,6 +2997,7 @@ class _Builder:
                 callee in locals_
                 or callee in self.function_locals
                 or callee in params
+                or callee in self.imports
             )
             if not bound and callee not in self.functions:
                 raise _Unsupported(
@@ -2890,6 +3012,16 @@ class _Builder:
                 raw = self._lookup(
                     callee, params, locals_, _span(function)
                 )
+                if isinstance(raw, _External):
+                    result_i = frozenset()
+                    for a in actual:
+                        result_i |= a
+                    transfers.append(
+                        TsCall(
+                            _span(node), callee, actual, result_i
+                        )
+                    )
+                    return result_i
                 if not isinstance(raw, _Callable):
                     raise _Unsupported(
                         "unsupported_expression", _span(node)

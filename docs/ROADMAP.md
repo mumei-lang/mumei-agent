@@ -2841,6 +2841,35 @@ static method (the model binds `this` only on instance
 paths), and `extends` of a member/computed expression that
 isn't a bound class name or literal close.
 
+### C06 TypeScript `import`/`export` (slice 23)
+
+`import` binds names to an `_External` marker, not a shape:
+`import {a, b as c}`, `import * as ns` and `import d`
+register each bound name in `self.imports`, consulted last
+in `_lookup`. Reads are dep-free; member reads stay
+external (a namespace has no enumerable fields); a call or
+`new` through one records a `TsCall` transfer and yields
+the union of its actuals — the same opaque-callee
+over-approximation the declared-function call already
+uses, since the imported body's deps simply aren't in this
+unit. `import type` and bare `import 'm'` bind nothing.
+
+`export` strips to what it declares: `export function`,
+`export class` and `export default function` register in
+the same tables as unmarked declarations; `export {}`,
+`export const` and `export *` admit without bindings —
+module-scope values were never visible to the function
+summaries anyway. Top-level `import_statement`,
+`export_statement` and `empty_statement` join
+`_TOP_LEVEL`; an `import` inside a body stays closed.
+
+Boundaries: cross-module resolution is out of scope for
+the single-unit model — the transfer callee is the source
+text (`ns.g`, `new C`), and aliasing an imported name
+through anything but a plain identifier collapses it to a
+dep-free scalar (calls on that scalar close as before).
+`export =` / `export * as ns` admit but bind nothing.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

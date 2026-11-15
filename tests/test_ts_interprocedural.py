@@ -869,21 +869,19 @@ def test_non_scalar_local_annotation_closes():
 # --- unit closures -----------------------------------------------------------
 
 
-def test_import_closes_unit():
+def test_import_admits_unit():
     src = (
         'import { z } from "./m";\n'
         "function f(x: number): number { return x; }"
     )
     s = _fn(src)
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_unit"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_export_closes_unit():
+def test_export_admits_unit():
     src = "export function f(x: number): number { return x; }"
     s = _fn(src)
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_unit"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_declare_closes_unit():
@@ -1036,13 +1034,13 @@ def test_parameters_order_preserved():
     assert s.return_dependencies == frozenset({2})
 
 
-def test_exported_function_keeps_summary_with_gap():
+def test_exported_function_summary_available():
     summaries = _summarize(
         "export function f(x: number): number { return x; }"
     ).functions
     (s,) = summaries
-    assert s.name == "f" and not s.available
-    assert s.gaps[0].reason == "unsupported_unit"
+    assert s.name == "f" and s.available
+    assert s.return_dependencies == frozenset({0})
 
 
 def test_statement_after_break_is_conditional():
@@ -2692,4 +2690,95 @@ def test_super_outside_ctor_closes():
     )
     # `super(args)` is only valid in a ctor — but the model lets
     # the parent-ctor resolution decide: no ctor anywhere closes.
+    assert not s.available
+
+
+# --- slice 23: import / export
+
+
+def test_named_import_call():
+    s = _fn(
+        "import {g} from './m';\n"
+        "function f(x: number): number { return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "g"
+
+
+def test_import_alias():
+    s = _fn(
+        "import {g as h} from './m';\n"
+        "function f(x: number): number { return h(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_namespace_import_member_call():
+    s = _fn(
+        "import * as ns from './m';\n"
+        "function f(x: number): number { return ns.g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_default_import_call():
+    s = _fn(
+        "import d from './m';\n"
+        "function f(x: number): number { return d(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_side_effect_import_admits():
+    s = _fn(
+        "import './m';\n"
+        "function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_import_type_binds_nothing():
+    s = _fn(
+        "import type {T} from './m';\n"
+        "function f(x: number): number { return T; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_export_function_declared():
+    s = _fn(
+        "export function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_default_function():
+    s = _fn(
+        "export default function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_class():
+    s = _fn(
+        "export class C { m(v: number): number { return v; } }\n"
+        "function f(x: number): number { const c = new C(x); return c.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_new_on_import():
+    s = _fn(
+        "import {C} from './m';\n"
+        "function f(x: number): number { const c = new C(x); return 0; }"
+    )
+    assert s.available
+    assert s.calls and s.calls[0].callee == "new C"
+
+
+def test_body_import_closes():
+    s = _fn(
+        "function f(x: number): number { import {g} from './m'; return x; }"
+    )
     assert not s.available
