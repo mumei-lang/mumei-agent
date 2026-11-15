@@ -3288,6 +3288,23 @@ up the chain, since the key may name an accessor. `C[k] = v`
 applies the same may-write to the statics table and static
 setters.
 
+### C06 TypeScript ambient, abstract and top-level items (slice 48)
+
+Three closes lift at once. `declare`/ambient declarations skip
+like `interface`/`type` — they produce no runtime bindings, so
+a name they claim stays unbound and any actual use still
+closes at the use site (`call_unresolved`). `abstract class`
+registers like a normal class (it IS a real base-class value);
+`abstract`/`declare` members, method signatures and index
+signatures are bodyless and skip — the member simply never
+registers. And non-declaration top-level statements
+(`console.log(x)`, `init()`, module-scope `if`/`for`) now
+evaluate in pass 2 in source order alongside the declarators —
+they run once at import, so their calls and writes reach
+`module_locals`; an item the model can't express still closes
+the unit. `o!.a = v` admits too — `non_null_expression`
+unwraps in the member-target walk.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

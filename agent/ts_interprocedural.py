@@ -303,9 +303,11 @@ Admitted:
   which record a `TsCall` and yield `base ∪ actuals` like an
   `_External` callee. Member stores on a computed base still
   close (no binding to rebind). Regex literals are dep-free.
-* Type-only declarations — `interface I {...}` and `type T =
-  {...}` at top level are skipped wholesale (they evaluate to
-  nothing); `declare`/ambient declarations still close. `enum
+* Type-only and ambient declarations — `interface I {...}`,
+  `type T = {...}` and `declare ...`/`ambient_declaration` at
+  top level are skipped wholesale (they evaluate to nothing —
+  an ambient name simply never binds, so a use of it still
+  closes at the use site). `enum
   E { A, B = expr }` (and `const enum`, `export enum`) binds a
   `_Composite` in module scope: bare members are dep-free and an
   initializer contributes its own deps — an initializer may
@@ -353,9 +355,13 @@ Admitted:
   (`this` is the instance) and records a `TsCall`; `o.p = v`
   invokes the setter with the written deps as its actual, unless
   the instance carries an own data field `p` (a field shadows
-  the accessor). Static accessors and object-literal
-  `{get p(){}}` still close — the latter would bind `this` to
-  the literal.
+  the accessor). Static accessors admit the same through the
+  statics table, and object-literal `{get p(){}}`/`{set p(v){}}`
+  collect into a synthetic class's accessor tables — `this`
+  binds to the literal. `abstract`/`declare` members are
+  bodyless signatures and skip (the member simply never
+  registers); `abstract class` registers like a normal class,
+  and an index signature member skips.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -372,13 +378,13 @@ Admitted:
   name-resolved call). Everything else — calls through a
   non-callable field, unresolved names — stays closed.
 
-Closed with declared gaps: ambient/`declare`
-declarations, non-declaration top-level statements and a
-module-scope declarator the model can't evaluate close the
-whole unit (`unsupported_unit`);
-`extends` on a non-class value, static/object-literal
-accessors, `any`/composite/missing parameter
-types, `eval`, `with`, and `new` on a non-class/non-function
+Closed with declared gaps: a module-scope item the model
+can't evaluate closes the whole unit (`unsupported_unit`) —
+top-level statements (`console.log(x)`, `init()`,
+module-scope `if`/`for`) evaluate in source order in pass 2,
+so an unmodelled one still closes;
+`extends` on a non-class value,
+`eval`, `with`, and `new` on a non-class/non-function
 ctor stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
@@ -418,6 +424,7 @@ _AUGMENTED_OPS = {op + "=" for op in _BINARY_OPS if op not in {"==", "===", "!="
 _TOP_LEVEL = {
     "function_declaration",
     "class_declaration",
+    "abstract_class_declaration",
     "comment",
     "import_statement",
     "export_statement",
@@ -427,10 +434,13 @@ _TOP_LEVEL = {
     "generator_function_declaration",
     # Type-only declarations (`interface I {...}`, `type T =
     # {...}`) evaluate to nothing — they're skipped wholesale
-    # rather than closing the unit. `declare`/ambient forms stay
-    # closed (they'd claim runtime bindings with no body).
+    # rather than closing the unit. `declare`/ambient forms are
+    # skipped the same way: they produce no runtime bindings, so
+    # names they claim stay unbound and any actual use still
+    # closes at the use site.
     "interface_declaration",
     "type_alias_declaration",
+    "ambient_declaration",
     "enum_declaration",
     "internal_module",
     # A bodyless `function g(v: T): R;` overload signature — the
@@ -885,7 +895,10 @@ class _Builder:
         # evaluated in source order in pass 2, read by `_lookup`
         # after params and before the class/import registries.
         self.module_locals: dict = {}
-        declarators: list = []
+        # Declarations AND plain statements, in source order —
+        # both evaluate in module scope during pass 2 (a
+        # statement that can't be modelled closes the unit).
+        module_items: list = []
         for child in root.named_children:
             if child.type in _TOP_LEVEL:
                 if child.type in {
@@ -895,7 +908,10 @@ class _Builder:
                     name = child.child_by_field_name("name")
                     if name is not None:
                         self.functions[name.text.decode()] = child
-                if child.type == "class_declaration":
+                if child.type in {
+                    "class_declaration",
+                    "abstract_class_declaration",
+                }:
                     name = child.child_by_field_name("name")
                     if name is not None:
                         self.classes[name.text.decode()] = child
@@ -916,7 +932,10 @@ class _Builder:
                                 self.functions[
                                     name.text.decode()
                                 ] = inner
-                        if inner.type == "class_declaration":
+                        if inner.type in {
+                            "class_declaration",
+                            "abstract_class_declaration",
+                        }:
                             name = inner.child_by_field_name("name")
                             if name is not None:
                                 self.classes[
@@ -928,17 +947,21 @@ class _Builder:
                             "enum_declaration",
                             "internal_module",
                         }:
-                            declarators.append(inner)
+                            module_items.append(inner)
                 if child.type in {
                     "lexical_declaration",
                     "variable_declaration",
                     "enum_declaration",
                     "internal_module",
                 }:
-                    declarators.append(child)
+                    module_items.append(child)
             else:
-                if self.unit_gap is None:
-                    self.unit_gap = TsGap("unsupported_unit", _span(child))
+                # A top-level statement (`console.log(x)`,
+                # `init()`, a module-scope `if`/`for`/...) runs
+                # once at import — evaluate it in pass 2 in
+                # source order; a statement the model can't
+                # express still closes the unit.
+                module_items.append(child)
         self.frames: list[dict[str, bool]] = []
         # Function-level scope for `var` bindings, set per body; plus
         # the let/const block-scope save stack and the var-name set.
@@ -958,16 +981,16 @@ class _Builder:
         # `yield` operand deps collected for the innermost
         # generator body/callable invocation being evaluated.
         self.yield_deps: list[frozenset[int]] = []
-        # Pass 2 — evaluate module-scope declarators in source
+        # Pass 2 — evaluate module-scope items in source
         # order now that every function/class name is registered
         # (a `const g = f()` may call a declaration hoisted past
         # its site). `var` writes land in `module_locals` by
-        # pointing `function_locals` at it for the pass. A
-        # declarator that can't be modelled closes the unit.
+        # pointing `function_locals` at it for the pass. An
+        # item that can't be modelled closes the unit.
         saved_flocals = self.function_locals
         self.function_locals = self.module_locals
         mcount = [0]
-        for node in declarators:
+        for node in module_items:
             try:
                 if node.type == "enum_declaration":
                     self._register_enum(node)
@@ -1804,7 +1827,10 @@ class _Builder:
                     locals_,
                 )
             return
-        if kind == "class_declaration":
+        if kind in {
+            "class_declaration",
+            "abstract_class_declaration",
+        }:
             # `class C { ... }` in a body — binds a `_Class` (no
             # hoisting: declaration order applies).
             name_node = node.child_by_field_name("name")
@@ -2655,8 +2681,12 @@ class _Builder:
             "member_expression",
             "subscript_expression",
             "parenthesized_expression",
+            "non_null_expression",
         }:
-            if cur.type == "parenthesized_expression":
+            if cur.type in {
+                "parenthesized_expression",
+                "non_null_expression",
+            }:
                 inner = next(iter(_children(cur)), None)
                 if inner is None:
                     raise _Unsupported(
@@ -3335,10 +3365,8 @@ class _Builder:
                         )
                     parent = pval
                 continue
-            if not child.is_named and child.type in {
-                "abstract",
-                "declare",
-            }:
+            if not child.is_named and child.type == "declare":
+                # `declare class` — ambient, no runtime binding.
                 raise _Unsupported("unsupported_expression", _span(child))
             if child.type == "decorator":
                 decorators.extend(_children(child))
@@ -3364,9 +3392,10 @@ class _Builder:
                     c.type for c in member.children if not c.is_named
                 }
                 if markers & {"abstract", "declare"}:
-                    raise _Unsupported(
-                        "unsupported_expression", _span(member)
-                    )
+                    # `abstract m(): T` / `declare m()` — a
+                    # bodyless signature; skipping is safe since
+                    # the member simply never registers.
+                    continue
                 mname = member.child_by_field_name("name")
                 if mname is not None and (
                     mname.type == "computed_property_name"
@@ -3464,9 +3493,9 @@ class _Builder:
                     c.type for c in member.children if not c.is_named
                 }
                 if markers & {"abstract", "declare"}:
-                    raise _Unsupported(
-                        "unsupported_expression", _span(member)
-                    )
+                    # `declare f: T` / `abstract f: T` —
+                    # signature-only field, never initialized.
+                    continue
                 fname = member.child_by_field_name("name")
                 if fname is None or fname.type not in {
                     "property_identifier",
@@ -3500,7 +3529,17 @@ class _Builder:
                 # like a class decorator once `captured` exists.
                 decorators.extend(_children(member))
                 continue
-            # index signatures, ambient members.
+            if member.type in {
+                "abstract_method_signature",
+                "method_signature",
+                "abstract_public_field_definition",
+                "index_signature",
+            }:
+                # Bodyless signatures — abstract members and
+                # index signatures declare shape only; skipping
+                # them is safe because a call through a member
+                # that never registered simply misses the table.
+                continue
             raise _Unsupported("unsupported_expression", _span(member))
         for dec_expr in decorators:
             self._eval_decorator(
@@ -4415,7 +4454,11 @@ class _Builder:
                 locals_,
                 is_method=kind != "arrow_function",
             )
-        if kind in {"class", "class_declaration"}:
+        if kind in {
+            "class",
+            "class_declaration",
+            "abstract_class_declaration",
+        }:
             return self._class_value(node, params, locals_)
         if kind == "new_expression":
             # `new C(args)` — the callee resolves to a `_Class`

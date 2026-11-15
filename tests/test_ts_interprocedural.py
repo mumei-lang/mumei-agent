@@ -963,14 +963,26 @@ def test_export_admits_unit():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_declare_closes_unit():
+def test_declare_skips_ambient():
+    # `declare` produces no runtime binding — the unit stays
+    # open; any actual use of the name still closes at the
+    # use site.
     src = (
         "declare function d(x: number): number;\n"
         "function f(x: number): number { return x; }"
     )
     s = _fn(src)
+    assert s.available
+
+
+def test_declared_name_use_closes():
+    src = (
+        "declare function d(x: number): number;\n"
+        "function f(x: number): number { return d(x); }"
+    )
+    s = _fn(src)
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_unit"
+    assert s.gaps[0].reason == "call_unresolved"
 
 
 def test_top_level_class_admits_unit():
@@ -3489,13 +3501,12 @@ def test_export_and_const_enum():
     assert s.available and s.return_dependencies == frozenset()
 
 
-def test_declare_still_closes():
+def test_declare_still_skips():
     s = _fn(
         "declare function g(): void;"
         " function f(x: number): number { return x; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_unit"
+    assert s.available
 
 
 # --- slice 33: class getters/setters ----------------------------------------
@@ -4456,5 +4467,82 @@ def test_dynamic_member_write_class_static():
         "class C { static s: number = 0; }"
         " function f(x: number): number {"
         " const k = \"s\"; C[k] = x; return C.s; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 48: ambient/abstract/top-level statements ------------
+
+
+def test_top_level_expression_statement_admits():
+    # `console.log(1)` at module scope runs at import — the
+    # unit stays open.
+    s = _fn(
+        "console.log(1);"
+        " function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_top_level_effect_reaches_module_locals():
+    s = _fn(
+        "const o = {a: 0}; o.a = 1;"
+        " function f(x: number): number { return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_top_level_unbound_call_still_closes_unit():
+    s = _fn(
+        "run_side_effect();"
+        " function f(x: number): number { return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_unit"
+
+
+def test_abstract_class_and_members_admit():
+    # An abstract class registers like a normal one; abstract
+    # members are signatures and skip.
+    s = _fn(
+        "abstract class A { abstract m(): number; }"
+        " class B extends A { m(): number { return 1; } }"
+        " function f(x: number): number {"
+        " const b = new B(); return b.m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_abstract_ctor_param_props():
+    s = _fn(
+        "abstract class A { constructor(private v: number) {} }"
+        " class B extends A {}"
+        " function f(x: number): number {"
+        " const b = new B(x); return b.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_declare_module_skips():
+    s = _fn(
+        "declare module \"m\" {}"
+        " function f(x: number): number { return x; }"
+    )
+    assert s.available
+
+
+def test_index_signature_member_skips():
+    s = _fn(
+        "class C { [k: string]: number; a: number = 0; }"
+        " function f(x: number): number {"
+        " const c = new C(); return c.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_non_null_base_write_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: 0}; o!.a = x; return o.a; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
