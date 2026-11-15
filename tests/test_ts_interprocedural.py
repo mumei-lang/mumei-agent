@@ -2252,3 +2252,62 @@ def test_for_await_of_iterates():
         " return x; }"
     )
     assert s.available
+
+
+# --- slice 16: shorthand method definitions
+
+
+def test_shorthand_method_field_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {m: (v: number): number => v + 1};"
+        " return o.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_shorthand_method_syntax():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {m(v: number): number { return v + x; }};"
+        " return o.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_method_captures_local():
+    s = _fn(
+        "function f(x: number): number {"
+        " const k = x;"
+        " const o = {m(v: number): number { return v + k; }};"
+        " return o.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_getter_method_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {get a(): number { return x; }};"
+        " return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_generator_method_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {*g(v: number) { yield v; }};"
+        " return x; }"
+    )
+    assert not s.available
+
+
+def test_async_method_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {async m(v: number): Promise<number> { return v; }};"
+        " return x; }"
+    )
+    assert s.available

@@ -2706,6 +2706,18 @@ Boundaries: generators (`function*`, `yield`) stay closed —
 a `yield` has no slot in the dep model and `yield`'s
 send/receive semantics are out of the supported fragment.
 
+### C06 TypeScript shorthand method definitions (slice 16)
+
+`{m(v) { ... }}` in an object literal binds a `_Callable`
+field value, identical to `{m: (v) => ...}` — the slice-13
+member-call path (`o.m(x)`) invokes it with arg binding and
+capture resolution. `get`/`set`, `*` (generator) and
+`static` marker children stay closed; `async` admits per
+slice 15.
+
+Boundaries: `this` inside a method still closes at invoke —
+there is no receiver binding.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

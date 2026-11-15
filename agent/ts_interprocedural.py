@@ -117,6 +117,10 @@ Admitted:
   the operand's deps through and `async` admits at the signature
   gate. `for await (x of y)` iterates like `of`. Generators
   (`function*`, `yield`) stay closed — a `yield` has no dep slot.
+* Shorthand method definitions `{m(v) { ... }}` — a callable
+  field value like an arrow, invoked through the slice-13 member
+  call path (`o.m(x)`). `get`/`set`/`*`/`static` markers stay
+  closed; `async` admits. `this` inside closes at invoke.
 * Destructured formal parameters `f({a, b}, [x])` — the pattern
   occupies one scalar index; its sub-names bind member reads of
   the slot at body start (each sees the slot's whole dep set).
@@ -155,7 +159,7 @@ Admitted:
 
 Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
-`this`, shorthand method definitions (`{m(){}}`),
+`this`, getters/setters,
 generators, `any`/composite/missing parameter
 types, rest formal parameters, `new` and
 generator/tagged-template function values stay
@@ -1979,6 +1983,30 @@ class _Builder:
                     else:
                         # `{...scalar}` adds unknowable fields.
                         spilled |= src
+                elif child.type == "method_definition":
+                    # `{m(v) { ... }}` — a callable field value;
+                    # `o.m(x)` invokes like a slice-13 member call.
+                    # `get`/`set` (read/write effects), `*`
+                    # (generator) and `static` markers stay closed;
+                    # `async` admits like an async arrow. `this`
+                    # inside closes at invoke.
+                    markers = {
+                        c.type
+                        for c in child.children
+                        if not c.is_named
+                    }
+                    if markers & {"get", "set", "*", "static"}:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(child)
+                        )
+                    mname = child.child_by_field_name("name")
+                    if mname is None or mname.type != "property_identifier":
+                        raise _Unsupported(
+                            "unsupported_expression", _span(child)
+                        )
+                    fields[mname.text.decode()] = self._callable_value(
+                        child, params, locals_
+                    )
                 else:
                     raise _Unsupported(
                         "unsupported_expression", _span(child)
