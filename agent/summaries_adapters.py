@@ -145,8 +145,9 @@ def build_plan_parser(parser):
         type=int,
         required=True,
         help=(
-            "Host-assigned monotonically increasing stamp for the probe "
-            "observations this pass records."
+            "Host-assigned monotonically increasing base stamp for the "
+            "probe observations this pass records; a resumed retry "
+            "records base stamp + its previous attempt count."
         ),
     )
     parser.add_argument(

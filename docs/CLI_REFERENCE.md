@@ -575,7 +575,7 @@ Plan the summary-derivation route for a declared profile through the C11 probe b
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--profile` | `<PROFILE>` | yes | — | Summary-derivation profile to plan for (for example mumei.go-scalar-parameter-deps/v1). |
-| `--stamp` | `<STAMP>` | yes | — | Host-assigned monotonically increasing stamp for the probe observations this pass records. |
+| `--stamp` | `<STAMP>` | yes | — | Host-assigned monotonically increasing base stamp for the probe observations this pass records; a resumed retry records base stamp + its previous attempt count. |
 | `--tool-version` | `<TOOL_VERSION>` | no | — | Optional declared tool version the planner pins against. |
 | `--rounds` | `<ROUNDS>` | no | 1 | Maximum observe-and-replan rounds (default 1). |
 | `--max-parallel` | `<MAX_PARALLEL>` | no | 1 | Maximum probes run concurrently per round (default 1). |
