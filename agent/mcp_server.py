@@ -3095,6 +3095,153 @@ def sol_summaries_reuse(source_path: str, manifest_path: str) -> str:
 
 
 @mcp.tool()
+def ts_summaries_accept(
+    source_path: str,
+    manifest_path: str,
+    function: str,
+    resolve_modules: bool = False,
+) -> str:
+    """Run the strict whole-context accept gate for one declared TS
+    function (C06/C07).
+
+    The same wiring as `ts-summaries-accept`: `context_match` first —
+    the strict whole-context gate — then a declared-only function
+    resolution that emits the freshly derived record, never the
+    declared one. The returned document is the acceptance decision;
+    the summary inside is a conservative report, not a proof.
+
+    Args:
+        source_path: Declared TypeScript/JavaScript source (64 KiB).
+        manifest_path: Declared
+            `mumei.ts-scalar-parameter-deps/v1` manifest (8 MiB).
+        function: Declared function name to accept.
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
+
+    Returns:
+        JSON with `accept` — the `mumei.ts-summary-accept/v1`
+        document — or `error` on a declared failure.
+    """
+    try:
+        import agent.ts_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    if not function or "\n" in function or "\r" in function:
+        return _err("function must be a nonempty single-line name")
+    return _summaries_declared_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.TsSummarySet,
+        lambda raw: mod.summarize_typescript(
+            raw,
+            resolver=(
+                mod._fs_resolver(source_path)
+                if resolve_modules
+                else None
+            ),
+            source_path=source_path,
+        ),
+        lambda declared, live: {
+            "accept": mod.summary_accept_document(
+                declared, live, function
+            )
+        },
+    )
+
+
+@mcp.tool()
+def rust_summaries_accept(
+    source_path: str, manifest_path: str, function: str
+) -> str:
+    """Run the strict whole-context accept gate for one declared
+    Rust function.
+
+    The same wiring as `rust-summaries-accept`: `context_match`
+    first — the strict whole-context gate — then a declared-only
+    function resolution that emits the freshly derived record,
+    never the declared one. The returned document is the
+    acceptance decision; the summary inside is a conservative
+    report, not a proof.
+
+    Args:
+        source_path: Declared Rust source (64 KiB).
+        manifest_path: Declared
+            `mumei.rust-scalar-parameter-deps/v1` manifest (8 MiB).
+        function: Declared function name to accept — an exact
+            emitted name (`f`, `P.f`) or a bare member name.
+
+    Returns:
+        JSON with `accept` — the `mumei.rust-summary-accept/v1`
+        document — or `error` on a declared failure.
+    """
+    try:
+        import agent.rust_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    if not function or "\n" in function or "\r" in function:
+        return _err("function must be a nonempty single-line name")
+    return _summaries_declared_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.RustSummarySet,
+        mod.summarize_rust,
+        lambda declared, live: {
+            "accept": mod.summary_accept_document(
+                declared, live, function
+            )
+        },
+    )
+
+
+@mcp.tool()
+def sol_summaries_accept(
+    source_path: str, manifest_path: str, function: str
+) -> str:
+    """Run the strict whole-context accept gate for one declared
+    Solidity function.
+
+    The same wiring as `sol-summaries-accept`: `context_match`
+    first — the strict whole-context gate — then a declared-only
+    function resolution that emits the freshly derived record,
+    never the declared one. The returned document is the
+    acceptance decision; the summary inside is a conservative
+    report, not a proof.
+
+    Args:
+        source_path: Declared Solidity source (256 KiB).
+        manifest_path: Declared
+            `mumei.sol-scalar-parameter-deps/v1` manifest (8 MiB).
+        function: Declared function name to accept — an exact
+            emitted name (`f`, `C.f`, `C.f#2`) or a bare member
+            name.
+
+    Returns:
+        JSON with `accept` — the `mumei.sol-summary-accept/v1`
+        document — or `error` on a declared failure.
+    """
+    try:
+        import agent.sol_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    if not function or "\n" in function or "\r" in function:
+        return _err("function must be a nonempty single-line name")
+    return _summaries_declared_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.SolSummarySet,
+        mod.summarize_solidity,
+        lambda declared, live: {
+            "accept": mod.summary_accept_document(
+                declared, live, function
+            )
+        },
+    )
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 

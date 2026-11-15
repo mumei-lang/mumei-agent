@@ -659,6 +659,126 @@ def test_mcp_sol_summaries_reuse_merges(tmp_path):
     assert [f["name"] for f in out["manifest"]["functions"]] == ["C.f"]
 
 
+def test_mcp_ts_summaries_accept_accepts_declared(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+    import agent.ts_interprocedural as ts
+
+    src_text = "function f(x: number): number { return x; }"
+    src = tmp_path / "f.ts"
+    src.write_text(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(src_text).to_dict())
+    )
+    out = json.loads(
+        mcp_server.ts_summaries_accept(str(src), str(manifest), "f")
+    )
+    assert out["status"] == "ok"
+    accept = out["accept"]
+    assert accept["schema_version"] == "mumei.ts-summary-accept/v1"
+    assert accept["accepted"] is True
+    assert accept["context_match"] is True
+    assert accept["summary"]["name"] == "f"
+
+
+def test_mcp_ts_summaries_accept_rejects_context_mismatch(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+    import agent.ts_interprocedural as ts
+
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            ts.summarize_typescript(
+                "function f(x: number): number { return x; }"
+            ).to_dict()
+        )
+    )
+    src = tmp_path / "f.ts"
+    src.write_text(
+        "function f(x: number): number { return x; }\n"
+        "function g(x: number): number { return x; }"
+    )
+    out = json.loads(
+        mcp_server.ts_summaries_accept(str(src), str(manifest), "f")
+    )
+    assert out["status"] == "ok"
+    accept = out["accept"]
+    assert accept["accepted"] is False
+    assert accept["reason"] == "context_mismatch"
+
+
+def test_mcp_rust_summaries_accept_bare_member_name(tmp_path):
+    from agent import mcp_server
+    import agent.rust_interprocedural as rust
+
+    src_text = "fn f(x: u64) -> u64 { x }"
+    src = tmp_path / "f.rs"
+    src.write_text(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(rust.summarize_rust(src_text).to_dict())
+    )
+    out = json.loads(
+        mcp_server.rust_summaries_accept(str(src), str(manifest), "f")
+    )
+    assert out["status"] == "ok"
+    assert out["accept"]["accepted"] is True
+    out = json.loads(
+        mcp_server.rust_summaries_accept(
+            str(src), str(manifest), "missing"
+        )
+    )
+    assert out["accept"]["reason"] == "unknown_function"
+
+
+def test_mcp_sol_summaries_accept_accepts_declared(tmp_path):
+    from agent import mcp_server
+    import agent.sol_interprocedural as sol
+
+    src_text = (
+        "contract C { function f(uint x) public returns (uint) "
+        "{ return x; } }"
+    )
+    src = tmp_path / "c.sol"
+    src.write_text(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(src_text).to_dict())
+    )
+    out = json.loads(
+        mcp_server.sol_summaries_accept(str(src), str(manifest), "C.f")
+    )
+    assert out["status"] == "ok"
+    assert out["accept"]["accepted"] is True
+    assert out["accept"]["summary"]["name"] == "C.f"
+    # Bare member name resolves via the fallback.
+    out = json.loads(
+        mcp_server.sol_summaries_accept(str(src), str(manifest), "f")
+    )
+    assert out["accept"]["accepted"] is True
+
+
+@pytest.mark.parametrize(
+    "tool", ["ts_summaries_accept", "rust_summaries_accept", "sol_summaries_accept"]
+)
+def test_mcp_summaries_accept_validates_function(tmp_path, tool):
+    from agent import mcp_server
+
+    src = tmp_path / "s.src"
+    src.write_text("x")
+    manifest = tmp_path / "m.json"
+    manifest.write_text("{}")
+    fn = getattr(mcp_server, tool)
+    assert json.loads(fn(str(src), str(manifest), ""))[
+        "status"
+    ] == "error"
+    assert json.loads(fn(str(src), str(manifest), "a\nb"))[
+        "status"
+    ] == "error"
+
+
 @pytest.mark.parametrize(
     "tool",
     [

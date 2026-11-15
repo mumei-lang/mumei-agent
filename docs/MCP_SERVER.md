@@ -87,6 +87,9 @@ Exported tools:
 | `ts_summaries_reuse(source_path, manifest_path, resolve_modules=false)` | Emit a merged `mumei.ts-scalar-parameter-deps/v1` manifest reusing the declared manifest's unchanged summaries (same wiring as `ts-summaries-reuse`) — the weaker per-function freshness merge, not the strict gate |
 | `rust_summaries_reuse(source_path, manifest_path)` | Same wiring as `rust-summaries-reuse` — returns the merged `mumei.rust-scalar-parameter-deps/v1` manifest |
 | `sol_summaries_reuse(source_path, manifest_path)` | Same wiring as `sol-summaries-reuse` — returns the merged `mumei.sol-scalar-parameter-deps/v1` manifest |
+| `ts_summaries_accept(source_path, manifest_path, function, resolve_modules=false)` | Run the strict whole-context accept gate for one declared TS function (same wiring as `ts-summaries-accept`) — returns `mumei.ts-summary-accept/v1`; the freshly derived record, never the declared one |
+| `rust_summaries_accept(source_path, manifest_path, function)` | Same wiring as `rust-summaries-accept` — returns `mumei.rust-summary-accept/v1`; exact name or bare-member-name resolution |
+| `sol_summaries_accept(source_path, manifest_path, function)` | Same wiring as `sol-summaries-accept` — returns `mumei.sol-summary-accept/v1`; exact name or bare-member-name resolution |
 | `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
@@ -170,6 +173,9 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `ts_summaries_reuse` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `manifest` |
 | `rust_summaries_reuse` | `source_path: str, manifest_path: str` | `manifest` |
 | `sol_summaries_reuse` | `source_path: str, manifest_path: str` | `manifest` |
+| `ts_summaries_accept` | `source_path: str, manifest_path: str, function: str, resolve_modules: bool = False` | `accept` |
+| `rust_summaries_accept` | `source_path: str, manifest_path: str, function: str` | `accept` |
+| `sol_summaries_accept` | `source_path: str, manifest_path: str, function: str` | `accept` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
 | `suggest_mm_migration` | `code_file: str, language: str, issues_json: str = '[]'` | `migration_hints` |
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |
