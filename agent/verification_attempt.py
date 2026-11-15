@@ -127,6 +127,21 @@ class AttemptEvent:
             result["exit_code"] = self.exit_code
         return result
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptEvent":
+        """Rebuild a declared event snapshot; constructors re-validate it.
+
+        The snapshot is a host declaration: restoration re-checks every
+        invariant the constructor enforces but trusts nothing else — a
+        foreign schema, unknown keys or a malformed event are static
+        errors, not recovered history."""
+        if type(data) is not dict:
+            raise ValueError("attempt event requires a declared snapshot")
+        allowed = {"kind", "elapsed_ms", "exit_code"}
+        if set(data) - allowed or not {"kind", "elapsed_ms"} <= set(data):
+            raise ValueError("attempt event snapshot has unknown or missing keys")
+        return cls(data["kind"], data["elapsed_ms"], data.get("exit_code"))
+
 
 @dataclass(frozen=True)
 class AttemptRecord:
@@ -223,6 +238,40 @@ class AttemptRecord:
             "state": self.state,
             "events": [event.to_dict() for event in self.events],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptRecord":
+        """Rebuild a declared record snapshot; constructors re-validate it.
+
+        The snapshot is a host declaration: restoration re-checks every
+        invariant the constructor enforces but trusts nothing else — a
+        foreign schema, unknown keys, a malformed event list or a declared
+        `state` that disagrees with the replayed events are static errors,
+        not recovered history."""
+        if type(data) is not dict or data.get("schema_version") != "mumei.verifier-attempt/v1":
+            raise ValueError("attempt record requires its declared snapshot schema")
+        required = {
+            "request_fingerprint",
+            "attempt_number",
+            "timeout_ms",
+            "state",
+            "events",
+        }
+        allowed = required | {"schema_version"}
+        if set(data) - allowed or required - set(data):
+            raise ValueError("attempt record snapshot has unknown or missing keys")
+        events = data["events"]
+        if type(events) is not list or len(events) > MAX_EVENTS:
+            raise ValueError("attempt record snapshot requires a bounded event list")
+        record = cls(
+            data["request_fingerprint"],
+            data["attempt_number"],
+            data["timeout_ms"],
+            tuple(AttemptEvent.from_dict(event) for event in events),
+        )
+        if record.state != data["state"]:
+            raise ValueError("attempt record declared state disagrees with its events")
+        return record
 
 
 @dataclass(frozen=True)
@@ -549,6 +598,47 @@ class AttemptSequence:
         if self.report_stamp is not None:
             result["report_stamp"] = self.report_stamp
         return result
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptSequence":
+        """Rebuild a declared lineage snapshot; constructors re-validate it.
+
+        The snapshot is a host declaration: restoration re-checks every
+        invariant the constructor enforces — record bindings, ordinals,
+        terminal predecessors, the selected-result reference and the
+        report stamp — but trusts nothing else. A foreign schema, unknown
+        keys, malformed members or a declared `state` that disagrees with
+        replayed events are static errors, not recovered history. A
+        restored `selected_result` still names a declared fingerprint the
+        snapshot cannot re-bind to bytes; durability, canonical-store
+        ownership and Evidence remain host duties."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version") != "mumei.verifier-attempt-sequence/v1"
+        ):
+            raise ValueError("attempt sequence requires its declared snapshot schema")
+        required = {"request_fingerprint", "timeout_ms", "attempts"}
+        allowed = required | {"schema_version", "selected_result", "report_stamp"}
+        if set(data) - allowed or required - set(data):
+            raise ValueError("attempt sequence snapshot has unknown or missing keys")
+        attempts = data["attempts"]
+        if type(attempts) is not list or len(attempts) > MAX_ATTEMPTS:
+            raise ValueError("attempt sequence snapshot requires a bounded attempt list")
+        selected = data.get("selected_result")
+        if selected is not None:
+            if type(selected) is not dict or set(selected) != {
+                "attempt_number",
+                "output_fingerprint",
+            }:
+                raise ValueError("attempt sequence snapshot has malformed selected result")
+            selected = (selected["attempt_number"], selected["output_fingerprint"])
+        return cls(
+            data["request_fingerprint"],
+            data["timeout_ms"],
+            tuple(AttemptRecord.from_dict(attempt) for attempt in attempts),
+            selected_result=selected,
+            report_stamp=data.get("report_stamp"),
+        )
 
 
 def _is_lineage_extension(
