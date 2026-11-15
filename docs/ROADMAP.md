@@ -3155,6 +3155,32 @@ C11 probe boundary, not the route.
 Producing or accepting a summary is not a proof, an audit or a
 verification verdict — the routes emit declared routing evidence only.
 
+### C06 declared Solidity summary route family
+
+`agent.sol_interprocedural` promotes the Solidity summary spike to the
+declared route family: `python -m agent sol-summaries` emits
+`mumei.sol-scalar-parameter-deps/v1` for single-file Solidity — an
+in-process tree-sitter summarizer (no helper binary) covering `pure`/
+`view` functions with scalar `uint*`/`int*`/`bool` parameters and a
+single scalar return, local declarations, assignments, `if`/`else`
+joins, one-pass loop may-analysis, same-contract calls, state-variable
+writes (`effects`), `require`/`revert`/`new`/struct/member/index
+handling and recorded gaps for everything outside the fragment.
+
+`sol-summaries-accept` applies the strict whole-context gate to one
+function's declared summary (overloaded `C.g#2` stems stay ambiguous
+until the emitted name disambiguates), `sol-summaries-check` and
+`sol-summaries-reuse` partition and merge a declared manifest against
+the fresh derivation, and `sol-summaries-attempt` runs the produce
+route as one declared attempt through the C11 dispatch lifecycle and
+emits `mumei.sol-summaries-attempt-report/v1`. The `agent.sol-summaries`
+adapter descriptor declares `filesystem.read` only — the route runs
+in-process, so the `process.spawn` in its `probe_argv` belongs to the
+C11 probe boundary, not the route.
+
+Producing or accepting a summary is not a proof, an audit or a
+verification verdict — the routes emit declared routing evidence only.
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe
