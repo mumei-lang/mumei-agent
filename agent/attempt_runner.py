@@ -52,19 +52,23 @@ def _memory_bound_preexec(bound_mb: int):
 # `prlimit` applies the same RLIMIT_AS as `preexec_fn` but through a
 # plain exec, so a bounded spawn avoids `preexec_fn` entirely — the
 # mechanism CPython docs warn can deadlock in a multithreaded
-# process. `preexec_fn` remains only as the fallback for POSIX hosts
-# without prlimit (e.g. macOS).
+# process. A POSIX `sh -c 'ulimit -v K; exec "$@"'` wrapper does the
+# same on hosts without prlimit (e.g. macOS): `ulimit -v` sets
+# RLIMIT_AS in the shell and `exec` carries it into the target —
+# still a pure exec chain. `preexec_fn` remains only as the last
+# resort when neither wrapper exists.
 _PRLIMIT = shutil.which("prlimit")
+_SH = shutil.which("sh")
 
 
 def memory_bound_spawn_thread_safe() -> bool:
     """Whether a memory-bound spawn avoids `preexec_fn`.
 
     `preexec_fn` forces the unsafe fork+exec spawn path, which can
-    deadlock in a multithreaded process. With `prlimit` present the
-    bound is applied by an exec wrapper instead, making bounded
-    spawns thread-safe."""
-    return _PRLIMIT is not None
+    deadlock in a multithreaded process. With `prlimit` or a POSIX
+    `sh` present the bound is applied by an exec wrapper instead,
+    making bounded spawns thread-safe."""
+    return _PRLIMIT is not None or _SH is not None
 
 
 def _spawn_target_resolvable(name: str) -> bool:
@@ -217,6 +221,7 @@ class AttemptRunner:
             memory_bound_mb is not None
             and resource is None
             and _PRLIMIT is None
+            and _SH is None
         ):
             raise ValueError(
                 "attempt run memory bound requires a POSIX resource boundary"
@@ -241,6 +246,22 @@ class AttemptRunner:
                 # which would masquerade as the target's own exit.
                 # Leave argv unwrapped so a missing target still
                 # reports a spawn failure.
+            elif _SH is not None:
+                if _spawn_target_resolvable(spawn_argv[0]):
+                    # `ulimit -v` is RLIMIT_AS in KiB; `exec` carries
+                    # the limit into the target. The `&&` keeps a
+                    # rejected bound from running the target
+                    # unbounded; a target the shell cannot exec
+                    # exits 127 — the same masquerade prlimit would
+                    # make — so the wrapper is applied only when the
+                    # target resolves.
+                    spawn_argv = [
+                        _SH,
+                        "-c",
+                        f"ulimit -v {memory_bound_mb * 1024} && exec \"$@\"",
+                        "mumei-attempt-bound",
+                        *spawn_argv,
+                    ]
             else:
                 preexec = _memory_bound_preexec(memory_bound_mb)
         try:

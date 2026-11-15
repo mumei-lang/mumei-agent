@@ -147,7 +147,11 @@ is spawned under POSIX `RLIMIT_AS`, capping its whole address space — the
 declared `memory_mb` budget a plan produces now reaches the execution
 boundary instead of stopping at the plan manifest. The bound applies to
 the child only; the runner process is never constrained, and a non-POSIX
-host rejects a declared bound with a static error.
+host rejects a declared bound with a static error. The bound is applied
+by an exec wrapper — `prlimit --as=` when available, else a POSIX
+`sh -c 'ulimit -v <KiB> && exec "$@"'` wrapper (the same RLIMIT_AS
+through a pure exec chain, so bounded spawns stay thread-safe on hosts
+without `prlimit`); `preexec_fn` remains only when neither exists.
 
 ```python
 result = AttemptRunner().run(request, argv, memory_bound_mb=256)
@@ -2834,10 +2838,11 @@ tuple keeps request order regardless of completion order — observation
 `i` always answers request `i`. `max_parallel=1` is plain sequential
 execution and remains the default; non-positive or non-int bounds are
 static errors. `AttemptRunner` applies a declared `memory_bound_mb`
-through a `prlimit` exec wrapper when `prlimit` is available, so
-memory-bound probes stay parallel-safe there; `preexec_fn` remains
-only as the fallback on hosts without `prlimit`, and on such a host a
-batch carrying a bound request still falls back to sequential
+through an exec wrapper — `prlimit --as=` when available, else a POSIX
+`sh -c 'ulimit -v <KiB> && exec "$@"'` wrapper — so memory-bound
+probes stay parallel-safe on POSIX hosts; `preexec_fn` remains
+only when neither wrapper exists, and only on such a host does a
+batch carrying a bound request fall back to sequential
 execution because the fork+exec spawn path can deadlock in a
 multithreaded process before timeout accounting starts. Retry policy
 and Evidence acceptance remain open.
