@@ -342,6 +342,29 @@ def test_import_requires_a_package_unit(tmp_path, capsys):
     assert code == 1 and "package unit" in err
 
 
+def test_output_equal_to_a_declared_import_file_fails(tmp_path, capsys):
+    files = {
+        "a.go": "package p\nimport l \"my/lib\"\nfunc F0() int64 { return l.G(1) }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    helper = _write_helper(
+        tmp_path, json.dumps(_package_fixture(files)).encode()
+    )
+    lib_source = "package lib\nfunc G(x int64) int64 { return x }\n"
+    lib = _write_source(tmp_path, "lib.go", lib_source)
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    code, out, err = _run(
+        capsys,
+        _args(
+            helper,
+            *paths,
+            extra=["--import", f"my/lib={lib}", "--output", str(lib)],
+        ),
+    )
+    assert code == 1 and out == "" and "overwrite" in err
+    assert lib.read_text() == lib_source
+
+
 def test_malformed_and_duplicate_import_specs_fail(tmp_path, capsys):
     helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
     source = _write_source(tmp_path, "main.go", SOURCE)
@@ -405,3 +428,35 @@ def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
         for call in entry["calls"]
     ]
     assert calls and any(call["result"] for call in calls)
+
+
+def test_real_helper_import_round_trip(tmp_path, capsys, real_go_types):
+    """A declared import unit resolves through the real helper: the call
+    into the imported package must surface as an imported transfer in
+    the emitted manifest, not vanish as an unresolved gap."""
+    files = {
+        "a.go": (
+            "package p\n"
+            'import l "my/lib"\n'
+            "func F(x int64) int64 { return l.H(x) }\n"
+        ),
+        "b.go": "package p\nfunc G(y int64) int64 { return F(y) }\n",
+    }
+    lib = _write_source(
+        tmp_path,
+        "lib.go",
+        "package lib\nfunc H(y int64) int64 { return y }\n",
+    )
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    code, out, err = _run(
+        capsys,
+        _args(real_go_types, *paths, extra=["--import", f"my/lib={lib}"]),
+    )
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    calls = [
+        call
+        for entry in manifest["functions"]
+        for call in entry["calls"]
+    ]
+    assert calls and any(call.get("imported") for call in calls)
