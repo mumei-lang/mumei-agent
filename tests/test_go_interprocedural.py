@@ -8372,6 +8372,26 @@ def test_imported_len_computed_operand_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_imported_len_pins_inner_named_types(go_types_helper):
+    # `len(lib.VMK)` — the map key's named identity pins too, so a
+    # `MK` redeclaration flags the summary via stale_dependents.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar _ lib.MK\n"
+        "func F() int64 { return int64(len(lib.VMK)) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert members["MK"]["id"] in result.pinned
+
+
 def test_imported_len_chan_var_stays_closed(go_types_helper):
     # `len(lib.VC)` on `var VC chan int64` — a valid call whose
     # operand's fact kind is not a modelled container: stays opaque.

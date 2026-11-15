@@ -734,6 +734,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if member.type.type_id:
             self.pinned.add(member.type.type_id)
 
+    def _pin_fact_identities(self, fact: Any) -> None:
+        """Pin every named type identity inside a fact tree — each
+        container level's own and key identities plus the terminal
+        element's — so redeclaring any flags `stale_dependents`."""
+        while fact is not None:
+            if fact.type_id:
+                self.pinned.add(fact.type_id)
+            if fact.key is not None and fact.key.type_id:
+                self.pinned.add(fact.key.type_id)
+            fact = fact.elem
+
     def _imported_index_read(
         self,
         node: Any,
@@ -3030,7 +3041,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
-                    self._pin_member_type(member)
+                    self._pin_fact_identities(fact)
                     transfers.append(
                         CallTransfer(
                             FileSpan(
