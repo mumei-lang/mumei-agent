@@ -402,3 +402,27 @@ def test_if_else_return_carries_cond_deps():
     s = _fn(src, "f")
     assert s.available
     assert s.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_block_scoped_decl_does_not_shadow_outer():
+    src = """contract C {
+  function f(uint256 x) public pure returns (uint256) {
+    uint256 y = x;
+    { uint256 y = 0; }
+    return y;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_block_assignment_to_outer_propagates():
+    src = """contract C {
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    uint256 s = x;
+    { s = y; }
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})

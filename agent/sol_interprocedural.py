@@ -181,7 +181,9 @@ class _Builder:
         self.summaries: dict[str, SolFunctionSummary] = {}
         self._inline_depth = 0
         self._writes: list[set[str]] = []
+        self._decls: list[set[str]] = []
         self._state_vars: dict[str, set[str]] = {}
+        self._overload_groups: dict[str, list[str]] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -438,6 +440,8 @@ class _Builder:
             locals_[name.text.decode()] = deps
             if self._writes:
                 self._writes[-1].add(name.text.decode())
+            if self._decls:
+                self._decls[-1].add(name.text.decode())
             return None
         if t == "expression_statement":
             expr = next(
@@ -600,7 +604,21 @@ class _Builder:
             # block_statement arm already walks its statements.
             return None
         if t == "block_statement":
-            return self._block(st, locals_, param_index, summary)
+            # Block-scoped decls shadow outer names without
+            # destroying them; assignments to outer names
+            # propagate back, inner decls don't leak.
+            inner = dict(locals_)
+            self._decls.append(set())
+            try:
+                ret = self._block(
+                    st, inner, param_index, summary
+                )
+            finally:
+                decls = self._decls.pop()
+            for name in list(inner):
+                if name in locals_ and name not in decls:
+                    locals_[name] = inner[name]
+            return ret
         raise _Unsupported("unsupported_statement", _span(st))
 
     def _loop(
