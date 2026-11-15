@@ -4077,6 +4077,7 @@ METHOD_LIB = {
         "type EI struct{ I }\n"
         "type S struct{ F int64 }\n"
         "func (s *S) PF() int64 { return 0 }\n"
+        "func (s S) VF() int64 { return int64(s.F) }\n"
         "var V T\nconst K T = 7\nvar PV *T\nvar VS S\n"
         "var PS *S\nvar PU *int64\nvar PPV **T\n"
         "var PA *[4]int64\n"
@@ -4193,12 +4194,112 @@ def test_imported_method_on_composite_var_receiver_dot_import(
     assert result.available and result.return_dependencies == frozenset({0})
 
 
-def test_imported_method_on_indexed_receiver_stays_closed(go_types_helper):
-    # `lib.VSS[0].PF()` — the receiver is an index read whose
-    # element is a struct, not a member name: stays closed.
+def test_imported_method_on_indexed_receiver(go_types_helper):
+    # `lib.VSS[0].PF()` — the receiver is a composite element of an
+    # imported container: external state like the container itself,
+    # dep-free apart from the (literal) index, and the transfer records
+    # the container member.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 { return lib.VSS[0].PF() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    vss = next(m for m in snapshot.imported_members if m.name == "VSS")
+    assert any(
+        t.imported and t.target == vss.id for t in result.calls
+    )
+
+
+def test_imported_method_on_indexed_receiver_carries_index_deps(
+    go_types_helper,
+):
+    # `lib.VSS[i].PF()` — the receiver's index dependencies join the
+    # result like the index read's do.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i int64) int64 { return lib.VSS[i].PF() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_method_on_map_element_receiver(go_types_helper):
+    # `lib.VSM["k"].VF()` — a struct element out of a `map[string]S`
+    # (a value-receiver method: map elements are not addressable, so
+    # `PF` would not compile). The literal key is dep-free.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.VSM[\"k\"].VF() + x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    vsm = next(m for m in snapshot.imported_members if m.name == "VSM")
+    # The whole fact tree pins: the named key is none here, but the
+    # element's named type `S` does.
+    assert vsm.type.elem.type_id in result.pinned
+
+
+def test_imported_method_on_indexed_receiver_pins_fact_tree(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VSS[0].PF() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    vss = next(m for m in snapshot.imported_members if m.name == "VSS")
+    assert result.available
+    assert vss.id in result.pinned
+    assert vss.type.elem.type_id in result.pinned
+
+
+def test_dot_imported_method_on_indexed_receiver(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(i int64) int64 { return VSS[i].PF() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_index_element_receiver(go_types_helper):
+    # `lib.S.VF(lib.VSS[i])` — the leading argument is the receiver:
+    # a composite element of an imported container reads external
+    # state like `lib.VS.PF(lib.VS)` does, carrying the index deps.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i int64) int64 { return lib.S.VF(lib.VSS[i]) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_method_on_computed_index_element_stays_closed(go_types_helper):
+    # `g()[0].PF()` — the element comes from a local call, not an
+    # imported container member: stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func g() []lib.S { return nil }\n"
+        "func F() int64 { return g()[0].PF() }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
@@ -4288,9 +4389,10 @@ def test_method_expr_receiver_pins_element_identity(go_types_helper):
     assert vn.type.elem.type_id in result.pinned
 
 
-def test_method_expr_indexed_receiver_stays_closed(go_types_helper):
-    # `lib.W.WF(lib.VW2[0], x)` — the receiver slot holds an index
-    # read, not a member name: stays closed.
+def test_method_expr_indexed_receiver_admits(go_types_helper):
+    # `lib.W.WF(lib.VW2[0], x)` — the receiver slot holds a composite
+    # element of an imported container: admitted like `lib.VW` itself,
+    # dep-free apart from the index.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { return lib.W.WF(lib.VW2[0], x) }\n"
@@ -4299,7 +4401,22 @@ def test_method_expr_indexed_receiver_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_indexed_receiver_carries_index_deps(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i int64, x int64) int64 {\n"
+        "\treturn lib.W.WF(lib.VW2[i], x)\n}\n"
+    }
+    snapshot = _method_expr_snapshot(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
 def test_imported_method_on_const_receiver(go_types_helper):

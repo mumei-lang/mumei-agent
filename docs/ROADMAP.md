@@ -2303,9 +2303,14 @@ parameter, `lib.V.M(x)` on package state (its var read still records
 the staleness transfer) and `lib.K.M(x)` on a constant all share the
 path. A composite imported var receiver admits too — `lib.VS.PF()`
 on a struct var reads external state like the member itself, so it
-is dep-free and records the imported transfer against the member —
-while a receiver that is an index or call result (`lib.VSS[0].PF()`)
-still names no member and stays closed. A method *expression*
+is dep-free and records the imported transfer against the member.
+The same admission reaches a composite *element* of an imported
+container: `lib.VSS[i].PF()` and `lib.VSM[k].VF()` read external
+state like the container, carry only the indexes' dependencies
+(innermost-first, like every index chain), record the transfer on
+the container member and pin its whole fact tree — while a computed
+operand (`g()[0].PF()`) still names no member and stays closed. A
+method *expression*
 `lib.T.M(recv, args)` records `method_expr: true` so the consumer
 applies the receiver rules to the leading argument — `lib.S.PM(lib.VS,
 x)` admits through the same composite-var receiver read
