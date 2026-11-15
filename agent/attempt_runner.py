@@ -12,6 +12,7 @@ truncation happened, not that the producer stopped writing.
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -33,6 +34,34 @@ try:  # POSIX-only; a declared memory bound is unavailable elsewhere.
     import resource
 except ImportError:  # pragma: no cover - exercised only off POSIX
     resource = None
+
+# A session-leader child owns its process group, so a deadline or
+# cancellation kill reaches helpers the child spawned itself instead
+# of orphaning them. Off POSIX the runner falls back to signalling
+# the direct child only.
+_PROCESS_GROUP = os.name == "posix" and hasattr(os, "killpg")
+
+
+def _signal_tree(process: subprocess.Popen, terminate: bool) -> None:
+    """Signal the child's whole process group, or just the child.
+
+    Group delivery fails closed to the direct signal when the group
+    is already gone or the platform cannot signal one — the child
+    still receives its deadline or cancellation signal.
+    """
+    if _PROCESS_GROUP:
+        try:
+            os.killpg(
+                process.pid,
+                signal.SIGTERM if terminate else signal.SIGKILL,
+            )
+            return
+        except OSError:
+            pass
+    if terminate:
+        process.terminate()
+    else:
+        process.kill()
 
 POLL_SECONDS = 0.005
 CANCEL_GRACE_MS = 1000
@@ -222,9 +251,12 @@ class AttemptRunner:
 
         `request` only binds the record (fingerprint, ordinal, declared
         timeout); the caller decides it is dispatchable via `check_dispatch`.
-        On the declared deadline the child is killed and `timed_out` is
-        reported; a set `cancel_event` triggers `cancel_requested` then a
-        terminate-then-kill sequence ending in `exited` or `cancelled`.
+        On the declared deadline the child's whole process group is
+        killed and `timed_out` is reported; a set `cancel_event`
+        triggers `cancel_requested` then a terminate-then-kill
+        sequence ending in `exited` or `cancelled`. Group delivery
+        covers helpers the child spawned itself so a killed attempt
+        leaves no orphaned subprocesses.
         `memory_bound_mb` applies a declared POSIX `RLIMIT_AS` ceiling to
         the child's whole address space — a best-effort bound, not a
         sandbox: it covers no CPU, I/O, network or permission policy, and
@@ -300,6 +332,7 @@ class AttemptRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=preexec,
+                start_new_session=_PROCESS_GROUP,
             )
         except (OSError, subprocess.SubprocessError):
             return AttemptRunResult(
@@ -324,7 +357,7 @@ class AttemptRunner:
                     events.append(AttemptEvent("exited", elapsed, code))
                 break
             if elapsed >= request.timeout_ms:
-                process.kill()
+                _signal_tree(process, terminate=False)
                 process.wait()
                 events.append(
                     AttemptEvent("timed_out", max(elapsed, request.timeout_ms))
@@ -334,7 +367,7 @@ class AttemptRunner:
                 cancel_at is not None
                 and elapsed - cancel_at >= CANCEL_GRACE_MS
             ):
-                process.kill()
+                _signal_tree(process, terminate=False)
                 process.wait()
                 events.append(
                     AttemptEvent(
@@ -350,7 +383,7 @@ class AttemptRunner:
             ):
                 cancel_at = elapsed
                 events.append(AttemptEvent("cancel_requested", elapsed))
-                process.terminate()
+                _signal_tree(process, terminate=True)
             try:
                 process.wait(timeout=POLL_SECONDS)
             except subprocess.TimeoutExpired:

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -136,6 +137,32 @@ def test_run_timeout_kills_runaways_and_reports_timed_out():
     assert result.record.state == "timed_out"
     assert result.record.events[-1].elapsed_ms >= 200
     assert wall < 30
+
+
+@pytest.mark.skipif(
+    not (os.name == "posix" and hasattr(os, "killpg")),
+    reason="process-group kill is POSIX-only",
+)
+def test_run_timeout_kills_spawned_helpers_too():
+    child = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(60)'])\n"
+        "print(p.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    result = AttemptRunner().run(
+        request(timeout_ms=300), argv(child)
+    )
+    assert result.record.state == "timed_out"
+    helper_pid = int(result.stdout.strip())
+    for _ in range(50):
+        try:
+            os.kill(helper_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    pytest.fail("spawned helper survived the attempt timeout")
 
 
 def test_run_exit_past_deadline_reports_timed_out_not_exited():
