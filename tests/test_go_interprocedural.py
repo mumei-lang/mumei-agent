@@ -9069,3 +9069,145 @@ def test_imported_variadic_spread_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_summary_set_manifest_declares_schema_and_context(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper, "func F(x int64) int64 { return x }"
+    )
+    data = summaries.to_dict()
+    assert data["schema_version"] == ip.PROFILE
+    assert data["context_key"] == summaries.context_key
+    assert [f["binding_id"] for f in data["functions"]] == [
+        f.binding_id for f in summaries.functions
+    ]
+    json.dumps(data)
+
+
+def test_summary_manifest_function_fields(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x, y int64) int64 { return x + y }\n"
+        "func G(a int64) int64 { return F(a, a) }",
+    )
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "G"
+    )
+    entry = next(
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
+    )
+    call = next(c for c in entry["calls"])
+    assert call["arguments"] == [[0], [0]]
+    assert call["result"] == [0]
+    assert call["span"]["start"] <= call["span"]["end"]
+    assert "imported" not in call
+    assert entry["return_dependencies"] == [0]
+
+
+def test_summary_manifest_omits_unavailable_dependencies(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(){}\nfunc F(x int64) int64 { defer G(); return x }",
+    )
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    entry = next(
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
+    )
+    # A gap-closed summary never serializes a null dependencies field.
+    assert "return_dependencies" not in entry
+    assert entry["gaps"]
+
+
+def test_summary_manifest_marks_imported_transfers(go_types_helper):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    entry = next(
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
+    )
+    (call,) = entry["calls"]
+    assert call["imported"] is True
+
+
+def test_summary_manifest_gap_serializes_span_and_callee(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tif x <= 0 { return 0 }\n"
+        "\treturn F(x - 1)\n"
+        "}",
+    )
+    entry = summaries.to_dict()["functions"][0]
+    gap = entry["gaps"][0]
+    assert gap["reason"] == "recursive_call_graph"
+    assert gap.get("callee")
+    assert gap["span"] is None or gap["span"]["start"] <= gap["span"]["end"]
+
+
+def test_summary_manifest_file_span_carries_file_index(go_types_helper):
+    files = {
+        "a.go": "package p\nfunc F(x int64) int64 { return G(x) }\n",
+        "b.go": "package p\nfunc G(y int64) int64 { return y }\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    entry = next(
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
+    )
+    assert entry["calls"][0]["span"]["file"] >= 0
+
+
+def test_summary_manifest_pins_declared_type_identities(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type T int64\nfunc F(x T) int64 { return int64(x) }",
+    )
+    entry = summaries.to_dict()["functions"][0]
+    assert entry["pinned"]
+    assert entry["parameters"][0]["type_id"]
+
+
+def test_summary_manifest_deterministic_ordering(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(a, b, c int64) int64 { return a + b + c }",
+    )
+    first, second = summaries.to_dict(), summaries.to_dict()
+    assert first == second
+    json.dumps(first)
+
+
+def test_summary_manifest_rejects_foreign_spans():
+    gap = ip.SummaryGap("opaque", span=object())
+    with pytest.raises(ValueError):
+        gap.to_dict()

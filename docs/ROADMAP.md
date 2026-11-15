@@ -2783,6 +2783,38 @@ non-integer value. A forged arity that still validates is caught at
 the consumer: the left-hand width must equal it.
 
 
+### C06 declared summary manifests
+
+`GoSummarySet.to_dict()` serializes a derived summary set into a
+detached manifest under `mumei.go-scalar-parameter-deps/v1`: the
+context key the set was derived against plus each function's declared
+fields — binding identity, key, parameter/result type facts (with
+element/key chains), sorted return dependencies, call transfers
+(target, per-argument dependency sets, result set, span, `imported`
+marker), gaps (reason, span, callee) and pinned type identities.
+Serialization is metadata only: it carries no bytes and claims no
+acceptance, and derived properties (`available`, `effects`) are not
+stored — a reader recomputes them from the same declared fields. A
+`None` dependencies field serializes as an absent key, never a null
+that could read as parameter-independent, and absent optional
+fields (`result_type`, `pinned`, `callee`, `imported`) stay absent
+rather than defaulting. Spans serialize with their file index for
+package units and without it for single-file units; anything that is
+not a declared `ByteSpan`/`FileSpan` fails statically rather than
+serializing a foreign shape.
+
+This is a **handoff surface, not a route**: a host may persist the
+manifest or feed it to a scheduler, but reuse still goes through
+`for_function`/`for_package_function` — which reject after any
+source, target or report change — and `stale_dependents` still flags
+dependents of replaced identities. No I/O, `from_dict`, transport,
+versioning negotiation, evidence semantics, plugin, runner/scheduler,
+or default audit/CLI/MCP route is added; TS/Solidity/Rust adapter
+summary sets keep their own shapes. C06 stays partially delivered —
+the manifest is the first declared output surface a consumable route
+can bind.
+
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe
