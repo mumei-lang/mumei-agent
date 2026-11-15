@@ -467,6 +467,11 @@ def main_reuse(args: argparse.Namespace | None = None) -> int:
         args = build_reuse_parser().parse_args()
     try:
         restored = _read_manifest(args.manifest)
+        if restored.target_arch != args.target_arch:
+            raise SnapshotError(
+                "declared manifest was derived for a different "
+                "target architecture"
+            )
         sources, report = _run_declared(args)
         live = _summarize(sources, report, args.target_arch)
         reusable, _, _ = _reuse_partition(restored, live, report)

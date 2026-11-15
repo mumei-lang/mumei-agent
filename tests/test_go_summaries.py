@@ -634,6 +634,37 @@ def test_reuse_merges_declared_and_fresh_summaries(tmp_path, capsys):
     )
 
 
+def test_reuse_rejects_a_manifest_from_another_target_arch(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    code, _, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper, manifest_path, source,
+            extra=["--target-arch", "386"],
+        ),
+    )
+    assert code == 1 and "target architecture" in err
+
+
+def test_reuse_rejects_a_manifest_without_a_target_arch(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["target_arch"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, _, err = _run_reuse(
+        capsys, _reuse_args(helper, manifest_path, source)
+    )
+    assert code == 1 and "target architecture" in err
+
+
 def test_reuse_rejects_a_malformed_manifest(tmp_path, capsys):
     helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
     source = _write_source(tmp_path, "main.go", SOURCE)

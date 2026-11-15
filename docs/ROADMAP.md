@@ -2819,7 +2819,9 @@ fields (`result_type`, `pinned`, `callee`, `imported`) stay absent
 rather than defaulting. Spans serialize with their file index for
 package units and without it for single-file units; anything that is
 not a declared `ByteSpan`/`FileSpan` fails statically rather than
-serializing a foreign shape.
+serializing a foreign shape. The set also declares the `target_arch`
+it was derived for — scalar widths are arch-dependent while binding
+identities are not — so a reuse route can refuse a mismatched unit.
 
 `GoSummarySet.from_dict()` rebuilds a declared set with the same
 boundary discipline as the C11 snapshot restorations: strict key sets
@@ -2903,7 +2905,11 @@ same rule `go-summaries-check` reports, and emits a merged
 declared summary is carried over verbatim, every other live function is
 freshly derived and a `missing` entry is dropped. The merged set is
 keyed to the fresh context, so it describes the current unit, not the
-declared one.
+declared one. The manifest now declares the `target_arch` it was
+derived for (`int`/`uintptr` widths are arch-dependent while binding
+identities are not): a manifest whose declared architecture differs
+from `--target-arch` — or that declares none — fails closed rather
+than carrying wrong-width summaries forward.
 
 Reuse remains detection, not authorization: carrying a declared summary
 forward is the host's per-function freshness choice under the weaker

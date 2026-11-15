@@ -458,6 +458,10 @@ def _package_context(
 class GoSummarySet:
     context_key: str
     functions: tuple[FunctionSummary, ...]
+    # The gc target the set was derived for — `int`/`uintptr` widths are
+    # arch-dependent while binding identities are not, so a manifest
+    # must declare it for a reuse route to refuse a mismatched unit.
+    target_arch: str | None = None
     profile: str = PROFILE
 
     def for_function(
@@ -526,11 +530,14 @@ class GoSummarySet:
         or hand it to a route, but it proves nothing: `for_function`
         still rejects reuse after any source/snapshot change and
         `stale_dependents` still flags dependents of replaced identities."""
-        return {
+        result = {
             "schema_version": PROFILE,
             "context_key": self.context_key,
             "functions": [f.to_dict() for f in self.functions],
         }
+        if self.target_arch is not None:
+            result["target_arch"] = self.target_arch
+        return result
 
     @classmethod
     def from_dict(cls, value: Any) -> "GoSummarySet":
@@ -543,13 +550,20 @@ class GoSummarySet:
         the live snapshot's context key and `stale_dependents` still flags
         dependents of replaced identities, so a foreign manifest can only
         describe reuse, never authorize it."""
-        v = _manifest_record(value, ("schema_version", "context_key", "functions"))
+        v = _manifest_record(
+            value,
+            ("schema_version", "context_key", "functions"),
+            ("target_arch",),
+        )
         _require_restore(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
         _require_restore(len(functions) <= MAX_MANIFEST_MEMBERS)
         restored = tuple(FunctionSummary.from_dict(f) for f in functions)
         _require_restore(len({f.binding_id for f in restored}) == len(restored))
-        return cls(_string(v["context_key"]), restored)
+        target_arch = (
+            _string(v["target_arch"]) if "target_arch" in v else None
+        )
+        return cls(_string(v["context_key"]), restored, target_arch)
 
 
 class _Unsupported(Exception):
@@ -3983,7 +3997,7 @@ def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
             builder.summarize(f.binding_id)
             for f in sorted(snapshot.functions, key=lambda f: f.binding_id)
         )
-    return GoSummarySet(key, results)
+    return GoSummarySet(key, results, snapshot.target_arch)
 
 
 def summarize_go_package(
@@ -4041,4 +4055,4 @@ def summarize_go_package(
             builder.summarize(f.binding_id)
             for f in sorted(snapshot.functions, key=lambda f: f.binding_id)
         )
-    return GoSummarySet(key, results)
+    return GoSummarySet(key, results, snapshot.target_arch)
