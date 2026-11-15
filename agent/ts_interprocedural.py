@@ -268,6 +268,15 @@ Admitted:
   --resolve-modules` resolves relative `./`/`../`
   specifiers under the source file's directory, bounded by
   MAX_SOURCE_BYTES each.
+* CommonJS — a unit's `module.exports`/`exports` writes
+  collect into a precise export table (`exports.x = v`,
+  `module.exports.x = v`, `module.exports = v`) that
+  `require('./b')` resolves to; a unit that writes none
+  answers a `_Composite` of its ESM `export` table. The
+  same table feeds `import` interop (`import {g}`, and
+  `import d` of a bare-function export via `default`).
+  Unresolvable specifiers and non-string arguments keep
+  the external-callee union — resolution only sharpens.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -1087,6 +1096,25 @@ class _Builder:
         # `yield` operand deps collected for the innermost
         # generator body/callable invocation being evaluated.
         self.yield_deps: list[frozenset[int]] = []
+        # CommonJS surface — `module.exports`/`exports` seed a
+        # shared composite so `exports.g = f` / `module.exports =
+        # {...}` bind a real export table a `require` can read.
+        # A file that declares `exports` as a local shadows it
+        # normally.
+        _cjs_table = _Composite({})
+        self._cjs_seed = _cjs_table
+        # The CJS export table the model tracks precisely: field
+        # writes collect into `_cjs_fields`, a whole-table rebind
+        # (`module.exports = v`) into `_cjs_whole`. The seeds
+        # keep in-module `module`/`exports` reads working under
+        # the normal (scalar-collapsing) member model; the
+        # require path reads this precise table instead.
+        self._cjs_fields = _Composite({})
+        self._cjs_whole = None
+        self.module_locals.setdefault(
+            "module", _Composite({"exports": _cjs_table})
+        )
+        self.module_locals.setdefault("exports", _cjs_table)
         # Pass 2 — evaluate module-scope items in source
         # order now that every function/class name is registered
         # (a `const g = f()` may call a declaration hoisted past
@@ -1102,6 +1130,8 @@ class _Builder:
                     self._register_enum(node)
                 elif node.type == "internal_module":
                     self._register_namespace(node)
+                elif self._cjs_export_store(node, mcount):
+                    pass
                 else:
                     self.statement(
                         node,
@@ -1423,7 +1453,7 @@ class _Builder:
                 # Default import — the clause's bare name.
                 pairs.append((child.text.decode(), "default"))
         exports = self._resolve_module(node)
-        for local, imported in pairs:
+        for local, imported in pairs:  # noqa: B007
             bound = False
             if exports is not None:
                 if imported == "*":
@@ -1443,8 +1473,9 @@ class _Builder:
         resolver, unresolvable specifier, cycle, or unreadable
         module all yield None (the names stay `_External` — the
         same over-approximation as before resolution existed).
-        Bounded by MAX_MODULE_DEPTH along the import chain; built
-        tables are cached per top-level call."""
+        ESM `export`s combine with CommonJS `exports.x`/`module.exports`
+        fields for interop; a bound `module.exports` value also
+        surfaces under `default`."""
         if self.resolver is None:
             return None
         src_node = next(
@@ -1453,9 +1484,25 @@ class _Builder:
         if src_node is None:
             return None
         spec = src_node.text.decode().strip("'\"")
+        builder = self._resolve_builder(spec)
+        if builder is None:
+            return None
+        exports = dict(builder.exports)
+        cjs = builder.cjs_exports
+        if isinstance(cjs, _Composite):
+            for key, val in cjs.fields.items():
+                exports.setdefault(key, val)
+        elif cjs is not None:
+            exports.setdefault("default", cjs)
+        return exports
+
+    def _resolve_builder(self, spec):
+        """The resolved module's own `_Builder` — cached per
+        top-level call; cycles and chains past MAX_MODULE_DEPTH
+        yield None."""
         if spec in self.module_cache:
             return self.module_cache[spec]
-        exports = None
+        builder = None
         if (
             spec not in self.resolving
             and len(self.resolving) < MAX_MODULE_DEPTH
@@ -1466,14 +1513,128 @@ class _Builder:
             if isinstance(raw, bytes) and len(raw) <= MAX_SOURCE_BYTES:
                 root = _syntax(raw)
                 if root is not None:
-                    exports = _Builder(
+                    builder = _Builder(
                         root,
                         resolver=self.resolver,
                         resolving=self.resolving | {spec},
                         module_cache=self.module_cache,
-                    ).exports
-        self.module_cache[spec] = exports
-        return exports
+                    )
+        self.module_cache[spec] = builder
+        return builder
+
+    def _require_specifier(self, arguments):
+        """`require('./b')` — the literal specifier of a CommonJS
+        call, or None for a dynamic argument (`require(name)`),
+        which stays external."""
+        if arguments is None:
+            return None
+        named = [
+            c
+            for c in _children(arguments)
+            if c.type not in {"comment"}
+        ]
+        if len(named) == 1 and named[0].type == "string":
+            return named[0].text.decode().strip("'\"")
+        return None
+
+    def _resolve_require(self, spec):
+        """`require(spec)`'s value — the resolved module's
+        `module.exports` (a rebound non-object exports yields
+        itself, e.g. `module.exports = function`), or a
+        `_Composite` of its ESM exports when the module writes
+        none. Unresolvable stays None — the caller falls back to
+        the external-callee union."""
+        builder = self._resolve_builder(spec)
+        if builder is None:
+            return None
+        cjs = builder.cjs_exports
+        if cjs is not None and (
+            not isinstance(cjs, _Composite) or cjs.fields
+        ):
+            return cjs
+        if builder.exports:
+            return _Composite(dict(builder.exports))
+        return cjs if cjs is not None else _Composite({})
+
+    @property
+    def cjs_exports(self):
+        """This unit's CommonJS `module.exports` value — the
+        `exports`/`module.exports` seeds share one composite, so
+        `exports.f = g` and `module.exports = {...}` both land
+        here. `module.exports = <non-object>` (e.g. a bare
+        function) rebinds the field to the value itself."""
+        whole = self._cjs_whole
+        fields = self._cjs_fields
+        if whole is None:
+            return fields
+        if not fields.fields:
+            return whole
+        if isinstance(whole, _Composite):
+            merged = _Composite(dict(whole.fields))
+            for key, val in fields.fields.items():
+                if key in merged.fields:
+                    merged.fields[key] = _merge_vals(
+                        merged.fields[key], val
+                    )
+                else:
+                    merged.fields[key] = val
+            return merged
+        # A non-object whole-table export plus later field
+        # writes — keep both: the value under `default`, the
+        # fields beside it (over-approximates — extra bindings
+        # only sharpen a caller).
+        combined = _Composite(dict(fields.fields))
+        combined.fields.setdefault("default", whole)
+        return combined
+
+    def _cjs_export_store(self, node, count) -> bool:
+        """`module.exports = v` / `module.exports.x = v` /
+        `exports.x = v` at module level — capture the evaluated
+        VALUE (callable/composite preserved) into the CJS export
+        table, where the normal member-store model would
+        collapse it to scalar deps. Returns True when the
+        statement was consumed; deeper paths and any other
+        statement fall through to `statement()`."""
+        if node.type != "expression_statement" or not node.named_children:
+            return False
+        stmt = node.named_children[0]
+        if stmt.type != "assignment_expression":
+            return False
+        if any(
+            c.type == "augmented_operator" for c in stmt.children
+        ):
+            return False
+        left = stmt.child_by_field_name("left")
+        right = stmt.child_by_field_name("right")
+        if left is None or right is None:
+            return False
+        base_node, path = left, []
+        while base_node.type == "member_expression":
+            prop = base_node.child_by_field_name("property")
+            if prop is None or prop.type != "property_identifier":
+                return False
+            path.append(prop.text.decode())
+            base_node = base_node.child_by_field_name("object")
+        if base_node.type != "identifier":
+            return False
+        base = base_node.text.decode()
+        path = list(reversed(path))
+        if base == "module":
+            if not path or path[0] != "exports":
+                return False
+            path = path[1:]
+        elif base != "exports":
+            return False
+        if len(path) > 1:
+            return False
+        value = self._eval(
+            right, {}, self.module_locals, [], count
+        )
+        if not path:
+            self._cjs_whole = value
+        else:
+            self._cjs_fields.fields[path[0]] = value
+        return True
 
     def _register_nested_functions(self, node, params, locals_) -> None:
         """Register every `function inner() {}` declaration under
@@ -2926,6 +3087,10 @@ class _Builder:
                 "arrow_function",
                 "function_expression",
                 "generator_function",
+                # A call result (`require`, a factory/curry) —
+                # the callable carries its own origin/scope, so
+                # binding it can't alias anything else.
+                "call_expression",
             }
         ):
             return _scalar_of(value)
@@ -5198,6 +5363,20 @@ class _Builder:
             if bound:
                 # A local binding shadows a same-named function
                 # declaration — JS resolution order.
+                if callee == "require" and self.resolver is not None:
+                    spec = self._require_specifier(arguments)
+                    if spec is not None:
+                        cval = self._resolve_require(spec)
+                        if cval is not None:
+                            transfers.append(
+                                TsCall(
+                                    _span(node),
+                                    callee,
+                                    actual,
+                                    _scalar_of(cval),
+                                )
+                            )
+                            return cval
                 raw = self._lookup(
                     callee, params, locals_, _span(function)
                 )

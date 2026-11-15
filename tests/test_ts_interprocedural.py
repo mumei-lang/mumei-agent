@@ -4850,3 +4850,141 @@ def test_export_type_exports_nothing():
         ).functions if fn.name == "f"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_module_exports_object_invokes():
+    mods = {
+        "./b": "module.exports = { g: function(a){ return a + 1; } };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./b');"
+            " function f(x: number): number { return m.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_exports_field_invokes():
+    mods = {
+        "./c": "exports.g = function(a){ return a * 2; };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./c');"
+            " function f(x: number): number { return m.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_module_exports_field_invokes():
+    mods = {
+        "./m": "module.exports.g = function(a){ return a * 5; };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./m');"
+            " function f(x: number): number { return m.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_bare_function_invokes():
+    mods = {
+        "./d": "module.exports = function(a){ return a * 3; };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const g = require('./d');"
+            " function f(x: number): number { return g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_unresolvable_stays_external():
+    mods = {"./b": "module.exports = { g: function(a){ return a; } };"}
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./missing');"
+            " function f(x: number): number { return m.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_without_resolver_stays_external():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./b');"
+            " function f(x: number): number { return m.g(x); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_require_of_esm_module_composites_exports():
+    mods = {
+        "./e": "export function g(a){ return a; }",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./e');"
+            " function f(x: number): number { return m.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_import_from_commonjs_module_reads_exports():
+    mods = {
+        "./c": "exports.g = function(a){ return a * 2; };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './c';"
+            " function f(x: number): number { return g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_default_import_of_commonjs_whole():
+    mods = {
+        "./d": "module.exports = function(a){ return a * 3; };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import d from './d';"
+            " function f(x: number): number { return d(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_commonjs_export_write_in_importer_callable():
+    # `m.g = function...` on a require-bound composite keeps the
+    # stored callable invocable (copy-on-write field write).
+    mods = {
+        "./b": "module.exports = { g: function(a){ return a + 1; } };",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "const m = require('./b');"
+            " function f(x: number): number {"
+            " m.g = function(a){ return a; };"
+            " return m.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

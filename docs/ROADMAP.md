@@ -3351,6 +3351,27 @@ importer's binding stays `_External` with unchanged
 semantics. Re-export chains compose through the shared
 module cache and depth bound.
 
+### C06 TypeScript CommonJS require (slice 52)
+
+`require('./b')` resolves the module and yields its
+CommonJS `module.exports` — a field write
+(`exports.x = v`/`module.exports.x = v`), a whole-table
+rebind (`module.exports = v`, including a bare
+function/class value), or a `_Composite` of the unit's
+ESM `export` table when it writes none. Module-level CJS
+export stores are evaluated into a precise export table
+(the normal member model would collapse the value to
+scalar deps), so `const m = require('./b'); m.g(x)` and
+`const g = require('./d'); g(x)` invoke the real
+callables. `import` reads the same table: `import {g}`
+from a CJS unit binds its `exports.g`, and `import d`
+from `module.exports = fn` binds the function under
+`default`. Every failure path — unresolvable specifier,
+missing resolver, non-string argument — falls back to
+the external-callee union, so resolution is again
+strictly sharpening. In-module reads of `module`/`exports`
+keep the seeded scalar approximation.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
