@@ -4988,3 +4988,88 @@ def test_commonjs_export_write_in_importer_callable():
         ).functions if fn.name == "f"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_value_alias_invokes():
+    # `let h = g` — a declared function used as a value
+    # materializes its `_Callable`; the alias invokes it.
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function g(a: number){ return a; }"
+            " function f(x: number): number {"
+            " let h = g; return h(x); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_value_in_object_field():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function g(a: number){ return a; }"
+            " function f(x: number): number {"
+            " let o = {h: g}; return o.h(x); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_value_in_array_element():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function g(a: number){ return a; }"
+            " function f(x: number): number {"
+            " let a = [g]; return a[0](x); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_value_as_argument_invokes():
+    # `h(c){ return c(1) }` with `h(g)` — the callable actual
+    # binds to the param and invokes inside the body.
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function g(a: number){ return a; }"
+            " function h(c){ return c(1); }"
+            " function f(x: number): number { return h(g) + x; }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_arrow_value_as_argument_invokes():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function h(c){ return c(1); }"
+            " function f(x: number): number {"
+            " return h((v) => v + x); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_composite_as_argument_reads_field():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function h(o){ return o.a; }"
+            " function f(x: number): number {"
+            " return h({a: x}); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_external_as_argument_yields_union():
+    # A param bound to an `_External` still calls through the
+    # actuals-union convention.
+    mods = {"./x": "export function g(a){ return a; }"}
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './x';"
+            " function h(c){ return c(1); }"
+            " function f(x: number): number { return h(g) + x; }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

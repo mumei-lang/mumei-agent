@@ -3372,6 +3372,22 @@ the external-callee union, so resolution is again
 strictly sharpening. In-module reads of `module`/`exports`
 keep the seeded scalar approximation.
 
+### C06 TypeScript first-class function values (slice 53)
+
+A `function` declaration used as a value (`let h = g`,
+`{f: g}`, `[g]`, `h(g)`, `new A(g)`) materializes a
+`_Callable` via `_lookup`'s function registry — the cache
+unions `captured` across materialization sites so a name
+visible under several scopes keeps an over-approximation.
+Call sites collect each argument's evaluated value beside
+its dep-set (`values_out`); `_invoke_callable` binds a
+non-scalar actual (`_Callable`/`_Composite`/`_Class`/
+`_External`) to the parameter, so `h(c){ return c(1) }`
+invokes the real callback and `h(o){ return o.a }` reads
+the passed composite's fields. Scalar actuals keep dep
+binding unchanged — an opt-in channel, no semantics change
+where it is unused.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

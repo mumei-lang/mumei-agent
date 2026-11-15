@@ -277,6 +277,15 @@ Admitted:
   `import d` of a bare-function export via `default`).
   Unresolvable specifiers and non-string arguments keep
   the external-callee union — resolution only sharpens.
+* Function declarations are first-class values: `_lookup`
+  materializes `self.functions[name]` into a `_Callable`
+  (captured scope unioned across materialization sites, so
+  a name visible under several scopes over-approximates).
+  Call sites collect each argument's evaluated VALUE in
+  `values_out`; `_invoke_callable` binds a non-scalar
+  actual (`_Callable`/`_Composite`/`_Class`/`_External`)
+  to the parameter, so `h(g)`/`h({a: x})`/`new A(g)` let
+  the callee body call `c(x)` or read `o.a` precisely.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -969,6 +978,7 @@ class _Builder:
         self.functions: dict[str, object] = {}
         self.classes: dict[str, object] = {}
         self._class_cache: dict[str, object] = {}
+        self._fn_cache: dict[str, object] = {}
         # Optional module resolver: maps an import specifier to
         # source text (None = no resolver / unresolvable — the
         # names stay `_External`, the existing over-approximation).
@@ -3120,6 +3130,35 @@ class _Builder:
                     self.classes[name], params, locals_
                 )
             return self._class_cache[name]
+        if name in self.functions:
+            # A function declaration used as a VALUE (`let h =
+            # g`, `{f: g}`, `[g]`, `h(g)`) materializes its
+            # `_Callable`. The cache unions `captured` across
+            # materialization sites so a name visible under
+            # several scopes always keeps an over-approximation
+            # of every scope it captured.
+            if name not in self._fn_cache:
+                self._fn_cache[name] = self._callable_value(
+                    self.functions[name], params, locals_
+                )
+            else:
+                cval = self._fn_cache[name]
+                extra = frozenset(params.values())
+                for val in locals_.values():
+                    extra |= _scalar_of(val)
+                if extra - cval.captured:
+                    widened = _Callable(
+                        cval.node,
+                        cval.params,
+                        cval.defaults,
+                        cval.captured | extra,
+                        cval.rest,
+                        cval.is_method,
+                    )
+                    widened.param_props = cval.param_props
+                    widened.origin = cval.origin
+                    self._fn_cache[name] = widened
+            return self._fn_cache[name]
         if name in self.imported_bindings:
             return self.imported_bindings[name]
         if name in self.imports:
@@ -3680,6 +3719,7 @@ class _Builder:
         span,
         this_val=None,
         construct=False,
+        actual_values=None,
     ) -> frozenset[int]:
         """`g(args)` where `g` binds an arrow/function value —
         evaluate the body inline. Captured names read the CALL
@@ -3710,6 +3750,11 @@ class _Builder:
         if this_val is not None:
             inner["this"] = this_val
         for i, pname in enumerate(cval.params):
+            aval = (
+                actual_values[i]
+                if actual_values is not None and i < len(actual_values)
+                else None
+            )
             if i == cval.rest:
                 # `...rest` collects every remaining argument —
                 # dep-wise the union of them all.
@@ -3723,7 +3768,14 @@ class _Builder:
                 deps |= self.expression(
                     dnode, params, inner, transfers, count
                 )
-            inner[pname] = deps
+            if aval is not None and not isinstance(aval, frozenset):
+                # A value-typed actual (a `_Callable`/`_Composite`
+                # passed as an argument) binds its identity — a
+                # body calling `param(x)` invokes the real
+                # callback; scalar actuals keep dep binding.
+                inner[pname] = aval
+            else:
+                inner[pname] = deps
             if (
                 construct
                 and pname in cval.param_props
@@ -4280,7 +4332,17 @@ class _Builder:
             return result | extras
         return _scalar_of(raw) | extras
 
-    def _construct(self, cls, actual, params, locals_, transfers, count, span):
+    def _construct(
+        self,
+        cls,
+        actual,
+        params,
+        locals_,
+        transfers,
+        count,
+        span,
+        actual_values=None,
+    ):
         """`new C(args)` — seed `this` to a fresh `_Composite` of
         the class, run field initializers (which see `this` and
         the captured scope, not ctor params), then the ctor body;
@@ -4320,6 +4382,7 @@ class _Builder:
                     span,
                     this_val=inner["this"],
                     construct=True,
+                    actual_values=actual_values,
                 )
                 inner["this"] = instance
         finally:
@@ -4341,21 +4404,38 @@ class _Builder:
         return inner["this"]
 
     def _call_actuals(
-        self, arguments, params, locals_, transfers, count, node
+        self,
+        arguments,
+        params,
+        locals_,
+        transfers,
+        count,
+        node,
+        values_out=None,
     ):
         """`f(a, b)` actuals, or `tag`...${x}...`` — a tagged
         template calls the tag with the cooked-strings array
-        (dep-free) then each substitution's value."""
+        (dep-free) then each substitution's value. When
+        `values_out` is a list it also collects each argument's
+        evaluated VALUE (a `_Callable` argument keeps its
+        identity — `_invoke_callable` binds it to the param so
+        `h(cb){ cb(x) }` invokes the real callback)."""
+        def add(arg_node):
+            value = self._eval(
+                arg_node, params, locals_, transfers, count
+            )
+            if values_out is not None:
+                values_out.append(value)
+            return _scalar_of(value)
+
         if arguments.type == "template_string":
             actuals: list = [frozenset()]
+            if values_out is not None:
+                values_out.append(frozenset())
             for child in _children(arguments):
                 if child.type == "template_substitution":
                     for inner in _children(child):
-                        actuals.append(
-                            self.expression(
-                                inner, params, locals_, transfers, count
-                            )
-                        )
+                        actuals.append(add(inner))
             return tuple(actuals)
         if arguments.type != "arguments":
             raise _Unsupported("unsupported_expression", _span(node))
@@ -4369,15 +4449,9 @@ class _Builder:
                     raise _Unsupported(
                         "unsupported_expression", _span(arg)
                     )
-                actuals.append(
-                    self.expression(
-                        operand, params, locals_, transfers, count
-                    )
-                )
+                actuals.append(add(operand))
                 continue
-            actuals.append(
-                self.expression(arg, params, locals_, transfers, count)
-            )
+            actuals.append(add(arg))
         return tuple(actuals)
 
     def _collection_call(
@@ -4961,9 +5035,16 @@ class _Builder:
                     "unsupported_expression", _span(node)
                 )
             # `new C` without parentheses constructs with no args.
+            vals_n: list = []
             actual_n = (
                 self._call_actuals(
-                    args_node, params, locals_, transfers, count, node
+                    args_node,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    node,
+                    values_out=vals_n,
                 )
                 if args_node is not None
                 else ()
@@ -4993,8 +5074,14 @@ class _Builder:
                 )
             if isinstance(raw_n, _Class):
                 result_n = self._construct(
-                    raw_n, actual_n, params, locals_, transfers,
-                    count, _span(node),
+                    raw_n,
+                    actual_n,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    actual_values=vals_n,
                 )
                 transfers.append(
                     TsCall(
@@ -5034,6 +5121,7 @@ class _Builder:
                     _span(node),
                     this_val=_Composite({}),
                     construct=True,
+                    actual_values=vals_n,
                 )
                 transfers.append(
                     TsCall(
@@ -5068,8 +5156,15 @@ class _Builder:
                 # `o.f(x)` — the field may hold a `_Callable`
                 # (`{f: v => v}`). There is no `this` binding —
                 # a body reading `this` closes inside.
+                vals_m: list = []
                 actual_m = self._call_actuals(
-                    arguments, params, locals_, transfers, count, node
+                    arguments,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    node,
+                    values_out=vals_m,
                 )
                 try:
                     raw = self._member_read(
@@ -5173,6 +5268,7 @@ class _Builder:
                                     transfers,
                                     count,
                                     _span(node),
+                                    actual_values=vals_m,
                                     this_val=(
                                         base_val2
                                         if fval.is_method
@@ -5235,6 +5331,7 @@ class _Builder:
                     count,
                     _span(node),
                     this_val=this_val,
+                    actual_values=vals_m,
                 )
                 transfers.append(
                     TsCall(
@@ -5261,8 +5358,15 @@ class _Builder:
                     raise _Unsupported(
                         "unsupported_expression", _span(node)
                     )
+                vals_s: list = []
                 actual_s = self._call_actuals(
-                    arguments, params, locals_, transfers, count, node
+                    arguments,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    node,
+                    values_out=vals_s,
                 )
                 inst = self._invoke_callable(
                     parent.ctor,
@@ -5274,6 +5378,7 @@ class _Builder:
                     _span(node),
                     this_val=this_v,
                     construct=True,
+                    actual_values=vals_s,
                 )
                 locals_["this"] = inst
                 transfers.append(
@@ -5306,8 +5411,15 @@ class _Builder:
                 # conditional pick) whose captured deps plus the
                 # actuals' union over-approximate the result —
                 # the same bound the optional-call fallback uses.
+                vals_e: list = []
                 actual_e = self._call_actuals(
-                    arguments, params, locals_, transfers, count, node
+                    arguments,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    node,
+                    values_out=vals_e,
                 )
                 raw = self._eval(
                     function, params, locals_, transfers, count
@@ -5321,6 +5433,7 @@ class _Builder:
                         transfers,
                         count,
                         _span(node),
+                        actual_values=vals_e,
                     )
                     transfers.append(
                         TsCall(
@@ -5357,8 +5470,15 @@ class _Builder:
                 raise _Unsupported(
                     "call_unresolved", _span(node), callee
                 )
+            vals: list = []
             actual = self._call_actuals(
-                arguments, params, locals_, transfers, count, node
+                arguments,
+                params,
+                locals_,
+                transfers,
+                count,
+                node,
+                values_out=vals,
             )
             if bound:
                 # A local binding shadows a same-named function
@@ -5412,6 +5532,7 @@ class _Builder:
                     transfers,
                     count,
                     _span(node),
+                    actual_values=vals,
                 )
                 transfers.append(
                     TsCall(_span(node), callee, actual, result)
