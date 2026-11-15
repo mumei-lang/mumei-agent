@@ -23,6 +23,7 @@ from agent.verification_attempt import (
     AttemptEvent,
     AttemptExecutionRequest,
     AttemptNormalizedResult,
+    AttemptOutput,
     AttemptRecord,
     AttemptSequence,
 )
@@ -128,7 +129,8 @@ class AttemptRunResult:
     """One observed run: a terminal record plus the bounded captured bytes.
 
     `stdout`/`complete` are collection observations, not success or Evidence
-    claims; hosts still bind snapshots with `AttemptOutput` and own canonical
+    claims; a dispatched run binds its snapshot through
+    `AttemptDispatch.captured_output()`, and hosts still own canonical
     publication. The record is terminal by construction.
     """
 
@@ -314,9 +316,9 @@ class AttemptDispatch:
     `sequence` is the sequence reconciled with the run's terminal record;
     `run` is the observed run itself — terminal record, bounded stdout and
     the `complete` collection claim. Nothing here selects a canonical
-    result, binds an `AttemptOutput` snapshot or publishes lineage: the
-    host still calls `select_result`, builds `AttemptOutput` and publishes
-    through `AttemptSequenceStore`.
+    result or publishes lineage: the host still calls `select_result` —
+    typically on the `captured_output()` snapshot, the canonical builder
+    for this run's bytes — and publishes through `AttemptSequenceStore`.
     """
 
     sequence: AttemptSequence
@@ -339,6 +341,28 @@ class AttemptDispatch:
         ):
             raise ValueError("attempt dispatch does not match the sequence")
 
+    def captured_output(self) -> AttemptOutput:
+        """Bind the run's captured stdout as an `AttemptOutput` snapshot.
+
+        The snapshot is built from the reconciled sequence's current
+        record — identical to the run's record after reconciliation — the
+        bounded captured bytes and the run's `complete` collection claim,
+        then checked against `check_output_binding`. A non-`exited`
+        terminal run cannot produce a snapshot: `AttemptOutput` requires
+        an exited record, so a failed, timed-out or cancelled dispatch
+        fails statically rather than minting an output for a process
+        that never produced one. The snapshot is still a host claim, not
+        Evidence — selection and publication stay explicit host steps.
+        """
+        output = AttemptOutput(
+            self.sequence.current,
+            self.run.stdout,
+            hashlib.sha256(self.run.stdout).hexdigest(),
+            complete=self.run.complete,
+        )
+        self.sequence.check_output_binding(output)
+        return output
+
 
 def dispatch_attempt(
     sequence: AttemptSequence,
@@ -357,8 +381,10 @@ def dispatch_attempt(
     sequence has the run's terminal record reconciled in. A stamped
     sequence requires `report_stamp` — it is checked before spawn so a
     missing, malformed or non-fresh stamp fails statically instead of
-    losing an observed run. Reconciling does not select a result, capture
-    an `AttemptOutput` or publish — those stay explicit host steps.
+    losing an observed run. Reconciling does not select a result or
+    publish — `captured_output()` binds the run's bytes as the declared
+    `AttemptOutput` snapshot, and selection and publication stay explicit
+    host steps.
     """
     if type(sequence) is not AttemptSequence:
         raise ValueError("attempt dispatch requires an attempt sequence")
