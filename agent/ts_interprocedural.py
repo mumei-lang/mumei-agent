@@ -317,6 +317,10 @@ Admitted:
   precisely, others via `"*"`), `get`/`has`/`size`/
   iteration reads carry the entry union. `new` on a scalar-
   joined ctor dep-unions; `Function` is a known global.
+* `_invoke_callable` bounds nesting at `MAX_INVOKE_DEPTH` —
+  self-recursive or mutually recursive function values
+  over-approximate to captured ∪ actuals past the bound
+  instead of exhausting the interpreter stack.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -469,6 +473,11 @@ PROFILE = "mumei.ts-interprocedural/v1"
 # Defensive bound on evaluated syntax nodes — a parser or dispatch bug
 # must never hang the analyzer.
 MAX_NODES = 20000
+# Nesting bound for `_invoke_callable` — self-recursive or
+# deeply chained function values would otherwise exhaust the
+# interpreter stack. Beyond the bound an invocation
+# over-approximates to captured ∪ actuals.
+MAX_INVOKE_DEPTH = 32
 # Import resolution depth along a chain of relative specifiers
 # — deeper chains stay `_External` like any unresolvable import.
 MAX_MODULE_DEPTH = 8
@@ -1220,6 +1229,7 @@ class _Builder:
         # object — subsequent `exports.x` writes land on the
         # old object and never reach `module.exports`.
         self._cjs_exports_detached = False
+        self._invoke_depth = 0
         self.module_locals.setdefault(
             "module", _Composite({"exports": _cjs_table})
         )
@@ -3876,6 +3886,47 @@ class _Builder:
         must never capture them). The shared `transfers`/`count`
         accumulators keep call records and the node budget
         global across the chain."""
+        if self._invoke_depth >= MAX_INVOKE_DEPTH:
+            # Recursive or deeply nested call chains — beyond
+            # the bound the result over-approximates to the
+            # callee's captured deps plus every actual (the
+            # same shape an opaque callee would produce), so
+            # a self-recursive function value terminates
+            # instead of exhausting the interpreter stack.
+            result = _scalar_of(cval)
+            for a in actual:
+                result |= a
+            return result
+        self._invoke_depth += 1
+        try:
+            return self._invoke_callable_body(
+                cval,
+                actual,
+                params,
+                locals_,
+                transfers,
+                count,
+                span,
+                this_val=this_val,
+                construct=construct,
+                actual_values=actual_values,
+            )
+        finally:
+            self._invoke_depth -= 1
+
+    def _invoke_callable_body(
+        self,
+        cval,
+        actual,
+        params,
+        locals_,
+        transfers,
+        count,
+        span,
+        this_val=None,
+        construct=False,
+        actual_values=None,
+    ) -> frozenset[int]:
         if cval.origin is not None and cval.origin is not self:
             return cval.origin._invoke_callable(
                 cval,

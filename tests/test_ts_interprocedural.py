@@ -5477,3 +5477,40 @@ def test_new_on_joined_ctor_dep_unions():
         " return new (k === 'C' ? C : D)().m(x); }"
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_self_recursive_function_value_terminates():
+    s = _fn(
+        "function f(x: number) {"
+        " function g(a) { return a > 0 ? g(a - 1) : a; }"
+        " return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_self_recursive_arrow_terminates():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = (a) => a > 0 ? g(a - 1) : a;"
+        " return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_mutually_recursive_callables_terminate():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = (a) => h(a);"
+        " let h = (a) => a > 0 ? g(a - 1) : a;"
+        " return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_finite_nesting_still_inlines():
+    s = _fn(
+        "function f(x: number) {"
+        " let a = (v) => v + 1;"
+        " return a(a(a(a(a(x))))); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

@@ -3447,6 +3447,18 @@ opaque ctor instead of closing. `Function` joins the known
 globals so `new Function(...)` is an opaque `_External`
 rather than `binding_unavailable`.
 
+### C06 TypeScript invoke depth bound — recursive function values terminate (slice 57)
+
+`_invoke_callable` now bounds its own nesting at
+`MAX_INVOKE_DEPTH` (32): a function value that invokes
+itself — `let g = (a) => a > 0 ? g(a - 1) : a` — or a
+mutually recursive chain previously exhausted the
+interpreter stack while materializing `binding_unavailable`.
+Past the bound an invocation over-approximates to the
+callee's captured deps plus every actual, the same shape an
+opaque callee produces, so recursion keeps the summary
+available with a dep-union result.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
