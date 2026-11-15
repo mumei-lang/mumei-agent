@@ -764,6 +764,34 @@ validates both declared paths, calls
 checkout-local paths basename-redacted, like the other consume
 tools.
 
+### C02 declared evidence-check route (evidence-check)
+
+`python -m agent evidence-check --core <path> --evidence <path>` is
+the consume-side companion of `verify-attempt`: it feeds a saved
+`mumei.verification-evidence/v1` record's bytes to
+`<core> evidence check --stdin --json` as one declared attempt.
+`AttemptRunner`/`dispatch_attempt` gain a bounded `feed_bytes`
+argument (at most 65536 bytes, written to the child's stdin on a
+daemon feeder thread then closed — a child that exits early or never
+reads surfaces `BrokenPipeError`, which is simply the observed run
+outcome), so the representation check itself now carries canonical
+attempt lineage instead of running as an inline Popen.
+
+Selection requires exit 0 AND captured stdout that parses as the
+Core's one accepted `mumei.evidence-representation-check/v1`
+diagnostic — every rejection exits 1 with no diagnostic to bind, and
+a 0 exit with unrecognised bytes binds nothing. The report
+(`mumei.evidence-check-report/v1`) echoes the diagnostic's
+`representation` and its own `checks_not_performed` list only on
+selection — the six semantic duties the check never assesses stay
+named — plus the evidence candidate; a mid-run drift of the declared
+record suppresses the outcome via `inputs_changed`. The route is
+also reachable as the `evidence_check` MCP tool. C02 stays partial:
+this discharges the representation check as a declared consume
+attempt only — `claim_truth`, `freshness` (beyond record currency),
+`producer_authenticity`, `semantic_correspondence` and
+`artifact_semantics` remain host/Core duties.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

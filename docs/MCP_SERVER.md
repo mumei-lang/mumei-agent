@@ -72,6 +72,7 @@ Exported tools:
 | `evidence_check_accept(sequence_json, check_json)` | Restore a declared attempt-sequence snapshot and evidence-check record from inline JSON and emit the `mumei.evidence-check-acceptance/v1` descriptor — `accepted` only when the record binds the sequence's current candidate and is `"valid"`; no Core run, representation-level only |
 | `evidence_compare(evidence_a_path, evidence_b_path)` | Compare two declared `mumei.verification-evidence/v1` records' claim surfaces and emit `mumei.evidence-comparison/v1` (`subject_match`/`specification_match`/`claims_match`); record-vs-record comparison only, no Core run |
 | `evidence_identity_check(evidence_path, source_path)` | Compare a declared `mumei.verification-evidence/v1` record's bound `subject.sha256` to the current source bytes and emit `mumei.evidence-file-identity/v1` (`match`/`mismatch`); byte-level file identity only, no Core run |
+| `evidence_check(core_path, evidence_path, attempt_timeout_ms=30000)` | Feed a declared `mumei.verification-evidence/v1` record's bytes to `evidence check --stdin --json` as one declared attempt (same wiring as the `evidence-check` route) and return `mumei.evidence-check-report/v1` — `representation` is claimed only on the recognised v1 diagnostic |
 | `verify_attempt(core_path, source_path, solver_timeout_ms=5000, solver_resource_limit=1000000, attempt_timeout_ms=30000)` | Run `evidence verify-source` as one declared attempt (same wiring as the `verify-attempt` route) and return `mumei.verify-attempt-report/v1` — including `candidate`, `evidence_check` and `acceptance` when a result is selected; representation-level acceptance only |
 | `verify_recheck(core_path, evidence_path, source_path, solver_timeout_ms=5000, solver_resource_limit=1000000, attempt_timeout_ms=30000)` | Run `evidence recheck-source` as one declared attempt (same wiring as `verify-recheck`); `recheck` is claimed only for uniquely-mapped exit codes and mid-run drift reports `inputs_changed` |
 | `native_recheck(core_path, bundle_dir, source_path, expected_build_id, attempt_timeout_ms=30000)` | Run `native-bundle recheck-llvm` as one declared attempt (same wiring as `native-recheck`) and return `mumei.native-recheck-report/v1` |
@@ -143,6 +144,7 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `verify_code_spec_traceability` | `code_file: str, spec_text: str, language: str \| None = None, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
 | `verify_foreign_code` | `source_code: str, language: str, use_llm: bool = True, run_mumei: bool = True, ctx: Context \| None = None` |  |
 | `audit_code` | `source_code: str, language: str, domain_hint: str = '', ctx: Context \| None = None` |  |
+| `evidence_check` | `core_path: str, evidence_path: str, attempt_timeout_ms: int = 30000` | `report` |
 | `evidence_check_accept` | `sequence_json: str, check_json: str` | `acceptance` |
 | `evidence_compare` | `evidence_a_path: str, evidence_b_path: str` | `comparison` |
 | `evidence_identity_check` | `evidence_path: str, source_path: str` | `identity` |
