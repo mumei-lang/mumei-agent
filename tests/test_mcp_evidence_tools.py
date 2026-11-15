@@ -229,3 +229,155 @@ class TestPathologicalJson:
             mcp_server.evidence_check_accept(doc, json.dumps(check.to_dict()))
         )
         assert out["status"] == "error"
+
+
+def _write_stub_core(tmp_path, exits: dict):
+    """Stub `mumei`: per-subcommand exit codes; verify-source emits a
+    fake record and `evidence check` the canonical diagnostic."""
+    diagnostic = {
+        "schema_version": "mumei.evidence-representation-check/v1",
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "checks_not_performed": [
+            "claim_truth", "file_identity", "freshness",
+            "producer_authenticity", "semantic_correspondence",
+            "artifact_semantics",
+        ],
+    }
+    evidence = {"schema_version": "mumei.verification-evidence/v1", "record": True}
+    lines = ["#!/bin/sh\n"]
+    lines.append(
+        'if [ "$1" = "evidence" ] && [ "$2" = "verify-source" ]; then\n'
+        f'    printf \'%s\' \'{json.dumps(evidence)}\'\n'
+        f'    exit {exits.get("verify-source", 0)}\n'
+        'elif [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
+        "    cat >/dev/null\n"
+        f'    printf \'%s\' \'{json.dumps(diagnostic)}\'\n'
+        "    exit 0\n"
+        'elif [ "$1" = "evidence" ] && [ "$2" = "recheck-source" ]; then\n'
+        f'    printf \'%s\' \'{{"schema_version":"mumei.evidence-consistency/v1"}}\'\n'
+        f'    exit {exits.get("recheck-source", 0)}\n'
+        'elif [ "$1" = "native-bundle" ] && [ "$2" = "recheck-llvm" ]; then\n'
+        f'    printf \'%s\' \'{{"schema_version":"mumei.native-consumer-evidence/v1"}}\'\n'
+        f'    exit {exits.get("recheck-llvm", 0)}\n'
+        "fi\n"
+        "exit 2\n"
+    )
+    core = tmp_path / "mumei-stub"
+    core.write_text("".join(lines))
+    core.chmod(0o755)
+    return core
+
+
+class TestVerifyAttemptTool:
+    def test_selected_result_reports_acceptance(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(mcp_server.verify_attempt(str(core), str(src)))
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["schema_version"] == "mumei.verify-attempt-report/v1"
+        assert report["acceptance"]["accepted"] is True
+        assert report["candidate"] is not None
+
+    def test_refuted_exit_has_no_selection(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"verify-source": 1})
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(mcp_server.verify_attempt(str(core), str(src)))
+        assert out["status"] == "ok"
+        assert "selected_result" not in out["report"]["sequence"]
+        assert "acceptance" not in out["report"]
+
+    def test_bad_args_are_errors(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        for args in (
+            ("", str(src)),
+            (str(core), ""),
+        ):
+            out = json.loads(mcp_server.verify_attempt(*args))
+            assert out["status"] == "error"
+        out = json.loads(mcp_server.verify_attempt(str(core), str(src), attempt_timeout_ms=0))
+        assert out["status"] == "error"
+
+    def test_error_redacts_declared_paths(self, tmp_path):
+        missing_core = tmp_path / "no-such-core"
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.verify_attempt(str(missing_core), str(src))
+        )
+        assert out["status"] == "error"
+        assert str(missing_core) not in out["error"]
+        assert str(src) not in out["error"]
+
+
+class TestVerifyRecheckTool:
+    def test_consistent_outcome(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"recheck-source": 0})
+        evidence = _write_evidence(tmp_path / "ev.json", _sha256(SOURCE))
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.verify_recheck(str(core), str(evidence), str(src))
+        )
+        assert out["status"] == "ok"
+        assert out["report"]["recheck"] == "consistent"
+
+    def test_inconclusive_outcome(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"recheck-source": 3})
+        evidence = _write_evidence(tmp_path / "ev.json", _sha256(SOURCE))
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.verify_recheck(str(core), str(evidence), str(src))
+        )
+        assert out["status"] == "ok"
+        assert out["report"]["recheck"] == "inconclusive"
+
+    def test_missing_evidence_is_error(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        missing = tmp_path / "gone.json"
+        out = json.loads(
+            mcp_server.verify_recheck(str(core), str(missing), str(src))
+        )
+        assert out["status"] == "error"
+        assert str(missing) not in out["error"]
+
+
+class TestNativeRecheckTool:
+    def _bundle(self, tmp_path):
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        record = bundle / "native-bundle.json"
+        record.write_text('{"schema_version": "mumei.native-bundle/v1"}', encoding="utf-8")
+        for name in ("program.ll", "program.o", "proof-cert.json", "program"):
+            (bundle / name).write_text("x", encoding="utf-8")
+        return bundle, hashlib.sha256(record.read_bytes()).hexdigest()
+
+    def test_equivalent_outcome(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"recheck-llvm": 0})
+        bundle, build_id = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.native_recheck(str(core), str(bundle), str(src), build_id)
+        )
+        assert out["status"] == "ok"
+        assert out["report"]["recheck"] == "equivalent"
+
+    def test_bad_build_id_is_error(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        bundle, _ = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.native_recheck(str(core), str(bundle), str(src), "zz" * 32)
+        )
+        assert out["status"] == "error"

@@ -231,75 +231,90 @@ def build_recheck_parser(
     return parser
 
 
+def run_recheck(args: argparse.Namespace) -> dict:
+    """Run the declared verify-recheck and return the report dict.
+
+    Emits `mumei.verify-recheck-report/v1`: the reconciled lineage,
+    the normalized run record, `inputs_changed` when declared bytes
+    drifted mid-run (the claimed outcome is then suppressed), the
+    mapped `recheck` outcome for uniquely-mapped exit codes, and the
+    evidence candidate on a selected result. Raises
+    `OSError`/`ValueError`/`UnicodeDecodeError` on any declared-input
+    failure; the caller treats those as static errors.
+    """
+    from agent.attempt_runner import dispatch_attempt
+    from agent.verification_attempt import (
+        AttemptSequence,
+        AttemptSequenceStore,
+    )
+
+    _check_request(args)
+
+    fingerprint = _attempt_fingerprint(args)
+    argv = (
+        args.core,
+        "evidence",
+        "recheck-source",
+        args.evidence,
+        "--source",
+        args.source,
+        "--json",
+        "--solver-timeout",
+        args.solver_timeout,
+        "--solver-resource-limit",
+        args.solver_resource_limit,
+    )
+    sequence = AttemptSequence(fingerprint, args.attempt_timeout)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    current = store.current
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        memory_bound_mb=args.memory_bound_mb,
+    )
+    try:
+        inputs_changed = _attempt_fingerprint(args) != fingerprint
+    except OSError:
+        inputs_changed = True
+    record = dispatch.run.record
+    exit_code = None
+    if record.state == "exited" and record.events:
+        exit_code = record.events[-1].exit_code
+    # recheck-source emits the consistency diagnostic only on a
+    # clean `Consistent` exit; refuted (1) and inconclusive (3)
+    # runs produced no bytes to bind.
+    if exit_code == 0 and not inputs_changed:
+        updated = dispatch.sequence.select_result(
+            dispatch.captured_output()
+        )
+    else:
+        updated = dispatch.sequence
+    published = store.compare_and_set(current, updated)
+    report: dict[str, object] = {
+        "schema_version": RECHECK_REPORT_PROFILE,
+        "sequence": published.to_dict(),
+        "normalized": dispatch.run.normalized().to_dict(),
+    }
+    if inputs_changed:
+        # The run consumed bytes that no longer match the declared
+        # request: its exit code is not a verdict on this
+        # fingerprint. Surface the drift; claim no outcome.
+        report["inputs_changed"] = True
+    elif exit_code in RECHECK_OUTCOMES:
+        report["recheck"] = RECHECK_OUTCOMES[exit_code]
+    if published.selected_result is not None:
+        report["candidate"] = (
+            published.evidence_candidate().to_dict()
+        )
+    return report
+
+
 def main_recheck(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_recheck_parser().parse_args()
     try:
-        from agent.attempt_runner import dispatch_attempt
-        from agent.verification_attempt import (
-            AttemptSequence,
-            AttemptSequenceStore,
-        )
-
-        _check_request(args)
-
-        fingerprint = _attempt_fingerprint(args)
-        argv = (
-            args.core,
-            "evidence",
-            "recheck-source",
-            args.evidence,
-            "--source",
-            args.source,
-            "--json",
-            "--solver-timeout",
-            args.solver_timeout,
-            "--solver-resource-limit",
-            args.solver_resource_limit,
-        )
-        sequence = AttemptSequence(fingerprint, args.attempt_timeout)
-        store = AttemptSequenceStore()
-        store.publish(sequence)
-        current = store.current
-        dispatch = dispatch_attempt(
-            current.begin_attempt(),
-            argv,
-            memory_bound_mb=args.memory_bound_mb,
-        )
-        try:
-            inputs_changed = _attempt_fingerprint(args) != fingerprint
-        except OSError:
-            inputs_changed = True
-        record = dispatch.run.record
-        exit_code = None
-        if record.state == "exited" and record.events:
-            exit_code = record.events[-1].exit_code
-        # recheck-source emits the consistency diagnostic only on a
-        # clean `Consistent` exit; refuted (1) and inconclusive (3)
-        # runs produced no bytes to bind.
-        if exit_code == 0 and not inputs_changed:
-            updated = dispatch.sequence.select_result(
-                dispatch.captured_output()
-            )
-        else:
-            updated = dispatch.sequence
-        published = store.compare_and_set(current, updated)
-        report: dict[str, object] = {
-            "schema_version": RECHECK_REPORT_PROFILE,
-            "sequence": published.to_dict(),
-            "normalized": dispatch.run.normalized().to_dict(),
-        }
-        if inputs_changed:
-            # The run consumed bytes that no longer match the declared
-            # request: its exit code is not a verdict on this
-            # fingerprint. Surface the drift; claim no outcome.
-            report["inputs_changed"] = True
-        elif exit_code in RECHECK_OUTCOMES:
-            report["recheck"] = RECHECK_OUTCOMES[exit_code]
-        if published.selected_result is not None:
-            report["candidate"] = (
-                published.evidence_candidate().to_dict()
-            )
+        report = run_recheck(args)
         document = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             Path(args.output).write_text(document, encoding="utf-8")

@@ -695,6 +695,26 @@ needs no redaction because it performs no file reads at all. Neither
 tool spawns, queries Core or decides truth — a `"valid"` acceptance
 still means Core's representation check passed at record time only.
 
+The three spawn-based routes are exposed the same way, in-process:
+each route file now factors its report production into a
+`run_*(args) -> dict` (`run_attempt` in `verify_attempt.py`,
+`run_recheck` in `verify_recheck.py` and `native_recheck.py`) that the
+thin `main_*` wraps for the CLI (argparse + JSON emission), and the
+MCP tools `verify_attempt`, `verify_recheck` and `native_recheck`
+build the identical declared `Namespace` — solver budgets as ints
+converted to the CLI's string fields, no `--output`, no
+`--memory-bound` — call the `run_*` function directly, and return the
+report dict under `status: "ok"`. This is the same pattern
+`go_summaries` uses: the model supplies declared absolute paths and
+integer budgets, the route performs its own `_check_request`
+validation (absolute POSIX paths, size bounds, timeout ranges) before
+dispatching, and the fingerprint still binds the executable bytes,
+input bytes and budgets. Reported path-validation and budget checks
+fail as `status: "error"` before any spawn; spawn failures and
+declared-input errors surface through `_err` with declared paths
+redacted to basenames — model-facing text never carries a
+checkout-local absolute path.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
