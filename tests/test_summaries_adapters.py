@@ -130,7 +130,6 @@ def test_registry_holds_every_descriptor():
     assert [d.adapter_id for d in summary_descriptors()] == [
         "agent.go-summaries",
         "agent.rust-summaries",
-        "agent.go-summaries",
         "agent.ts-summaries",
     ]
 

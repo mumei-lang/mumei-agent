@@ -133,8 +133,11 @@ def ts_summaries_adapter() -> AdapterDescriptor:
 
 def summary_descriptors() -> tuple[AdapterDescriptor, ...]:
     """Every declared summary-route descriptor, in registry order."""
-    return (go_summaries_adapter(), rust_summaries_adapter())
-    return (go_summaries_adapter(), ts_summaries_adapter())
+    return (
+        go_summaries_adapter(),
+        rust_summaries_adapter(),
+        ts_summaries_adapter(),
+    )
 
 
 def summary_registry() -> AdapterRegistry:
