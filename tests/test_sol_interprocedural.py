@@ -799,3 +799,85 @@ def test_slice7_try_returns_from_both_paths():
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice8_external_member_call_is_opaque():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        uint x = ext.balanceOf(a);
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"
+    assert any(c.callee == "ext.balanceOf" for c in s.calls)
+
+
+def test_slice8_interface_cast_member_call():
+    src = """interface IERC20 {
+    function balanceOf(uint a) external returns (uint);
+}
+contract C {
+    address token;
+    function f(uint a) public returns (uint) {
+        return IERC20(token).balanceOf(a);
+    }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any("balanceOf" in (c.callee or "") for c in s.calls)
+
+
+def test_slice8_library_qualified_call_resolves():
+    s = _fn(
+        """library L {
+    function mul(uint a, uint b) internal returns (uint) {
+        return a;
+    }
+}
+contract C {
+    function f(uint a) public returns (uint) {
+        return L.mul(a, a);
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice8_qualified_call_uses_named_contract():
+    s = _fn(
+        """contract C {
+    function g(uint a) returns (uint) { return 0; }
+    function f(uint a) public returns (uint) {
+        return Other.f(a);
+    }
+}
+contract Other {
+    function f(uint a) public returns (uint) { return a; }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice8_ext_member_skips_unrelated_fallback():
+    # `ext.f(...)` where another contract declares `f` must not
+    # resolve to that contract's member.
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        return ext.f(a);
+    }
+}
+contract Other {
+    function f(uint a) public returns (uint) { return 0; }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "unknown"
+    assert any(c.callee == "ext.f" for c in s.calls)

@@ -195,6 +195,7 @@ class _Builder:
         self._overload_groups: dict[str, list[str]] = {}
         self.modifiers: dict[str, object] = {}
         self._parents: dict[str, list[str]] = {}
+        self._contract_names: set[str] = set()
 
     # -- unit scan ----------------------------------------------------
 
@@ -208,7 +209,11 @@ class _Builder:
         tree = parser.parse(self.source)
         root = tree.root_node
         for top in _children(root):
-            if top.type == "contract_declaration":
+            if top.type in {
+                "contract_declaration",
+                "interface_declaration",
+                "library_declaration",
+            }:
                 self._register_contract(top)
         if len(self.functions) > MAX_FUNCTIONS:
             raise _Unsupported("analysis_limit", 0)
@@ -274,6 +279,7 @@ class _Builder:
         contract = (
             name_node.text.decode() if name_node is not None else "?"
         )
+        self._contract_names.add(contract)
         body = next(
             (c for c in _children(node) if c.type == "contract_body"),
             None,
@@ -1294,6 +1300,7 @@ class _Builder:
     ) -> frozenset[int]:
         abi_member = None
         super_call = False
+        ext_member = None
         fn_expr = node.child_by_field_name("function")
         if (
             fn_expr is not None
@@ -1306,27 +1313,63 @@ class _Builder:
             and fn_expr.type == "member_expression"
         ):
             # `this.f(...)` — same-contract member dispatch.
-            idents = [
-                c for c in _children(fn_expr)
-                if c.type == "identifier"
-            ]
+            obj = fn_expr.child_by_field_name("object")
+            prop = fn_expr.child_by_field_name("property")
+            if obj is None:
+                # Older shape: bare identifier children.
+                idents = [
+                    c for c in _children(fn_expr)
+                    if c.type == "identifier"
+                ]
+                if len(idents) >= 2:
+                    obj, prop = idents[0], idents[-1]
+            obase = (
+                _children(obj)[0]
+                if obj is not None
+                and obj.type == "expression"
+                and len(_children(obj)) == 1
+                else obj
+            )
             if (
-                len(idents) == 2
-                and idents[0].text == b"this"
+                obase is not None
+                and obase.type == "identifier"
+                and obase.text == b"this"
             ):
-                fn_expr = idents[1]
+                fn_expr = prop
             elif (
-                len(idents) == 2
-                and idents[0].text == b"super"
+                obase is not None
+                and obase.type == "identifier"
+                and obase.text == b"super"
             ):
-                fn_expr = idents[1]
+                fn_expr = prop
                 super_call = True
             elif (
-                len(idents) == 2
-                and idents[0].text.decode() == "abi"
+                obase is not None
+                and obase.type == "identifier"
+                and obase.text.decode() == "abi"
             ):
-                abi_member = idents[1].text.decode()
+                abi_member = (
+                    prop.text.decode() if prop is not None else None
+                )
                 fn_expr = None
+            elif prop is not None:
+                # `expr.f(...)` on something that isn't
+                # this/super/abi — an external, library or
+                # low-level member call; keep the base's deps.
+                ext_member = (
+                    obj,
+                    prop.text.decode(),
+                )
+                fn_expr = None
+            if ext_member is not None and (
+                obase is not None
+                and obase.type == "identifier"
+                and obase.text.decode() in self._contract_names
+            ):
+                # `L.f(...)` on a declared contract/library —
+                # qualified dispatch into that contract.
+                qualified = obase.text.decode()
+                fn_expr = prop
         args = [
             c
             for c in _children(node)
@@ -1364,14 +1407,19 @@ class _Builder:
         if (
             fn_expr is None
             or fn_expr.type != "identifier"
-        ):
+        ) and ext_member is None:
             if void:
                 summary.calls.append(
                     SolCall(_span(node), None, actual_t, None)
                 )
                 return frozenset()
             raise _Unsupported("call_unresolved", _span(node))
-        name = fn_expr.text.decode()
+        name = (
+            fn_expr.text.decode()
+            if fn_expr is not None
+            and fn_expr.type == "identifier"
+            else ext_member[1]
+        )
         if name in _BUILTIN_VOID_CALLS:
             summary.calls.append(
                 SolCall(_span(node), name, actual_t, None)
@@ -1389,10 +1437,31 @@ class _Builder:
         # any other contract in the file.
         targets: list[str] = []
         current = getattr(self, "_current_contract", "")
-        targets = self._lookup_fns(
-            current, name, skip_self=super_call
-        )
-        if not targets:
+        if ext_member is not None:
+            # `expr.f(...)`: resolve only when the receiver names
+            # a declared contract/library — the target belongs
+            # to the receiver's type, not a global lookup.
+            obase = ext_member[0]
+            obase_in = (
+                _children(obase)[0]
+                if obase.type == "expression"
+                and len(_children(obase)) == 1
+                else obase
+            )
+            if (
+                obase_in is not None
+                and obase_in.type == "identifier"
+                and obase_in.text.decode() in self._contract_names
+            ):
+                targets = self._lookup_fns(
+                    obase_in.text.decode(), name
+                )
+            ext_member = None if targets else ext_member
+        else:
+            targets = self._lookup_fns(
+                current, name, skip_self=super_call
+            )
+        if not targets and ext_member is None:
             for cname in dict.fromkeys(self.contracts.values()):
                 if cname in self._hierarchy(current):
                     continue
@@ -1400,6 +1469,37 @@ class _Builder:
                 if base in self._overload_groups:
                     targets = self._overload_groups[base]
                     break
+        if not targets and name in self._contract_names:
+            # `IERC20(token)` — a contract cast; the wrapped
+            # expression's deps flow through.
+            summary.calls.append(
+                SolCall(_span(node), name, actual_t, actual_union)
+            )
+            return actual_union
+        if not targets and ext_member is not None:
+            # External/library member call — opaque callee whose
+            # result conservatively carries the args' and the
+            # receiver expression's deps. The receiver itself is
+            # opaque: an unresolvable base contributes no deps.
+            try:
+                base_deps = self._expr(
+                    ext_member[0], locals_, param_index, summary
+                )
+            except _Unsupported:
+                base_deps = frozenset()
+            result_deps = actual_union | base_deps
+            summary.calls.append(
+                SolCall(
+                    _span(node),
+                    f"{ext_member[0].text.decode()}.{ext_member[1]}",
+                    actual_t,
+                    result_deps if not void else None,
+                )
+            )
+            if summary.effects != "state_writes":
+                summary.effects = "unknown"
+                self._effects_touched = True
+            return result_deps if not void else frozenset()
         if not targets:
             if void:
                 # Unknown callee whose result is discarded —

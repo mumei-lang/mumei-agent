@@ -2677,6 +2677,21 @@ in-process; no audit/CLI/MCP route changes.
   clause binds its error params dep-free, and all scopes join
   into the caller — returns from any path union.
 
+### C06 Solidity member-call dispatch (slice 8)
+
+- `obj.f(...)` (base not `this`/`super`/`abi`) resolves
+  qualified into the named contract/library (`L.mul`, a cast
+  receiver is never the dispatch key); otherwise it records an
+  opaque call whose result unions the args' and receiver
+  expression's deps and marks `effects = "unknown"` (the
+  receiver itself is opaque: an unresolvable base is dep-free).
+- `interface`/`library`/`abstract contract` declarations
+  register members under their own name, so `IERC20(token)`
+  contract casts become opaque pass-through calls.
+- Member calls never fall back to unrelated same-file
+  contracts: `ext.f` stays `ext.f` even when another contract
+  defines `f`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
