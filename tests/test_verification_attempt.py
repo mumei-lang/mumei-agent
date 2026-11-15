@@ -4008,3 +4008,42 @@ def test_normalized_result_from_dict_rejects_malformed_stdout():
     data["stdout"] = {"sha256": "b" * 64}
     with pytest.raises(ValueError):
         AttemptNormalizedResult.from_dict(data)
+
+
+# --- declared attempt-request restoration --------------------------------------
+
+
+def test_execution_request_round_trip():
+    req = AttemptExecutionRequest(FINGERPRINT, 1, 10)
+    assert AttemptExecutionRequest.from_dict(req.to_dict()) == req
+
+
+def test_execution_request_from_dict_rejects_malformed():
+    data = AttemptExecutionRequest(FINGERPRINT, 1, 10).to_dict()
+    data["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError):
+        AttemptExecutionRequest.from_dict(data)
+    data = AttemptExecutionRequest(FINGERPRINT, 1, 10).to_dict()
+    data["extra"] = 1
+    with pytest.raises(ValueError):
+        AttemptExecutionRequest.from_dict(data)
+    data = AttemptExecutionRequest(FINGERPRINT, 1, 10).to_dict()
+    data["timeout_ms"] = -1
+    with pytest.raises(ValueError):
+        AttemptExecutionRequest.from_dict(data)
+
+
+def test_cancel_request_round_trip():
+    req = AttemptCancelRequest(FINGERPRINT, 1)
+    assert AttemptCancelRequest.from_dict(req.to_dict()) == req
+
+
+def test_cancel_request_from_dict_rejects_malformed():
+    data = AttemptCancelRequest(FINGERPRINT, 1).to_dict()
+    data["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError):
+        AttemptCancelRequest.from_dict(data)
+    data = AttemptCancelRequest(FINGERPRINT, 1).to_dict()
+    data["extra"] = 1
+    with pytest.raises(ValueError):
+        AttemptCancelRequest.from_dict(data)

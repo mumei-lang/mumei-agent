@@ -541,7 +541,11 @@ round trip. `AttemptNormalizedResult.from_dict(data)` restores the
 `mumei.verifier-run-result/v1` record the candidate binds: the exact
 key set, the conditional `exit_code` member and the `stdout`
 sub-record's optional `complete: false` are all re-checked, so a
-stored run result round-trips under the same declared discipline.
+stored run result round-trips under the same declared discipline. The
+detached attempt requests restore the same way:
+`AttemptExecutionRequest.from_dict` and `AttemptCancelRequest.from_dict`
+rebuild `mumei.verifier-attempt-execution/v1` and
+`mumei.verifier-attempt-cancel/v1` records fail-closed.
 
 `agent.core_evidence.evaluate_evidence_check(sequence, check)` normalizes
 a declared record into an acceptance descriptor

@@ -756,6 +756,30 @@ class AttemptExecutionRequest:
             "timeout_ms": self.timeout_ms,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptExecutionRequest":
+        """Rebuild a declared execution request; the constructor
+        re-validates it. A foreign schema, unknown keys or malformed
+        members are static errors."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version")
+            != "mumei.verifier-attempt-execution/v1"
+        ):
+            raise ValueError(
+                "execution request requires its declared record schema"
+            )
+        required = {"request_fingerprint", "attempt_number", "timeout_ms"}
+        if set(data) != required | {"schema_version"}:
+            raise ValueError(
+                "execution request record has unknown or missing keys"
+            )
+        return cls(
+            data["request_fingerprint"],
+            data["attempt_number"],
+            data["timeout_ms"],
+        )
+
 
 @dataclass(frozen=True)
 class AttemptCancelRequest:
@@ -780,6 +804,26 @@ class AttemptCancelRequest:
             "request_fingerprint": self.request_fingerprint,
             "attempt_number": self.attempt_number,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptCancelRequest":
+        """Rebuild a declared cancel request; the constructor
+        re-validates it. A foreign schema, unknown keys or malformed
+        members are static errors."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version")
+            != "mumei.verifier-attempt-cancel/v1"
+        ):
+            raise ValueError(
+                "cancel request requires its declared record schema"
+            )
+        required = {"request_fingerprint", "attempt_number"}
+        if set(data) != required | {"schema_version"}:
+            raise ValueError(
+                "cancel request record has unknown or missing keys"
+            )
+        return cls(data["request_fingerprint"], data["attempt_number"])
 
 
 @dataclass(frozen=True)
