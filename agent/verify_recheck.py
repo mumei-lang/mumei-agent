@@ -19,8 +19,10 @@ Selection rule: only an ``exited`` run with ``exit_code == 0``
 ``mumei.source-evidence-recheck/v1`` diagnostic on stdout only then.
 Refuted (1) and inconclusive (3) exits publish the terminal lineage
 with no selection: the child produced no diagnostic to bind. The route
-re-hashes every declared input after the observed run and skips the
-selection when any byte drifted mid-run.
+re-hashes every declared input after the observed run; when any byte
+drifted mid-run it skips the selection, claims no recheck outcome
+(the observed exit code applies to bytes outside the declared
+request) and reports ``inputs_changed``.
 
 The report carries a ``recheck`` field naming the terminal outcome
 only when the exit code is unambiguous: ``"consistent"`` (0) or
@@ -287,7 +289,12 @@ def main_recheck(args: argparse.Namespace | None = None) -> int:
             "sequence": published.to_dict(),
             "normalized": dispatch.run.normalized().to_dict(),
         }
-        if exit_code in RECHECK_OUTCOMES:
+        if inputs_changed:
+            # The run consumed bytes that no longer match the declared
+            # request: its exit code is not a verdict on this
+            # fingerprint. Surface the drift; claim no outcome.
+            report["inputs_changed"] = True
+        elif exit_code in RECHECK_OUTCOMES:
             report["recheck"] = RECHECK_OUTCOMES[exit_code]
         if published.selected_result is not None:
             report["candidate"] = (

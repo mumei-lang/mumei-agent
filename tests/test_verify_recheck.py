@@ -91,6 +91,31 @@ def test_consistent_recheck_selects_diagnostic(tmp_path, capsys):
     assert "acceptance" not in report
 
 
+def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
+    """A child that mutates a declared input mid-run exits 0, but the
+    exit code applies to bytes outside the declared request: no
+    selection, no claimed outcome, drift surfaced."""
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "recheck-source" ]; then\n'
+        '    printf "tampered" > "$3"\n'
+        f"    printf '%s' '{json.dumps(DIAGNOSTIC)}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    evidence, source = _write_inputs(tmp_path)
+    code, out, _ = _run(capsys, _args(core, evidence, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "recheck" not in report
+    assert "candidate" not in report
+    assert report["sequence"].get("selected_result") is None
+
+
 def test_exit_one_publishes_lineage_without_claimed_outcome(
     tmp_path, capsys
 ):
