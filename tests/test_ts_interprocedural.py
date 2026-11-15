@@ -2146,7 +2146,9 @@ def test_arrow_member_store_merges_back():
         " let o = { a: x }; const g = () => { o.a = y; };"
         " g(); return o.a; }"
     )
-    assert s.available and s.return_dependencies == frozenset({0, 1})
+    # The unconditional call definitely ran the store — `o.a` is
+    # exactly `y` (the write lands on the shared object in place).
+    assert s.available and s.return_dependencies == frozenset({1})
 
 
 def test_arrow_param_shadow_no_leak():
@@ -2257,7 +2259,7 @@ def test_member_call_write_merges_back():
         " o.g(); return o.a; }"
     )
     # `o` shares the instance — the body's store reaches it.
-    assert s.available and s.return_dependencies == frozenset({0, 1})
+    assert s.available and s.return_dependencies == frozenset({1})
 
 
 # --- slice 14: destructured formal parameters
@@ -6073,6 +6075,43 @@ def test_review8_alt_rebind_unions_instead_of_mutating():
         "}"
     )
     assert frozenset({0}) <= s.return_dependencies
+
+
+def test_review9_alt_captured_write_before_rebind_reaches_aliases():
+    # An alternate callee that writes a shared object through a
+    # caller name and then rebinds that name must still merge the
+    # writes back to the original object — every alias sees them.
+    s = _fn(
+        "class C {"
+        "  m(): number { o.v = y; o = other; return 0 }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let c = new C();"
+        "  let o = {v: 0};"
+        "  let p = o;"
+        "  let other = {w: x};"
+        "  c.m = () => 0;"
+        "  if (x > 0) { delete c.m }"
+        "  c.m();"
+        "  return p.v"
+        "}"
+    )
+    assert frozenset({1}) <= s.return_dependencies
+
+
+def test_review9_primary_captured_write_reaches_aliases():
+    # The same shared-object write through the primary callee:
+    # the write lands on the shared object, so the alias reads it.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        "  let o = {v: 0};"
+        "  let p = o;"
+        "  const g = () => { o.v = y; return 0 };"
+        "  g();"
+        "  return p.v"
+        "}"
+    )
+    assert s.return_dependencies == frozenset({1})
 
 
 def test_review8_alt_rebind_divergent_class_closes_call():

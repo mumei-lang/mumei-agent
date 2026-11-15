@@ -978,6 +978,11 @@ def _merge_vals(old, new):
     """Join two values: scalar|scalar unions, composite|composite
     merges field-wise, and a shape mismatch collapses the composite
     to its leaf deps (a name can't be both shapes at once)."""
+    if old is new:
+        # join(x, x) = x — returning `old` keeps the composite's
+        # identity, so every other name aliasing it (and every
+        # marked shared reference) still sees the same object.
+        return old
     if isinstance(old, _Composite) and isinstance(new, _Composite):
         fields = dict(old.fields)
         for key, nval in new.fields.items():
@@ -4097,9 +4102,10 @@ class _Builder:
             # `a` when `this.f = v` ran inside `a.set(...)`, or
             # a composite passed as an argument): mutating its
             # field table propagates the write where rebinding
-            # can't reach. Objects local to this scope keep
-            # copy-on-write — a loop-join artifact doubles as
-            # the fixed point's pre-write snapshot.
+            # can't reach. The name still rebinds to `new` — a
+            # marked object takes an in-place write at most once,
+            # so later writes compose on the copy and a loop join
+            # keeps its pre-write snapshot.
             old.fields.clear()
             old.fields.update(new.fields)
             old.deleted = new.deleted
@@ -4283,6 +4289,24 @@ class _Builder:
         self._invoke_depth += 1
         try:
             saved_frame = dict(locals_) if cval.alts else None
+            snap_memo = None
+            saved_snap = None
+            if saved_frame is not None:
+                # Deep-snapshot eagerly: the primary invoke may
+                # mutate shared objects in place (`_aliased_objs`),
+                # so clones taken after it would read post-call
+                # state — each alternate candidate is an exclusive
+                # world and must read the PRE-call values.
+                snap_memo = {}
+                saved_snap = {
+                    name: _clone_value(val, snap_memo)
+                    for name, val in saved_frame.items()
+                }
+                if actual_values is not None:
+                    for val in actual_values:
+                        _clone_value(val, snap_memo)
+                if alt_this is not None:
+                    _clone_value(alt_this, snap_memo)
             result = self._invoke_callable_body(
                 cval,
                 actual,
@@ -4325,8 +4349,26 @@ class _Builder:
                 memo = {}
                 alt_locals = {
                     name: _clone_value(val, memo)
-                    for name, val in saved_frame.items()
+                    for name, val in saved_snap.items()
                 }
+                # The snapshot memo holds a snap for the actuals and
+                # `this` too — clone them into this world so every
+                # snapshot object maps to a clone.
+                if actual_values is not None:
+                    for val in actual_values:
+                        snap = snap_memo.get(id(val))
+                        if snap is not None:
+                            _clone_value(snap, memo)
+                if alt_this is not None:
+                    snap = snap_memo.get(id(alt_this))
+                    if snap is not None:
+                        _clone_value(snap, memo)
+                # Re-key by ORIGINAL ids — the `this`/actual lookups
+                # and the merge-back reference caller objects, not
+                # the snapshot copies.
+                for oid, snap in snap_memo.items():
+                    if id(snap) in memo:
+                        memo[oid] = memo[id(snap)]
                 alt_actuals = (
                     [_clone_value(v, memo) for v in actual_values]
                     if actual_values is not None
@@ -4351,12 +4393,14 @@ class _Builder:
                 except _Unsupported:
                     # A callee that closes keeps the actuals'
                     # union (the opaque shape) — writes to the
-                    # actuals fold in the same way.
+                    # actuals fold in the same way, but stay inside
+                    # this candidate's clone world until the
+                    # merge-back joins them.
                     opaque = _scalar_of(alt)
                     for a in actual:
                         opaque |= a
                     result |= opaque
-                    self._opaque_call_writes(actual_values, opaque)
+                    self._opaque_call_writes(alt_actuals, opaque)
                 for name, aval in alt_locals.items():
                     if name not in locals_:
                         continue
@@ -4495,6 +4539,15 @@ class _Builder:
         saved_aliased = self._aliased_objs
         self._aliased_objs = set(saved_aliased)
         inner = dict(locals_)
+        for frame_val in inner.values():
+            if isinstance(frame_val, _Composite):
+                # A captured composite is shared with the caller
+                # the same way a composite actual or `this` is:
+                # a member write through the callee's name must
+                # mutate the shared object so every alias sees
+                # it — copy-on-write would strand the write on a
+                # rebind before the callee-join can carry it back.
+                self._aliased_objs.add(frame_val)
         destructured_params: list = []
         if this_val is not None:
             inner["this"] = this_val
