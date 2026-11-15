@@ -2068,8 +2068,10 @@ analysis rather than supplying an effect-free or dependency-free result.
 C07 is **partially delivered**, not done. Fixed-point joins, bounded
 loop bodies, `&x` escape folds and `*p` stores/reads, multi-file
 package units and audit wiring (`--enable-summaries`) have all landed
-since this line was written — the honest residuals are signature-level
-pointer parameters, true resource-state semantics (package globals,
+since this line was written — the honest residuals are pointee-state
+tracking for pointer parameters (the signature admits `pointer` types
+but dep sets index the binding, never its contents), true
+resource-state semantics (package globals,
 channels, constructors, bound closures), per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
 TS's host-declared `--resolve-modules` relative-import resolution
