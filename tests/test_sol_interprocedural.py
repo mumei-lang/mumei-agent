@@ -1325,3 +1325,53 @@ def test_review_emit_marks_unknown():
         "f",
     )
     assert s.available and s.effects == "unknown"
+
+
+def test_review2_for_init_decl_scoped_to_loop():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    for (uint s = 0; s < 3; s++) { }
+    s = x;
+} }""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_review2_loop_local_decl_shadows_state_var():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    for (uint s = 0; s < 3; s++) { s = x; }
+} }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "none_in_supported_fragment"
+
+
+def test_review2_nested_block_decl_shadows_state_var():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    { uint s; { s = x; } }
+    s = 1;
+} }""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_review2_void_unknown_call_marks_unknown():
+    s = _fn(
+        """contract C {
+function f(uint x) public returns (uint) {
+    mystery(x);
+    return x;
+} }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "unknown"
+    assert s.return_dependencies == frozenset({0})

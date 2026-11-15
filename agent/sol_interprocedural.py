@@ -1051,6 +1051,7 @@ class _Builder:
         touched, matching the if-join."""
         inner = dict(locals_)
         self._writes.append(set())
+        self._decls.append(set())
         try:
             if init is not None:
                 self._statement(
@@ -1067,6 +1068,9 @@ class _Builder:
                 )
         finally:
             touched = self._writes.pop()
+            # Loop-init decls (`for (uint i = 0; ...)`)
+            # stay scoped to the loop.
+            self._decls.pop()
         merged = frozenset()
         if cond is not None:
             # Loop-init names (`i`) live in `inner`, not the
@@ -1269,9 +1273,8 @@ class _Builder:
             lname = lident.text.decode()
             shadowed = (
                 lname in param_index
-                or (
-                    self._decls
-                    and lname in self._decls[-1]
+                or any(
+                    lname in frame for frame in self._decls
                 )
             )
             if (
@@ -1306,9 +1309,8 @@ class _Builder:
             tname = tident.text.decode()
             shadowed = (
                 tname in param_index
-                or (
-                    self._decls
-                    and tname in self._decls[-1]
+                or any(
+                    tname in frame for frame in self._decls
                 )
             )
             if (
@@ -1932,6 +1934,9 @@ class _Builder:
                 summary.calls.append(
                     SolCall(_span(node), name, actual_t, None)
                 )
+                if summary.effects != "state_writes":
+                    summary.effects = "unknown"
+                    self._effects_touched = True
                 return frozenset()
             raise _Unsupported("call_unresolved", _span(node))
         callees = []
