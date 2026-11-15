@@ -1,6 +1,7 @@
 """C06 Rust interprocedural summaries — slice tests."""
 
 import json
+import os
 
 import pytest
 
@@ -859,3 +860,42 @@ def test_attempt_route_output_file(tmp_path, capsys):
         report["schema_version"]
         == "mumei.rust-summaries-attempt-report/v1"
     )
+
+
+def test_attempt_route_rejects_output_hardlink_to_source(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    link = tmp_path / "linked.rs"
+    os.link(src, link)
+    with pytest.raises(SystemExit) as exc:
+        rust.main_attempt(_attempt_args(src, output=link))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+    assert src.read_text() == _RS_SRC
+
+
+def test_attempt_route_skips_candidate_when_inputs_change(
+    tmp_path, capsys, monkeypatch
+):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    from agent import attempt_runner
+
+    real_run = attempt_runner.AttemptRunner.run
+
+    def run_then_modify(self, request, argv, memory_bound_mb=None):
+        src.write_text(_RS_SRC + "//mutated mid-run")
+        return real_run(
+            self, request, argv, memory_bound_mb=memory_bound_mb
+        )
+
+    monkeypatch.setattr(
+        attempt_runner.AttemptRunner, "run", run_then_modify
+    )
+    rust.main_attempt(_attempt_args(src))
+    report = json.loads(capsys.readouterr().out)
+    assert report["sequence"].get("selected_result") is None
+    assert "candidate" not in report

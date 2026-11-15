@@ -1774,6 +1774,13 @@ def main_attempt(args=None) -> None:
             )
         except RuntimeError:
             same = True
+        if not same:
+            try:
+                import os
+
+                same = os.path.samefile(args.output, args.source)
+            except OSError:
+                same = False
         if same:
             _emit(
                 {
@@ -1824,7 +1831,16 @@ def main_attempt(args=None) -> None:
             request, argv, memory_bound_mb=args.memory_bound_mb
         )
         published = sequence.reconcile_report(run.record)
-        if run.record.state == "exited":
+        try:
+            current = Path(args.source).read_bytes()
+        except OSError:
+            current = None
+        inputs_changed = (
+            current is None
+            or hashlib.sha256(current).hexdigest()
+            != request_doc["source"]["sha256"]
+        )
+        if run.record.state == "exited" and not inputs_changed:
             published = published.select_result(
                 AttemptOutput(
                     published.current,
