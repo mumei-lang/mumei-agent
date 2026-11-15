@@ -60,6 +60,7 @@ _MANIFEST_FIELDS = frozenset(
         "setting_specs",
         "input_formats",
         "required_permissions",
+        "probe_argv",
     }
 )
 _MANIFEST_REQUIRED = frozenset(
@@ -353,6 +354,7 @@ class AdapterDescriptor:
     setting_specs: tuple[SettingSpec, ...] = ()
     input_formats: frozenset[str] = frozenset()
     required_permissions: frozenset[str] | None = None
+    probe_argv: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -399,6 +401,15 @@ class AdapterDescriptor:
         _labels(self.input_formats, empty=True)
         if self.required_permissions is not None:
             _permissions(self.required_permissions)
+        if self.probe_argv is not None and (
+            not isinstance(self.probe_argv, tuple)
+            or not self.probe_argv
+            or any(
+                type(arg) is not str or not arg
+                for arg in self.probe_argv
+            )
+        ):
+            raise ValueError("invalid adapter probe declaration")
 
     def to_dict(self) -> dict:
         return {
@@ -423,6 +434,11 @@ class AdapterDescriptor:
             "required_permissions": (
                 sorted(self.required_permissions)
                 if self.required_permissions is not None
+                else None
+            ),
+            "probe_argv": (
+                list(self.probe_argv)
+                if self.probe_argv is not None
                 else None
             ),
         }
@@ -452,6 +468,9 @@ class AdapterDescriptor:
         if type(specs) is not list:
             raise ValueError("invalid adapter manifest setting spec")
         permissions = manifest.get("required_permissions")
+        probe_argv = manifest.get("probe_argv")
+        if probe_argv is not None and type(probe_argv) is not list:
+            raise ValueError("invalid adapter probe declaration")
         return cls(
             adapter_id=manifest["adapter_id"],
             adapter_version=manifest["adapter_version"],
@@ -472,6 +491,9 @@ class AdapterDescriptor:
             input_formats=_manifest_strings(manifest.get("input_formats", [])),
             required_permissions=(
                 None if permissions is None else _manifest_strings(permissions)
+            ),
+            probe_argv=(
+                None if probe_argv is None else tuple(probe_argv)
             ),
         )
 

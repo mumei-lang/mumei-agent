@@ -14,6 +14,14 @@ Declared outcome mapping (a convention, not a verdict):
 - `failed` (the spawn itself was refused — e.g. ENOENT) → `"missing"`
 - `timed_out` / `cancelled` → `"unknown"`
 
+Manifests may declare the probe command itself:
+`AdapterDescriptor.probe_argv` is an optional immutable command parsed
+from the `probe_argv` manifest key, and `probe_request_for(descriptor,
+stamp)` binds it to the descriptor's declared `max_timeout_ms` /
+`max_memory_mb` budgets — a manifest pins how much room its own probe
+gets, and a descriptor without the declaration is a static error, never
+a wildcard probe.
+
 Boundary held honestly: a probe reports **observed command behavior**,
 not tool health, availability proof, version truth or acceptance. The
 command is host-declared, so a lying or wrong probe simply records a
@@ -43,6 +51,7 @@ from agent.verification_attempt import (
 )
 from agent.verification_planner import (
     MAX_STAMP,
+    AdapterDescriptor,
     RuntimeObservation,
     _label,
     _positive,
@@ -198,3 +207,32 @@ def run_probe(
         stamp=request.stamp,
     )
     return AdapterProbeOutcome(observation, result)
+
+
+def probe_request_for(
+    descriptor: AdapterDescriptor,
+    stamp: int,
+    *,
+    attempt_number: int = 1,
+) -> AdapterProbeRequest:
+    """Bind a manifest-declared probe command to its declared budgets.
+
+    The descriptor's `probe_argv` becomes the request argv verbatim —
+    it is host-declared text, never parsed or expanded. The request's
+    `timeout_ms` and `memory_bound_mb` are the descriptor's declared
+    `max_timeout_ms` / `max_memory_mb` budgets, so a manifest pins how
+    much room its own probe gets. A descriptor without `probe_argv` is
+    a static error (`probe command not declared`), not a wildcard probe.
+    """
+    if not isinstance(descriptor, AdapterDescriptor):
+        raise ValueError("probe binding requires an adapter descriptor")
+    if descriptor.probe_argv is None:
+        raise ValueError("probe command not declared")
+    return AdapterProbeRequest(
+        descriptor.adapter_id,
+        descriptor.probe_argv,
+        timeout_ms=descriptor.max_timeout_ms,
+        stamp=stamp,
+        attempt_number=attempt_number,
+        memory_bound_mb=descriptor.max_memory_mb,
+    )

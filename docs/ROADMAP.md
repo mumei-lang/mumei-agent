@@ -2604,6 +2604,34 @@ accepts or verifies anything. Actual plugin loading, adapter code
 execution beyond the declared probe, output interpretation and Evidence
 acceptance remain open.
 
+
+### C11 manifest-declared probe commands
+
+`AdapterDescriptor.probe_argv` is an optional immutable command declared
+by the adapter manifest (`probe_argv` key, a nonempty list of nonempty
+strings — any other shape is a static manifest error). A descriptor
+without it serializes `null` and stays probe-free.
+
+`agent.adapter_probe.probe_request_for(descriptor, stamp)` binds the
+declared command to the descriptor's own budgets: the request's
+`timeout_ms` is the declared `max_timeout_ms` and `memory_bound_mb` the
+declared `max_memory_mb`, so a manifest pins how much room its own probe
+gets. A descriptor without `probe_argv` is a static error
+(`probe command not declared`), never a wildcard probe. The declared
+argv passes through verbatim — host-declared text, never parsed,
+expanded or resolved against PATH here — and the resulting observation
+stays an untrusted, stamp-ordered claim exactly like a free-standing
+`AdapterProbeRequest`.
+
+```python
+descriptor = AdapterDescriptor.from_manifest(manifest)  # has probe_argv
+req = probe_request_for(descriptor, stamp=7)
+outcome = run_probe(req)  # bounded by declared max_* budgets
+```
+
+Still closed: plugin loading, adapter code execution beyond the declared
+probe, stdout interpretation, version truth and Evidence acceptance.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
