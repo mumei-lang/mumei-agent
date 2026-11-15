@@ -2702,6 +2702,16 @@ in-process; no audit/CLI/MCP route changes.
 - A property no registered library provides stays an opaque
   member call (`effects = "unknown"`).
 
+### C06 Solidity free functions and special members (slice 10)
+
+- A function without `returns` is admitted with an empty dep
+  set (no results, no `missing_return` gap).
+- File-level `function_definition`s register as free
+  functions resolvable by bare name from any contract.
+- `constructor`, `fallback` and `receive` members summarize
+  like functions (`C.constructor`, `C.fallback`, `C.receive`)
+  — their state writes mark `effects` as usual.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

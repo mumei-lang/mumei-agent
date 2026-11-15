@@ -159,7 +159,8 @@ def _scalar_param(param) -> tuple[str, str] | None:
 
 def _return_scalar(fn) -> bool:
     """Every parameter of the `returns (...)` clause is scalar
-    (one or more — multi-return tuples are union-modelled)."""
+    (zero or more — multi-return tuples are union-modelled, and
+    a function without `returns` simply has no results)."""
     ret = fn.child_by_field_name("return_type") or next(
         (
             c
@@ -169,7 +170,7 @@ def _return_scalar(fn) -> bool:
         None,
     )
     if ret is None:
-        return False
+        return True
     params = [c for c in _children(ret) if c.type == "parameter"]
     if not params:
         return False
@@ -197,6 +198,7 @@ class _Builder:
         self._parents: dict[str, list[str]] = {}
         self._contract_names: set[str] = set()
         self._usings: dict[str, list[str]] = {}
+        self._free_fns: dict[str, list[str]] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -216,6 +218,24 @@ class _Builder:
                 "library_declaration",
             }:
                 self._register_contract(top)
+            elif top.type == "function_definition":
+                fname = top.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(top)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if fname is None:
+                    continue
+                ukey = fname.text.decode()
+                self._free_fns.setdefault(
+                    ukey, []
+                ).append(ukey)
+                self.functions[ukey] = top
+                self.contracts[ukey] = ""
+
         if len(self.functions) > MAX_FUNCTIONS:
             raise _Unsupported("analysis_limit", 0)
         summaries = []
@@ -350,6 +370,19 @@ class _Builder:
                         contract, set()
                     ).add(vname.text.decode())
                 continue
+            if member.type in {
+                "constructor_definition",
+                "fallback_receive_definition",
+            }:
+                kw = (
+                    member.children[0].text.decode()
+                    if member.children
+                    else "?"
+                )
+                ukey = f"{contract}.{kw}"
+                self.functions[ukey] = member
+                self.contracts[ukey] = contract
+                continue
             if member.type == "modifier_definition":
                 mname = member.child_by_field_name("name") or next(
                     (
@@ -468,6 +501,10 @@ class _Builder:
         except _Unsupported as exc:
             summary.gaps.append(SolGap(exc.reason, exc.byte))
             return summary
+        if rets is None and ret is None:
+            # No `returns` clause — the function produces no
+            # results; a missing `return` is fine.
+            rets = frozenset()
         if rets is None:
             if not summary.gaps:
                 summary.gaps.append(
@@ -1504,6 +1541,8 @@ class _Builder:
             targets = self._lookup_fns(
                 current, name, skip_self=super_call
             )
+        if not targets and ext_member is None:
+            targets = list(self._free_fns.get(name, ()))
         if not targets and ext_member is None:
             for cname in dict.fromkeys(self.contracts.values()):
                 if cname in self._hierarchy(current):

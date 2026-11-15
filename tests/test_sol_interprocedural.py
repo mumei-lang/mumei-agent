@@ -936,3 +936,49 @@ contract C {
         "f",
     )
     assert s.available and s.effects == "unknown"
+
+
+def test_slice10_no_returns_clause_admitted():
+    s = _fn(
+        """contract C {
+    function f(uint a) public { uint x = a; }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_slice10_free_function_resolves():
+    s = _fn(
+        """function g(uint a) returns (uint) { return a; }
+contract C {
+    function f(uint a) public returns (uint) { return g(a); }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice10_constructor_summarized():
+    src = """contract C {
+    uint s;
+    constructor(uint a) { s = a; }
+    function f(uint a) public returns (uint) { return s + a; }
+}"""
+    r = _summarize(src)
+    ctor = next(
+        f for f in r.functions if f.name.endswith(".constructor")
+    )
+    assert ctor.available and ctor.effects == "state_writes"
+
+
+def test_slice10_fallback_receive_summarized():
+    src = """contract C {
+    uint s;
+    fallback() external { s = 1; }
+    receive() external payable { s = 2; }
+}"""
+    r = _summarize(src)
+    names = {f.name for f in r.functions}
+    assert any(".fallback" in n for n in names)
+    assert any(".receive" in n for n in names)
