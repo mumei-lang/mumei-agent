@@ -2558,6 +2558,52 @@ for any non-`direct_import` call, for arity below two, and for a
 non-integer value. A forged arity that still validates is caught at
 the consumer: the left-hand width must equal it.
 
+
+### C11 declared availability probes
+
+The opt-in `agent.adapter_probe` module connects a host-declared probe
+command to `AttemptRunner` and maps the observed terminal outcome to a
+`RuntimeObservation` that `AdapterRegistry.plan()` consumes. This closes
+the "actual probing" phrase of the C11 scope at the observation level —
+the probe decides nothing and records only what the declared command was
+observed to do.
+
+Declared outcome mapping (a convention, not a verdict): `exited` with
+exit code 0 maps to `availability="available"`; `exited` with a nonzero
+code and `failed` (a refused spawn, e.g. ENOENT) map to `"missing"`;
+`timed_out` and `cancelled` map to `"unknown"`. `AdapterProbeRequest`
+declares `adapter_id`, an immutable nonempty `argv`, `timeout_ms`, the
+registry's monotonic `stamp`, an attempt number and an optional bounded
+`memory_bound_mb`. Its `execution_request()` binds an execution-record
+fingerprint over schema, adapter id, argv and stamp; `run_probe` runs
+exactly one `AttemptRunner.run` with the declared bounds and one optional
+cancellation event, then returns `AdapterProbeOutcome{observation,
+result}` — the registry-ready observation plus the run's detached
+normalization.
+
+```python
+from agent.adapter_probe import AdapterProbeRequest, run_probe
+
+req = AdapterProbeRequest(
+    "zendingsol.host.lean_scaffold",
+    ("lean", "--version"),
+    timeout_ms=5_000,
+    stamp=7,
+)
+outcome = run_probe(req)
+plan = registry.plan(request, policy, (outcome.observation,))
+```
+
+Boundary held honestly: a probe reports observed command behavior, not
+tool health, availability proof or version truth — the command is
+host-declared, so a lying probe simply records a lying observation, and
+replay ordering across probes stays the stamp's job. No stdout is parsed
+(the normalized digest binds bytes, never meaning), `tool_version` stays
+a host-declared field, and nothing here authorizes, schedules, retries,
+accepts or verifies anything. Actual plugin loading, adapter code
+execution beyond the declared probe, output interpretation and Evidence
+acceptance remain open.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
