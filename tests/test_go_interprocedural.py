@@ -4156,6 +4156,57 @@ def test_imported_method_on_package_member_receiver(go_types_helper):
     assert transfers  # the `lib.V` var read is on record
 
 
+def test_imported_method_on_composite_var_receiver(go_types_helper):
+    # `lib.VS.PF()` — a struct-typed imported var receiver: the
+    # method reads external state, so the receiver is dep-free and
+    # still records the imported transfer for staleness.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.VS.PF() + x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    vs = next(m for m in snapshot.imported_members if m.name == "VS")
+    transfers = [
+        t
+        for t in result.calls
+        if t.imported and t.arguments == () and t.target == vs.id
+    ]
+    assert transfers  # the `lib.VS` receiver read is on record
+
+
+def test_imported_method_on_composite_var_receiver_dot_import(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return VS.PF() + x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_method_on_indexed_receiver_stays_closed(go_types_helper):
+    # `lib.VSS[0].PF()` — the receiver is an index read whose
+    # element is a struct, not a member name: stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VSS[0].PF() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_method_on_const_receiver(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
@@ -7512,10 +7563,11 @@ def test_imported_field_read_parenthesized_is_admitted(go_types_helper):
 
 
 def test_imported_field_read_method_member_stays_closed(go_types_helper):
-    # `lib.VS.PF` selects a method member, not a field — method values
-    # keep their own gate.
+    # A method *value* `f := lib.VS.PF` selects a method member, not a
+    # field — method values keep their own gate even though the call
+    # `lib.VS.PF()` admits as a composite receiver.
     files = _files_member_read(
-        "return lib.VS.PF()", decl="func F() int64"
+        "f := lib.VS.PF\n\treturn f()", decl="func F() int64"
     )
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
