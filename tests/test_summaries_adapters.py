@@ -779,6 +779,94 @@ def test_mcp_summaries_accept_validates_function(tmp_path, tool):
     ] == "error"
 
 
+def test_mcp_ts_summaries_attempt_selects_exited_run(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+
+    src = tmp_path / "f.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    out = json.loads(
+        mcp_server.ts_summaries_attempt(str(src), 60000)
+    )
+    assert out["status"] == "ok"
+    report = out["report"]
+    assert (
+        report["schema_version"]
+        == "mumei.ts-summaries-attempt-report/v1"
+    )
+    assert report["normalized"]["outcome"] == "exited"
+    assert "candidate" in report
+    assert report["sequence"]["selected_result"] is not None
+
+
+def test_mcp_rust_summaries_attempt_selects_exited_run(tmp_path):
+    from agent import mcp_server
+
+    src = tmp_path / "f.rs"
+    src.write_text("fn f(x: u64) -> u64 { x }")
+    out = json.loads(
+        mcp_server.rust_summaries_attempt(str(src), 60000)
+    )
+    assert out["status"] == "ok"
+    report = out["report"]
+    assert (
+        report["schema_version"]
+        == "mumei.rust-summaries-attempt-report/v1"
+    )
+    assert report["normalized"]["outcome"] == "exited"
+    assert "candidate" in report
+
+
+def test_mcp_sol_summaries_attempt_selects_exited_run(tmp_path):
+    from agent import mcp_server
+
+    src = tmp_path / "c.sol"
+    src.write_text(
+        "contract C { function f(uint x) public returns (uint) "
+        "{ return x; } }"
+    )
+    out = json.loads(
+        mcp_server.sol_summaries_attempt(str(src), 60000)
+    )
+    assert out["status"] == "ok"
+    report = out["report"]
+    assert (
+        report["schema_version"]
+        == "mumei.sol-summaries-attempt-report/v1"
+    )
+    assert report["normalized"]["outcome"] == "exited"
+    assert "candidate" in report
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "ts_summaries_attempt",
+        "rust_summaries_attempt",
+        "sol_summaries_attempt",
+    ],
+)
+def test_mcp_summaries_attempt_validates_declared_args(tmp_path, tool):
+    from agent import mcp_server
+
+    fn = getattr(mcp_server, tool)
+    src = tmp_path / "s.src"
+    src.write_text("x")
+    assert json.loads(fn("", 60000))["status"] == "error"
+    assert json.loads(fn("a\nb", 60000))["status"] == "error"
+    out = json.loads(fn(str(tmp_path / "missing"), 60000))
+    assert out["status"] == "error"
+    assert str(tmp_path) not in out["error"]
+    for bad_timeout in (0, -1, "x", 1.5):
+        assert json.loads(fn(str(src), bad_timeout))[
+            "status"
+        ] == "error"
+    for bad_bound in (-1, "x"):
+        assert json.loads(fn(str(src), 60000, bad_bound))[
+            "status"
+        ] == "error"
+
+
 @pytest.mark.parametrize(
     "tool",
     [
