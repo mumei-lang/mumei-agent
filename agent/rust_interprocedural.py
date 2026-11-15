@@ -674,6 +674,23 @@ class _Builder:
             # a plain `let q = ...` binding: a `&mut q`/`(a, b)`
             # pattern copies or destructures the value, so the bound
             # name neither carries `p`'s type nor shares `p`'s slot.
+            # `let ref mut q = p` is the exception that still
+            # aliases: `q` binds `&mut p`, so writes through `q`
+            # reach `p`'s storage exactly like the move case.
+            ref_mut_binding = (
+                pat.type == "ref_pattern"
+                and any(
+                    c.type == "mut_pattern"
+                    for c in _children(pat)
+                )
+            )
+            if val is not None and ref_mut_binding:
+                vsrc = _unparen(val)
+                write_root = (
+                    _arg_root(vsrc)
+                    if vsrc is not None
+                    else None
+                )
             if val is not None and pat.type == "identifier":
                 # `let q = p` / `let q = &mut p` — no annotation:
                 # inherit the source binding's type so `q.m()`
