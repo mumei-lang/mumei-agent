@@ -91,15 +91,18 @@ def test_consistent_recheck_selects_diagnostic(tmp_path, capsys):
     assert "acceptance" not in report
 
 
-def test_refuted_recheck_publishes_lineage_without_selection(
+def test_exit_one_publishes_lineage_without_claimed_outcome(
     tmp_path, capsys
 ):
+    """Exit 1 conflates Refuted with every static failure (read,
+    UTF-8, budget, Invalid/InconsistentSavedEvidence) — the route
+    claims no outcome for it."""
     core = _write_core(tmp_path, recheck_exit=1)
     evidence, source = _write_inputs(tmp_path)
     code, out, _ = _run(capsys, _args(core, evidence, source))
     assert code == 0
     report = json.loads(out)
-    assert report["recheck"] == "refuted"
+    assert "recheck" not in report
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
     assert report["normalized"]["exit_code"] == 1
@@ -112,6 +115,7 @@ def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert report["recheck"] == "inconclusive"
+    assert report["sequence"].get("selected_result") is None
     assert report["normalized"]["exit_code"] == 3
 
 
@@ -237,8 +241,8 @@ def test_real_core_recheck_detects_tampered_evidence(
     tmp_path, capsys, real_core
 ):
     """A saved record whose spec hash no longer matches the source's
-    fresh query is refuted — the freshness story this route exists
-    for."""
+    fresh query is rejected (InconsistentSavedEvidence — exit 1, the
+    ambiguous code) — the freshness story this route exists for."""
     source = tmp_path / "id_fn.mm"
     source.write_text(ESTABLISHED_SOURCE)
     produced = subprocess.run(
@@ -260,5 +264,9 @@ def test_real_core_recheck_detects_tampered_evidence(
     )
     assert code == 0
     report = json.loads(out)
-    assert report["recheck"] == "refuted"
+    # Core exits 1 for InconsistentSavedEvidence — the ambiguous code,
+    # so no claimed outcome; detection still surfaces as exit 1 with
+    # no selection.
+    assert "recheck" not in report
+    assert report["normalized"]["exit_code"] == 1
     assert report["sequence"].get("selected_result") is None

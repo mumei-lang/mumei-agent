@@ -22,9 +22,14 @@ with no selection: the child produced no diagnostic to bind. The route
 re-hashes every declared input after the observed run and skips the
 selection when any byte drifted mid-run.
 
-The report carries a ``recheck`` field naming the terminal outcome —
-``"consistent"``, ``"refuted"`` or ``"inconclusive"`` — only when the
-run exited with a known recheck code. Unlike verify-attempt, no
+The report carries a ``recheck`` field naming the terminal outcome
+only when the exit code is unambiguous: ``"consistent"`` (0) or
+``"inconclusive"`` (3). Exit 1 conflates ``Refuted`` with every
+static failure — read/UTF-8/budget errors AND ``Invalid`` /
+``InconsistentSavedEvidence`` (the stale-or-tampered case this route
+exists to detect) all exit 1 in Core's contract — so the route names
+it only through the lineage's ``exit_code``, never as a claimed
+outcome. Unlike verify-attempt, no
 ``record_evidence_check`` runs here: the produced diagnostic is
 ``mumei.source-evidence-recheck/v1``, not a
 ``mumei.verification-evidence/v1`` record, so the representation
@@ -57,10 +62,13 @@ RECHECK_REPORT_PROFILE = "mumei.verify-recheck-report/v1"
 # input the Core cannot even read is a static error, not a run.
 MAX_INPUT_BYTES = 65_536
 
-# Terminal exit-code mapping mirrors mumei's recheck_source contract:
-# 0 = Consistent, 1 = Refuted, 3 = Inconclusive. Any other exit code
-# (or a non-exited run) is left unnamed — the lineage carries it.
-RECHECK_OUTCOMES = {0: "consistent", 1: "refuted", 3: "inconclusive"}
+# Terminal exit-code mapping mirrors mumei's recheck_source contract,
+# restricted to unambiguous codes: 0 = Consistent and 3 = Inconclusive.
+# Exit 1 is shared by Refuted and every `Err` path (unreadable or
+# non-UTF-8 input, invalid budget, InvalidSavedEvidence,
+# InconsistentSavedEvidence), so it gets no claimed outcome — the
+# lineage carries the raw code.
+RECHECK_OUTCOMES = {0: "consistent", 3: "inconclusive"}
 
 DEFAULT_SOLVER_TIMEOUT_MS = "5000"
 DEFAULT_SOLVER_RESOURCE_LIMIT = "1000000"
