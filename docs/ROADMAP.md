@@ -3262,6 +3262,18 @@ annotation at all — recorded deps come from the actual
 `return` statements, so the signature gate is now purely
 structural (named function + statement-block body).
 
+### C06 TypeScript dynamic member calls (slice 46)
+
+`o[k](x)` admits: the dynamic key can't pick the field, so
+every callable field of the composite — plus every class
+method of an instance's `klass` — is invoked and the results
+union, with non-callable fields contributing their scalar
+through the member read. To make that complete, computed
+members (`[k]() {}` on classes and object literals) now
+register under synthetic names a static lookup can never
+produce, so the dynamic call finds them among the candidates
+instead of skipping them. `o?.[k](x)` admits identically.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

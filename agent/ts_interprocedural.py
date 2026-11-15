@@ -129,6 +129,13 @@ Admitted:
   body evaluates as with a name call. A `function` expression or
   shorthand method (`is_method`) invoked through a member path
   receives `this` = the object; an arrow does not.
+* Dynamic member calls `o[k](x)` — the key can't pick the field,
+  so every callable field (and every class method of an
+  instance's `klass`, including computed `[k]() {}` members
+  registered under synthetic names a static lookup can never
+  produce) is invoked and the results union — an
+  over-approximation where non-callable fields contribute their
+  scalar through the member read. `o?.[k](x)` admits the same.
 * `async` functions, async arrows and `await` expressions — in the
   dep model a promise is its resolved value, so `await e` passes
   the operand's deps through and `async` admits at the signature
@@ -3216,14 +3223,29 @@ class _Builder:
                 if mname is not None and (
                     mname.type == "computed_property_name"
                 ):
-                    # `[k]() {}` — the member can't be keyed into
-                    # the tables, so it is skipped (uncallable —
-                    # `o[k]()` closes on its own). Its name
-                    # expression still evaluates in class scope:
-                    # its deps are already inside `captured` (the
-                    # union of all locals) but its calls run.
+                    # `[k]() {}` — the member can't be keyed, so it
+                    # registers under a synthetic name a static
+                    # lookup can never produce: a dynamic `o[k]()`
+                    # still finds it among the invoke candidates.
+                    # The name expression evaluates in class scope.
                     for inner in _children(mname):
                         self.expression(inner, params, locals_, [], [0])
+                    try:
+                        cnames, cdefaults, crest = (
+                            self._callable_params(member)
+                        )
+                        methods[f"[computed:{member.start_byte}]"] = (
+                            _Callable(
+                                member,
+                                cnames,
+                                cdefaults,
+                                captured,
+                                crest,
+                                is_method=True,
+                            )
+                        )
+                    except _Unsupported:
+                        pass
                     continue
                 if mname is None or mname.type not in {
                     "property_identifier",
@@ -3948,14 +3970,24 @@ class _Builder:
                     if mname is not None and (
                         mname.type == "computed_property_name"
                     ):
-                        # `{[k]() {}}` — unnameable member, skipped
-                        # like a class's computed member; the name
-                        # expression still evaluates.
+                        # `{[k]() {}}` — unnameable member; like a
+                        # class's computed member it registers
+                        # under a synthetic name so a dynamic
+                        # `o[k]()` finds it among the candidates.
                         for inner in _children(mname):
                             spilled |= self.expression(
                                 inner, params, locals_, transfers,
                                 count,
                             )
+                        try:
+                            fields[f"[computed:{child.start_byte}]"] = (
+                                self._callable_value(
+                                    child, params, locals_,
+                                    is_method=True,
+                                )
+                            )
+                        except _Unsupported:
+                            pass
                         continue
                     if mname is None or mname.type != "property_identifier":
                         raise _Unsupported(
@@ -4424,6 +4456,48 @@ class _Builder:
                         result_m = base_val2
                         for a in actual_m:
                             result_m |= a
+                        transfers.append(
+                            TsCall(
+                                _span(node),
+                                function.text.decode(),
+                                actual_m,
+                                result_m,
+                            )
+                        )
+                        return result_m
+                    if (
+                        isinstance(base_val2, _Composite)
+                        and prop is None
+                    ):
+                        # `o[k](x)` — a dynamic key can't pick the
+                        # field, so every callable field is invoked
+                        # and the results union (an
+                        # over-approximation: non-callable fields
+                        # contribute their scalar through `raw`).
+                        result_m = _scalar_of(raw)
+                        for a in actual_m:
+                            result_m |= a
+                        cands = list(base_val2.fields.values())
+                        if base_val2.klass is not None:
+                            # An instance's methods live on the
+                            # class, not its fields.
+                            cands += base_val2.klass.methods.values()
+                        for fval in cands:
+                            if isinstance(fval, _Callable):
+                                result_m |= self._invoke_callable(
+                                    fval,
+                                    actual_m,
+                                    params,
+                                    locals_,
+                                    transfers,
+                                    count,
+                                    _span(node),
+                                    this_val=(
+                                        base_val2
+                                        if fval.is_method
+                                        else None
+                                    ),
+                                )
                         transfers.append(
                             TsCall(
                                 _span(node),

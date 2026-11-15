@@ -4043,13 +4043,24 @@ def test_computed_member_skipped_named_members_admit():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_computed_member_call_closes():
+def test_computed_member_call_admits():
+    # `c[k]()` — the computed member registers under a synthetic
+    # key the dynamic call finds among the invoke candidates.
     s = _fn(
         "function f(x: number): number { const k = 'a';"
-        " class C { [k](): number { return 1; } }"
+        " class C { [k](): number { return x; } }"
         " const c = new C(); return c[k](); }"
     )
-    assert not s.available
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_computed_member_call_object_literal():
+    s = _fn(
+        "function f(x: number): number { const k = 'a';"
+        " const o = { [k](): number { return x; } };"
+        " return o[k](); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_object_literal_computed_method_skipped():
@@ -4331,3 +4342,46 @@ def test_method_typed_params_admit():
         "function f(x: number): number { return x; }"
     )
     assert s.available
+
+
+# --- slice 46: dynamic member calls -----------------------------
+
+
+def test_dynamic_member_call_invokes_all():
+    # `o[k]()` — every callable field is invoked and results union.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {m() { return x; }}; const k = \"m\";"
+        " return o[k](); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_call_arrow_field():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {m: (v: number) => v}; const k = \"m\";"
+        " return o[k](x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_call_this():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: 0, m() { return this.a; }}; const k = \"m\";"
+        " o.a = x; return o[k](); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_call_union():
+    # Two callable fields — the result unions both bodies'
+    # deps plus the actuals.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const o = {m() { return x; }, n() { return y; }};"
+        " const k = \"m\"; return o[k](); }"
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0, 1})
