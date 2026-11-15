@@ -199,6 +199,7 @@ class _Builder:
         self._contract_names: set[str] = set()
         self._usings: dict[str, list[str]] = {}
         self._free_fns: dict[str, list[str]] = {}
+        self._all_state_vars: dict[str, set[str]] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -283,6 +284,12 @@ class _Builder:
             out |= self._state_vars.get(c, set())
         return out
 
+    def _all_state_vars_of(self, contract):
+        out: set[str] = set()
+        for c in self._hierarchy(contract):
+            out |= self._all_state_vars.get(c, set())
+        return out
+
     def _lookup_fns(self, contract, name, skip_self=False):
         for c in self._hierarchy(contract):
             if skip_self and c == contract:
@@ -362,13 +369,14 @@ class _Builder:
                     ),
                     None,
                 )
-                if (
-                    vname is not None
-                    and _scalar_type(tnode)
-                ):
-                    self._state_vars.setdefault(
+                if vname is not None:
+                    self._all_state_vars.setdefault(
                         contract, set()
                     ).add(vname.text.decode())
+                    if _scalar_type(tnode):
+                        self._state_vars.setdefault(
+                            contract, set()
+                        ).add(vname.text.decode())
                 continue
             if member.type in {
                 "constructor_definition",
@@ -1111,6 +1119,57 @@ class _Builder:
                         "unsupported_statement", _span(el)
                     )
                 return deps
+            if (
+                len(tinner) == 1
+                and tinner[0].type == "array_access"
+            ):
+                # `arr[i] = v` / `m[k] = v` — the container slot
+                # accumulates the value and index deps; storage
+                # containers mark `state_writes`.
+                if right is None:
+                    raise _Unsupported(
+                        "unsupported_statement", _span(expr)
+                    )
+                deps = self._expr(
+                    right, locals_, param_index, summary
+                )
+                node = tinner[0]
+                while node.type == "array_access":
+                    index = node.child_by_field_name("index")
+                    if index is not None:
+                        deps |= self._expr(
+                            index, locals_, param_index, summary
+                        )
+                    nb = node.child_by_field_name("base")
+                    node = (
+                        _children(nb)[0]
+                        if nb is not None
+                        and nb.type == "expression"
+                        and len(_children(nb)) == 1
+                        else nb
+                    )
+                if node is None or node.type != "identifier":
+                    raise _Unsupported(
+                        "unsupported_statement", _span(expr)
+                    )
+                name = node.text.decode()
+                if name in self._all_state_vars_of(
+                    getattr(self, "_current_contract", "")
+                ):
+                    locals_.setdefault(name, frozenset())
+                if name not in locals_:
+                    raise _Unsupported(
+                        "unsupported_statement", _span(expr)
+                    )
+                locals_[name] = locals_[name] | deps
+                if self._writes:
+                    self._writes[-1].add(name)
+                if name in self._all_state_vars_of(
+                    getattr(self, "_current_contract", "")
+                ):
+                    summary.effects = "state_writes"
+                    self._effects_touched = True
+                return deps
             lident = (
                 _children(left)[0]
                 if left is not None
@@ -1279,6 +1338,24 @@ class _Builder:
                     deps |= self._expr(
                         c, locals_, param_index, summary
                     )
+            return deps
+        if t == "array_access":
+            # Container read — the container itself is opaque
+            # (dep-free external), the index's deps flow.
+            base = node.child_by_field_name("base")
+            index = node.child_by_field_name("index")
+            deps = frozenset()
+            if index is not None:
+                deps |= self._expr(
+                    index, locals_, param_index, summary
+                )
+            if base is not None:
+                try:
+                    deps |= self._expr(
+                        base, locals_, param_index, summary
+                    )
+                except _Unsupported:
+                    pass
             return deps
         if t == "binary_expression":
             deps = frozenset()

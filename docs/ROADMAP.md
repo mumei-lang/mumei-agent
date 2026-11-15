@@ -2712,6 +2712,18 @@ in-process; no audit/CLI/MCP route changes.
   like functions (`C.constructor`, `C.fallback`, `C.receive`)
   — their state writes mark `effects` as usual.
 
+### C06 Solidity index access (slice 11)
+
+- `arr[i]` / `m[k]` reads union the index's deps with the
+  (dep-free, opaque) container's; nested `m[k][j]` walks the
+  chain. Unresolvable containers stay dep-free.
+- `arr[i] = v` / `m[k] = v` accumulate the value and every
+  index's deps into the container slot; storage containers
+  (any declared state var, not just scalars — a new
+  `_all_state_vars` registry tracks every declared name)
+  mark `effects = "state_writes"`. Typed local arrays stay
+  closed at declaration.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

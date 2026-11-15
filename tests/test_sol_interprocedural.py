@@ -982,3 +982,61 @@ def test_slice10_fallback_receive_summarized():
     names = {f.name for f in r.functions}
     assert any(".fallback" in n for n in names)
     assert any(".receive" in n for n in names)
+
+
+def test_slice11_mapping_write_marks_state():
+    s = _fn(
+        """contract C {
+    mapping(uint => uint) m;
+    function f(uint a, uint k) public returns (uint) {
+        m[k] = a;
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice11_index_read_carries_index_deps():
+    s = _fn(
+        """contract C {
+    mapping(uint => uint) m;
+    function f(uint a, uint k) public returns (uint) {
+        uint x = m[k];
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_slice11_index_write_then_read():
+    s = _fn(
+        """contract C {
+    uint[] arr;
+    function f(uint a, uint k) public returns (uint) {
+        arr[k] = a;
+        return arr[k];
+    }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0, 1})
+    assert s.effects == "state_writes"
+
+
+def test_slice11_nested_index_write():
+    s = _fn(
+        """contract C {
+    mapping(uint => mapping(uint => uint)) m;
+    function f(uint a, uint k) public returns (uint) {
+        m[k][a] = k;
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
