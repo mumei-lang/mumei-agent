@@ -25,6 +25,7 @@ _SUBCOMMANDS = {
     "ts-summaries-accept",
     "ts-summaries-check",
     "ts-summaries-reuse",
+    "ts-summaries-attempt",
     "mcp-server",
     "check-spec-health",
     "migrate-suggest",
@@ -315,6 +316,23 @@ def main() -> None:
         ts_reuse_build_parser(parser)
         args = parser.parse_args(argv[1:])
         ts_reuse_main(args)
+    elif command == "ts-summaries-attempt":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_attempt_parser as ts_attempt_build_parser,
+            main_attempt as ts_attempt_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-attempt",
+            description=(
+                "Run the ts-summaries produce route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        ts_attempt_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_attempt_main(args)
     elif command == "validate-code-to-spec":
         import argparse
         from agent.cross_validation import (

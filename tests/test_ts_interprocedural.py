@@ -6679,3 +6679,91 @@ def test_check_route_ambiguous_name_is_never_reusable(
     out = json.loads(capsys.readouterr().out)
     assert "f" in out["stale"]
     assert "f" not in out["reusable"]
+
+
+def _attempt_args(source, attempt_timeout=60000, output=None,
+                  resolve=False, memory_bound_mb=None):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "resolve_modules": resolve,
+            "attempt_timeout": attempt_timeout,
+            "memory_bound_mb": memory_bound_mb,
+            "output": str(output) if output else None,
+        },
+    )()
+
+
+def test_attempt_route_emits_lineage_and_candidate(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    ts.main_attempt(_attempt_args(src))
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "mumei.ts-summaries-attempt-report/v1"
+    sequence = report["sequence"]
+    assert (
+        sequence["schema_version"] == "mumei.verifier-attempt-sequence/v1"
+    )
+    assert sequence["attempts"][0]["state"] == "exited"
+    assert sequence["attempts"][0]["events"][-1]["kind"] == "exited"
+    assert sequence["attempts"][0]["events"][-1]["exit_code"] == 0
+    assert sequence["selected_result"]["attempt_number"] == 1
+    normalized = report["normalized"]
+    assert normalized["outcome"] == "exited"
+    assert normalized["exit_code"] == 0
+    candidate = report["candidate"]
+    assert candidate["schema_version"] == "mumei.verifier-evidence-candidate/v1"
+    assert (
+        candidate["request_fingerprint"]
+        == sequence["request_fingerprint"]
+    )
+
+
+def test_attempt_route_rejects_resolve_modules(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    with pytest.raises(SystemExit) as exc:
+        ts.main_attempt(_attempt_args(src, resolve=True))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "unsupported_option"
+
+
+def test_attempt_route_binds_source_bytes(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    ts.main_attempt(_attempt_args(src))
+    first = json.loads(capsys.readouterr().out)["sequence"][
+        "request_fingerprint"
+    ]
+    src.write_text(_SRC_TWO_CHANGED)
+    ts.main_attempt(_attempt_args(src))
+    second = json.loads(capsys.readouterr().out)["sequence"][
+        "request_fingerprint"
+    ]
+    assert first != second
+
+
+def test_attempt_route_output_file(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    out_path = tmp_path / "report.json"
+    ts.main_attempt(_attempt_args(src, output=out_path))
+    capsys.readouterr()
+    report = json.loads(out_path.read_text())
+    assert report["schema_version"] == "mumei.ts-summaries-attempt-report/v1"
+
+
+def test_attempt_route_rejects_output_overwriting_source(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    with pytest.raises(SystemExit) as exc:
+        ts.main_attempt(_attempt_args(src, output=src))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+    assert src.read_text() == _SRC_TWO

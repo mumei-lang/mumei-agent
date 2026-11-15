@@ -33,6 +33,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `ts-summaries-accept` | 3 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `ts-summaries-check` | 3 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
 | `ts-summaries-reuse` | 3 | Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `ts-summaries-attempt` | 4 | Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `validate-code-to-spec` | 8 | Detect spec drift by comparing changed code to specs. |
 | `verify-conformance` | 8 | Return structured JSON for natural-language spec to code conformance. |
 | `verify-traceability` | 8 | Return structured JSON for bidirectional spec/code traceability. |
@@ -383,6 +384,26 @@ Re-derive the TypeScript summary set for one declared source and emit a manifest
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-interprocedural/v1) to reuse unchanged summaries from. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+
+
+## `mumei-agent ts-summaries-attempt`
+
+Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 
 
 ## `mumei-agent validate-code-to-spec`
