@@ -485,6 +485,10 @@ class _Builder:
                 ret = left_ret
             if right_ret is not None:
                 ret = right_ret if ret is None else ret | right_ret
+            if ret is not None:
+                # Which branch produced the value depends on
+                # the condition — its deps join the result.
+                ret = ret | merged
             return ret
         if t == "while_statement" or t == "do_while_statement":
             kids = _children(st)

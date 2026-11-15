@@ -391,3 +391,14 @@ def test_non_scalar_state_var_still_closes():
 }"""
     s = _fn(src, "f")
     assert not s.available
+
+
+def test_if_else_return_carries_cond_deps():
+    src = """contract C {
+  function f(uint256 c, uint256 a, uint256 b) public pure returns (uint256) {
+    if (c > 0) { return a; } else { return b; }
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.return_dependencies == frozenset({0, 1, 2})
