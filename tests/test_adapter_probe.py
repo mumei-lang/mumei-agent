@@ -428,6 +428,60 @@ def test_observe_probes_parallel_single_request():
     assert obs[0].availability == "available"
 
 
+class _ConcurrencyStubRunner:
+    """Runner stand-in that records peak concurrent `run` calls."""
+
+    class _Result:
+        def normalized(self):
+            import types as _t
+
+            return _t.SimpleNamespace(outcome="exited", exit_code=0)
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.inflight = 0
+        self.max_seen = 0
+
+    def run(self, execution_request, argv, cancel_event=None, memory_bound_mb=None):
+        with self._lock:
+            self.inflight += 1
+            self.max_seen = max(self.max_seen, self.inflight)
+        try:
+            time.sleep(0.05)
+        finally:
+            with self._lock:
+                self.inflight -= 1
+        return self._Result()
+
+
+def test_observe_probes_memory_bound_batch_runs_sequentially():
+    import dataclasses as _dc
+
+    # preexec_fn carries the memory bound and is unsafe under
+    # threads: a batch carrying a memory-bound probe must stay
+    # sequential even when max_parallel allows concurrency.
+    bound = _dc.replace(_req(), adapter_id="bound.probe", memory_bound_mb=64)
+    plain_a = _dc.replace(_req(), adapter_id="plain.a")
+    plain_b = _dc.replace(_req(), adapter_id="plain.b")
+
+    runner = _ConcurrencyStubRunner()
+    obs = observe_probes((bound, plain_a, plain_b), runner=runner, max_parallel=3)
+    assert [o.adapter_id for o in obs] == ["bound.probe", "plain.a", "plain.b"]
+    assert runner.max_seen == 1
+
+
+def test_observe_probes_unbound_batch_runs_in_parallel():
+    import dataclasses as _dc
+
+    a = _dc.replace(_req(), adapter_id="a.probe")
+    b = _dc.replace(_req(), adapter_id="b.probe")
+
+    runner = _ConcurrencyStubRunner()
+    obs = observe_probes((a, b), runner=runner, max_parallel=2)
+    assert [o.adapter_id for o in obs] == ["a.probe", "b.probe"]
+    assert runner.max_seen == 2
+
+
 def test_observe_probes_feeds_replan():
     """Round-trip: schedule → observe → plan sees the observation."""
     registry = _registry(

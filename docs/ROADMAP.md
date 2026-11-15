@@ -2671,7 +2671,11 @@ no state between calls, so concurrent workers are safe; the returned
 tuple keeps request order regardless of completion order — observation
 `i` always answers request `i`. `max_parallel=1` is plain sequential
 execution and remains the default; non-positive or non-int bounds are
-static errors. Retry policy and Evidence acceptance remain open.
+static errors. A batch carrying a `memory_bound_mb` request stays
+sequential even under `max_parallel>1`: the bound is applied through
+`preexec_fn`, whose fork+exec spawn path can deadlock in a
+multithreaded process before timeout accounting starts. Retry policy
+and Evidence acceptance remain open.
 
 ### C11 bounded probe-driven planning
 

@@ -352,6 +352,13 @@ def observe_probes(
     safe; output order never depends on completion order —
     `observations[i]` always answers `requests[i]`. `max_parallel=1`
     is plain sequential execution.
+
+    The parallel path is only taken when no request declares a
+    `memory_bound_mb`: `AttemptRunner` installs that limit through a
+    `preexec_fn`, and `preexec_fn` forces the fork+exec spawn path,
+    which can deadlock in a multithreaded process. A batch carrying a
+    memory-bound probe falls back to sequential execution rather than
+    risk a spawn that can stall before timeout accounting starts.
     """
     if not isinstance(requests, tuple):
         raise ValueError("probe observation requires a request tuple")
@@ -361,7 +368,11 @@ def observe_probes(
         raise ValueError("probe parallelism bound must be a positive int")
     if runner is None:
         runner = AttemptRunner()
-    if max_parallel == 1 or len(requests) <= 1:
+    if (
+        max_parallel == 1
+        or len(requests) <= 1
+        or any(req.memory_bound_mb is not None for req in requests)
+    ):
         out: list[RuntimeObservation] = []
         for req in requests:
             outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
