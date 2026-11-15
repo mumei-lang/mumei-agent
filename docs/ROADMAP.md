@@ -3360,6 +3360,22 @@ basename-redacted; nothing spawns and no manifest is accepted. The
 family's produce surface is now uniformly reachable over MCP.
 
 
+### C06 declared summary check routes as MCP tools
+
+`ts_summaries_check`, `rust_summaries_check` and `sol_summaries_check`
+expose the declared check routes over MCP. Each module's check
+document is shared through `summary_check_document(declared, live)`:
+the CLI route and the tool emit the identical partition —
+`context_match` (the strict whole-context gate) plus the name-level
+`reusable`/`stale`/`missing` sets. Both declared inputs are read
+under the same byte bounds as the CLI route (source per route,
+manifest at 8 MiB), the manifest restores through the strict
+`from_dict` gate, and `ts_summaries_check` carries the
+`resolve_modules` opt-in. Declared failures surface as `error` with
+the declared paths basename-redacted; detection only — nothing is
+accepted or merged.
+
+
 ### C06 declared summary MCP tool (go_summaries)
 
 The MCP surface exposes the produce route as `go_summaries(
