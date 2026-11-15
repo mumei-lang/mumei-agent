@@ -6,8 +6,10 @@ import threading
 import pytest
 
 from agent.adapter_probe import (
+    AdapterProbeHistory,
     AdapterProbeOutcome,
     AdapterProbeRequest,
+    MAX_PROBE_HISTORY,
     MAX_PLAN_ROUNDS,
     PROBE_SCHEMA,
     observe_probes,
@@ -406,6 +408,79 @@ def test_observe_probes_missing_keeps_excluded():
     obs = observe_probes(reqs)
     assert obs[0].availability == "missing"
     assert registry.plan(_route(), policy, obs).selected is None
+
+
+def test_probe_history_records_outcomes():
+    req = _req()
+    hist = AdapterProbeHistory.start(req)
+    assert hist.attempt_count == 0
+    out = run_probe(req)
+    hist = hist.record(req, out)
+    assert hist.attempt_count == 1
+    assert hist.outcomes[0].outcome == "exited"
+    req2 = _req(attempt_number=2)
+    hist = hist.record(req2, run_probe(req2))
+    assert hist.attempt_count == 2
+
+
+def test_probe_history_rejects_fingerprint_mismatch():
+    hist = AdapterProbeHistory.start(_req())
+    other = _req(argv=(sys.executable, "-c", "pass"))
+    with pytest.raises(ValueError, match="fingerprint"):
+        hist.record(other, run_probe(other))
+
+
+def test_probe_history_rejects_adapter_mismatch():
+    hist = AdapterProbeHistory.start(_req())
+    other = AdapterProbeRequest(
+        "zendingsol.host.other",
+        (sys.executable, "-c", "pass"),
+        timeout_ms=30_000,
+        stamp=1,
+    )
+    with pytest.raises(ValueError, match="adapter"):
+        hist.record(other, run_probe(other))
+
+
+def test_probe_history_rejects_foreign_outcome():
+    hist = AdapterProbeHistory.start(_req())
+    other = _req(argv=(sys.executable, "-c", "pass"))
+    foreign = run_probe(other)
+    with pytest.raises(ValueError, match="match request"):
+        hist.record(_req(), foreign)
+
+
+def test_probe_history_rejects_out_of_order_attempt():
+    hist = AdapterProbeHistory.start(_req())
+    req2 = _req(attempt_number=2)
+    with pytest.raises(ValueError, match="ordinal"):
+        hist.record(req2, run_probe(req2))
+    req = _req()
+    hist = hist.record(req, run_probe(req))
+    with pytest.raises(ValueError, match="ordinal"):
+        hist.record(req, run_probe(req))
+
+
+def test_probe_history_bound():
+    hist = AdapterProbeHistory.start(_req())
+    for n in range(1, MAX_PROBE_HISTORY + 1):
+        req = _req(attempt_number=n)
+        hist = hist.record(req, run_probe(req))
+    req = _req(attempt_number=MAX_PROBE_HISTORY + 1)
+    with pytest.raises(ValueError, match="bound"):
+        hist.record(req, run_probe(req))
+
+
+def test_probe_history_validation():
+    with pytest.raises(ValueError):
+        AdapterProbeHistory.start(object())
+    hist = AdapterProbeHistory.start(_req())
+    with pytest.raises(ValueError):
+        hist.record(_req(), object())
+    with pytest.raises(ValueError):
+        AdapterProbeHistory(
+            "zendingsol.host.lean_scaffold", "nothex"
+        )
 
 
 def test_plan_with_probes_selects_after_probe():
