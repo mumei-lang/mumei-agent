@@ -2014,7 +2014,13 @@ pins `T` through `pointee_type_ids` — whose identities the producer
 now declares as members so a bound `*p` on the stored pointer
 resolves `T` too — while a non-scalar shape (`*lib.PA` on
 `*[4]int64`, `*lib.PSTR` on `*struct{ F T }`) stays closed like a
-named struct pointee. A bound
+named struct pointee. A deref
+through a pointer-typed *field* member resolves the same way:
+`*lib.VS2.P` resolves the field like a field read, classifies the
+result through the field member's `*T` fact, and pins the base
+member's identity beside the pointee's — a field whose pointee
+carries no identity (`*lib.VS3.PU` on `PU *int64`) stays closed
+like `*lib.PU`. A bound
 pointer dereferences the same way: `*t` on a parameter or local
 whose declared `*T` names the pointee admits, records its own
 imported transfer against the pointee identity (the binding's read

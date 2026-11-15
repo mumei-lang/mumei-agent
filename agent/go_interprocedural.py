@@ -1434,6 +1434,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
         member = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)
+            if member is None:
+                # `*lib.VS2.P` — a pointer-typed *field* member:
+                # resolve it like a field read and classify by the
+                # field member's fact, pinning the base member's
+                # identity beside the field's — the same staleness
+                # cover the write side's `*lib.VS2.P = v` uses.
+                pair = self._imported_field_read(inner)
+                if pair is not None and pair[1].type.kind == "pointer":
+                    base, field_member = pair
+                    self.pinned.add(base.id)
+                    self._pin_member_type(base)
+                    member = field_member
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
             # exactly like `*lib.PV` — a bare `import` reference whose
