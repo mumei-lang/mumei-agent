@@ -141,7 +141,9 @@ def test_empty_loop_admitted():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_break_in_loop_closes():
+def test_break_in_loop_admitted():
+    # Slice 14: break/continue are no-ops under the single-pass
+    # may-analysis — later statements stay reachable.
     src = """contract C {
   function f(uint256 x) public pure returns (uint256) {
     uint256 s = x;
@@ -150,7 +152,8 @@ def test_break_in_loop_closes():
   }
 }"""
     s = _fn(src, "f")
-    assert not s.available
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
 
 
 def test_non_scalar_param_closes():
