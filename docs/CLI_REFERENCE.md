@@ -43,6 +43,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-check` | 7 | Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report. |
 | `go-summaries-reuse` | 7 | Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's summaries for the functions the fresh report confirms unchanged. |
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
+| `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
@@ -563,6 +564,22 @@ Run a provisioned go-types helper on declared Go sources and accept one function
 | `--output` | `<<PATH>>` | no | — | Write the accept report JSON here instead of stdout. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to accept from. |
 | `--binding` | `<<ID>>` | yes | — | Binding identity of the function whose declared summary to accept. |
+
+
+## `mumei-agent summaries-plan`
+
+Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--profile` | `<PROFILE>` | yes | — | Summary-derivation profile to plan for (for example mumei.go-scalar-parameter-deps/v1). |
+| `--stamp` | `<STAMP>` | yes | — | Host-assigned monotonically increasing stamp for the probe observations this pass records. |
+| `--tool-version` | `<TOOL_VERSION>` | no | — | Optional declared tool version the planner pins against. |
+| `--rounds` | `<ROUNDS>` | no | 1 | Maximum observe-and-replan rounds (default 1). |
+| `--max-parallel` | `<MAX_PARALLEL>` | no | 1 | Maximum probes run concurrently per round (default 1). |
+| `--histories` | `<PATH>` | no | — | Optional JSON array of persisted mumei.adapter-probe-history/v1 records this pass resumes. |
 
 
 ## `mumei-agent go-summaries-attempt`

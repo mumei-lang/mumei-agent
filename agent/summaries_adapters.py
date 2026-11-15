@@ -12,6 +12,7 @@ route itself and owns every acceptance decision. The declared
 """
 
 import sys
+from pathlib import Path
 
 from agent.go_interprocedural import PROFILE as GO_SUMMARY_PROFILE
 from agent.verification_planner import (
@@ -124,3 +125,143 @@ def plan_summary_route(
         max_parallel=max_parallel,
         histories=histories,
     )
+
+
+PLAN_PROFILE = "mumei.summaries-plan/v1"
+
+
+def build_plan_parser(parser):
+    """Arguments for the ``summaries-plan`` route."""
+    parser.add_argument(
+        "--profile",
+        required=True,
+        help=(
+            "Summary-derivation profile to plan for (for example "
+            f"{GO_SUMMARY_PROFILE})."
+        ),
+    )
+    parser.add_argument(
+        "--stamp",
+        type=int,
+        required=True,
+        help=(
+            "Host-assigned monotonically increasing stamp for the probe "
+            "observations this pass records."
+        ),
+    )
+    parser.add_argument(
+        "--tool-version",
+        default=None,
+        help="Optional declared tool version the planner pins against.",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="Maximum observe-and-replan rounds (default 1).",
+    )
+    parser.add_argument(
+        "--max-parallel",
+        type=int,
+        default=1,
+        help="Maximum probes run concurrently per round (default 1).",
+    )
+    parser.add_argument(
+        "--histories",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Optional JSON array of persisted "
+            "mumei.adapter-probe-history/v1 records this pass resumes."
+        ),
+    )
+    return parser
+
+
+def main_plan(args=None, *, runner=None) -> int:
+    """Plan a summary route through the declared probe boundary.
+
+    Emits ``mumei.summaries-plan/v1``: the resulting
+    ``mumei.verification-plan/v1`` document, the probe observations this
+    pass recorded and the updated probe histories the host persists to
+    schedule retries. Routing only — no summary is derived, and a
+    selected adapter is a routing decision, not an accepted manifest.
+    """
+    import argparse
+    import json
+
+    if args is None:
+        parser = argparse.ArgumentParser(
+            prog="python -m agent summaries-plan",
+            description=(
+                "Plan the summary-derivation route for a declared "
+                "profile through the C11 probe boundary and print the "
+                "plan JSON."
+            ),
+        )
+        build_plan_parser(parser)
+        args = parser.parse_args()
+    histories = ()
+    if args.histories is not None:
+        from agent.adapter_probe import AdapterProbeHistory
+
+        try:
+            declared = json.loads(
+                Path(args.histories).read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(f"summaries-plan: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if type(declared) is not list:
+            print(
+                "summaries-plan: histories file must be a JSON array",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            histories = tuple(
+                AdapterProbeHistory.from_dict(record) for record in declared
+            )
+        except ValueError as exc:
+            print(f"summaries-plan: {exc}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        probe_plan = plan_summary_route(
+            args.profile,
+            PlannerPolicy(),
+            stamp=args.stamp,
+            tool_version=args.tool_version,
+            histories=histories,
+            rounds=args.rounds,
+            max_parallel=args.max_parallel,
+            runner=runner,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"summaries-plan: {exc}", file=sys.stderr)
+        sys.exit(1)
+    document = (
+        json.dumps(
+            {
+                "schema_version": PLAN_PROFILE,
+                "profile": args.profile,
+                "plan": probe_plan.plan.to_dict(),
+                "observations": [
+                    {
+                        "adapter_id": observation.adapter_id,
+                        "availability": observation.availability,
+                        "tool_version": observation.tool_version,
+                        "stamp": observation.stamp,
+                    }
+                    for observation in probe_plan.observations
+                ],
+                "histories": [
+                    history.to_dict() for history in probe_plan.histories
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    sys.stdout.write(document)
+    return 0

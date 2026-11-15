@@ -33,6 +33,7 @@ _SUBCOMMANDS = {
     "go-summaries-reuse",
     "go-summaries-accept",
     "go-summaries-attempt",
+    "summaries-plan",
 }
 
 
@@ -557,6 +558,24 @@ def main() -> None:
         go_summaries_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_accept_main(args))
+    elif command == "summaries-plan":
+        import argparse
+        from agent.summaries_adapters import (
+            build_plan_parser as summaries_plan_build_parser,
+            main_plan as summaries_plan_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent summaries-plan",
+            description=(
+                "Plan the summary-derivation route for a declared "
+                "profile through the C11 probe boundary and print the "
+                "plan JSON."
+            ),
+        )
+        summaries_plan_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(summaries_plan_main(args))
     elif command == "go-summaries-attempt":
         import argparse
         from agent.go_summaries import (
