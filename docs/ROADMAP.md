@@ -2667,6 +2667,16 @@ in-process; no audit/CLI/MCP route changes.
   derived contract's functions and modifier scopes; writes
   mark `state_writes` as usual.
 
+### C06 Solidity delete and try/catch (slice 7)
+
+- `delete x` / `delete this.s` clear the slot (deps become
+  empty); state-var deletes mark `effects = "state_writes"`.
+- `try f(...) returns (uint r) { ... } catch { ... }` models
+  both paths as may-branches: the success block binds the
+  `returns` params to the attempt's dep union, each catch
+  clause binds its error params dep-free, and all scopes join
+  into the caller — returns from any path union.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

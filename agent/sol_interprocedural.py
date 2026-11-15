@@ -702,6 +702,63 @@ class _Builder:
                 expr, locals_, param_index, summary
             )
             return None
+        if t == "try_statement":
+            attempt = st.child_by_field_name("attempt")
+            body = st.child_by_field_name("body")
+            catches = [
+                c for c in _children(st) if c.type == "catch_clause"
+            ]
+            rparams = [
+                c for c in _children(st) if c.type == "parameter"
+            ]
+            rdeps = (
+                self._expr(attempt, locals_, param_index, summary)
+                if attempt is not None
+                else frozenset()
+            )
+            variants = []
+            # Success path: `returns (...)` params bind the
+            # attempt's union (position-insensitive).
+            ok = dict(locals_)
+            for rp in rparams:
+                rn = rp.child_by_field_name("name")
+                if rn is not None:
+                    ok[rn.text.decode()] = rdeps
+            variants.append(ok)
+            # Failure paths: catch params are dep-free error data.
+            for cc in catches:
+                ci = dict(locals_)
+                for cp in _children(cc):
+                    if cp.type == "parameter":
+                        cn = cp.child_by_field_name("name")
+                        if cn is not None:
+                            ci[cn.text.decode()] = frozenset()
+                variants.append((ci, cc))
+            ret = None
+            results = []
+            first = variants[0]
+            results.append(
+                self._block(body, first, param_index, summary)
+                if body is not None
+                else None
+            )
+            for ci, cc in variants[1:]:
+                cbody = cc.child_by_field_name("body")
+                results.append(
+                    self._block(cbody, ci, param_index, summary)
+                    if cbody is not None
+                    else None
+                )
+            scopes = [first] + [v[0] for v in variants[1:]]
+            for name in set().union(*scopes):
+                merged = frozenset()
+                for sc in scopes:
+                    merged |= sc.get(name, frozenset())
+                locals_[name] = merged
+            for r in results:
+                if r is not None:
+                    ret = r if ret is None else ret | r
+            return ret
         if t == "if_statement":
             cond = next(
                 (c for c in _children(st) if c.type == "expression"),
@@ -1108,7 +1165,48 @@ class _Builder:
                     c, locals_, param_index, summary
                 )
             return deps
-        if t == "unary_expression" or t == "update_expression":
+        if t == "unary_expression":
+            arg = node.child_by_field_name("argument")
+            op = node.child_by_field_name("operator")
+            if op is not None and op.text == b"delete":
+                # `delete x` clears the slot — a write, not a
+                # read. `this.s`/state vars count as state writes.
+                dname = None
+                if arg is not None:
+                    ain = (
+                        _children(arg)[0]
+                        if arg.type == "expression"
+                        and len(_children(arg)) == 1
+                        else arg
+                    )
+                    if ain.type == "identifier":
+                        dname = ain.text.decode()
+                    elif ain.type == "member_expression":
+                        did = [
+                            c
+                            for c in _children(ain)
+                            if c.type == "identifier"
+                        ]
+                        if len(did) == 2 and did[0].text == b"this":
+                            dname = did[1].text.decode()
+                if dname is not None and dname in locals_:
+                    locals_[dname] = frozenset()
+                    if self._writes:
+                        self._writes[-1].add(dname)
+                    if dname in self._state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    ):
+                        summary.effects = "state_writes"
+                        self._effects_touched = True
+                return frozenset()
+            deps = frozenset()
+            for c in _children(node):
+                if c.is_named:
+                    deps |= self._expr(
+                        c, locals_, param_index, summary
+                    )
+            return deps
+        if t == "update_expression":
             deps = frozenset()
             for c in _children(node):
                 if c.is_named:

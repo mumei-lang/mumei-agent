@@ -741,3 +741,61 @@ contract C is B {
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice7_delete_local_clears_deps():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        uint x = a;
+        delete x;
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_slice7_delete_state_marks_writes():
+    s = _fn(
+        """contract C {
+    uint s;
+    function f(uint a) public returns (uint) {
+        s = a;
+        delete s;
+        return this.s;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice7_try_catch_joins_branches():
+    s = _fn(
+        """contract C {
+    function g(uint a) returns (uint) { return a; }
+    function f(uint a) public returns (uint) {
+        uint x = 0;
+        try g(a) returns (uint r) { x = r; } catch { x = a; }
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice7_try_returns_from_both_paths():
+    s = _fn(
+        """contract C {
+    function g(uint a) returns (uint) { return a; }
+    function f(uint a) public returns (uint) {
+        try g(a) returns (uint r) { return r; } catch { return 0; }
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
