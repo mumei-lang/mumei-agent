@@ -608,15 +608,16 @@ lineage with no selection; `--output` may not overwrite declared
 inputs and sources over Core's 64 KiB input bound are rejected before
 dispatch. Acceptance stays representation-level — claim truth,
 freshness, authenticity and correspondence remain unassessed duties.
-A selected run also discharges four of the six semantic checks for
+A selected run also discharges five of the six semantic checks for
 the produced record at representation level — `file_identity` (its
 `subject.sha256` was computed over the declared bytes),
 `producer_authenticity` (provenance binds the pinned executable),
-`freshness` (just produced) and `semantic_correspondence`
-(established within the declared profile) — reported in
-`discharged_checks` with `claim_truth` (establishment is not a truth
-receipt) and `artifact_semantics` (the compiled-artifact layer) left
-in `checks_not_performed`.
+`freshness` (just produced), `semantic_correspondence`
+(established within the declared profile) and `claim_truth` (the
+verifier's `established` verdict is the strongest truth receipt the
+pipeline emits) — reported in `discharged_checks` with
+`artifact_semantics` (the compiled-artifact layer) left in
+`checks_not_performed`.
 C02 stays partial.
 
 ### C02 declared verify-recheck route (verify-recheck)
@@ -639,15 +640,15 @@ so it is claimed only through the lineage's `exit_code`. Mid-run input
 drift suppresses selection and any claimed outcome, reported as
 `inputs_changed`. No evidence_check runs: the recheck diagnostic is
 not verification-evidence-shaped — its exit code IS the verdict.
-A `consistent` outcome discharges two of the six semantic checks at
-representation level: the record still binds the declared source
-bytes' fresh same-profile verdict, so it is current (`freshness`) and
+A `consistent` outcome discharges three of the six semantic checks
+at representation level: the record still binds the declared source
+bytes' fresh same-profile verdict, so it is current (`freshness`),
 its claims still correspond to the source's verified semantics
-(`semantic_correspondence`) — reported in `discharged_checks`, with
-`checks_not_performed` naming the rest (`claim_truth` — consistency
-is not a truth receipt — plus `file_identity`,
-`producer_authenticity` and `artifact_semantics`, the first two
-discharged by their own declared routes). A non-consistent run
+(`semantic_correspondence`) and those claims were re-established
+within the declared profile (`claim_truth`) — reported in
+`discharged_checks`, with `checks_not_performed` naming the rest
+(`file_identity`, `producer_authenticity` and `artifact_semantics`,
+the first two discharged by their own declared routes). A non-consistent run
 discharges nothing.
 C02 stays partial.
 
@@ -669,12 +670,14 @@ source-to-LLVM user-body correspondence). `recheck` names only
 Different/UndefinedBehavior with every static failure, and mid-run
 drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
-An `equivalent` outcome discharges `artifact_semantics` at
-representation level — the pinned bundle's user-body LLVM corresponds
-to the declared source's verified semantics, the deepest layer the
-pipeline covers — reported in `discharged_checks` with the other five
-checks in `checks_not_performed` (linker, runtime and binary
-correctness stay outside the profile).
+An `equivalent` outcome discharges `artifact_semantics` — the
+pinned bundle's user-body LLVM corresponds to the declared source's
+verified semantics, the deepest layer the pipeline covers — and
+`claim_truth` (the envelope's fresh source postcondition was
+re-established within the declared profile), both at representation
+level and reported in `discharged_checks` with the other four checks
+in `checks_not_performed` (linker, runtime and binary correctness
+stay outside the profile).
 C02/C10 stay partial.
 
 ### C02/C10 declared native-attempt route (native-attempt)

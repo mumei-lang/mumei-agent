@@ -96,9 +96,11 @@ def test_equivalent_recheck_selects_report(tmp_path, capsys):
     assert report["schema_version"] == "mumei.native-recheck-report/v1"
     assert report["recheck"] == "equivalent"
     assert report["sequence"]["selected_result"] is not None
-    assert report["discharged_checks"] == ["artifact_semantics"]
-    assert report["checks_not_performed"] == [
+    assert report["discharged_checks"] == [
+        "artifact_semantics",
         "claim_truth",
+    ]
+    assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
         "producer_authenticity",

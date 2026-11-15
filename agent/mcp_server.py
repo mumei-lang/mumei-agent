@@ -2668,9 +2668,10 @@ def verify_attempt(
     the source bytes and the solver budgets — then, only on a selected
     (`exited`, `exit_code == 0`) result, runs the live representation
     check and evaluates acceptance. A selected run reports
-    `discharged_checks` — `file_identity`, `freshness`,
-    `producer_authenticity` and `semantic_correspondence` — with
-    `claim_truth` and `artifact_semantics` in `checks_not_performed`.
+    `discharged_checks` — `claim_truth`, `file_identity`,
+    `freshness`, `producer_authenticity` and
+    `semantic_correspondence` — with `artifact_semantics` in
+    `checks_not_performed`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -2739,8 +2740,8 @@ def verify_recheck(
     for uniquely-mapped exit codes (0 `consistent`, 3 `inconclusive`);
     mid-run drift reports `inputs_changed` with no claimed outcome. A
     `consistent` recheck reports `discharged_checks` —
-    `freshness` and `semantic_correspondence` — with the remaining
-    checks in `checks_not_performed`.
+    `claim_truth`, `freshness` and `semantic_correspondence` — with
+    the remaining checks in `checks_not_performed`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -2868,8 +2869,8 @@ def native_recheck(
     claimed only for uniquely-mapped exit codes (0 `equivalent`,
     3 `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. An `equivalent` recheck reports `discharged_checks`
-    — `artifact_semantics` — with the remaining checks in
-    `checks_not_performed`.
+    — `artifact_semantics` and `claim_truth` — with the remaining
+    checks in `checks_not_performed`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.

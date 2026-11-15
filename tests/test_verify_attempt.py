@@ -108,15 +108,13 @@ def test_selected_evidence_is_checked_and_accepted(tmp_path, capsys):
     assert acceptance["accepted"] is True
     assert acceptance["candidate_match"] is True
     assert report["discharged_checks"] == [
+        "claim_truth",
         "file_identity",
         "freshness",
         "producer_authenticity",
         "semantic_correspondence",
     ]
-    assert report["checks_not_performed"] == [
-        "artifact_semantics",
-        "claim_truth",
-    ]
+    assert report["checks_not_performed"] == ["artifact_semantics"]
 
 
 def test_refuted_run_publishes_lineage_without_selection(
@@ -177,9 +175,10 @@ def test_failing_check_records_failed_outcome(tmp_path, capsys):
     report = json.loads(out)
     assert report["evidence_check"]["outcome"] == "failed"
     assert report["acceptance"]["accepted"] is False
-    # The produced record still discharges its four checks — the
+    # The produced record still discharges its five checks — the
     # representation check's outcome is a separate claim.
     assert report["discharged_checks"] == [
+        "claim_truth",
         "file_identity",
         "freshness",
         "producer_authenticity",
