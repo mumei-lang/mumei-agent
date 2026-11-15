@@ -15,6 +15,7 @@ from agent.attempt_runner import (
     AttemptRunner,
     AttemptRunResult,
     dispatch_attempt,
+    dispatch_next_attempt,
     publish_dispatch,
 )
 from agent.verification_attempt import (
@@ -819,3 +820,113 @@ def test_publish_dispatch_rejects_a_stale_expected():
     dispatch = dispatch_attempt(ready_sequence(), argv("pass"))
     with pytest.raises(ValueError, match="compare failed"):
         publish_dispatch(store, dispatch, expected=sequence)
+
+
+def exited_sequence(state="failed", ordinal=1):
+    record = AttemptRecord(
+        FINGERPRINT,
+        ordinal,
+        10_000,
+        (AttemptEvent("started", 0), AttemptEvent(state, 2)),
+    )
+    return AttemptSequence(FINGERPRINT, 10_000, (record,))
+
+
+def test_dispatch_next_attempt_reserves_and_runs_attempt_one():
+    sequence = AttemptSequence(FINGERPRINT, 10_000)
+    dispatch = dispatch_next_attempt(sequence, argv("import sys; sys.exit(3)"))
+    assert dispatch.sequence.current.attempt_number == 1
+    assert dispatch.sequence.current.state == "exited"
+    assert dispatch.run.record.events[-1].exit_code == 3
+
+
+def test_dispatch_next_attempt_retries_after_a_terminal_record():
+    first = dispatch_next_attempt(
+        AttemptSequence(FINGERPRINT, 10_000),
+        argv("import sys; sys.exit(1)"),
+    )
+    dispatch = dispatch_next_attempt(first.sequence, argv("pass"))
+    assert dispatch.sequence.current.attempt_number == 2
+    assert dispatch.sequence.current.state == "exited"
+    assert len(dispatch.sequence.attempts) == 2
+
+
+def test_dispatch_next_attempt_runs_after_a_failed_attempt():
+    sequence = exited_sequence("failed")
+    dispatch = dispatch_next_attempt(sequence, argv("pass"))
+    assert dispatch.sequence.current.attempt_number == 2
+    assert dispatch.sequence.current.state == "exited"
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        AttemptSequence(
+            FINGERPRINT,
+            10_000,
+            (
+                AttemptRecord(
+                    FINGERPRINT, 1, 10_000, (AttemptEvent("started", 0),)
+                ),
+            ),
+        ),
+        ready_sequence(),
+    ],
+    ids=["in-flight", "ready-unstarted"],
+)
+def test_dispatch_next_attempt_rejects_a_nonterminal_current(sequence):
+    with pytest.raises(ValueError):
+        dispatch_next_attempt(sequence, argv("pass"))
+
+
+def test_dispatch_next_attempt_rejects_a_selected_sequence():
+    dispatch = dispatch_next_attempt(
+        AttemptSequence(FINGERPRINT, 10_000), argv("pass")
+    )
+    output = AttemptOutput(
+        dispatch.sequence.current,
+        dispatch.run.stdout,
+        hashlib.sha256(dispatch.run.stdout).hexdigest(),
+    )
+    selected = dispatch.sequence.select_result(output)
+    with pytest.raises(
+        ValueError, match="a selected result closes the attempt sequence"
+    ):
+        dispatch_next_attempt(selected, argv("pass"))
+
+
+@pytest.mark.parametrize("bad", [None, "x", 1, AttemptRecord(FINGERPRINT, 1, 10)])
+def test_dispatch_next_attempt_rejects_foreign_sequences(bad):
+    with pytest.raises(
+        ValueError, match="^attempt dispatch requires an attempt sequence$"
+    ):
+        dispatch_next_attempt(bad, argv("pass"))
+
+
+def stamped_terminal_sequence(stamp=1):
+    record = AttemptRecord(
+        FINGERPRINT,
+        1,
+        10_000,
+        (AttemptEvent("started", 0), AttemptEvent("exited", 2, 1)),
+    )
+    return AttemptSequence(
+        FINGERPRINT, 10_000, (record,), report_stamp=stamp
+    )
+
+
+def test_dispatch_next_attempt_forwards_a_fresh_report_stamp():
+    sequence = stamped_terminal_sequence(4)
+    dispatch = dispatch_next_attempt(
+        sequence, argv("pass"), report_stamp=5
+    )
+    assert dispatch.sequence.report_stamp == 5
+    assert dispatch.sequence.current.attempt_number == 2
+
+
+@pytest.mark.parametrize("stamp", [None, 0, 4])
+def test_dispatch_next_attempt_rejects_missing_or_stale_stamps(stamp):
+    sequence = stamped_terminal_sequence(4)
+    with pytest.raises(ValueError, match="report stamp"):
+        dispatch_next_attempt(sequence, argv("pass"), report_stamp=stamp)
+    assert sequence.current.state == "exited"
