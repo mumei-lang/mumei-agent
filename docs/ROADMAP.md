@@ -2897,6 +2897,32 @@ Module-scope `var` is modelled as module-scoped — real
 JS hoists it to global scope, but nothing else in the
 unit can see the difference.
 
+### C06 TypeScript generators and `yield` (slice 25)
+
+`function* f() { yield e; }` admits — the dep model has
+no iterator slot, so each `yield`/`yield*` operand's
+deps union into the enclosing generator's own return
+deps: the iterated values are the over-approximation
+of "the iterator carries the yielded deps". `yield`'s
+sent-back value is dep-free.
+
+`self.yield_deps` isolates per callable the way frames
+do: `body()` and `_invoke_callable` save/restore the
+list so an inner generator's yields don't leak into the
+outer function, then union what was collected into the
+result. `generator_function` binds a `_Callable` like
+`function_expression` (`is_method`, since `*m()`/`o.m()`
+receive `this` through the member path); `*` marks admit
+in class and object-literal method tables for the same
+reason.
+
+Boundaries: `yield` on a non-generator function keeps
+closing via the usual expression rules; the sent/return
+value of `it.next(v)` isn't modelled — reading the
+iterator's result is dep-free, an over-approximation
+gap documented on the yield side, not an
+under-approximation of the producer's deps.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

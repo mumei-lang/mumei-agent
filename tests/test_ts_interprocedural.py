@@ -2237,13 +2237,14 @@ def test_async_arrow_value():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_generator_still_closes():
-    # `function*` is a generator_function_declaration — a closed
-    # top-level node, so no `f` summary is produced.
+def test_generator_admits_slice25():
+    # `function*` admits since slice 25 — `yield` deps union
+    # into the return deps.
     summaries = _summarize(
         "function* f(x: number): number { yield x; return x; }"
     ).functions
-    assert all(s.name != "f" for s in summaries)
+    (s,) = [s for s in summaries if s.name == "f"]
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_for_await_of_iterates():
@@ -2297,13 +2298,13 @@ def test_getter_method_closes():
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_generator_method_closes():
+def test_generator_method_admits():
     s = _fn(
         "function f(x: number): number {"
         " const o = {*g(v: number) { yield v; }};"
         " return x; }"
     )
-    assert not s.available
+    assert s.available
 
 
 def test_async_method_admits():
@@ -2860,3 +2861,60 @@ def test_local_shadows_module():
         "function f(x: number): number { let g = x; return g; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 25: generators / yield
+
+
+def test_generator_yield_deps():
+    s = _fn(
+        "function* f(x: number): number { yield x; yield 1; return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_generator_yield_star():
+    s = _fn(
+        "function h(x: number): number { return x; }\n"
+        "function* f(x: number): number { yield* h(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_generator_value_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = function*(v: number) { yield v; };"
+        " const it = g(x);"
+        " return x; }"
+    )
+    assert s.available
+
+
+def test_yield_in_generator_method():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { *m(v: number) { yield v; } }"
+        " const c = new C(x);"
+        " const it = c.m(x);"
+        " return x; }"
+    )
+    assert s.available
+
+
+def test_yield_deps_isolated_per_callable():
+    s = _fn(
+        "function* f(x: number): number {"
+        " const g = function*(v: number) { yield 1; };"
+        " g(x);"
+        " yield x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_top_level_generator():
+    s = _fn(
+        "function* g(x: number): number { yield x; }\n"
+        "function f(x: number): number { return x; }"
+    )
+    assert s.available

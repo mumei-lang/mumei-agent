@@ -116,8 +116,7 @@ Admitted:
 * `async` functions, async arrows and `await` expressions — in the
   dep model a promise is its resolved value, so `await e` passes
   the operand's deps through and `async` admits at the signature
-  gate. `for await (x of y)` iterates like `of`. Generators
-  (`function*`, `yield`) stay closed — a `yield` has no dep slot.
+  gate. `for await (x of y)` iterates like `of`.
 * Rest formal parameters `f(a, ...rest)` — the rest name
   occupies the last index slot; a declared-function call already
   unions every evaluated argument into the result, and a
@@ -125,8 +124,10 @@ Admitted:
   remaining actuals. A parameter after `...rest` closes.
 * Shorthand method definitions `{m(v) { ... }}` — a callable
   field value like an arrow, invoked through the slice-13 member
-  call path (`o.m(x)`). `get`/`set`/`*`/`static` markers stay
-  closed; `async` admits. `this` binds to the receiver object
+  call path (`o.m(x)`). `get`/`set`/`static` markers stay
+  closed; `*` generator methods admit (yield deps union into
+  the result, as below); `async` admits. `this` binds to the
+  receiver object
   inside (see the classes bullet).
 * Destructured formal parameters `f({a, b}, [x])` — the pattern
   occupies one scalar index; its sub-names bind member reads of
@@ -163,9 +164,9 @@ Admitted:
   shadow) — `super(args)` in a ctor runs the parent
   constructor on the same `this`, `super.m(x)` calls through
   the parent prototype; `implements` is type-level and
-  admits silently. Getters/setters, generators, computed
-  names, `abstract`/`declare`/`readonly` and decorated
-  members close.
+  admits silently. Getters/setters, computed names,
+  `abstract`/`declare`/`readonly` and decorated members
+  close; `*m()` generator methods admit like `function*`.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -198,6 +199,12 @@ Admitted:
   the model can't evaluate (an unbound call, an
   unsupported shape) closes the whole unit, and a write to
   a module-scope name from inside a function closes.
+* Generators — `function*`, `function*` methods and `*m()`
+  object-literal methods admit; each `yield`/`yield*` operand's
+  deps union into the enclosing generator's return deps (the
+  iterated values are the over-approximation), and `yield`'s
+  sent-back value is dep-free. `yield_deps` isolate per callable
+  the way frames do.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -214,9 +221,9 @@ declarations, non-declaration top-level statements and a
 module-scope declarator the model can't evaluate close the
 whole unit (`unsupported_unit`);
 `extends` on a non-class value, getters/setters,
-generators, `any`/composite/missing parameter
-types, `eval`, `with`, `new` on a non-class/non-function
-ctor, and generator function values stay
+`any`/composite/missing parameter
+types, `eval`, `with`, and `new` on a non-class/non-function
+ctor stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -259,6 +266,7 @@ _TOP_LEVEL = {
     "empty_statement",
     "lexical_declaration",
     "variable_declaration",
+    "generator_function_declaration",
 }
 
 
@@ -537,7 +545,10 @@ class _Builder:
         declarators: list = []
         for child in root.named_children:
             if child.type in _TOP_LEVEL:
-                if child.type == "function_declaration":
+                if child.type in {
+                    "function_declaration",
+                    "generator_function_declaration",
+                }:
                     name = child.child_by_field_name("name")
                     if name is not None:
                         self.functions[name.text.decode()] = child
@@ -553,7 +564,10 @@ class _Builder:
                     # `export {}`/`export default`/`export *`
                     # binds nothing the function model reads.
                     for inner in child.named_children:
-                        if inner.type == "function_declaration":
+                        if inner.type in {
+                            "function_declaration",
+                            "generator_function_declaration",
+                        }:
                             name = inner.child_by_field_name("name")
                             if name is not None:
                                 self.functions[
@@ -591,6 +605,9 @@ class _Builder:
         # Labels the next loop/switch frame claims — a `break L` or
         # `continue L` looks its frame up by name.
         self.pending_labels: list[str] = []
+        # `yield` operand deps collected for the innermost
+        # generator body/callable invocation being evaluated.
+        self.yield_deps: list[frozenset[int]] = []
         # Pass 2 — evaluate module-scope declarators in source
         # order now that every function/class name is registered
         # (a `const g = f()` may call a declaration hoisted past
@@ -670,7 +687,10 @@ class _Builder:
         """Register every `function inner() {}` declaration under
         `node` in the unit's call table — function declarations
         hoist within their enclosing function."""
-        if node.type == "function_declaration":
+        if node.type in {
+            "function_declaration",
+            "generator_function_declaration",
+        }:
             inner_name = node.child_by_field_name("name")
             if inner_name is not None:
                 self.functions[inner_name.text.decode()] = node
@@ -726,13 +746,12 @@ class _Builder:
     def body(self, node, name: str) -> TsFunctionSummary:
         # Signature gates: named function, every parameter a scalar
         # `identifier: number|boolean`, a declared scalar return type
-        # and a statement_block body. `function*` (`*` markers) stays
-        # closed — a `yield` needs state the model has no slot for;
-        # `async` admits since `await` degrades to operand deps in the
-        # dep model (a promise resolves to its value).
-        for child in node.children:
-            if not child.is_named and child.type == "*":
-                raise _Unsupported("unsupported_signature", _span(node))
+        # and a statement_block body. `function*` admits: the
+        # model has no iterator slot, so each `yield`'s operand deps
+        # union into the function's own return deps — the iterated
+        # values are exactly what the over-approximation reports.
+        # `async` admits since `await` degrades to operand deps in
+        # the dep model (a promise resolves to its value).
         params_node = node.child_by_field_name("parameters")
         body = node.child_by_field_name("body")
         ret = node.child_by_field_name("return_type")
@@ -837,15 +856,20 @@ class _Builder:
             self._register_nested_functions(inner_decl)
         self.frames = []
         saw_return = [False]
+        saved_yields, self.yield_deps = self.yield_deps, []
         self._sequence(
             _children(body), params, locals_, transfers, count, deps,
             saw_return, False,
         )
+        result_deps = deps[0] if saw_return[0] else frozenset()
+        for ydeps in self.yield_deps:
+            result_deps |= ydeps
+        self.yield_deps = saved_yields
         return TsFunctionSummary(
             name,
             True,
             tuple(params.keys()),
-            deps[0] if saw_return[0] else frozenset(),
+            result_deps,
             tuple(sorted(transfers, key=lambda c: (c.span.start, c.span.end))),
             (),
             (),
@@ -1952,6 +1976,7 @@ class _Builder:
                 "identifier",
                 "arrow_function",
                 "function_expression",
+                "generator_function",
             }
         ):
             return _scalar_of(value)
@@ -2300,6 +2325,7 @@ class _Builder:
         saved_block, self.block_stack = self.block_stack, []
         saved_var, self.var_names = self.var_names, set()
         saved_flocals, self.function_locals = self.function_locals, inner
+        saved_yields, self.yield_deps = self.yield_deps, []
         try:
             if body_node.type == "statement_block":
                 adeps = [frozenset()]
@@ -2331,6 +2357,12 @@ class _Builder:
             # `new f()` — the value is the evolved `this`, not
             # the body's return.
             result = inner.get("this", result)
+        # A callable's own `yield`s stay inside its iterator —
+        # union them into the call's result, then restore the
+        # outer list so they never leak to the caller's summary.
+        for ydeps in self.yield_deps:
+            result = _scalar_of(result) | ydeps
+        self.yield_deps = saved_yields
         # Writes inside the body are may-writes on the caller's
         # scope — member stores rebase shared `_Composite`
         # instances on `inner`, so join them back.
@@ -2396,7 +2428,7 @@ class _Builder:
                 markers = {
                     c.type for c in member.children if not c.is_named
                 }
-                if markers & {"get", "set", "*", "abstract"}:
+                if markers & {"get", "set", "abstract"}:
                     raise _Unsupported(
                         "unsupported_expression", _span(member)
                     )
@@ -2662,7 +2694,7 @@ class _Builder:
                         for c in child.children
                         if not c.is_named
                     }
-                    if markers & {"get", "set", "*", "static"}:
+                    if markers & {"get", "set", "static"}:
                         raise _Unsupported(
                             "unsupported_expression", _span(child)
                         )
@@ -2830,12 +2862,30 @@ class _Builder:
             return self.expression(
                 left, params, locals_, transfers, count
             ) | self.expression(right, params, locals_, transfers, count)
-        if kind in {"arrow_function", "function_expression"}:
+        if kind == "yield_expression":
+            # `yield e` / `yield* e` — the operand's deps are the
+            # iterator's element deps; the sent-back value is
+            # unknown (dep-free).
+            operand = next(iter(_children(node)), None)
+            if operand is not None:
+                self.yield_deps.append(
+                    _scalar_of(
+                        self._eval(
+                            operand, params, locals_, transfers, count
+                        )
+                    )
+                )
+            return frozenset()
+        if kind in {
+            "arrow_function",
+            "function_expression",
+            "generator_function",
+        }:
             return self._callable_value(
                 node,
                 params,
                 locals_,
-                is_method=kind == "function_expression",
+                is_method=kind != "arrow_function",
             )
         if kind in {"class", "class_declaration"}:
             return self._class_value(node, params, locals_)
