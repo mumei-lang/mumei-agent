@@ -1167,3 +1167,75 @@ def test_evidence_candidate_rejects_malformed():
     data["extra"] = 1
     with pytest.raises(ValueError):
         AttemptEvidenceCandidate.from_dict(data)
+
+
+# --- evidence-check-accept route --------------------------------------------------
+
+import argparse
+
+from agent.evidence_check import main_accept
+
+
+def _seq_and_check_files(tmp_path):
+    sequence, _ = _selected()
+    check = sequence.evidence_check(sequence.evidence_candidate(), "valid")
+    seq_path = tmp_path / "sequence.json"
+    chk_path = tmp_path / "check.json"
+    seq_path.write_text(json.dumps(sequence.to_dict()), encoding="utf-8")
+    chk_path.write_text(json.dumps(check.to_dict()), encoding="utf-8")
+    return seq_path, chk_path
+
+
+def test_evidence_check_accept_route_emits_acceptance(tmp_path, capsys):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=None
+    )
+    assert main_accept(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.evidence-check-acceptance/v1"
+    assert out["candidate_match"] is True
+    assert out["accepted"] is True
+
+
+def test_evidence_check_accept_route_writes_to_output(tmp_path, capsys):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    out_path = tmp_path / "accept.json"
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=str(out_path)
+    )
+    assert main_accept(args) == 0
+    out = json.loads(out_path.read_text(encoding="utf-8"))
+    assert out["accepted"] is True
+
+
+def test_evidence_check_accept_route_rejects_stale_check(tmp_path, capsys):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    other = snapshot(body=b"other-body")
+    other_seq = matching_sequence(other).select_result(other)
+    foreign = other_seq.evidence_check(other_seq.evidence_candidate(), "valid")
+    chk_path.write_text(json.dumps(foreign.to_dict()), encoding="utf-8")
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=None
+    )
+    assert main_accept(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["candidate_match"] is False
+    assert out["accepted"] is False
+
+
+def test_evidence_check_accept_route_refuses_declared_overwrite(tmp_path):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=str(chk_path)
+    )
+    assert main_accept(args) == 1
+
+
+def test_evidence_check_accept_route_rejects_malformed(tmp_path):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    chk_path.write_text('{"schema_version": "mumei.other/v1"}', encoding="utf-8")
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=None
+    )
+    assert main_accept(args) == 1

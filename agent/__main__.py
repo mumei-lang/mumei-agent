@@ -608,6 +608,24 @@ def main() -> None:
         go_summaries_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_attempt_main(args))
+    elif command == "evidence-check-accept":
+        import argparse
+        from agent.evidence_check import (
+            build_accept_parser as evidence_accept_build_parser,
+            main_accept as evidence_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check-accept",
+            description=(
+                "Evaluate a declared evidence-check record against a "
+                "restored attempt-sequence snapshot and emit the "
+                "representation-level acceptance descriptor."
+            ),
+        )
+        evidence_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_accept_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
