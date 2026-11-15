@@ -3561,3 +3561,81 @@ def test_for_partial_slots():
         " let i = 0; for (; i < 5;) { i = x; } return i; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 35: expression callees + namespaces ------------------------------
+
+
+def test_iife():
+    s = _fn(
+        "function f(x: number): number {"
+        " const v = (() => x + 1)(); return v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_parenthesized_callee():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v * 2; return (g)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_call_result_callee_closes():
+    # `g(x)()` — the call result is a scalar, not callable.
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v; return g(x)(); }"
+    )
+    assert not s.available
+
+
+def test_parenthesized_member_base():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: x}; return (o).a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_tagged_template_declared_tag():
+    s = _fn(
+        "function tag(s: number, v: number): number { return v; }"
+        " function f(x: number): number {"
+        " const r = tag`a${x}`; return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_namespace_const():
+    s = _fn(
+        "namespace N { export const v = 1; }"
+        " function f(x: number): number { return N.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_namespace_function_call():
+    s = _fn(
+        "namespace N { export function g(v: number) { return v; } }"
+        " function f(x: number): number { return N.g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_namespace_sees_module_locals():
+    s = _fn(
+        "const k = 2; namespace N { export const v = k; }"
+        " function f(x: number): number { return N.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_namespace_bad_member_closes_unit():
+    s = _fn(
+        "namespace N { while (true) {} }"
+        " function f(x: number): number { return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_unit"

@@ -253,6 +253,20 @@ Admitted:
   `_Composite` in module scope: bare members are dep-free and an
   initializer contributes its own deps, so `E.A` reads as a
   field.
+* Expression callees — `(() => x)()`, `(g)(x)`, `f?.()`: a
+  non-identifier callee evaluates to a value; a `_Callable`
+  invokes inline, an `_External` yields the actuals' union,
+  and the optional-call fallback covers scalar callees.
+  Parenthesized expressions preserve their value (no eager
+  flatten) so `(() => x)()` and `(o).f` keep their shape.
+  Tagged templates (`tag`..${x}..``) call the tag with the
+  strings array plus each substitution.
+* `namespace N { ... }` — binds a `_Composite` in module
+  scope: member declarators evaluate in order into a scope
+  that sees module bindings, exported `function` members
+  become callable fields (`N.g(x)` invokes through the
+  member-call path). `enum`/`class`/nested-namespace members
+  close the unit.
 * `async` — `async function f(...): Promise<T>` admits when
   `T` is `number`/`boolean` (nested `Promise<Promise<T>>`
   unwraps the same way); `await` passes the operand's deps
@@ -340,6 +354,7 @@ _TOP_LEVEL = {
     "interface_declaration",
     "type_alias_declaration",
     "enum_declaration",
+    "internal_module",
 }
 
 # Well-known platform/library globals read as `_External` — reads
@@ -764,12 +779,14 @@ class _Builder:
                             "lexical_declaration",
                             "variable_declaration",
                             "enum_declaration",
+                            "internal_module",
                         }:
                             declarators.append(inner)
                 if child.type in {
                     "lexical_declaration",
                     "variable_declaration",
                     "enum_declaration",
+                    "internal_module",
                 }:
                     declarators.append(child)
             else:
@@ -804,6 +821,8 @@ class _Builder:
             try:
                 if node.type == "enum_declaration":
                     self._register_enum(node)
+                elif node.type == "internal_module":
+                    self._register_namespace(node)
                 else:
                     self.statement(
                         node,
@@ -855,6 +874,62 @@ class _Builder:
                     )
                 else:
                     fields[mname] = frozenset()
+        self.module_locals[name.text.decode()] = _Composite(fields)
+
+    def _register_namespace(self, node) -> None:
+        """`namespace N { export const v = e; export function
+        g() {} }` — binds `N` to a `_Composite` of its member
+        bindings in module scope: declarators evaluate in order
+        into a namespace scope that sees outer module bindings,
+        and exported functions become callable fields (`N.g()`
+        invokes through the member-call path). Anything else
+        closes the whole unit."""
+        name = node.child_by_field_name("name")
+        body = node.child_by_field_name("body")
+        if body is None:
+            body = next(
+                (c for c in node.children if c.type == "statement_block"),
+                None,
+            )
+        if name is None or body is None:
+            raise _Unsupported("unsupported_unit", _span(node))
+        ns_locals = dict(self.module_locals)
+        fields: dict = {}
+        for member in _children(body):
+            decl = member
+            if member.type == "export_statement":
+                decl = next(iter(_children(member)), None)
+                if decl is None:
+                    continue
+            if decl.type in {
+                "lexical_declaration",
+                "variable_declaration",
+            }:
+                before = dict(ns_locals)
+                self.statement(
+                    decl,
+                    {},
+                    ns_locals,
+                    [],
+                    [0],
+                    [frozenset()],
+                    [False],
+                    False,
+                )
+                for n, v in ns_locals.items():
+                    if n not in before or before[n] is not v:
+                        fields[n] = v
+            elif decl.type == "function_declaration":
+                fname = decl.child_by_field_name("name")
+                if fname is None:
+                    raise _Unsupported(
+                        "unsupported_unit", _span(member)
+                    )
+                cval = self._callable_value(decl, {}, ns_locals)
+                fields[fname.text.decode()] = cval
+                ns_locals[fname.text.decode()] = cval
+            else:
+                raise _Unsupported("unsupported_unit", _span(member))
         self.module_locals[name.text.decode()] = _Composite(fields)
 
     def _register_import(self, node) -> None:
@@ -3388,7 +3463,10 @@ class _Builder:
             exprs = _children(node)
             if len(exprs) != 1:
                 raise _Unsupported("unsupported_expression", _span(node))
-            return self.expression(exprs[0], params, locals_, transfers, count)
+            # Preserve the value — a parenthesized callable or
+            # composite must keep its shape for `(() => x)()`
+            # and `(o).f` to work; callers flatten as needed.
+            return self._eval(exprs[0], params, locals_, transfers, count)
         if kind == "await_expression":
             # `await` yields the operand's value — for the dep model
             # that's a pass-through. `for await (...)` iterates the
@@ -3777,7 +3855,54 @@ class _Builder:
                 )
                 return _scalar_of(inst)
             if function.type != "identifier":
-                raise _Unsupported("unsupported_expression", _span(node))
+                # `(() => x)()`, `(g)(x)`, `f()()` — the callee
+                # is an expression: evaluate it. A `_Callable`
+                # invokes inline, an `_External` yields the
+                # actuals' union, anything else closes (or takes
+                # the optional-call over-approximation).
+                actual_e = self._call_actuals(
+                    arguments, params, locals_, transfers, count, node
+                )
+                raw = self._eval(
+                    function, params, locals_, transfers, count
+                )
+                if isinstance(raw, _Callable):
+                    result_e = self._invoke_callable(
+                        raw,
+                        actual_e,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        _span(node),
+                    )
+                    transfers.append(
+                        TsCall(
+                            _span(node),
+                            function.text.decode(),
+                            actual_e,
+                            result_e,
+                        )
+                    )
+                    return result_e
+                result_e = _scalar_of(raw)
+                if isinstance(raw, _External):
+                    result_e = frozenset()
+                elif not optional_call:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                for a in actual_e:
+                    result_e |= a
+                transfers.append(
+                    TsCall(
+                        _span(node),
+                        function.text.decode(),
+                        actual_e,
+                        result_e,
+                    )
+                )
+                return result_e
             callee = function.text.decode()
             bound = (
                 callee in locals_

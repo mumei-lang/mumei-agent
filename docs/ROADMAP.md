@@ -3093,6 +3093,24 @@ only scalar-shaped results are modelled.
 `empty_statement` and now read as absent — classic loops
 admit in every partial form.
 
+### C06 TypeScript expression callees + namespaces (slice 35)
+
+`(() => x)()`, `(g)(x)`, `f?.()` — a non-identifier callee
+evaluates to a value; a `_Callable` invokes inline, an
+`_External` yields the actuals' union, the optional-call
+fallback covers scalars. Parenthesized expressions stop
+flattening early so a parenthesized callable/composite
+keeps its shape (`(o).f` reads too). A scalar callee still
+closes — `(x > 0 ? g : h)(x)` collapses to captured deps
+before the call and stays closed, the honest boundary.
+
+`namespace N { export const v = e; export function g() {} }`
+binds a `_Composite` in module scope: members evaluate in
+order into a scope seeing module bindings, exported
+functions become callable fields (`N.g(x)` invokes through
+the member path). Tagged templates already modeled as calls
+with the strings array plus each substitution.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
