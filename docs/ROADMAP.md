@@ -2666,6 +2666,22 @@ availability/stamp/tool_version cross the boundary into observations,
 so probe stdout or exit detail cannot leak into a routing decision.
 Concurrency, retry policy and Evidence acceptance remain open.
 
+### C11 bounded probe-driven planning
+
+`agent.adapter_probe.plan_with_probes(registry, request, policy,
+observations, stamp=..., rounds=1)` runs the observe → re-plan loop:
+`plan()`, `probe_requests_for`, `observe_probes`, then `plan()` again
+with the accumulated observations — incrementing the stamp each round
+so the registry's freshness check accepts them. `rounds` is bounded by
+`MAX_PLAN_ROUNDS` (4); the loop stops early when a candidate is
+selected or a scheduling round emits no requests. The result,
+`AdapterProbePlan(plan, observations)`, hands the caller the final
+plan and the new observations to chain further planning.
+
+The driver never authorizes, retries beyond `rounds`, or accepts
+Evidence — it only schedules and observes declared probes. C11 stays
+partial; concurrency across probes remains open.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
