@@ -795,6 +795,7 @@ def test_mcp_ts_summaries_attempt_selects_exited_run(tmp_path):
         == "mumei.ts-summaries-attempt-report/v1"
     )
     assert report["normalized"]["outcome"] == "exited"
+    assert report["normalized"]["exit_code"] == 0
     assert "candidate" in report
     assert report["sequence"]["selected_result"] is not None
 
@@ -814,6 +815,7 @@ def test_mcp_rust_summaries_attempt_selects_exited_run(tmp_path):
         == "mumei.rust-summaries-attempt-report/v1"
     )
     assert report["normalized"]["outcome"] == "exited"
+    assert report["normalized"]["exit_code"] == 0
     assert "candidate" in report
 
 
@@ -835,6 +837,7 @@ def test_mcp_sol_summaries_attempt_selects_exited_run(tmp_path):
         == "mumei.sol-summaries-attempt-report/v1"
     )
     assert report["normalized"]["outcome"] == "exited"
+    assert report["normalized"]["exit_code"] == 0
     assert "candidate" in report
 
 
