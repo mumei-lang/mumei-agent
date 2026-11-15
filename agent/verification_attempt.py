@@ -27,6 +27,7 @@ TERMINAL_STATES = frozenset({"exited", "failed", "timed_out", "cancelled"})
 EVIDENCE_CHECK_OUTCOMES = frozenset({"valid", "failed", "cancelled"})
 _TRANSITIONS = {
     ("ready", "started"): "running",
+    ("ready", "cancelled"): "cancelled",
     ("running", "cancel_requested"): "cancelling",
     ("running", "exited"): "exited",
     ("running", "failed"): "failed",
@@ -308,6 +309,27 @@ class AttemptSequence:
             self.request_fingerprint, len(self.attempts) + 1, self.timeout_ms
         )
         return replace(self, attempts=(*self.attempts, attempt))
+
+    def withdraw_attempt(self) -> "AttemptSequence":
+        """Withdraw the reserved-but-never-started attempt; it never ran.
+
+        A ready record has no running process to signal, so withdrawal records
+        the terminal `cancelled` outcome directly — no declared request and no
+        observation round-trip, and intent and outcome collapse into one
+        declaration. A running attempt still needs `request_cancellation`
+        (delivering the signal and confirming the stop stay host duties); a
+        terminal record is already finished and an empty sequence withdraws
+        nothing. Withdrawal is a host decision only — it is not a crash, a
+        timeout or an Evidence verdict, and it does not authorize the next
+        attempt (a separate `begin_attempt` still reserves it).
+        """
+        current = self.current
+        if current is None:
+            raise ValueError("attempt withdrawal requires a reserved attempt")
+        if current.state != "ready":
+            raise ValueError("attempt withdrawal requires a ready attempt")
+        withdrawn = current.record(AttemptEvent("cancelled", 0))
+        return replace(self, attempts=(*self.attempts[:-1], withdrawn))
 
     def reconcile_report(
         self, incoming: AttemptRecord, report_stamp: int | None = None

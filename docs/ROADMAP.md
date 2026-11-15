@@ -521,6 +521,38 @@ audit/CLI/MCP route is added. C11 stays partial; Core meaning and acceptance,
 C12's demand gate and existing assurance/Lean/native/LLVM/deferred-WASM
 policies are unchanged.
 
+### C11 ready-record withdrawal
+
+`AttemptSequence.withdraw_attempt()` records a host's decision not to run the
+reserved-but-never-started current attempt: the `ready` record is extended
+with a terminal `cancelled` event at elapsed zero. The direct
+`ready → cancelled` transition is shared lineage vocabulary — a host report
+carrying the same event reconciles to an identical sequence — so withdrawal
+is not a special state, only the declared counterpart of an observation the
+lifecycle already admits.
+
+```python
+from agent.verification_attempt import AttemptSequence
+
+sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+withdrawn = sequence.withdraw_attempt()
+assert withdrawn.current.state == "cancelled"
+assert withdrawn.next_dispatch() is None
+assert withdrawn.begin_attempt().current.attempt_number == 2
+```
+
+Only a `ready` current record can be withdrawn: a running attempt still goes
+through `request_cancellation` (signal delivery and stop confirmation remain
+host duties), a terminal record is already finished, an empty sequence has
+nothing to withdraw and a sequence closed by a selected result fails
+statically. Withdrawal is intent **and** outcome collapsed into one
+declaration — there is no process to signal — but it is still not a crash,
+timeout, Evidence verdict or authorization: the next attempt needs an
+explicit `begin_attempt`. No I/O, clocks, plugins, runner/scheduler, stream
+collection, Evidence normalization/acceptance, external verifier, dependency
+or default audit/CLI/MCP route is added. C11 stays partial; Core meaning and
+acceptance are unchanged.
+
 ### C11 monotonic report stamps for replay detection
 
 `AttemptSequence.reconcile_report` accepts an optional `report_stamp`: a
