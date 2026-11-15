@@ -3054,8 +3054,28 @@ Probing is availability only: the version is host-declared
 (`tool_version_unknown`) and a structural exclusion — denied
 location, missing permission — is never probed at all. The returned
 `AdapterProbePlan` carries the updated `AdapterProbeHistory` records
-for retry scheduling. No audit, MCP or scheduled verification path
-calls this yet; that wiring stays open.
+for retry scheduling. `summaries-plan` (below) is the first consumable
+caller; audit, MCP and scheduled verification wiring stays open.
+
+
+### C06 consumable plan route (summaries-plan)
+
+`python -m agent summaries-plan --profile <id> --stamp <n>` is the
+planner-facing consumable over `plan_summary_route`: it plans the
+summary route for a declared profile through the probe boundary and
+prints `mumei.summaries-plan/v1` — the resulting
+`mumei.verification-plan/v1` document, the `RuntimeObservation`s the
+pass recorded, and the updated `AdapterProbeHistory` records.
+
+`--tool-version` declares the host's observed adapter version (without
+it the adapter stays excluded as `tool_version_unknown`), `--rounds`
+and `--max-parallel` bound the observe-and-replan loop, and
+`--histories <file>` resumes a JSON array of persisted
+`mumei.adapter-probe-history/v1` records so retries continue from the
+host's saved attempt counts. `AdapterProbeHistory.to_dict()` /
+`from_dict()` is the declared record schema for that persistence.
+Routing only — a selected adapter is a routing decision, not an
+accepted manifest.
 
 
 ### C11 declared availability probes

@@ -1,9 +1,11 @@
 """Declared adapter descriptors for the summary-derivation routes."""
 
 import hashlib
+import json
 
 import pytest
 
+from agent.adapter_probe import AdapterProbeHistory
 from agent.summaries_adapters import (
     SUMMARY_DERIVATION,
     go_summaries_adapter,
@@ -166,3 +168,76 @@ def test_plan_summary_route_never_probes_structural_exclusion():
     assert result.plan.selected is None
     assert result.observations == ()
     assert result.histories == ()
+
+
+def test_probe_history_record_round_trips():
+    result = plan_summary_route(
+        GO_SUMMARY_PROFILE,
+        PlannerPolicy(allowed_permissions=_PERMISSIONS),
+        stamp=7,
+        tool_version="1.0.0",
+    )
+    history = result.histories[0]
+    data = history.to_dict()
+    assert data["schema_version"] == "mumei.adapter-probe-history/v1"
+    assert data["adapter_id"] == history.adapter_id
+    restored = AdapterProbeHistory.from_dict(data)
+    assert restored == history
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"schema_version": "other/v9"},
+        {"schema_version": "mumei.adapter-probe-history/v1"},
+        {
+            "schema_version": "mumei.adapter-probe-history/v1",
+            "adapter_id": "agent.go-summaries",
+            "command_fingerprint": "x" * 64,
+            "outcomes": "not-a-list",
+        },
+    ],
+)
+def test_probe_history_record_rejects_bad_declarations(record):
+    with pytest.raises(ValueError):
+        AdapterProbeHistory.from_dict(record)
+
+
+def _plan_args(tmp_path, histories=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        profile=GO_SUMMARY_PROFILE,
+        stamp=11,
+        tool_version="1.0.0",
+        rounds=1,
+        max_parallel=1,
+        histories=histories,
+    )
+
+
+def test_summaries_plan_route_emits_report(capsys, tmp_path):
+    from agent.summaries_adapters import PLAN_PROFILE, main_plan
+
+    assert main_plan(_plan_args(tmp_path)) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == PLAN_PROFILE
+    assert report["profile"] == GO_SUMMARY_PROFILE
+    assert report["plan"]["selected"]["adapter_id"] == "agent.go-summaries"
+    assert report["observations"][0]["availability"] == "available"
+    history = report["histories"][0]
+    assert history["adapter_id"] == "agent.go-summaries"
+    assert history["outcomes"]
+
+
+def test_summaries_plan_route_resumes_declared_histories(capsys, tmp_path):
+    from agent.summaries_adapters import main_plan
+
+    assert main_plan(_plan_args(tmp_path)) == 0
+    first = json.loads(capsys.readouterr().out)
+    histories_file = tmp_path / "histories.json"
+    histories_file.write_text(json.dumps(first["histories"]))
+    assert main_plan(_plan_args(tmp_path, histories=str(histories_file))) == 0
+    second = json.loads(capsys.readouterr().out)
+    first_count = len(first["histories"][0]["outcomes"])
+    assert len(second["histories"][0]["outcomes"]) == first_count + 1

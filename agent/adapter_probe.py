@@ -575,6 +575,53 @@ class AdapterProbeHistory:
             self.outcomes + (result,),
         )
 
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": "mumei.adapter-probe-history/v1",
+            "adapter_id": self.adapter_id,
+            "command_fingerprint": self.command_fingerprint,
+            "outcomes": [outcome.to_dict() for outcome in self.outcomes],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AdapterProbeHistory":
+        """Rebuild a declared probe-history record; the constructor
+        re-validates it.
+
+        The record is a host declaration: restoration re-checks the
+        exact key set and schema, and each outcome is restored through
+        ``AttemptNormalizedResult.from_dict`` — a foreign schema,
+        unknown keys or malformed members are static errors."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version") != "mumei.adapter-probe-history/v1"
+        ):
+            raise ValueError(
+                "probe history requires its declared record schema"
+            )
+        required = {
+            "adapter_id",
+            "command_fingerprint",
+            "outcomes",
+        }
+        if not required <= set(data) or not set(data) <= required | {
+            "schema_version",
+        }:
+            raise ValueError(
+                "probe history record has unknown or missing keys"
+            )
+        outcomes = data["outcomes"]
+        if type(outcomes) is not list:
+            raise ValueError("probe history record has malformed outcomes")
+        return cls(
+            data["adapter_id"],
+            data["command_fingerprint"],
+            tuple(
+                AttemptNormalizedResult.from_dict(outcome)
+                for outcome in outcomes
+            ),
+        )
+
 # Bound on observe → re-plan iterations inside `plan_with_probes` —
 # each round re-probes the same observation-excluded set, so a
 # bound keeps a perpetually-missing adapter from probing forever.
