@@ -768,11 +768,15 @@ class _Composite:
     an instance freely. `klass` is the `_Class` an instance came
     from (None for literals) — method lookup falls through to it."""
 
-    __slots__ = ("fields", "klass")
+    __slots__ = ("fields", "klass", "deleted")
 
-    def __init__(self, fields: dict, klass=None) -> None:
+    def __init__(self, fields: dict, klass=None, deleted=None) -> None:
         self.fields = fields
         self.klass = klass
+        # Names of fields a `delete` may have removed — a join
+        # keeps the field's deps (it may have survived) while the
+        # marker keeps the prototype fallback reachable on reads.
+        self.deleted = deleted if deleted is not None else frozenset()
 
 
 class _Callable:
@@ -970,7 +974,9 @@ def _merge_vals(old, new):
         # Same class keeps method resolution; a class divergence
         # (or a plain literal join) loses it — reads then collapse.
         klass = old.klass if old.klass is new.klass else None
-        return _Composite(fields, klass)
+        return _Composite(
+            fields, klass, old.deleted | new.deleted
+        )
     if isinstance(old, _Composite) or isinstance(new, _Composite):
         return _scalar_of(old) | _scalar_of(new)
     # Two callables (or a callable and a scalar) join to the
@@ -981,6 +987,9 @@ def _merge_vals(old, new):
 def _val_leq(new, old) -> bool:
     """`new` adds nothing over `old` — the fixed-point test."""
     if isinstance(old, _Composite) and isinstance(new, _Composite):
+        if not new.deleted <= old.deleted:
+            # New deletions are new information too.
+            return False
         for key, nval in new.fields.items():
             if key not in old.fields or not _val_leq(
                 nval, old.fields[key]
@@ -998,9 +1007,11 @@ def _composite_delete(composite, path, span):
     """Copy-on-write `delete composite.path` — removes the leaf
     field and returns the updated `_Composite`."""
     fields = dict(composite.fields)
+    deleted = composite.deleted
     key = path[0]
     if len(path) == 1:
         fields.pop(key, None)
+        deleted = deleted | {key}
     else:
         sub = fields.get(key)
         if not isinstance(sub, _Composite):
@@ -1008,13 +1019,14 @@ def _composite_delete(composite, path, span):
             # to delete through.
             raise _Unsupported("unsupported_expression", span)
         fields[key] = _composite_delete(sub, path[1:], span)
-    return _Composite(fields, composite.klass)
+    return _Composite(fields, composite.klass, deleted)
 
 
 def _composite_set(composite, path, value, conditional, span):
     """Copy-on-write member store: `composite.path = value`,
     returning the updated `_Composite`."""
     fields = dict(composite.fields)
+    deleted = composite.deleted
     key = path[0]
     if len(path) == 1:
         old = fields.get(key)
@@ -1023,6 +1035,9 @@ def _composite_set(composite, path, value, conditional, span):
             if conditional and old is not None
             else value
         )
+        if not conditional:
+            # A definite write resurrects the field.
+            deleted = deleted - {key}
     else:
         sub = fields.get(key)
         if not isinstance(sub, _Composite):
@@ -1030,7 +1045,7 @@ def _composite_set(composite, path, value, conditional, span):
         fields[key] = _composite_set(
             sub, path[1:], value, conditional, span
         )
-    return _Composite(fields, composite.klass)
+    return _Composite(fields, composite.klass, deleted)
 
 
 def _composite_dyn_set(composite, path, value, span):
@@ -1079,7 +1094,7 @@ def _composite_dyn_set(composite, path, value, span):
             fields[fname] = widened
         else:
             fields[fname] = _scalar_of(fval) | vdeps
-    return _Composite(fields, composite.klass)
+    return _Composite(fields, composite.klass, composite.deleted)
 
 
 def _syntax(raw: bytes):
@@ -1735,7 +1750,9 @@ class _Builder:
         if not fields.fields:
             return whole
         if isinstance(whole, _Composite):
-            merged = _Composite(dict(whole.fields))
+            merged = _Composite(
+                dict(whole.fields), deleted=whole.deleted
+            )
             for key, val in fields.fields.items():
                 if key in merged.fields:
                     merged.fields[key] = _merge_vals(
@@ -1748,7 +1765,9 @@ class _Builder:
         # writes — keep both: the value under `default`, the
         # fields beside it (over-approximates — extra bindings
         # only sharpen a caller).
-        combined = _Composite(dict(fields.fields))
+        combined = _Composite(
+            dict(fields.fields), deleted=fields.deleted
+        )
         combined.fields.setdefault("default", whole)
         return combined
 
@@ -3244,7 +3263,11 @@ class _Builder:
                 snap = {}
                 for sname, sval in inner.items():
                     if isinstance(sval, _Composite):
-                        snap[sname] = ("fields", dict(sval.fields))
+                        snap[sname] = (
+                            "fields",
+                            dict(sval.fields),
+                            frozenset(sval.deleted),
+                        )
                     elif isinstance(sval, _Callable):
                         # `captured` is a dep frozenset, not a
                         # dict — compare it as a set.
@@ -3263,7 +3286,8 @@ class _Builder:
                         saw_return, conditional or frame["broke"],
                     )
                 changed = False
-                for sname, (skind, before) in snap.items():
+                for sname, sentry in snap.items():
+                    skind, before = sentry[0], sentry[1]
                     cur = inner.get(sname)
                     if skind == "captured":
                         caps = getattr(cur, "captured", None)
@@ -3277,8 +3301,13 @@ class _Builder:
                     if not isinstance(table, dict):
                         changed = True
                         continue
-                    # A deleted or narrowed field carries no new
-                    # dep information — the merged frontier already
+                    # A `delete` grows the composite's `deleted`
+                    # set — monotone, so it marks the pass changed
+                    # exactly once per field, then converges.
+                    if not getattr(cur, "deleted", frozenset()) <= sentry[2]:
+                        changed = True
+                    # A narrowed field carries no new dep
+                    # information — the merged frontier already
                     # holds it — so only widened fields count.
                     for k, v in table.items():
                         # A pass introduces new information when a
@@ -3640,7 +3669,15 @@ class _Builder:
                         read_union |= result
                     klass = klass.parent
                 return read_union
-            if key not in val.fields:
+            if key not in val.fields or key in val.deleted:
+                # A maybe-deleted field reads BOTH the surviving
+                # field deps and the prototype's fallback — the
+                # join can't tell which ran.
+                field_deps = (
+                    _scalar_of(val.fields[key])
+                    if key in val.fields
+                    else frozenset()
+                )
                 # Missing fields on an instance fall through to
                 # the class's accessors/methods (the prototype) —
                 # still missing means `undefined`, dep-free.
@@ -3661,9 +3698,13 @@ class _Builder:
                         transfers.append(
                             TsCall(_span(node), key, (), result)
                         )
-                        return result
+                        return result | field_deps
                     if key in val.klass.methods:
-                        return val.klass.methods[key]
+                        mval = val.klass.methods[key]
+                        if field_deps:
+                            return field_deps | _scalar_of(mval)
+                        val = mval
+                        continue
                 if val.klass is _MAP_SET_KLASS:
                     # `m.size` — a Map/Set pseudo-member carries
                     # the whole entry union.
@@ -3671,7 +3712,7 @@ class _Builder:
                 # An opaque call may have ADDED fields the
                 # table never named — `"*"` carries their deps
                 # (still dep-free when no opaque call ran).
-                return val.fields.get("*", frozenset())
+                return val.fields.get("*", frozenset()) | field_deps
             val = val.fields[key]
         return val
 
@@ -3700,6 +3741,7 @@ class _Builder:
             # the delete reaches it.
             old.fields.clear()
             old.fields.update(new.fields)
+            old.deleted = new.deleted
         for name, val in locals_.items():
             if val is old:
                 locals_[name] = new
@@ -3875,6 +3917,7 @@ class _Builder:
             if old in self._aliased_objs:
                 old.fields.clear()
                 old.fields.update(new.fields)
+                old.deleted = new.deleted
             for name, val in locals_.items():
                 if val is old:
                     locals_[name] = new
@@ -3922,6 +3965,7 @@ class _Builder:
             # the fixed point's pre-write snapshot.
             old.fields.clear()
             old.fields.update(new.fields)
+            old.deleted = new.deleted
         # Every binding IN THIS SCOPE sharing the instance is an
         # alias — the write reaches all of them. Only `locals_` is
         # scanned: eagerly rewriting the enclosing scope would
@@ -4208,7 +4252,9 @@ class _Builder:
                     # default's deps. Seed a copy's `"*"` bucket so
                     # `_pattern_read` carries them without
                     # mutating the caller's object.
-                    seeded = _Composite(dict(psrc.fields), psrc.klass)
+                    seeded = _Composite(
+                        dict(psrc.fields), psrc.klass, psrc.deleted
+                    )
                     seeded.fields["*"] = _merge_vals(
                         seeded.fields.get("*", frozenset()), deps
                     )
@@ -5321,7 +5367,7 @@ class _Builder:
                             old, tpath + ["*"], actual_union, True, span
                         )
                         if tpath
-                        else _Composite(added, klass=old.klass)
+                        else _Composite(added, klass=old.klass, deleted=old.deleted)
                     )
                     for name, val in locals_.items():
                         if val is old:
@@ -5375,7 +5421,7 @@ class _Builder:
             new = _composite_set(
                 old, tpath + [str(next_idx)], actual_union, True,
                 span,
-            ) if tpath else _Composite(added, klass=old.klass)
+            ) if tpath else _Composite(added, klass=old.klass, deleted=old.deleted)
             for name, val in locals_.items():
                 if val is old:
                     locals_[name] = new
@@ -5399,10 +5445,15 @@ class _Builder:
                 for k, v in old.fields.items()
             }
             new = (
-                _Composite(added, klass=old.klass)
+                _Composite(
+                    added, klass=old.klass, deleted=old.deleted
+                )
                 if not tpath
                 else _composite_set(
-                    old, tpath, _Composite(added, klass=old.klass),
+                    old, tpath,
+                    _Composite(
+                        added, klass=old.klass, deleted=old.deleted
+                    ),
                     True, span,
                 )
             )

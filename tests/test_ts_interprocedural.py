@@ -5852,3 +5852,18 @@ def test_review3_reassign_smaller_composite_in_loop_converges():
     )
     assert s.available
     assert s.return_dependencies == {0}
+
+
+def test_review4_delete_field_in_loop_keeps_prototype_fallback():
+    # `delete this.f` in a loop removes the field hiding a getter —
+    # later reads must union the surviving field deps with the
+    # getter's deps, and the join must still converge.
+    s = _fn(
+        "class C { f; get f() { return this.g; } g; "
+        "m(x) { this.f = x; for (let i = 0; i < 3; i++) { delete this.f; } "
+        "return this.f; } }\n"
+        "function f(a) { let c = new C(); return c.m(a); }",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == {0}
