@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -406,6 +407,16 @@ def _check_output_path(
             raise SnapshotError(
                 "declared output path would overwrite a declared source"
             )
+        for path in declared:
+            try:
+                same_file = os.path.samefile(args.output, path)
+            except OSError:
+                continue
+            if same_file:
+                raise SnapshotError(
+                    "declared output path would overwrite a "
+                    "declared source"
+                )
 
 
 def _run_declared(
@@ -684,6 +695,10 @@ def main_attempt(args: argparse.Namespace | None = None) -> int:
     compare-and-set publication — an ``exited`` run's captured stdout
     becomes the sequence's selected result, and failed, timed-out or
     cancelled runs publish the terminal lineage with no selection.
+    Because the child re-reads the declared paths, the route re-hashes
+    every declared input after the observed run and skips the
+    selection when any byte drifted mid-run — a result that no longer
+    matches the request fingerprint is recorded, not bound.
 
     Emits ``mumei.go-summaries-attempt-report/v1``: the canonical
     lineage, the normalized run-result descriptor and — only when a
@@ -697,7 +712,7 @@ def main_attempt(args: argparse.Namespace | None = None) -> int:
         args = build_attempt_parser().parse_args()
     try:
         _check_output_path(args, _declared_paths(args))
-        from agent.attempt_runner import dispatch_and_publish
+        from agent.attempt_runner import dispatch_attempt
         from agent.verification_attempt import (
             AttemptSequence,
             AttemptSequenceStore,
@@ -727,10 +742,23 @@ def main_attempt(args: argparse.Namespace | None = None) -> int:
         sequence = AttemptSequence(fingerprint, args.attempt_timeout)
         store = AttemptSequenceStore()
         store.publish(sequence)
-        dispatch = dispatch_and_publish(
-            store, argv, memory_bound_mb=args.memory_bound_mb
+        current = store.current
+        dispatch = dispatch_attempt(
+            current.begin_attempt(),
+            argv,
+            memory_bound_mb=args.memory_bound_mb,
         )
-        published = store.current
+        try:
+            inputs_changed = _attempt_fingerprint(args) != fingerprint
+        except OSError:
+            inputs_changed = True
+        if dispatch.run.record.state == "exited" and not inputs_changed:
+            updated = dispatch.sequence.select_result(
+                dispatch.captured_output()
+            )
+        else:
+            updated = dispatch.sequence
+        published = store.compare_and_set(current, updated)
         report: dict[str, object] = {
             "schema_version": ATTEMPT_REPORT_PROFILE,
             "sequence": published.to_dict(),

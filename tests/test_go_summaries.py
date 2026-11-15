@@ -1012,3 +1012,45 @@ def test_attempt_rejects_output_overwriting_declared_input(
     assert code == 1
     assert "overwrite a declared source" in err
     assert source.read_text() == "package main\n"
+
+
+def test_attempt_rejects_output_hardlink_to_declared_input(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, b"{}")
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    link = tmp_path / "linked.go"
+    os.link(source, link)
+    code, _, err = _run_attempt(
+        capsys,
+        _attempt_args(helper, source, extra=["--output", str(link)]),
+    )
+    assert code == 1
+    assert "overwrite a declared source" in err
+    assert source.read_text() == SOURCE
+
+
+def test_attempt_skips_candidate_when_inputs_drift(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    from agent import attempt_runner
+
+    real_run = attempt_runner.AttemptRunner.run
+
+    def run_then_modify(self, request, argv, **kwargs):
+        source.write_text(SOURCE + "//mutated mid-run\n")
+        return real_run(self, request, argv, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        attempt_runner.AttemptRunner, "run", run_then_modify
+    )
+    try:
+        code, out, _ = _run_attempt(capsys, _attempt_args(helper, source))
+    finally:
+        monkeypatch.undo()
+    assert code == 0
+    report = json.loads(out)
+    assert report["normalized"]["outcome"] == "exited"
+    assert "selected_result" not in report["sequence"]
+    assert "candidate" not in report
