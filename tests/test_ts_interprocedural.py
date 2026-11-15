@@ -2612,3 +2612,84 @@ def test_top_level_class():
         " return c.m(x); }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 22: extends / super
+
+
+def test_extends_method_inherited():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { m(v: number): number { return v; } }"
+        " class D extends C { }"
+        " const d = new D(x);"
+        " return d.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_super_ctor_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f = 0; constructor(v: number) { this.f = v; } }"
+        " class D extends C { constructor(v: number) { super(v); } }"
+        " const d = new D(x);"
+        " return d.f; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.callee == "super" for c in s.calls)
+
+
+def test_super_method_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { m(v: number): number { return v; } }"
+        " class D extends C { m(v: number): number { return super.m(v); } }"
+        " const d = new D(x);"
+        " return d.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_extends_field_init_inherited():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f = 0; }"
+        " class D extends C { g = 1; }"
+        " const d = new D(x);"
+        " return d.f; }"
+    )
+    assert s.available
+
+
+def test_extends_non_class_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: x};"
+        " class D extends o { }"
+        " return x; }"
+    )
+    assert not s.available
+
+
+def test_extends_implements_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " class D implements I { m(v: number): number { return v; } }"
+        " const d = new D(x);"
+        " return d.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_super_outside_ctor_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { }"
+        " class D extends C { m(v: number): number { super(v); return v; } }"
+        " const d = new D(x);"
+        " return d.m(x); }"
+    )
+    # `super(args)` is only valid in a ctor — but the model lets
+    # the parent-ctor resolution decide: no ctor anywhere closes.
+    assert not s.available

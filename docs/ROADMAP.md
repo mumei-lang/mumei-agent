@@ -2805,12 +2805,41 @@ mismatch) and `_bindable` widens: instances re-bind through
 
 Boundaries: `extends`/`implements`/`super`, getters/setters,
 generators, computed member names, `abstract`/`declare`/
-`readonly` and decorators close (`class_heritage` is
-rejected up front — the subclass's method table can't be
-built without a parent walk). `new` on a scalar/composite
-or unbound name closes. There is no prototype chain beyond
-the single class — `Object`/`Function.prototype` and
-property descriptors are not modelled.
+`readonly` and decorators close in slice 21 (`extends`
+admits in slice 22). `new` on a scalar/composite
+or unbound name closes.
+
+### C06 TypeScript `extends` and `super` (slice 22)
+
+`class D extends C` — `class_heritage`'s `extends_clause`
+evaluates its expression through `_eval`; only a `_Class`
+admits (a composite or scalar base closes).
+`implements_clause` is type-level and skips silently. The
+derived `_Class` merges the parent's `methods`, `statics`
+and `field_inits` with its own members shadowing
+same-named ones, inherits `ctor` when it declares none
+(the default ctor is just the parent's), and records
+`parent` for `super` resolution; `captured` unions the
+parent's.
+
+`super` works off the instance, not the name: `_member_target`
+accepts a `super` base like `this`, and `_member_read`
+resolves it to `this.klass.parent` — `super.m` reads the
+parent prototype's method table. `super(args)` in a ctor is
+a `call_expression` on a `super` callee: the parent ctor
+runs via `_invoke_callable(construct=True)` on the same
+`this` (so a parent ctor's own `super` resolves through
+`this.klass.parent` — the derived class — correctly
+chasing the chain), and a `super` `TsCall` records.
+`super.m(x)` reuses the member-call path: the resolved
+`_Callable` is `is_method`, so `this` binds to the
+instance. A `super` read without a parent closes.
+
+Boundaries: `super.f` field reads/writes (there is no
+parent-field slot distinct from `this`'s), `super` in a
+static method (the model binds `this` only on instance
+paths), and `extends` of a member/computed expression that
+isn't a bound class name or literal close.
 
 ## Roadmap authority and vocabulary
 

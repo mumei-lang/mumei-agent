@@ -158,9 +158,14 @@ Admitted:
   calls `c.m(x)` receive `this`, and a missing instance field
   falls through to the class's methods (the prototype). `C.sf` /
   `C.sm(x)` read statics on the class object; `this` anywhere
-  else is unbound. `extends`/`implements`, getters/setters,
-  generators, computed names, `abstract`/`declare`/`readonly`
-  and decorated members close.
+  else is unbound. `class D extends C` inherits the method,
+  static and field tables a `_Class` carries (own members
+  shadow) — `super(args)` in a ctor runs the parent
+  constructor on the same `this`, `super.m(x)` calls through
+  the parent prototype; `implements` is type-level and
+  admits silently. Getters/setters, generators, computed
+  names, `abstract`/`declare`/`readonly` and decorated
+  members close.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -185,8 +190,8 @@ Admitted:
   non-callable field, unresolved names — stays closed.
 
 Closed with declared gaps: `import`/`export` and ambient/`declare`
-declarations close the whole unit (`unsupported_unit`); class
-heritage (`extends`/`implements`/`super`), getters/setters,
+declarations close the whole unit (`unsupported_unit`);
+`extends` on a non-class value, getters/setters,
 generators, `any`/composite/missing parameter
 types, `eval`, `with`, `new` on a non-class/non-function
 ctor, and generator function values stay
@@ -340,19 +345,25 @@ class _Callable:
 class _Class:
     """A class value: `ctor` (`_Callable` or None), `methods` /
     `statics` (name -> `_Callable` for methods, scalar deps for
-    static fields) and `field_inits` (name -> initializer node).
-    `extends`/`implements`, getters/setters, generators and
-    computed names close the class instead. `captured` flattens
-    the whole class to a scalar."""
+    static fields), `field_inits` (name -> initializer node) and
+    `parent` (the `extends` `_Class` or None). Getters/setters,
+    generators and computed names close the class instead.
+    `captured` flattens the whole class to a scalar."""
 
-    __slots__ = ("ctor", "methods", "statics", "field_inits", "captured")
+    __slots__ = (
+        "ctor", "methods", "statics", "field_inits", "captured",
+        "parent",
+    )
 
-    def __init__(self, ctor, methods, statics, field_inits, captured):
+    def __init__(
+        self, ctor, methods, statics, field_inits, captured, parent=None
+    ):
         self.ctor = ctor
         self.methods = methods
         self.statics = statics
         self.field_inits = field_inits
         self.captured = captured
+        self.parent = parent
 
 
 def _scalar_of(value) -> frozenset[int]:
@@ -1889,9 +1900,9 @@ class _Builder:
                     "unsupported_expression", _span(cur)
                 )
             cur = obj
-        if cur.type == "this":
+        if cur.type in {"this", "super"}:
             path.reverse()
-            return "this", path, index_deps
+            return cur.type, path, index_deps
         if cur.type != "identifier":
             raise _Unsupported("unsupported_expression", _span(cur))
         path.reverse()
@@ -1905,7 +1916,18 @@ class _Builder:
         base, path, index_deps = self._member_target(
             node, params, locals_, transfers, count
         )
-        val = self._lookup(base, params, locals_, _span(node))
+        if base == "super":
+            # `super.m` — the parent prototype's method table.
+            this = self._lookup("this", params, locals_, _span(node))
+            klass = this.klass if isinstance(this, _Composite) else None
+            parent = klass.parent if klass is not None else None
+            if parent is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            val = parent
+        else:
+            val = self._lookup(base, params, locals_, _span(node))
         for idx, key in enumerate(path):
             if isinstance(val, _Class):
                 # `C.sm` / `C.sf` — statics and methods on the
@@ -2179,9 +2201,32 @@ class _Builder:
         capture. `extends`/`implements`, getters/setters,
         generators, computed names and `abstract`/decorated
         members all close."""
+        parent = None
         for child in node.children:
             if child.type == "class_heritage":
-                raise _Unsupported("unsupported_expression", _span(child))
+                for clause in _children(child):
+                    if clause.type == "implements_clause":
+                        # Type-level only — `implements` never
+                        # produces a runtime value.
+                        continue
+                    if clause.type != "extends_clause":
+                        raise _Unsupported(
+                            "unsupported_expression", _span(clause)
+                        )
+                    expr = next(iter(_children(clause)), None)
+                    if expr is None:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(clause)
+                        )
+                    pval = self._eval(
+                        expr, params, locals_, {}, [0]
+                    )
+                    if not isinstance(pval, _Class):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(clause)
+                        )
+                    parent = pval
+                continue
             if not child.is_named and child.type in {
                 "abstract",
                 "declare",
@@ -2267,7 +2312,26 @@ class _Builder:
         all_deps = captured
         for s in statics.values():
             all_deps |= _scalar_of(s)
-        return _Class(ctor, methods, statics, field_inits, all_deps)
+        if parent is not None:
+            # Inherit the tables the class didn't redeclare: own
+            # members shadow same-named parent members.
+            imethods = dict(parent.methods)
+            imethods.update(methods)
+            methods = imethods
+            istatics = dict(parent.statics)
+            istatics.update(statics)
+            statics = istatics
+            ifields = dict(parent.field_inits)
+            ifields.update(field_inits)
+            field_inits = ifields
+            if ctor is None:
+                # A derived class without a ctor defaults to one
+                # that runs the parent's.
+                ctor = parent.ctor
+            all_deps |= parent.captured
+        return _Class(
+            ctor, methods, statics, field_inits, all_deps, parent
+        )
 
     def _construct(self, cls, actual, params, locals_, transfers, count, span):
         """`new C(args)` — seed `this` to a fresh `_Composite` of
@@ -2732,13 +2796,20 @@ class _Builder:
                 this_val = None
                 if raw.is_method:
                     obj_node = function.child_by_field_name("object")
-                    base_val = (
-                        None
-                        if obj_node is None
-                        else self._eval(
-                            obj_node, params, locals_, transfers, count
+                    if obj_node is not None and obj_node.type == "super":
+                        # `super.m(x)` — `this` stays the instance.
+                        base_val = self._lookup(
+                            "this", params, locals_, _span(obj_node)
                         )
-                    )
+                    else:
+                        base_val = (
+                            None
+                            if obj_node is None
+                            else self._eval(
+                                obj_node, params, locals_,
+                                transfers, count,
+                            )
+                        )
                     if isinstance(base_val, _Composite):
                         this_val = base_val
                 result = self._invoke_callable(
@@ -2760,6 +2831,44 @@ class _Builder:
                     )
                 )
                 return result
+            if function.type == "super":
+                # `super(args)` in a derived ctor — run the
+                # parent constructor on the same `this`.
+                this_v = self._lookup(
+                    "this", params, locals_, _span(node)
+                )
+                klass = (
+                    this_v.klass
+                    if isinstance(this_v, _Composite)
+                    else None
+                )
+                parent = klass.parent if klass is not None else None
+                if parent is None or parent.ctor is None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                actual_s = self._call_actuals(
+                    arguments, params, locals_, transfers, count, node
+                )
+                inst = self._invoke_callable(
+                    parent.ctor,
+                    actual_s,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    this_val=this_v,
+                    construct=True,
+                )
+                locals_["this"] = inst
+                transfers.append(
+                    TsCall(
+                        _span(node), "super", actual_s,
+                        _scalar_of(inst),
+                    )
+                )
+                return _scalar_of(inst)
             if function.type != "identifier":
                 raise _Unsupported("unsupported_expression", _span(node))
             callee = function.text.decode()
