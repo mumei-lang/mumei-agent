@@ -2580,6 +2580,11 @@ the consumer: the left-hand width must equal it.
   and unresolved non-void calls record opaque `RustCall`s
   carrying the args' (and bound callee's) deps and mark
   `unknown` instead of closing.
+- `const`/`static` items read dep-free (`static mut`
+  writes mark `unknown`); container write methods
+  (`v.push(x)`, `insert`, `extend`, ...) merge argument deps
+  into the receiver's root slot; recursive calls record an
+  opaque `RustCall` instead of hitting the inline limit.
 - `let (a, b) = p` destructures bind via pattern walk;
   writes through parameters (`self.x = v`, `*p = v`,
   `a[i] = v`) accumulate per-param write deps that callers

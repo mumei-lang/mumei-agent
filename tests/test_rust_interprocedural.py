@@ -350,3 +350,44 @@ fn f(x: u64, y: u64) -> u64 {
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice5_container_write_method():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let mut v = Vec::new();
+    v.push(x);
+    v[0]
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice5_const_global_dep_free():
+    s = _fn(
+        """const K: u64 = 7;
+fn f(x: u64) -> u64 { x + K }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.effects == "none_in_supported_fragment"
+
+
+def test_slice5_static_mut_write_marks_unknown():
+    s = _fn(
+        """static mut S: u64 = 0;
+fn f(x: u64) -> u64 { unsafe { S = x; } x }""",
+        "f",
+    )
+    assert s.available and s.effects == "unknown"
+
+
+def test_slice5_recursion_opaque():
+    s = _fn(
+        "fn g(n: u64) -> u64 { if n == 0 { 0 } else { g(n - 1) } }",
+        "g",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"

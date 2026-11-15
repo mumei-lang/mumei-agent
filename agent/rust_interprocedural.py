@@ -161,6 +161,11 @@ class _Builder:
         self._writes: list = []
         self._decls: list = []
         self.methods: dict = {}
+        # `const K` / `static S` — compile-time constant, so a
+        # read is dep-free; `static mut` writes mark unknown.
+        self.globals: set = set()
+        self.mut_globals: set = set()
+        self._in_progress: set = set()
 
     # -- unit scan -------------------------------------------------
 
@@ -176,6 +181,18 @@ class _Builder:
                 if name is None:
                     continue
                 self.functions[name.text.decode()] = top
+                continue
+            if top.type in {"const_item", "static_item"}:
+                gname = top.child_by_field_name("name")
+                if gname is not None:
+                    self.globals.add(gname.text.decode())
+                    if any(
+                        c.type == "mutable_specifier"
+                        for c in top.children
+                    ):
+                        self.mut_globals.add(
+                            gname.text.decode()
+                        )
                 continue
             if top.type != "impl_item":
                 continue
@@ -222,6 +239,7 @@ class _Builder:
     # -- per-function summary --------------------------------------
 
     def _summarize(self, name, fn_node) -> RustFunctionSummary:
+        self._in_progress.add(name)
         self._writes.append(set())
         self._decls.append(set())
         params = fn_node.child_by_field_name("parameters")
@@ -274,6 +292,7 @@ class _Builder:
         )
         self._writes.pop()
         self._decls.pop()
+        self._in_progress.discard(name)
         ret_mark = getattr(summary, "return_mark", None)
         if (
             ret is None
@@ -579,7 +598,10 @@ class _Builder:
         if (
             left is not None
             and left.type == "identifier"
-            and left.text.decode() in locals_
+            and (
+                left.text.decode() in locals_
+                or left.text.decode() in self.mut_globals
+            )
         ):
             deps = (
                 self._expr(right, locals_, param_index, summary)
@@ -592,6 +614,10 @@ class _Builder:
             locals_[name] = deps
             if self._writes:
                 self._writes[-1].add(name)
+            if name in self.mut_globals:
+                # `static mut` writes are observable —
+                # unknown effects.
+                summary.effects = "unknown"
             return deps
         if left is not None and left.type in _EXPR_TYPES:
             # `*p = v`, `x.f = v`, `a[i] = v` — non-scalar
@@ -641,6 +667,8 @@ class _Builder:
         for a in actual:
             actual_union |= a
         recv_deps = frozenset()
+        recv = None
+        fld = None
         if (
             fn_expr is not None
             and fn_expr.type == "field_expression"
@@ -648,6 +676,7 @@ class _Builder:
             # `x.m(args)` — the receiver's deps join the opaque
             # result like another argument.
             recv = fn_expr.child_by_field_name("value")
+            fld = fn_expr.child_by_field_name("field")
             if recv is not None:
                 try:
                     recv_deps = self._expr(
@@ -695,7 +724,6 @@ class _Builder:
             # `x.m(args)` — resolve `m` when exactly one impl in
             # the file defines it; `self` binds the receiver deps
             # (param index 0).
-            fld = fn_expr.child_by_field_name("field")
             if fld is not None:
                 ukeys = self.methods.get(
                     fld.text.decode(), set()
@@ -709,6 +737,29 @@ class _Builder:
                         if recv is not None else None
                     )
                     roots.insert(0, recv_root)
+        if (
+            name is None
+            and fld is not None
+            and fld.text.decode() in _CONTAINER_WRITES
+        ):
+            rname = _arg_root(recv) if recv is not None else None
+            if rname is not None:
+                slot = (
+                    locals_.get(rname, frozenset())
+                    | actual_union
+                )
+                locals_[rname] = slot
+                if self._writes:
+                    self._writes[-1].add(rname)
+                summary.calls.append(
+                    RustCall(
+                        _span(node),
+                        f"{recv.text.decode()}."
+                        f"{fld.text.decode()}",
+                        actual_t, None,
+                    )
+                )
+                return frozenset() if void else slot
         if name is None or name not in self.functions:
             # method calls, fn-pointers, enum constructors
             # (`Some(x)`), external `crate::f` — opaque record.
@@ -726,6 +777,16 @@ class _Builder:
             if summary.effects != "state_writes":
                 summary.effects = "unknown"
             return frozenset() if void else result
+        if name in self._in_progress:
+            # Recursion — no fixpoint in the one-pass model;
+            # record it opaquely.
+            summary.calls.append(
+                RustCall(_span(node), name, actual_t,
+                         None if void else actual_union)
+            )
+            if summary.effects != "state_writes":
+                summary.effects = "unknown"
+            return frozenset() if void else actual_union
         callee = self.summaries.get(name)
         if callee is None:
             if self._inline_depth >= MAX_INLINE_DEPTH:
@@ -785,6 +846,8 @@ class _Builder:
             name = node.text.decode()
             if name in locals_:
                 return locals_[name]
+            if name in self.globals:
+                return frozenset()
             raise _Unsupported("binding_unavailable", _span(node))
         if t in {
             "integer_literal", "float_literal", "boolean_literal",
@@ -944,6 +1007,11 @@ class _Builder:
             return deps
         raise _Unsupported("unsupported_expression", _span(node))
 
+
+_CONTAINER_WRITES = {
+    "push", "insert", "extend", "push_front", "push_back",
+    "add", "set", "put", "append", "retain", "clear",
+}
 
 _TYPE_NAMES = {
     "primitive_type", "type_identifier", "generic_type",
