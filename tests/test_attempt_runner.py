@@ -10,6 +10,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+import agent.attempt_runner as attempt_runner
 from agent.attempt_runner import (
     AttemptDispatch,
     AttemptRunner,
@@ -420,8 +421,9 @@ def test_run_memory_bound_failure_reports_failed(monkeypatch):
         raise OSError("rlimit refused")
 
     # Force the preexec fallback so the refused rlimit surfaces
-    # as a spawn failure rather than a wrapped prlimit exit.
+    # as a spawn failure rather than a wrapped exit.
     monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    monkeypatch.setattr(runner_mod, "_SH", None)
     monkeypatch.setattr(runner_mod.resource, "setrlimit", boom)
     result = AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
     assert result.record.state == "failed"
@@ -454,6 +456,45 @@ def test_run_memory_bound_prefers_prlimit_wrapper(monkeypatch):
     assert spawned["preexec_fn"] is None
 
 
+def test_run_memory_bound_falls_back_to_sh_wrapper(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            spawned["preexec_fn"] = kw.get("preexec_fn")
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    monkeypatch.setattr(runner_mod, "_SH", "/bin/sh")
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
+    assert spawned["args"] == [
+        "/bin/sh",
+        "-c",
+        "ulimit -v 65536 && exec \"$@\"",
+        "mumei-attempt-bound",
+        *argv("pass"),
+    ]
+    assert spawned["preexec_fn"] is None
+
+
+def test_run_memory_bound_sh_wrapper_still_enforces_the_bound(
+    monkeypatch,
+):
+    import agent.attempt_runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    code = "x = b' ' * (256 * 1024 * 1024); print(len(x))"
+    result = AttemptRunner().run(
+        request(timeout_ms=30_000), argv(code), memory_bound_mb=96
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code != 0
+
+
 def test_run_memory_bound_falls_back_to_preexec(monkeypatch):
     import agent.attempt_runner as runner_mod
 
@@ -466,17 +507,32 @@ def test_run_memory_bound_falls_back_to_preexec(monkeypatch):
             raise OSError("stop before spawn")
 
     monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    monkeypatch.setattr(runner_mod, "_SH", None)
     monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
     AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
     assert spawned["args"] == list(argv("pass"))
     assert spawned["preexec_fn"] is not None
 
 
-def test_run_memory_bound_missing_target_reports_failed():
-    # Under prlimit, a target the wrapper cannot exec would exit
-    # 127 — masquerading as the target's own exit. The runner
-    # leaves the argv unwrapped instead so the plain spawn reports
-    # a real failure.
+@pytest.mark.parametrize("wrapper", ["prlimit", "sh", "preexec"])
+def test_run_memory_bound_missing_target_reports_failed(
+    monkeypatch, wrapper
+):
+    # Under a wrapper, a target it cannot exec would exit 127 —
+    # masquerading as the target's own exit. The runner leaves the
+    # argv unwrapped instead so the plain spawn reports a real
+    # failure on every spawn path.
+    import agent.attempt_runner as runner_mod
+
+    if wrapper == "prlimit":
+        monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+        monkeypatch.setattr(runner_mod, "_SH", "/bin/sh")
+    elif wrapper == "sh":
+        monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+        monkeypatch.setattr(runner_mod, "_SH", "/bin/sh")
+    else:
+        monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+        monkeypatch.setattr(runner_mod, "_SH", None)
     result = AttemptRunner().run(
         request(), ("/nonexistent-mumei-probe-binary",), memory_bound_mb=64
     )
@@ -518,8 +574,12 @@ def test_memory_bound_spawn_thread_safe(monkeypatch):
     import agent.attempt_runner as runner_mod
 
     monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    monkeypatch.setattr(runner_mod, "_SH", None)
     assert runner_mod.memory_bound_spawn_thread_safe()
     monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    monkeypatch.setattr(runner_mod, "_SH", "/bin/sh")
+    assert runner_mod.memory_bound_spawn_thread_safe()
+    monkeypatch.setattr(runner_mod, "_SH", None)
     assert not runner_mod.memory_bound_spawn_thread_safe()
 
 
@@ -930,3 +990,81 @@ def test_dispatch_next_attempt_rejects_missing_or_stale_stamps(stamp):
     with pytest.raises(ValueError, match="report stamp"):
         dispatch_next_attempt(sequence, argv("pass"), report_stamp=stamp)
     assert sequence.current.state == "exited"
+
+
+def test_detect_ulimit_sh_returns_none_without_sh(monkeypatch):
+    monkeypatch.setattr(attempt_runner.shutil, "which", lambda name: None)
+    assert attempt_runner._detect_ulimit_sh() is None
+
+
+def test_detect_ulimit_sh_requires_a_ulimit_v_shell(monkeypatch):
+    monkeypatch.setattr(
+        attempt_runner.shutil, "which", lambda name: "/bin/sh"
+    )
+
+    def fake_run(argv, **kwargs):
+        assert argv == ["/bin/sh", "-c", "ulimit -v >/dev/null 2>&1"]
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fake_run)
+    assert attempt_runner._detect_ulimit_sh() is None
+
+
+def test_detect_ulimit_sh_accepts_a_capable_shell(monkeypatch):
+    monkeypatch.setattr(
+        attempt_runner.shutil, "which", lambda name: "/bin/sh"
+    )
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0),
+    )
+    assert attempt_runner._detect_ulimit_sh() == "/bin/sh"
+
+
+def test_detect_ulimit_sh_treats_probe_errors_as_absent(monkeypatch):
+    monkeypatch.setattr(
+        attempt_runner.shutil, "which", lambda name: "/bin/sh"
+    )
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 10)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fake_run)
+    assert attempt_runner._detect_ulimit_sh() is None
+
+
+def test_detect_ulimit_sh_rejects_non_posix_hosts(monkeypatch):
+    monkeypatch.setattr(attempt_runner.os, "name", "nt")
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda argv, **kwargs: pytest.fail("probe must not run"),
+    )
+    assert attempt_runner._detect_ulimit_sh() is None
+
+
+def test_run_memory_bound_non_posix_sh_still_rejected(monkeypatch):
+    # A host where `sh` exists but cannot enforce RLIMIT_AS (e.g.
+    # Git Bash on Windows) must not accept the declared bound.
+    monkeypatch.setattr(attempt_runner, "_PRLIMIT", None)
+    monkeypatch.setattr(attempt_runner, "_SH", None)
+    monkeypatch.setattr(attempt_runner, "resource", None)
+    runner = AttemptRunner()
+    with pytest.raises(ValueError, match="memory bound"):
+        runner.run(request(), argv("pass"), memory_bound_mb=8)
+
+
+def test_run_memory_bound_sh_probe_failure_falls_back_to_preexec(
+    monkeypatch,
+):
+    # An `sh` that fails the ulimit probe leaves _SH None, so the
+    # preexec path (old behavior) still carries the bound.
+    monkeypatch.setattr(attempt_runner, "_PRLIMIT", None)
+    monkeypatch.setattr(attempt_runner, "_SH", None)
+    run = AttemptRunner().run(
+        request(), argv("import sys; sys.stdout.write('ok')"),
+        memory_bound_mb=128,
+    )
+    assert run.stdout == b"ok"
+    assert run.record.state == "exited"

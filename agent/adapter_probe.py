@@ -401,8 +401,9 @@ def _run_probe_batch(
     `memory_bound_mb` whose spawn would use `preexec_fn`: `preexec_fn`
     forces the fork+exec spawn path, which can deadlock in a
     multithreaded process. When `memory_bound_spawn_thread_safe()`
-    reports that bounds go through a plain exec (`prlimit`), a
-    memory-bound batch stays parallel-safe; otherwise it falls back to
+    reports that bounds go through a plain exec (`prlimit`, or a
+    POSIX `sh`/`ulimit -v` wrapper), a memory-bound batch stays
+    parallel-safe; only on a host with neither does it fall back to
     sequential execution rather than risk a spawn that can stall
     before timeout accounting starts.
     """
@@ -461,12 +462,12 @@ def observe_probes(
     The parallel path is only skipped when a request declares a
     `memory_bound_mb` AND the runner would install it through a
     `preexec_fn` — `preexec_fn` forces the fork+exec spawn path,
-    which can deadlock in a multithreaded process. With `prlimit`
-    available the bound is applied by an exec wrapper instead, so
-    memory-bound probes stay parallel-safe; only on a host without
-    `prlimit` does such a batch fall back to sequential execution
-    rather than risk a spawn that can stall before timeout
-    accounting starts.
+    which can deadlock in a multithreaded process. With `prlimit` or
+    a POSIX `sh` present the bound is applied by an exec wrapper
+    instead (`ulimit -v` sets the same RLIMIT_AS), so memory-bound
+    probes stay parallel-safe; only on a host with neither does such
+    a batch fall back to sequential execution rather than risk a
+    spawn that can stall before timeout accounting starts.
     """
     if not isinstance(requests, tuple):
         raise ValueError("probe observation requires a request tuple")
