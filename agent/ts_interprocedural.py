@@ -311,6 +311,12 @@ Admitted:
   captured union and the call dep-unions. `extends` on a
   non-class value ends the parent chain; the heritage
   expression's deps fold into the class's `captured`.
+* `new Map()`/`new Set()` (and weak variants) build a
+  `_Composite` tagged `_MAP_SET_KLASS`: `set`/`add`/
+  `delete`/`clear` may-write the entry table (literal keys
+  precisely, others via `"*"`), `get`/`has`/`size`/
+  iteration reads carry the entry union. `new` on a scalar-
+  joined ctor dep-unions; `Function` is a known global.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -531,6 +537,7 @@ _GLOBALS = {
     "String",
     "Symbol",
     "BigInt",
+    "Function",
     "RegExp",
     "Error",
     "TypeError",
@@ -826,6 +833,24 @@ class _Class:
         self.ssetters = ssetters if ssetters is not None else {}
 
 
+# `new Map()`/`new Set()`/weak variants yield a `_Composite`
+# tagged with this sentinel class so `_collection_call` gives
+# them map/set semantics instead of array ones.
+_MAP_SET_METHODS = {
+    "set",
+    "add",
+    "get",
+    "has",
+    "delete",
+    "clear",
+    "size",
+    "forEach",
+    "keys",
+    "values",
+    "entries",
+}
+
+
 def _scalar_of(value) -> frozenset[int]:
     """Flatten a value to scalar deps — reading or passing a whole
     composite over-approximates to the union of its leaf deps; a
@@ -844,6 +869,11 @@ def _scalar_of(value) -> frozenset[int]:
     if isinstance(value, _External):
         return frozenset()
     return value
+
+
+_MAP_SET_KLASS = _Class(
+    None, {}, {}, {}, frozenset()
+)
 
 
 def _callee_name(node):
@@ -3481,6 +3511,10 @@ class _Builder:
                         return result
                     if key in val.klass.methods:
                         return val.klass.methods[key]
+                if val.klass is _MAP_SET_KLASS:
+                    # `m.size` — a Map/Set pseudo-member carries
+                    # the whole entry union.
+                    return _scalar_of(val) | index_deps
                 # An opaque call may have ADDED fields the
                 # table never named — `"*"` carries their deps
                 # (still dep-free when no opaque call ran).
@@ -4797,6 +4831,66 @@ class _Builder:
             )
             return result
 
+        if base_val.klass is _MAP_SET_KLASS:
+            # Map/Set — `set`/`add`/`delete`/`clear` may-write the
+            # entry table (a literal key writes precisely, any
+            # other key lands in the `"*"` bucket and every
+            # existing entry takes the may-write union); reads
+            # (`get`/`has`/`size`, iteration views) carry the
+            # whole entry union.
+            arg_nodes = _children(arguments)
+            first = arg_nodes[0] if arg_nodes else None
+            lit_key = (
+                first.text.decode().strip("\"'")
+                if first is not None and first.type == "string"
+                else None
+            )
+            if prop in {"set", "add", "delete", "clear"}:
+                tbase, tpath, _ = self._member_target(
+                    obj_node, params, locals_, transfers, count
+                )
+                if tpath and any(k is None for k in tpath):
+                    raise _Unsupported("unsupported_expression", span)
+                target = self._write_scope(tbase, locals_, params)
+                if target is None:
+                    raise _Unsupported("binding_unavailable", span)
+                old = target.get(tbase)
+                if not isinstance(old, _Composite):
+                    raise _Unsupported("unsupported_expression", span)
+                added = dict(old.fields)
+                for key in list(added):
+                    added[key] = _merge_vals(added[key], actual_union)
+                if prop in {"set", "add"}:
+                    stored = actual[1] if len(actual) > 1 else actual_union
+                    if lit_key is not None:
+                        added[lit_key] = _merge_vals(
+                            added.get(lit_key, frozenset()), stored
+                        )
+                    else:
+                        added["*"] = added.get("*", frozenset()) | stored
+                new = (
+                    _composite_set(
+                        old, tpath + ["*"], actual_union, True, span
+                    )
+                    if tpath
+                    else _Composite(added, klass=old.klass)
+                )
+                for name, val in locals_.items():
+                    if val is old:
+                        locals_[name] = new
+                return record(frozenset())
+            if prop in {"keys", "values", "entries"}:
+                return record(_Composite({str(0): elem}))
+            if prop == "get" and lit_key is not None and (
+                lit_key in base_val.fields
+            ):
+                return record(
+                    base_val.fields[lit_key] | actual_union
+                )
+            # `get`/`has`/`size`/`forEach`/dynamic-key `get` —
+            # the entry union over-approximates the result.
+            return record(elem | actual_union)
+
         if prop == "forEach":
             # Undefined result — the callback's effects are the
             # transfers it recorded.
@@ -5351,6 +5445,21 @@ class _Builder:
                     )
                 )
                 return result_n
+            if (
+                ctor_node.type == "identifier"
+                and ctor_node.text.decode()
+                in {"Map", "Set", "WeakMap", "WeakSet"}
+            ):
+                # `new Map([[k, v], ...])` / `new Set([v])` — a
+                # container instance; constructor entries seed
+                # the unknown-key `"*"` bucket.
+                seed = frozenset()
+                for a in actual_n:
+                    seed |= a
+                return _Composite(
+                    {"*": seed} if seed else {},
+                    klass=_MAP_SET_KLASS,
+                )
             if isinstance(raw_n, _External):
                 # `new` on an imported ctor — the instance shape
                 # is unknown; the value conservatively carries
@@ -5389,6 +5498,23 @@ class _Builder:
                         "new " + _callee_name(ctor_node),
                         actual_n,
                         _scalar_of(result_n),
+                    )
+                )
+                return result_n
+            if isinstance(raw_n, frozenset) or raw_n is None:
+                # `new (cond ? C : D)()` — the ctor joined to a
+                # scalar; the instance over-approximates to the
+                # callee scalar plus the actuals (opaque ctor).
+                result_n = _scalar_of(raw_n)
+                for a in actual_n:
+                    result_n |= a
+                self._opaque_call_writes(vals_n, result_n)
+                transfers.append(
+                    TsCall(
+                        _span(node),
+                        "new " + _callee_name(ctor_node),
+                        actual_n,
+                        result_n,
                     )
                 )
                 return result_n
@@ -5468,8 +5594,14 @@ class _Builder:
                     )
                     if (
                         isinstance(base_val2, _Composite)
-                        and prop in _COLLECTION_METHODS
                         and prop not in base_val2.fields
+                        and (
+                            prop in _COLLECTION_METHODS
+                            or (
+                                base_val2.klass is _MAP_SET_KLASS
+                                and prop in _MAP_SET_METHODS
+                            )
+                        )
                     ):
                         return self._collection_call(
                             prop,

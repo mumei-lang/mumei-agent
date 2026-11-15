@@ -3433,6 +3433,20 @@ so `extends Object`/`extends B` on an opaque parameter admit
 while `extends` on a known `_Class` keeps method
 inheritance unchanged.
 
+### C06 TypeScript Map/Set builtins and opaque `new` (slice 56)
+
+`new Map()`/`new Set()`/`new WeakMap()`/`new WeakSet()`
+construct a `_Composite` tagged with the `_MAP_SET_KLASS`
+sentinel — `set`/`add`/`delete`/`clear` may-write the entry
+table (a literal key writes its own field, any other key
+folds into the `"*"` bucket and every existing entry takes
+the may-write union) while `get`/`has`/`size`/iteration
+views carry the entry union. `new` on a callee that joined
+to a scalar (`new (cond ? C : D)()`) dep-unions like an
+opaque ctor instead of closing. `Function` joins the known
+globals so `new Function(...)` is an opaque `_External`
+rather than `binding_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -5402,3 +5402,78 @@ def test_callee_label_scrubs_literal_keys():
         ' let o = {}; o["secret-value"](x); return x; }'
     )
     assert s.calls and s.calls[0].callee == "o[?]"
+
+
+def test_map_set_and_literal_get():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new Map(); m.set('a', x); return m.get('a'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_map_dynamic_key_get_unions_entries():
+    s = _fn(
+        "function f(x: number, k: string) {"
+        " let m = new Map(); m.set(k, x); return m.get('a'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_map_constructor_entries_seed():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new Map([['a', x]]); return m.get('a'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_set_add_and_has():
+    s = _fn(
+        "function f(x: number) {"
+        " let s = new Set(); s.add(x); return s.has(x) ? x : 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_map_size_reads_entry_union():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new Map(); m.set('a', x); return m.size; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_map_iteration_reads_values():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new Map(); m.set('a', x);"
+        " let y = 0; for (let [k, v] of m) { y = v; } return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_weakmap_entries():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new WeakMap(); m.set('a', x); return m.get('a'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_constructor_is_external():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = new Function('a', 'return a'); return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_new_on_joined_ctor_dep_unions():
+    s = _fn(
+        "class C { m(a) { return a; } }"
+        " class D { q(a) { return a; } }"
+        " function f(x: number, k: string) {"
+        " return new (k === 'C' ? C : D)().m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
