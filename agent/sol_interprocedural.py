@@ -1720,10 +1720,17 @@ class _Builder:
             return deps
         if t == "binary_expression":
             named = _children(node)
-            op = (
-                node.children[1].text.decode()
-                if len(node.children) >= 3
-                else ""
+            # The operator is the anonymous token between the
+            # operands — comments are named children and may
+            # sit ahead of it, so a positional child is not
+            # reliable.
+            op = next(
+                (
+                    c.text.decode()
+                    for c in node.children
+                    if not c.is_named
+                ),
+                "",
             )
             if op in {"&&", "||"} and len(named) == 2:
                 # Short-circuit: the right side may not run —

@@ -2235,3 +2235,19 @@ def test_review_base_failure_reasons_all_propagate_as_gap():
     # still marked available.
     assert not s.available
     assert any(g.reason == "binding_unavailable" for g in s.gaps)
+
+
+
+def test_review_comment_before_short_circuit_operator():
+    src = """contract C {
+  uint256 public s;
+  function f(uint256 a, uint256 x) public returns (uint256) {
+    s = a;
+    bool ok = a > 0 /* hit */ && (s = x) > 0;
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    # A comment ahead of `&&` made `children[1]` a comment, so
+    # the RHS ran unconditionally and dropped `a`'s dep.
+    assert s.return_dependencies == frozenset({0, 1})
