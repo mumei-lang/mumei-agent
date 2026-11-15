@@ -218,6 +218,12 @@ Admitted:
   element over-approximates to the whole parameter/actual
   union — `arguments[0]` and `arguments[i]` read it; a
   `f(...a)` spread actual contributes its operand's dep union.
+* Well-known globals — `Math`/`Object`/`JSON`/`console`/
+  `Number`/`Promise`/etc. read as `_External` through a
+  `_GLOBALS` table at the end of `_lookup`: member reads stay
+  external, calls and `new` yield the actuals' union, and a
+  local binding or import shadows the global via the normal
+  lookup order.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -280,6 +286,62 @@ _TOP_LEVEL = {
     "lexical_declaration",
     "variable_declaration",
     "generator_function_declaration",
+}
+
+# Well-known platform/library globals read as `_External` — reads
+# are dep-free, member reads stay external, and a call/`new`
+# through one yields its actuals' union (the opaque-callee
+# over-approximation, same as imports). A local binding or import
+# shadows the global through `_lookup` order.
+_GLOBALS = {
+    "Array",
+    "Boolean",
+    "Date",
+    "JSON",
+    "Map",
+    "Math",
+    "Number",
+    "Object",
+    "Promise",
+    "Set",
+    "String",
+    "Symbol",
+    "BigInt",
+    "RegExp",
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "Intl",
+    "Reflect",
+    "Proxy",
+    "WeakMap",
+    "WeakSet",
+    "console",
+    "window",
+    "globalThis",
+    "document",
+    "process",
+    "Buffer",
+    "require",
+    "fetch",
+    "setTimeout",
+    "setInterval",
+    "setImmediate",
+    "queueMicrotask",
+    "clearTimeout",
+    "clearInterval",
+    "parseInt",
+    "parseFloat",
+    "isNaN",
+    "isFinite",
+    "encodeURIComponent",
+    "decodeURIComponent",
+    "encodeURI",
+    "decodeURI",
+    "structuredClone",
+    "Promise",
+    "undefined",
 }
 
 
@@ -2038,6 +2100,8 @@ class _Builder:
             return self._class_cache[name]
         if name in self.imports:
             return _External()
+        if name in _GLOBALS:
+            return _External()
         raise _Unsupported("binding_unavailable", span)
 
     def _read_name(self, node, params, locals_, span) -> frozenset[int]:
@@ -3247,6 +3311,7 @@ class _Builder:
                 or callee in self.function_locals
                 or callee in params
                 or callee in self.imports
+                or callee in _GLOBALS
             )
             if not bound and callee not in self.functions:
                 raise _Unsupported(

@@ -2977,6 +2977,26 @@ extras the model can't see).
 operand's dep union as one actual — matching how a
 positional argument contributes its deps.
 
+### C06 TypeScript well-known globals (slice 29)
+
+`Math`/`Object`/`JSON`/`console`/`Number`/`String`/
+`Promise`/`Error`/`fetch`/`require`/`setTimeout`/etc. read
+as `_External` through a `_GLOBALS` table at the end of
+`_lookup` — a bare `Math.abs(x)` used to be
+`binding_unavailable`. Member reads stay external, calls
+and `new` yield the actuals' dep union with a `TsCall`
+record, and a local binding or import shadows the global
+through the normal lookup order.
+
+This is the same opaque-callee over-approximation imports
+use: `JSON.parse(x)` returns a value whose deps include
+`x`'s. `console.log(x)` records the call without putting
+`x` in the result.
+
+Boundaries: an unlisted name still closes
+(`binding_unavailable`) — the table is deliberately
+enumerated, not "any identifier is external".
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

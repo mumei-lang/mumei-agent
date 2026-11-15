@@ -389,15 +389,13 @@ def test_throw_admits():
     assert s.available
 
 
-def test_throw_new_expression_closes():
+def test_throw_new_expression_admits():
+    # `Error` is a well-known global (slice 29) — `new Error()`
+    # resolves as an external call, and the throw still throws.
     s = _fn(
         "function f(x: number): number { throw new Error(); return x; }"
     )
-    assert not s.available
-    # `new Error()` resolves an unbound ctor name — a thrown
-    # exception still throws the body (the gap keeps the function
-    # unavailable either way).
-    assert s.gaps[0].reason == "binding_unavailable"
+    assert s.available
 
 
 def test_try_catch_admits():
@@ -765,9 +763,10 @@ def test_arrow_function_value_admits():
 
 
 def test_member_call_closes():
-    # `Math` is an unbound base — the member call can't resolve.
+    # `Math2` is an unbound base — the member call can't resolve
+    # (`Math` itself is a well-known global since slice 29).
     s = _fn(
-        "function f(x: number): number { return Math.abs(x); }"
+        "function f(x: number): number { return Math2.abs(x); }"
     )
     assert not s.available
     assert s.gaps[0].reason == "binding_unavailable"
@@ -3100,3 +3099,70 @@ def test_spread_in_declared_call_records():
         "function f(x: number): number { return g(...[x]); }"
     )
     assert s.calls and s.calls[0].arguments == (frozenset({0}),)
+
+
+# --- slice 29: well-known globals
+
+
+def test_math_member_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " return Math.max(x, 1); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "Math.max"
+
+
+def test_object_static_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: x};"
+        " const k = Object.keys(o);"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_console_log_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " console.log(x);"
+        " return x; }"
+    )
+    assert s.available and s.calls[0].callee == "console.log"
+
+
+def test_number_conversion_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const s = String(x);"
+        " return x; }"
+    )
+    assert s.available
+
+
+def test_new_error_global():
+    s = _fn(
+        "function f(x: number): number {"
+        " const e = new Error();"
+        " return x; }"
+    )
+    assert s.available
+
+
+def test_global_shadowed_by_local():
+    s = _fn(
+        "function f(x: number): number {"
+        " const Math = {max: (a: number) => a};"
+        " return Math.max(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_promise_all():
+    s = _fn(
+        "function f(x: number): number {"
+        " const p = Promise.all([x]);"
+        " return x; }"
+    )
+    assert s.available
