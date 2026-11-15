@@ -2441,7 +2441,12 @@ exactly two names on a map member, so the `:=`, `var` and plain
 `=` tuple paths unpack the pair like a two-result call — the value
 read and the presence flag each conservatively take the read's own
 dependencies. A composite-typed element (`lib.VSM[k]`) stays closed
-the same way the single-value read does. A member
+the same way the single-value read does. A comma-ok read on a
+nested chain admits when the outermost index's container is still
+map-typed — `v, ok := lib.VM2[k1][k2]` descends one `elem` fact per
+level and requires the surviving container fact to be a `map`, so
+`v, ok := lib.VM2[k]` (whose value is a map the model cannot
+bind) stays closed. A member
 write (`lib.VM[k] = v`) pins the named key's identity too.
 
 The member record's `signature_type_ids` for a method now include

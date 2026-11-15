@@ -8216,6 +8216,70 @@ def test_imported_map_index_read_comma_ok_composite_stays_closed(
     assert not result.available
 
 
+def test_imported_map_index_read_comma_ok_nested_is_admitted(
+    go_types_helper,
+):
+    # `v, ok := lib.VM2[k1][k2]` — a comma-ok pair on a nested map
+    # chain: the outermost index's container is the inner map, so
+    # the read binds the pair like the flat form.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 { v, ok := lib.VM2[\"a\"][\"b\"]\n"
+        "\tif ok { return v }\n\treturn k }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_imported_map_index_read_comma_ok_nested_index_deps(
+    go_types_helper,
+):
+    # The nested read still unions every level's index deps — a
+    # computed outer key carries its own dependencies.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar VIM map[int64]map[string]int64\n",
+            "f.go": "package lib\nfunc K(k int64) int64 { return k }\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 {\n"
+        "\tv, ok := lib.VIM[lib.K(k)][\"b\"]\n"
+        "\tif ok { return v }\n\treturn 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_map_index_read_comma_ok_map_value_stays_closed(
+    go_types_helper,
+):
+    # `v, ok := lib.VM2["a"]` — one level short: the read's value is
+    # a map (unrepresentable as a binding), so the pair stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { v, ok := lib.VM2[\"a\"]\n"
+        "\tif ok && v == nil { return 1 }\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 VARIADIC_LIB = {
     "lib": {
         "v.go": "package lib\n"

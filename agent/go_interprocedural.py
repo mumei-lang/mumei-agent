@@ -984,28 +984,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return resolved[2]
 
-    def _index_member(self, node: Any) -> PackageMember | None:
+    def _index_member(
+        self, node: Any
+    ) -> tuple[PackageMember, int] | None:
         """The imported `var` member an index expression's operand
-        names — `lib.VM`, `VM` under a dot import, or parentheses
-        around either — or None."""
+        chain names — `lib.VM`, `VM` under a dot import, or
+        parentheses around either — plus the number of extra index
+        levels the chain wraps it in (`lib.VM2[k1][k2]` descends
+        one), or None."""
         inner = node.child_by_field_name("operand")
-        while inner is not None and inner.type == "parenthesized_expression":
-            inner = next(
-                (c for c in inner.named_children if c.type != "comment"),
-                None,
-            )
+        levels = 0
+        while True:
+            while inner is not None and inner.type == "parenthesized_expression":
+                inner = next(
+                    (c for c in inner.named_children if c.type != "comment"),
+                    None,
+                )
+            if inner is None or inner.type != "index_expression":
+                break
+            levels += 1
+            inner = inner.child_by_field_name("operand")
         if inner is not None and inner.type == "selector_expression":
-            return self._package_member(inner)
-        if inner is not None and inner.type == "identifier":
+            member = self._package_member(inner)
+        elif inner is not None and inner.type == "identifier":
             ref = self.references.get(self.node_key(inner))
-            if ref is not None and ref.kind == "import":
-                candidate = self.members.get(ref.binding_id)
-                if (
-                    candidate is not None
-                    and candidate.name.encode("utf-8") == inner.text
-                ):
-                    return candidate
-        return None
+            member = (
+                self.members.get(ref.binding_id)
+                if ref is not None and ref.kind == "import"
+                else None
+            )
+            if (
+                member is not None
+                and member.name.encode("utf-8") != inner.text
+            ):
+                member = None
+        else:
+            member = None
+        if member is None:
+            return None
+        return member, levels
 
     def _comma_ok_map_index(
         self, node: Any, width: int
@@ -1015,18 +1032,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
         Comma-ok binds exactly two names — the value read and the
         presence flag — so only a two-name LHS on an index
         expression whose operand names an imported map `var`
-        admits. The read itself still goes through
-        `_imported_index_read`, so the element's scalar-or-pointer
-        classification and the pins apply unchanged.
+        admits. A nested chain (`v, ok := lib.VM2[k1][k2]`) admits
+        when the outermost index's own container is still a map —
+        one `elem` descent per inner level. The read itself still
+        goes through `_imported_index_read`, so the element's
+        scalar-or-pointer classification and the pins apply
+        unchanged.
         """
         if width != 2 or node is None or node.type != "index_expression":
             return None
-        member = self._index_member(node)
-        if (
-            member is None
-            or member.kind != "var"
-            or member.type.kind != "map"
-        ):
+        resolved = self._index_member(node)
+        if resolved is None:
+            return None
+        member, levels = resolved
+        if member.kind != "var" or member.type.kind != "map":
+            return None
+        fact = member.type
+        for _ in range(levels):
+            fact = fact.elem if fact is not None else None
+        if fact is None or fact.kind != "map":
             return None
         return member
 
