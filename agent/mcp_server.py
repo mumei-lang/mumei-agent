@@ -2145,7 +2145,10 @@ def evidence_check_accept(sequence_json: str, check_json: str) -> str:
             return _err(f"{name} exceeds the bounded document limit")
         try:
             value = json.loads(text)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
+            # ValueError covers malformed JSON and the integer-digit
+            # limit; RecursionError covers pathological nesting — both
+            # stay tool errors, never propagated tracebacks.
             return _err(f"{name} is not valid JSON: {exc}")
         if type(value) is not dict:
             return _err(f"{name} must decode to a JSON object")

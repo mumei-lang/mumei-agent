@@ -66,7 +66,10 @@ def _read_evidence_subject(path: str) -> tuple[str, str]:
     data = _read_declared_bytes(path)
     try:
         value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # ValueError covers a malformed document and the integer-digit
+        # conversion limit; RecursionError covers pathological nesting.
+        # Both stay static errors, never a mismatch answer.
         raise ValueError("evidence document is not UTF-8 JSON") from exc
     if type(value) is not dict or value.get("schema_version") != EVIDENCE_SCHEMA:
         raise ValueError("evidence document is not mumei.verification-evidence/v1")

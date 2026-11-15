@@ -199,3 +199,33 @@ class TestEvidenceCheckAcceptTool:
             mcp_server.evidence_check_accept(oversized, json.dumps(check.to_dict()))
         )
         assert out["status"] == "error"
+
+
+class TestPathologicalJson:
+    def test_identity_tool_deep_nesting_is_error(self, tmp_path):
+        bad = tmp_path / "deep.json"
+        bad.write_text("[" * 30_000 + "]" * 30_000, encoding="utf-8")
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.evidence_identity_check(str(bad), str(src))
+        )
+        assert out["status"] == "error"
+
+    def test_accept_tool_deep_nesting_is_error(self):
+        deep = "[" * 30_000 + "]" * 30_000
+        sequence = _selected_sequence()
+        check = sequence.evidence_check(sequence.evidence_candidate(), "valid")
+        out = json.loads(
+            mcp_server.evidence_check_accept(deep, json.dumps(check.to_dict()))
+        )
+        assert out["status"] == "error"
+
+    def test_accept_tool_integer_digit_limit_is_error(self):
+        doc = '{"pad": ' + "1" * 5000 + "}"
+        sequence = _selected_sequence()
+        check = sequence.evidence_check(sequence.evidence_candidate(), "valid")
+        out = json.loads(
+            mcp_server.evidence_check_accept(doc, json.dumps(check.to_dict()))
+        )
+        assert out["status"] == "error"
