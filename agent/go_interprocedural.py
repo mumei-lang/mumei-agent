@@ -52,8 +52,9 @@ statement shape stay unsupported.
 Scalar conversions ``T(e)`` are effect-free — the result inherits the
 operand's dependencies; the type change itself (truncation, widening)
 is not modelled. The pure builtins ``min``/``max`` union their
-arguments' dependencies; every other builtin stays opaque
-(``len``/``cap`` can only take values no supported binding can hold).
+arguments' dependencies; ``len``/``cap`` additionally admit a single
+imported container ``var`` operand (``len(lib.VA)``) as a dep-free
+external read, and every other builtin stays opaque.
 Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 ``stale_dependents`` maps callee replacement to the summaries that must be
