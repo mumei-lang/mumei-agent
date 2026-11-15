@@ -1239,3 +1239,44 @@ def test_evidence_check_accept_route_rejects_malformed(tmp_path):
         sequence=str(seq_path), check=str(chk_path), output=None
     )
     assert main_accept(args) == 1
+
+
+def test_evidence_check_accept_cli_dispatch(tmp_path):
+    import subprocess
+    import sys as _sys
+
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    out = subprocess.run(
+        [
+            _sys.executable, "-m", "agent", "evidence-check-accept",
+            "--sequence", str(seq_path), "--check", str(chk_path),
+        ],
+        capture_output=True, text=True, cwd=str(tmp_path),
+        env={"PYTHONPATH": str(__import__("pathlib").Path(__file__).resolve().parents[1]), "PATH": "/usr/bin:/bin"},
+    )
+    assert out.returncode == 0, out.stderr
+    payload = json.loads(out.stdout)
+    assert payload["accepted"] is True
+
+
+def test_evidence_check_accept_route_refuses_hardlinked_input(tmp_path):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    link = tmp_path / "alias.json"
+    link.hardlink_to(chk_path)
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=str(link)
+    )
+    assert main_accept(args) == 1
+    # The declared check record is untouched.
+    assert json.loads(chk_path.read_text(encoding="utf-8"))[
+        "schema_version"
+    ] == "mumei.verifier-evidence-check/v1"
+
+
+def test_evidence_check_accept_route_rejects_oversize_document(tmp_path):
+    seq_path, chk_path = _seq_and_check_files(tmp_path)
+    seq_path.write_text(" " * (1024 * 1024 + 1), encoding="utf-8")
+    args = argparse.Namespace(
+        sequence=str(seq_path), check=str(chk_path), output=None
+    )
+    assert main_accept(args) == 1

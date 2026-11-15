@@ -53,7 +53,8 @@ def build_accept_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def _read_declared(path: str) -> dict:
-    data = Path(path).read_bytes()
+    with open(path, "rb") as handle:
+        data = handle.read(MAX_SNAPSHOT_BYTES + 1)
     if len(data) > MAX_SNAPSHOT_BYTES:
         raise ValueError("declared document exceeds the bounded read limit")
     try:
@@ -71,15 +72,16 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
         check = AttemptEvidenceCheck.from_dict(_read_declared(args.check))
         output_path = getattr(args, "output", None)
         if output_path is not None:
-            resolved = Path(output_path).resolve()
-            declared = {
-                Path(args.sequence).resolve(),
-                Path(args.check).resolve(),
-            }
-            if resolved in declared:
-                raise ValueError(
-                    "--output may not overwrite a declared input document"
-                )
+            out_path = Path(output_path)
+            for declared in (Path(args.sequence), Path(args.check)):
+                try:
+                    if declared.samefile(out_path):
+                        raise ValueError(
+                            "--output may not overwrite a declared "
+                            "input document"
+                        )
+                except FileNotFoundError:
+                    continue
         acceptance = evaluate_evidence_check(sequence, check)
         text = json.dumps(acceptance, indent=2) + "\n"
         if output_path is None:

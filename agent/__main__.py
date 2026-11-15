@@ -49,6 +49,7 @@ _SUBCOMMANDS = {
     "sol-summaries-check",
     "sol-summaries-reuse",
     "sol-summaries-attempt",
+    "evidence-check-accept",
 }
 
 
