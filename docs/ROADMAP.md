@@ -2411,9 +2411,16 @@ dot-imported name, or parentheses around either. The element fact
 must be scalar or pointer — a struct or nested-slice element is a
 value the fragment's model cannot hold — and anything that names no
 member stays closed: strings declare no `elem` fact, and a
-computed or nested operand (`f()[i]`, `lib.V2[0][0]`) is not a member
-name. An index write (`lib.VA[i] = v`) takes the imported-var-write
-path above instead — the LHS never reaches the read gate.
+computed operand (`f()[i]`) is not a member name. A nested index
+chain (`lib.V2[i][j]` on `[][]int64`, `lib.VM2["a"]["b"]` on
+`map[string]map[string]int64`) admits too: each level descends one
+`elem` fact and the result unions every level's index deps —
+evaluated innermost-first in Go's order — while intermediate
+container facts pin their own named and key identities; the final
+element keeps the scalar-or-pointer rule (`lib.VSM[k]` yields a
+struct and stays closed). An index write (`lib.VA[i] = v`) takes
+the imported-var-write path above instead — the LHS never reaches
+the read gate.
 
 A single-value read of an imported map var — `lib.VM[k]` — admits
 through the same gate: map type facts carry both a `key` fact and the

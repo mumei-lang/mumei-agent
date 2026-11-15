@@ -4085,7 +4085,9 @@ METHOD_LIB = {
         "var VSS []S\nvar VStr string\nvar V2 [][]int64\n"
         "type S2 struct{ N int64\n G string\n P *T }\nvar VS2 S2\n"
         "var VMK map[MK]int64\nvar VSM map[string]S\n"
-        "var PSTR *struct{ F T }\nvar PCH *chan T\n",
+        "var PSTR *struct{ F T }\nvar PCH *chan T\n"
+        "var V2T [][]T\nvar VM2 map[string]map[string]int64\n"
+        "type NS2 []int64\nvar V2NS []NS2\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
         "t.go": "package lib\ntype T int64\n",
@@ -6300,12 +6302,109 @@ def test_imported_index_read_slice_elem_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_nested_index_stays_closed(go_types_helper):
-    # `lib.V2[0][0]` — the outer operand is an index expression, not a
-    # member name.
+def test_imported_nested_index_is_admitted(go_types_helper):
+    # `lib.V2[i][j]` — each level descends one `elem` fact on
+    # `[][]int64`; the scalar element admits and the result unions
+    # both levels' index deps.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F() int64 { return lib.V2[0][0] }\n"
+        "func F(i, j int64) int64 { return lib.V2[i][j] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_imported_nested_index_literal_levels_are_dep_free(
+    go_types_helper,
+):
+    # `lib.V2[0][j]` — a literal level contributes nothing; only the
+    # computed index carries.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(j int64) int64 { return lib.V2[0][j] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_nested_map_index_is_admitted(go_types_helper):
+    # `lib.VM2["a"]["b"]` — `map[string]map[string]int64` descends two
+    # map facts to the scalar value; literal keys stay dep-free.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VM2[\"a\"][\"b\"] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_imported_nested_index_named_elem_pins(go_types_helper):
+    # `lib.V2T[i][j]` on `[][]T` — the final element's named identity
+    # pins like a single-level `[]T` element does. The conversion
+    # keeps the result `int64` so `T` can only pin through the read;
+    # `G` names `lib.T` so the member record exists to look up.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i, j int64) int64 { return int64(lib.V2T[i][j]) }\n"
+        "func G() int64 { _ = lib.T(0)\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert members["T"]["id"] in result.pinned
+
+
+def test_imported_nested_index_inner_container_pins(go_types_helper):
+    # `var V2NS []NS2` — the innermost container is itself a named
+    # type (`type NS2 []int64`): its identity must pin too, or
+    # redeclaring `NS2` flags nothing in `stale_dependents`. `G`
+    # names `lib.NS2` so the member record exists to look up.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i, j int64) int64 { return lib.V2NS[i][j] }\n"
+        "func G() int64 { _ = lib.NS2(nil)\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert members["NS2"]["id"] in result.pinned
+
+
+def test_imported_nested_index_struct_elem_stays_closed(
+    go_types_helper,
+):
+    # `lib.VSM[k]` yields an `S` — indexing its field chain
+    # (`lib.VSM[k].F`) is a selector on a computed operand, not a
+    # member index, and the element is not scalar anyway.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k string) int64 { return lib.VSM[k].F }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(

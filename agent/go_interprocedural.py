@@ -752,29 +752,97 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # container, element and map-key identities so redeclaring any
         # flags the summary through `stale_dependents`. The element
         # must be scalar-or-pointer — reading a struct element produces
-        # a value the fragment's model cannot hold. Everything else
-        # stays closed: strings have no container fact, nested or
-        # computed operands (`lib.VA[i][j]`, `f()[i]`) name no member,
-        # and imported-state
-        # writes (`lib.VA[i] = v`) match the imported-var-write rule.
-        # The comma-ok form `v, ok := lib.VM[k]` unpacks a map member's
-        # pair at the statement level and lands here as the same read.
+        # a value the fragment's model cannot hold. A nested index
+        # chain (`lib.V2[i][j]` on `[][]int64`) descends one `elem`
+        # fact per level and admits when the final element is scalar —
+        # the result unions every level's index deps. Everything else
+        # stays closed: strings have no container fact and a computed
+        # operand (`f()[i]`) names no member. The comma-ok form
+        # `v, ok := lib.VM[k]` unpacks a map member's pair at the
+        # statement level and lands here as the same read, and
+        # imported-state writes (`lib.VA[i] = v`) match the
+        # imported-var-write rule.
+        operand = node.child_by_field_name("operand")
         index = node.child_by_field_name("index")
-        member = self._index_member(node)
-        elem = member.type.elem if member is not None else None
+        # `lib.VA[i][j]` — a nested index chain: the outer index reads
+        # an element of the container the inner read yields, so each
+        # level descends one `elem` fact. `indexes` collects every
+        # index node outermost-first so evaluation can run in Go's
+        # order (the inner operand chain evaluates first).
+        indexes = [] if index is None else [index]
+        inner = operand
+        while True:
+            while (
+                inner is not None
+                and inner.type == "parenthesized_expression"
+            ):
+                inner = next(
+                    (
+                        c
+                        for c in inner.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if inner is None or inner.type != "index_expression":
+                break
+            indexes.append(inner.child_by_field_name("index"))
+            inner = inner.child_by_field_name("operand")
+        member = None
+        if inner is not None and inner.type == "selector_expression":
+            member = self._package_member(inner)
+        elif inner is not None and inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            if ref is not None and ref.kind == "import":
+                candidate = self.members.get(ref.binding_id)
+                if (
+                    candidate is not None
+                    and candidate.name.encode("utf-8") == inner.text
+                ):
+                    member = candidate
+        # Descend one `elem` fact per extra index level — `[][]T`
+        # yields `[]T` then `T`. Every container's own named identity
+        # pins at its level (a named `[]T` element, a map key).
+        container_kinds = {"slice", "array", "map"}
+        fact = member.type if member is not None else None
+        for _ in range(len(indexes) - 1):
+            if (
+                fact is None
+                or fact.kind not in container_kinds
+                or fact.elem is None
+            ):
+                raise _Unsupported(
+                    "non_parameter_reference", _span(node)
+                )
+            if fact.type_id:
+                self.pinned.add(fact.type_id)
+            if fact.key is not None and fact.key.type_id:
+                self.pinned.add(fact.key.type_id)
+            fact = fact.elem
+        elem = (
+            fact.elem
+            if fact is not None and fact.kind in container_kinds
+            else None
+        )
         if (
             index is None
             or member is None
             or member.kind != "var"
-            or member.type.kind not in {"slice", "array", "map"}
+            or fact is None
+            or fact.kind not in container_kinds
             or elem is None
             or elem.kind not in {"integer", "boolean", "pointer"}
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
         self._pin_member_type(member)
+        if fact.type_id:
+            # The innermost container's own named identity —
+            # `[]NS`/`map[K]NS` levels the descent stops on — must
+            # pin too, or redeclaring it flags nothing.
+            self.pinned.add(fact.type_id)
         if elem.type_id:
             self.pinned.add(elem.type_id)
-        key = member.type.key
+        key = fact.key
         if key is not None and key.type_id:
             self.pinned.add(key.type_id)
         transfers.append(
@@ -786,25 +854,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 imported=True,
             )
         )
-        if index.type in {
-            "int_literal",
-            "float_literal",
-            "imaginary_literal",
-            "rune_literal",
-            "interpreted_string_literal",
-            "raw_string_literal",
-        }:
-            # A literal index carries no dependencies — `lib.VM["k"]`
-            # reads the entry at a constant key like any other
-            # modelled index shape. `true`/`false` are excluded: Go
-            # allows shadowing the predeclared constants as variable
-            # names, so the node alone cannot prove a constant —
-            # the expression path resolves the `universe` reference
-            # (still dep-free) or the shadowing binding's deps.
-            return frozenset()
-        return self.expression(
-            index, fn, params, locals_, transfers, count, depth + 1
-        )
+        deps = frozenset()
+        for idx in reversed(indexes):
+            if idx is None:
+                raise _Unsupported(
+                    "non_parameter_reference", _span(node)
+                )
+            if idx.type in {
+                "int_literal",
+                "float_literal",
+                "imaginary_literal",
+                "rune_literal",
+                "interpreted_string_literal",
+                "raw_string_literal",
+            }:
+                # A literal index carries no dependencies —
+                # `lib.VM["k"]` reads the entry at a constant key
+                # like any other modelled index shape.
+                # `true`/`false` are excluded: Go allows shadowing
+                # the predeclared constants as variable names, so
+                # the node alone cannot prove a constant — the
+                # expression path resolves the `universe` reference
+                # (still dep-free) or the shadowing binding's deps.
+                continue
+            deps |= self.expression(
+                idx, fn, params, locals_, transfers, count, depth + 1
+            )
+        return deps
 
     def _imported_container_member(
         self, node: Any
