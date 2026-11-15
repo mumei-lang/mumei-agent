@@ -73,6 +73,25 @@ def _children(node):
     return [c for c in node.children if c.is_named]
 
 
+def _pattern_bindings(pat):
+    """Identifier names bound by a pattern, skipping every
+    `type` subtree (`Some(v)` binds `v`, not `Some`)."""
+    out = []
+
+    def walk(n):
+        t = n.child_by_field_name("type")
+        for c in _children(n):
+            if c is t:
+                continue
+            if c.type == "identifier":
+                out.append(c.text.decode())
+                continue
+            walk(c)
+
+    walk(pat)
+    return out
+
+
 def _descendants(node):
     out = []
 
@@ -356,9 +375,11 @@ class _Builder:
         cons = st.child_by_field_name("consequence")
         alt = st.child_by_field_name("alternative")
         merged = frozenset()
+        lc_pat = None
         if cond is not None:
             if cond.type == "let_condition":
                 lc_val = cond.child_by_field_name("value")
+                lc_pat = cond.child_by_field_name("pattern")
                 if lc_val is not None:
                     merged = self._expr(
                         lc_val, locals_, param_index, summary
@@ -368,6 +389,11 @@ class _Builder:
                     cond, locals_, param_index, summary
                 )
         left_locals = dict(locals_)
+        if lc_pat is not None:
+            # `if let Some(v) = it` — `v` binds the value's deps
+            # inside the consequence scope.
+            for bname in _pattern_bindings(lc_pat):
+                left_locals[bname] = merged
         right_locals = dict(locals_)
         left_ret = (
             self._statement(cons, left_locals, param_index, summary)
@@ -422,7 +448,13 @@ class _Builder:
                 scope = dict(locals_)
                 aret = None
                 for ac in _children(arm):
-                    if ac.type in {"match_pattern", "=>"}:
+                    if ac.type == "=>":
+                        continue
+                    if ac.type == "match_pattern":
+                        # `Some(v) => v` — `v` binds the
+                        # scrutinee's deps in this arm.
+                        for bname in _pattern_bindings(ac):
+                            scope[bname] = mdeps
                         continue
                     aret = self._statement(
                         ac, scope, param_index, summary
@@ -443,6 +475,22 @@ class _Builder:
         cond = st.child_by_field_name("condition")
         body = st.child_by_field_name("body")
         inner = dict(locals_)
+        lc_merged = frozenset()
+        if (
+            cond is not None
+            and cond.type == "let_condition"
+        ):
+            # `while let Some(v) = it` — the body reads the
+            # bound names, so evaluate the value first.
+            lc_val = cond.child_by_field_name("value")
+            lc_pat = cond.child_by_field_name("pattern")
+            if lc_val is not None:
+                lc_merged = self._expr(
+                    lc_val, inner, param_index, summary
+                )
+                if lc_pat is not None:
+                    for bname in _pattern_bindings(lc_pat):
+                        inner[bname] = lc_merged
         if st.type == "for_expression":
             # `for i in 0..n` — bind the pattern name to the
             # iterator's deps in the loop scope.
@@ -468,20 +516,14 @@ class _Builder:
                         ret = r if ret is None else ret | r
         finally:
             touched = self._writes.pop()
-        merged = frozenset()
-        if cond is not None:
-            if cond.type == "let_condition":
-                # `while let Some(x) = it` — the iterated value's
-                # deps join; pattern bindings stay unbound.
-                lc_val = cond.child_by_field_name("value")
-                if lc_val is not None:
-                    merged |= self._expr(
-                        lc_val, inner, param_index, summary
-                    )
-            else:
-                merged |= self._expr(
-                    cond, inner, param_index, summary
-                )
+        merged = lc_merged
+        if (
+            cond is not None
+            and cond.type != "let_condition"
+        ):
+            merged |= self._expr(
+                cond, inner, param_index, summary
+            )
         for name in list(locals_):
             deps = inner.get(name, frozenset())
             if deps != locals_[name] or name in touched:
@@ -610,15 +652,22 @@ class _Builder:
                     actual.insert(0, recv_deps)
                     actual_t = tuple(actual)
         if name is None or name not in self.functions:
-            # method calls, fn-pointers, macros — opaque record.
+            # method calls, fn-pointers, enum constructors
+            # (`Some(x)`), external `crate::f` — opaque record.
+            bound = (
+                locals_.get(name, frozenset())
+                if name is not None
+                else frozenset()
+            )
+            result = actual_union | bound
             cname = fn_expr.text.decode() if fn_expr is not None else None
             summary.calls.append(
                 RustCall(_span(node), cname, actual_t,
-                         None if void else actual_union)
+                         None if void else result)
             )
             if summary.effects != "state_writes":
                 summary.effects = "unknown"
-            return frozenset() if void else actual_union
+            return frozenset() if void else result
         callee = self.summaries.get(name)
         if callee is None:
             if self._inline_depth >= MAX_INLINE_DEPTH:
@@ -709,6 +758,58 @@ class _Builder:
             return self._block(node, locals_, param_index, summary) or frozenset()
         if t in {"break_expression", "continue_expression"}:
             return frozenset()
+        if t == "closure_expression":
+            # `|a, b| body` — the closure value's deps are the
+            # body's deps with its parameters bound to nothing;
+            # captured names carry their real deps.
+            cparams = node.child_by_field_name("parameters")
+            cbody = node.child_by_field_name("body")
+            if cbody is None:
+                return frozenset()
+            inner = dict(locals_)
+            if cparams is not None:
+                for p in _children(cparams):
+                    if p.type == "parameter":
+                        pp = p.child_by_field_name("pattern")
+                        for bname in (
+                            _pattern_bindings(pp)
+                            if pp is not None else ()
+                        ):
+                            inner[bname] = frozenset()
+                    elif p.type == "identifier":
+                        inner[p.text.decode()] = frozenset()
+            try:
+                return self._expr(
+                    cbody, inner, param_index, summary
+                )
+            except _Unsupported:
+                return frozenset()
+        if t == "closure_expression":
+            # `|a, b| body` — the closure value's deps are the
+            # body's deps with its parameters bound to nothing;
+            # captured names carry their real deps.
+            cparams = node.child_by_field_name("parameters")
+            cbody = node.child_by_field_name("body")
+            if cbody is None:
+                return frozenset()
+            inner = dict(locals_)
+            if cparams is not None:
+                for p in _children(cparams):
+                    if p.type == "parameter":
+                        pp = p.child_by_field_name("pattern")
+                        for bname in (
+                            _pattern_bindings(pp)
+                            if pp is not None else ()
+                        ):
+                            inner[bname] = frozenset()
+                    elif p.type == "identifier":
+                        inner[p.text.decode()] = frozenset()
+            try:
+                return self._expr(
+                    cbody, inner, param_index, summary
+                )
+            except _Unsupported:
+                return frozenset()
         if t == "unsafe_block":
             inner = next(
                 (c for c in _children(node)
@@ -793,7 +894,8 @@ _EXPR_TYPES = {
     "continue_expression", "tuple_expression",
     "range_expression", "array_expression", "struct_expression",
     "field_expression", "index_expression", "await_expression",
-    "macro_invocation", "generic_function",
+    "macro_invocation", "generic_function", "closure_expression",
+    "let_condition",
 }
 
 

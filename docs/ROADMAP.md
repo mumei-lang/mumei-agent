@@ -2573,6 +2573,13 @@ the consumer: the left-hand width must equal it.
   gets a dep index (over-approx). `unsafe { }` blocks act as
   plain blocks; `m!(tokens)` records an opaque call whose
   deps union every evaluable token.
+- `if let`/`while let`/`match`-arm patterns bind their
+  identifiers to the scrutinee's deps; closures
+  (`|a| a + x`) are values whose deps are the body's with
+  parameters bound empty; enum constructors (`Some(x)`)
+  and unresolved non-void calls record opaque `RustCall`s
+  carrying the args' (and bound callee's) deps and mark
+  `unknown` instead of closing.
 - `for i in it` binds the pattern to the iterator's deps;
   loop returns gain condition deps; `x.m(args)` method calls
   union the receiver deps into the opaque result; index/

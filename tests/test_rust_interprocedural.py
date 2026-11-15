@@ -241,3 +241,72 @@ fn f(x: u64) -> u64 { id::<u64>(x) }""",
 def test_slice2_tuple_pattern_binds():
     s = _fn("fn f((a, b): (u64, u64)) -> u64 { a + b }", "f")
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice3_if_let_binds_pattern():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    if let Some(v) = Some(x) { v } else { 0 }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice3_while_let_binds_pattern():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let mut s = 0u64;
+    while let Some(v) = Some(x) { s += v; break; }
+    s
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice3_match_arm_binds_pattern():
+    s = _fn(
+        """fn f(a: u64, b: u64) -> u64 {
+    match (a, b) { (x, y) => x + y }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice3_closure_value_and_call():
+    s = _fn(
+        """fn f(o: u64, x: u64) -> u64 {
+    let g = |a| a + x;
+    g(o)
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice3_enum_ctor_opaque():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let o = Some(x);
+    match o { Some(v) => v, None => 0 }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"
+
+
+def test_slice3_extern_path_call_opaque():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let y = std::cmp::max(x, 1);
+    y
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"
