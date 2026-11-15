@@ -334,6 +334,13 @@ Admitted:
   fields seed `"*"`; `g.extra = v` widens a callable's
   captured; an opaque `extends` seeds `"*"` with heritage
   deps plus the call's actuals.
+* `m.set`/`s.add` return the updated collection; Map/Set
+  method names dispatch before table entries; `bind`
+  prepends an earlier `bound` (first bound `this` wins, and
+  it overrides the call site's receiver); `apply` sorts
+  digit keys numerically; a depth-bounded invoke may-writes
+  composite actuals; `module.exports = exports` keeps the
+  live table.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -1794,9 +1801,16 @@ class _Builder:
                 # rebinds: earlier `exports.*` writes die with
                 # the old object, and the `exports` name
                 # detaches (it still aliases that object).
+                # Re-aliasing the LIVE table
+                # (`module.exports = exports`) keeps it:
+                # `exports.*` writes still reach the export.
                 self._cjs_whole = value
-                self._cjs_fields = _Composite({})
-                self._cjs_exports_detached = True
+                if (
+                    value is not self._cjs_fields
+                    and value is not self._cjs_seed
+                ):
+                    self._cjs_fields = _Composite({})
+                    self._cjs_exports_detached = True
                 return True
             self._cjs_fields.fields[path[0]] = value
             return True
@@ -4035,9 +4049,13 @@ class _Builder:
             # same shape an opaque callee would produce), so
             # a self-recursive function value terminates
             # instead of exhausting the interpreter stack.
+            # The opaque shape also may-writes every field of
+            # a composite actual — dropping those writes would
+            # under-approximate the callee's effects.
             result = _scalar_of(cval)
             for a in actual:
                 result |= a
+            self._opaque_call_writes(actual_values, result)
             return result
         self._invoke_depth += 1
         try:
@@ -4094,7 +4112,9 @@ class _Builder:
                 actual_values = list(bvals) + [None] * (
                     len(actual) - len(bvals)
                 )
-            if this_val is None and bthis is not None:
+            if bthis is not None:
+                # A bound `this` wins over the call site's
+                # receiver — `g.bind(o).call(p)` still sees `o`.
                 this_val = bthis
         # `this`/composite-actual marks last only for THIS call —
         # in-place mutation propagates the callee's writes, but a
@@ -4995,10 +5015,15 @@ class _Builder:
                 base.rest,
                 base.is_method,
             )
+            prev_deps, prev_vals, prev_this = (
+                base.bound if base.bound is not None
+                else ((), (), None)
+            )
             out.bound = (
-                tuple(_scalar_of(v) for v in bound),
-                tuple(bound),
-                this_val,
+                tuple(prev_deps)
+                + tuple(_scalar_of(v) for v in bound),
+                tuple(prev_vals) + tuple(bound),
+                prev_this if prev_this is not None else this_val,
             )
             out.origin = base.origin
             out.patterns = base.patterns
@@ -5017,7 +5042,19 @@ class _Builder:
         else:  # apply
             arr = vals[1] if len(vals) > 1 else None
             if isinstance(arr, _Composite):
-                call_vals = list(arr.fields.values())
+                # Array actuals bind positionally — digit keys
+                # sort numerically (`a[1]`/`a[0]` insertion order
+                # is not argument order); other keys follow.
+                digit_keys = sorted(
+                    (k for k in arr.fields if k.isdigit()),
+                    key=int,
+                )
+                call_vals = [arr.fields[k] for k in digit_keys]
+                call_vals += [
+                    arr.fields[k]
+                    for k in arr.fields
+                    if not k.isdigit()
+                ]
                 call_deps = [_scalar_of(v) for v in call_vals]
             elif arr is None:
                 call_vals = []
@@ -5175,6 +5212,15 @@ class _Builder:
                 for name, val in locals_.items():
                     if val is old:
                         locals_[name] = new
+                if prop in {"set", "add"}:
+                    # `m.set(k, v)`/`s.add(v)` return the
+                    # collection itself — chaining must keep
+                    # the updated entry table.
+                    return record(new)
+                if prop == "delete":
+                    # The boolean result observes the key and
+                    # the entry that may leave the table.
+                    return record(elem | actual_union)
                 return record(frozenset())
             if prop in {"keys", "values", "entries"}:
                 return record(_Composite({str(0): elem}))
@@ -5791,6 +5837,7 @@ class _Builder:
                 ctor_node.type == "identifier"
                 and ctor_node.text.decode()
                 in {"Map", "Set", "WeakMap", "WeakSet"}
+                and isinstance(raw_n, _External)
             ):
                 # `new Map([[k, v], ...])` / `new Set([v])` — a
                 # container instance; constructor entries seed
@@ -5936,12 +5983,14 @@ class _Builder:
                     )
                     if (
                         isinstance(base_val2, _Composite)
-                        and prop not in base_val2.fields
                         and (
-                            prop in _COLLECTION_METHODS
-                            or (
+                            (
                                 base_val2.klass is _MAP_SET_KLASS
                                 and prop in _MAP_SET_METHODS
+                            )
+                            or (
+                                prop not in base_val2.fields
+                                and prop in _COLLECTION_METHODS
                             )
                         )
                     ):

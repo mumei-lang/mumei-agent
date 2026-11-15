@@ -5668,3 +5668,88 @@ def test_opaque_extends_seeds_fields():
         " function f(x: number, B) { return new A(x).a; }"
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_map_set_chains_to_get():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new Map(); return m.set('a', x).get('a'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_map_delete_result_carries_key_deps():
+    s = _fn(
+        "function f(x: number, k: string) {"
+        " let m = new Map(); m.set('a', x);"
+        " return m.delete(k) ? 1 : 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_map_set_key_does_not_shadow_method_dispatch():
+    s = _fn(
+        "function f(x: number) {"
+        " let m = new Map(); m.set('get', x);"
+        " return m.get('a'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_local_class_map_shadows_builtin():
+    s = _fn(
+        "function f(x: number) { let y = 0;"
+        " let Map = class { constructor(v) { y = v; } };"
+        " new Map(x); return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_chained_bind_prepends_bound_actuals():
+    s = _fn(
+        "function f(x: number) { let g = (a) => a;"
+        " return g.bind(null, x).bind(null, 1)(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_bound_this_wins_over_call_receiver():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = function () { return this.v; };"
+        " let o = { v: x }, p = { v: 1 };"
+        " return g.bind(o).call(p); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_apply_args_use_numeric_order_not_insertion():
+    s = _fn(
+        "function f(x: number) { let g = (a, b) => b;"
+        " let a = []; a[1] = x; a[0] = 0;"
+        " return g.apply(null, a); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_depth_bound_still_writes_composite_actuals():
+    s = _fn(
+        "function f(x: number) { let o = { a: 0 };"
+        " let h = (v, n) => { o.a = v; if (n > 0) h(v, n - 1); };"
+        " h(x, 40); return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_exports_realias_keeps_exports_writes():
+    mod_a = (
+        "exports.g = (a) => a; module.exports = exports;"
+        " exports.h = (a) => a + 1;"
+    )
+    s = ts.summarize_typescript(
+        "const a = require('./a');"
+        " function f(x: number) { return a.h(x); }",
+        lambda spec: {"./a": mod_a}.get(spec),
+    )
+    fn = next(fn for fn in s.functions if fn.name == "f")
+    assert fn.available and fn.return_dependencies == frozenset({0})

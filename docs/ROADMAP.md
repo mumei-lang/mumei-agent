@@ -3496,6 +3496,24 @@ non-`_Class` expression seeds the instance's `"*"` with the
 heritage deps plus the call's actuals — an opaque parent
 ctor may write any `this` field.
 
+### C06 TypeScript collection-chain and callable-fixes review round (slice 61)
+
+Review-driven corrections: `m.set(k, v)`/`s.add(v)` return the
+updated collection so chained `.get`/`.has` keep the entry
+table; `m.delete(k)`'s boolean carries key + entry deps; a
+Map/Set method name takes dispatch priority over a table
+entry of the same name (`m.set('get', x)` stores data, never
+shadows `m.get`). A local `Map`/`Set` binding shadows the
+builtin only when it isn't an `_External` global — a local
+`class Map` runs its own ctor. `bind` on an already-bound
+callable prepends its earlier bound actuals and keeps the
+first bound `this`; a bound `this` overrides the call site's
+receiver. `apply` orders digit-keyed array fields
+numerically (insertion order is not argument order). An
+invoke-depth-bounded call still may-writes composite
+actuals' fields. `module.exports = exports` re-aliases the
+live table instead of detaching it.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
