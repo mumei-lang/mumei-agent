@@ -101,6 +101,7 @@ PREFIXES = {
 }
 ALLOWED = {
     ("ready", "started"),
+    ("ready", "cancelled"),
     ("running", "cancel_requested"),
     ("running", "exited"),
     ("running", "failed"),
@@ -2872,6 +2873,80 @@ def test_requests_are_independent_of_stamps_and_the_store():
         ValueError, match="^attempt execution requires a ready attempt$"
     ):
         store.current.request_execution()
+
+
+def test_withdraw_attempt_cancels_a_ready_current():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    withdrawn = sequence.withdraw_attempt()
+    assert withdrawn.current.state == "cancelled"
+    assert withdrawn.current.is_terminal
+    assert withdrawn.current.events == (AttemptEvent("cancelled", 0),)
+    assert sequence.current.state == "ready"
+    # Nothing dispatchable remains, but a fresh attempt can be
+    # reserved — withdrawal is not a sequence close.
+    assert withdrawn.next_dispatch() is None
+    resumed = withdrawn.begin_attempt()
+    assert resumed.current.attempt_number == 2
+    assert resumed.current.state == "ready"
+    assert resumed.request_execution().attempt_number == 2
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_withdraw_attempt_state_matrix(state):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record(state),))
+    if state == "ready":
+        assert sequence.withdraw_attempt().current.state == "cancelled"
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt withdrawal requires a ready attempt$"
+        ):
+            sequence.withdraw_attempt()
+
+
+def test_withdraw_attempt_requires_a_reserved_attempt():
+    sequence = AttemptSequence(FINGERPRINT, 10)
+    with pytest.raises(
+        ValueError, match="^attempt withdrawal requires a reserved attempt$"
+    ):
+        sequence.withdraw_attempt()
+
+
+def test_withdraw_attempt_rejects_a_closed_sequence():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    closed = sequence.select_result(output)
+    with pytest.raises(
+        ValueError, match="^attempt withdrawal requires a ready attempt$"
+    ):
+        closed.withdraw_attempt()
+
+
+def test_withdrawn_attempt_reconciles_a_matching_host_report():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    withdrawn = sequence.withdraw_attempt()
+    # A host reporting the same ready -> cancelled observation extends
+    # the lineage to an identical sequence; the direct transition is
+    # shared vocabulary, not a withdrawal-only shortcut.
+    reported = sequence.reconcile_report(withdrawn.current)
+    assert reported == withdrawn
+
+
+def test_withdrawn_attempt_is_not_cancellation_or_selection():
+    # A withdrawn record never ran: it cannot produce a cancellation
+    # request, an output binding or an evidence candidate, and it is
+    # not a selected result (a selected result still requires exit).
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    withdrawn = sequence.withdraw_attempt()
+    with pytest.raises(
+        ValueError, match="^attempt cancellation requires a running attempt$"
+    ):
+        withdrawn.request_cancellation()
+    with pytest.raises(
+        ValueError, match="^attempt execution requires a ready attempt$"
+    ):
+        withdrawn.request_execution()
+    with pytest.raises(ValueError, match="^evidence candidate requires"):
+        withdrawn.evidence_candidate()
+    assert withdrawn.selected_result is None
 
 
 def test_requests_are_passive_without_io_clock_or_spawn(monkeypatch, capsys):
