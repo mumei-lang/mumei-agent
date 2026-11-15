@@ -13,6 +13,7 @@ fragment stays closed (gap recorded).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass, field
 
@@ -298,6 +299,16 @@ def _ref_inner(node):
     )
 
 
+def _unparen(node):
+    """`(e)` — parentheses are transparent: unwrap to the inner
+    expression so `(p)`/`&mut (p)`/`&mut (*p)` behave exactly like
+    their unwrapped forms."""
+    while node is not None and node.type == "parenthesized_expression":
+        kids = [c for c in _children(node)]
+        node = kids[0] if len(kids) == 1 else None
+    return node
+
+
 def _arg_root(node):
     """Innermost identifier under reference/member/index
     wrappers — the slot a `&mut` argument writes through."""
@@ -393,6 +404,7 @@ class _Builder:
         self._in_progress: set = set()
         self._type_envs: list = []
         self._mut_ref_params: list = []
+        self._block_decls: list = []
 
     # -- unit scan -------------------------------------------------
 
@@ -587,15 +599,53 @@ class _Builder:
 
     # -- statements -------------------------------------------------
 
+    @contextlib.contextmanager
+    def _scope(self, locals_, param_index):
+        """A lexical scope — `let` bindings die with the block.
+
+        `param_index`, the current type env and the `&mut`-alias set
+        are only ever written by `let`, so they restore wholesale;
+        `locals_` is also written by assignments to outer names, so
+        only names a `let` bound inside get their old entry back.
+        """
+        self._block_decls.append(set())
+        prev_index = dict(param_index)
+        prev_types = (
+            dict(self._type_envs[-1]) if self._type_envs else {}
+        )
+        prev_muts = (
+            set(self._mut_ref_params[-1])
+            if self._mut_ref_params else set()
+        )
+        prev_locals = dict(locals_)
+        try:
+            yield
+        finally:
+            bound = self._block_decls.pop()
+            param_index.clear()
+            param_index.update(prev_index)
+            if self._type_envs:
+                self._type_envs[-1].clear()
+                self._type_envs[-1].update(prev_types)
+            if self._mut_ref_params:
+                self._mut_ref_params[-1].clear()
+                self._mut_ref_params[-1].update(prev_muts)
+            for name in bound:
+                if name in prev_locals:
+                    locals_[name] = prev_locals[name]
+                else:
+                    locals_.pop(name, None)
+
     def _block(self, block, locals_, param_index, summary):
         ret = None
-        for st in _children(block):
-            self.count[0] += 1
-            if self.count[0] > MAX_NODES:
-                raise _Unsupported("analysis_limit", _span(st))
-            r = self._statement(st, locals_, param_index, summary)
-            if r is not None:
-                ret = r if ret is None else ret | r
+        with self._scope(locals_, param_index):
+            for st in _children(block):
+                self.count[0] += 1
+                if self.count[0] > MAX_NODES:
+                    raise _Unsupported("analysis_limit", _span(st))
+                r = self._statement(st, locals_, param_index, summary)
+                if r is not None:
+                    ret = r if ret is None else ret | r
         # A block's trailing bare expression is its value —
         # handled inside _statement's expression arm.
         return ret
@@ -620,25 +670,36 @@ class _Builder:
             ltype = _type_name(st.child_by_field_name("type"))
             type_root = None
             write_root = None
-            if val is not None:
+            # Type inheritance and slot aliasing only make sense for
+            # a plain `let q = ...` binding: a `&mut q`/`(a, b)`
+            # pattern copies or destructures the value, so the bound
+            # name neither carries `p`'s type nor shares `p`'s slot.
+            if val is not None and pat.type == "identifier":
                 # `let q = p` / `let q = &mut p` — no annotation:
                 # inherit the source binding's type so `q.m()`
                 # still resolves the impl's method. A field/index
                 # read (`let q = p.v`) binds the field's own type —
                 # inheriting `p`'s would resolve the wrong impl, so
                 # only transparent identifier/reference vals count.
-                if val.type in {"identifier", "self"}:
-                    type_root = val.text.decode()
+                vsrc = _unparen(val)
+                if vsrc is not None and vsrc.type in {
+                    "identifier",
+                    "self",
+                }:
+                    type_root = vsrc.text.decode()
                     # A moved `&mut` param: writes via `q` reach `p`.
                     write_root = type_root
-                elif val.type == "reference_expression":
-                    inner = _ref_inner(val)
+                elif (
+                    vsrc is not None
+                    and vsrc.type == "reference_expression"
+                ):
+                    inner = _unparen(_ref_inner(vsrc))
                     if (
                         inner is not None
                         and inner.type in {"identifier", "self"}
                     ):
                         type_root = inner.text.decode()
-                    elif _is_mut_ref(val) and inner is not None:
+                    elif _is_mut_ref(vsrc) and inner is not None:
                         # `let q = &mut *p` / `let q = &mut p.v` —
                         # writes through `q` reach `p`'s pointee.
                         write_root = _arg_root(inner)
@@ -661,6 +722,8 @@ class _Builder:
                     self._decls[-1].add(bname)
                 if ltype is not None and self._type_envs:
                     self._type_envs[-1][bname] = ltype
+                if self._block_decls:
+                    self._block_decls[-1].add(bname)
                 if (
                     write_root is not None
                     and write_root in mut_params
@@ -669,6 +732,9 @@ class _Builder:
                     # `let q = p` re-binds a `&mut` parameter —
                     # writes rooted at `q` are writes through `p`.
                     param_index[bname] = param_index[write_root]
+                    # `q` re-binds a `&mut`, so it is one itself:
+                    # `let r = q` keeps the alias chain.
+                    self._mut_ref_params[-1].add(bname)
             return None
         if t == "return_expression":
             val = next(
@@ -914,12 +980,15 @@ class _Builder:
         try:
             ret = None
             if body is not None:
-                for c in _children(body):
-                    r = self._statement(
-                        c, inner, param_index, summary
-                    )
-                    if r is not None:
-                        ret = r if ret is None else ret | r
+                # Loop-body `let`s are scoped to the body — the
+                # shared binding maps restore like a block's.
+                with self._scope(inner, param_index):
+                    for c in _children(body):
+                        r = self._statement(
+                            c, inner, param_index, summary
+                        )
+                        if r is not None:
+                            ret = r if ret is None else ret | r
         finally:
             touched = self._writes.pop()
         merged = lc_merged

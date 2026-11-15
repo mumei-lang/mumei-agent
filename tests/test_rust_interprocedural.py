@@ -1086,3 +1086,98 @@ fn f(a: A, k: u64) -> u64 { let q = a.inner; q.get(k) }""",
     )
     assert s.available
     assert 1 in s.return_dependencies
+
+
+def test_review6_paren_rebind_keeps_receiver_type():
+    # `let mut q = (p)` — parens are transparent: `q` still
+    # inherits `p`'s type so `q.update(x)` resolves the impl
+    # method and its write projects onto `q`'s slot.
+    s = _fn(
+        """struct P { v: u64 }
+impl P { fn update(&mut self, x: u64) { self.v = x; } }
+fn f(p: P, x: u64) -> u64 { let mut q = (p); q.update(x); q.v }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_review6_paren_mut_rebind_keeps_param_write():
+    # `let q = (p)` moves the `&mut` reference exactly like
+    # `let q = p` — writes through `q` reach `p`'s pointee.
+    s = _fn(
+        """struct P { v: u64 }
+impl P { fn set(&mut self, x: u64) { self.v = x; } }
+fn f(p: &mut P, v: u64) { let q = (p); q.set(v); }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    assert s.param_writes.get(0) == frozenset({0, 1})
+
+
+def test_review6_paren_mut_borrow_stays_local():
+    # `let q = &mut (p)` borrows the local binding like
+    # `let q = &mut p` — it must NOT alias `p`'s pointee.
+    s = _fn(
+        """fn f(p: &mut u64, v: u64) { let q = &mut (p); }""",
+        "f",
+    )
+    assert s.available
+    assert not getattr(s, "param_writes", None)
+    assert s.effects == "none_in_supported_fragment"
+
+
+def test_review6_inner_shadow_restores_param_alias():
+    # An inner-block `let q = p` shadows outer `q` only inside
+    # the block — after it ends, `*q = v` writes `q`'s own slot.
+    s = _fn(
+        """struct P { v: u64 }
+fn f(p: &mut P, q: &mut P, v: u64) { { let q = p; } *q = v; }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    assert s.param_writes.get(0) is None
+    assert s.param_writes.get(1) == frozenset({1, 2})
+
+
+def test_review6_ref_pattern_does_not_alias():
+    # `let &mut mut q = p` copies `*p` into a local — `q`'s
+    # writes are local, never writes through `p`.
+    s = _fn(
+        """struct P { v: u64 }
+fn f(p: &mut P, v: u64) { let &mut mut q = p; q.v = v; }""",
+        "f",
+    )
+    assert s.available
+    assert not getattr(s, "param_writes", None)
+    assert s.effects == "none_in_supported_fragment"
+
+
+def test_review6_alias_chain_propagates():
+    # `let q = p; let r = q` — `r` re-binds the same `&mut`,
+    # so writes through `r` still reach `p`'s pointee.
+    s = _fn(
+        """fn f(p: &mut u64, v: u64) { let q = p; let r = q; *r = v; }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    assert s.param_writes.get(0) == frozenset({0, 1})
+
+
+def test_review6_loop_body_alias_does_not_leak():
+    # A `let` inside a loop body is scoped to the body — the
+    # alias must not survive past the loop.
+    s = _fn(
+        """struct P { v: u64 }
+fn f(p: &mut P, q: &mut P, v: u64) {
+    loop { let q = p; break; }
+    *q = v;
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    assert s.param_writes.get(0) is None
+    assert s.param_writes.get(1) == frozenset({1, 2})
