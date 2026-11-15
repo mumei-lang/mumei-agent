@@ -7499,6 +7499,40 @@ def test_index_element_field_read_pins_element_type(go_types_helper):
     assert vsm.type.elem.type_id in result.pinned
 
 
+def test_deref_write_through_index_element_evaluates_indexes(
+    go_types_helper,
+):
+    # `*lib.VSS[lib.Idx(&x, y)].P = 0` — the indexes inside the
+    # field operand still evaluate: `Idx`'s write through `&x` folds
+    # into `x` exactly like `lib.Set(&x, y)` does.
+    lib = {
+        "lib": {
+            "s.go": (
+                "package lib\n"
+                "type T int64\ntype S struct{ P *int64 }\n"
+                "var VSS []S\n"
+                "func Idx(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            ),
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(y int64) int64 {\n"
+        "\tvar x int64\n"
+        "\t*lib.VSS[lib.Idx(&x, y)].P = 0\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
 def test_computed_index_element_field_read_stays_closed(go_types_helper):
     # `g()[0].F` — the operand names no imported member, so the field
     # read stays closed like `f()[i]` does.

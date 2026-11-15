@@ -417,8 +417,9 @@ class _Builder:
 
     def _imported_field_read(
         self, node: Any
-    ) -> tuple[PackageMember, PackageMember] | None:
-        """The `(struct member, field member)` pair `lib.VS.F` names.
+    ) -> tuple[PackageMember, PackageMember, tuple[Any, ...]] | None:
+        """The `(struct member, field member, index nodes)` triple
+        `lib.VS.F` names.
 
         The operand resolves to an imported `var` member like a member
         read — `lib.VS`, `VS` under a dot import, or parentheses around
@@ -434,6 +435,7 @@ class _Builder:
         field = node.child_by_field_name("field")
         if operand is None or field is None:
             return None
+        index_nodes: list[Any] = []
         while operand.type == "parenthesized_expression":
             operand = next(
                 (c for c in operand.named_children if c.type != "comment"),
@@ -462,6 +464,25 @@ class _Builder:
                 fact = fact.elem if fact is not None else None
             if fact is None:
                 return None
+            index_nodes.append(operand.child_by_field_name("index"))
+            inner = operand.child_by_field_name("operand")
+            while True:
+                while (
+                    inner is not None
+                    and inner.type == "parenthesized_expression"
+                ):
+                    inner = next(
+                        (
+                            c
+                            for c in inner.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if inner is None or inner.type != "index_expression":
+                    break
+                index_nodes.append(inner.child_by_field_name("index"))
+                inner = inner.child_by_field_name("operand")
             base = member
         elif operand.type == "identifier":
             ref = self.references.get(self.node_key(operand))
@@ -487,7 +508,7 @@ class _Builder:
             or field_member.type.kind not in {"integer", "boolean", "pointer"}
         ):
             return None
-        return base, field_member
+        return base, field_member, tuple(index_nodes)
 
     def _bound_field_read(
         self,
@@ -1176,7 +1197,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # beside the field's pointee.
                     pair = self._imported_field_read(cur)
                     if pair is not None:
-                        base, field_member = pair
+                        base, field_member, index_nodes = pair
                         if (
                             field_member.type.kind == "pointer"
                             and (
@@ -1187,6 +1208,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         ):
                             self.pinned.add(base.id)
                             self._pin_fact_identities(base.type)
+                            # `*lib.VSS[f()].P = v` — the indexes inside
+                            # the field operand still evaluate, so they
+                            # join `extras` outermost-first like the
+                            # chain's own index nodes.
+                            extras.extend(index_nodes)
                             member = field_member
                             break
                 cur = cur.child_by_field_name("operand")
@@ -1509,7 +1535,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # flags the summary.
                 pair = self._imported_field_read(inner)
                 if pair is not None and pair[1].type.kind == "pointer":
-                    base, field_member = pair
+                    base, field_member, _ = pair
                     self.pinned.add(base.id)
                     self._pin_fact_identities(base.type)
                     member = field_member
@@ -2884,7 +2910,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                 pair = self._imported_field_read(node)
                 if pair is not None:
-                    base, field_member = pair
+                    base, field_member, _ = pair
                     # The transfer targets the field's identity; pin
                     # the base member's own identity too so redeclaring
                     # `VS` in its own file still flags the summary. An
