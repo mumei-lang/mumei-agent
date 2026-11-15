@@ -482,6 +482,7 @@ def main_reuse(args: argparse.Namespace | None = None) -> int:
                 by_id[f.binding_id] if f.binding_id in reusable else f
                 for f in live.functions
             ),
+            live.target_arch,
         )
         document = json.dumps(merged.to_dict(), indent=2, sort_keys=True) + "\n"
         _emit(document, args.output)

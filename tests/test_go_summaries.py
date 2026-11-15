@@ -634,6 +634,28 @@ def test_reuse_merges_declared_and_fresh_summaries(tmp_path, capsys):
     )
 
 
+def test_reuse_output_declares_its_target_arch(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    merged_path = tmp_path / "merged.json"
+    code, _, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper, manifest_path, source,
+            extra=["--output", str(merged_path)],
+        ),
+    )
+    assert code == 0 and err == ""
+    merged = json.loads(merged_path.read_text(encoding="utf-8"))
+    assert merged["target_arch"] == "amd64"
+    # A merged manifest is itself reusable for the same target.
+    code, _, err = _run_reuse(
+        capsys, _reuse_args(helper, merged_path, source)
+    )
+    assert code == 0 and err == ""
+
+
 def test_reuse_rejects_a_manifest_from_another_target_arch(
     tmp_path, capsys
 ):
