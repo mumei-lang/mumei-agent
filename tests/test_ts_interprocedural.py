@@ -1409,13 +1409,12 @@ def test_dynamic_subscript_read_unions_fields():
     assert s.available and s.return_dependencies == frozenset({0, 1, 2})
 
 
-def test_dynamic_subscript_write_closes():
+def test_dynamic_subscript_write_admits():
     s = _fn(
         "function f(x: number, k: number): number {"
         " let o = {a: x}; o[k] = x; return o.a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_member_write_on_scalar_closes():
@@ -4385,3 +4384,77 @@ def test_dynamic_member_call_union():
     )
     assert s.available
     assert s.return_dependencies == frozenset({0, 1})
+
+
+# --- slice 47: dynamic member writes ----------------------------
+
+
+def test_dynamic_member_write_admits():
+    # `o[k] = v` — every field is a may-write target.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: 0, b: 0}; const k = \"a\";"
+        " o[k] = x; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_write_other_field():
+    # A sibling field is a may-write too — over-approximates.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: 0, b: 0}; const k = \"a\";"
+        " o[k] = x; return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_write_keeps_callable():
+    # A callable field stays invocable through the may-write —
+    # its captured set widens instead of collapsing.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {m() { return 1; }}; const k = \"m\";"
+        " o[k] = x; return o.m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_dynamic_member_write_invokes_setters():
+    # `c[k] = v` where the class has a setter: the setter may
+    # run — its `this` write lands on the instance.
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f: number = 0; set p(v: number) { this.f = v; } }"
+        " const c = new C(); const k = \"p\";"
+        " c[k] = x; return c.f; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_read_invokes_getters():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { get p() { return x; } }"
+        " const c = new C(); const k = \"p\";"
+        " return c[k]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_write_nested():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: {n: 0}, b: {n: 0}}; const k = \"a\";"
+        " o[k].n = x; return o.a.n; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_member_write_class_static():
+    s = _fn(
+        "class C { static s: number = 0; }"
+        " function f(x: number): number {"
+        " const k = \"s\"; C[k] = x; return C.s; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

@@ -3274,6 +3274,20 @@ register under synthetic names a static lookup can never
 produce, so the dynamic call finds them among the candidates
 instead of skipping them. `o?.[k](x)` admits identically.
 
+### C06 TypeScript dynamic member writes (slice 47)
+
+`o[k] = v` admits: the target field is unknown, so every
+field at that level takes the write as a may-write — scalars
+union the value's deps, `_Callable` fields widen their
+captured set (staying invocable, since the real write may
+have hit a sibling), composites descend the rest of the
+path — and every setter up the class chain is invoked with
+the value as its actual. Reads get the matching lift: a
+dynamic `o[k]` unions every field AND invokes every getter
+up the chain, since the key may name an accessor. `C[k] = v`
+applies the same may-write to the statics table and static
+setters.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

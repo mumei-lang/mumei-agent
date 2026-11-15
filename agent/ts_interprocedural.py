@@ -87,7 +87,12 @@ Admitted:
   the composite to the union of its leaf deps), string-key
   subscripts `o["f"]` act like member syntax, a dynamic `o[k]`
   read unions every field at that level plus the index's deps
-  (writes stay closed), and a missing field reads as `undefined`
+  (every getter up the class chain is invoked too — the key may
+  name an accessor), a dynamic write `o[k] = v` is a may-write
+  on every field (scalars union the value's deps, callables
+  widen their captured set and stay invocable, composites
+  descend the rest of the path; every setter up the class chain
+  runs), and a missing field reads as `undefined`
   (no deps). Reading or passing a whole composite flattens to the
   union of its fields. Aliasing is reference-faithful only at the
   name level: `p = o` shares the composite and a member write
@@ -791,6 +796,52 @@ def _composite_set(composite, path, value, conditional, span):
         fields[key] = _composite_set(
             sub, path[1:], value, conditional, span
         )
+    return _Composite(fields, composite.klass)
+
+
+def _composite_dyn_set(composite, path, value, span):
+    """Copy-on-write member store through a dynamic key:
+    `composite[k].rest = value`. The target field is unknown, so
+    every field is a may-write — a scalar unions the value's
+    deps, a `_Callable` widens its captured set (keeping it
+    invocable — the real write may not have replaced it), a
+    `_Composite` descends the rest of the path (or collapses to
+    the union at the last step)."""
+    fields = dict(composite.fields)
+    key = path[0]
+    if key is not None:
+        if len(path) == 1:
+            old = fields.get(key)
+            fields[key] = (
+                _merge_vals(old, value) if old is not None else value
+            )
+        else:
+            sub = fields.get(key)
+            if not isinstance(sub, _Composite):
+                raise _Unsupported("unsupported_expression", span)
+            fields[key] = _composite_dyn_set(
+                sub, path[1:], value, span
+            )
+        return _Composite(fields, composite.klass)
+    vdeps = _scalar_of(value)
+    for fname, fval in fields.items():
+        if len(path) > 1 and isinstance(fval, _Composite):
+            fields[fname] = _composite_dyn_set(
+                fval, path[1:], value, span
+            )
+        elif isinstance(fval, _Callable):
+            widened = _Callable(
+                fval.node,
+                fval.params,
+                fval.defaults,
+                fval.captured | vdeps,
+                fval.rest,
+                fval.is_method,
+            )
+            widened.param_props = fval.param_props
+            fields[fname] = widened
+        else:
+            fields[fname] = _scalar_of(fval) | vdeps
     return _Composite(fields, composite.klass)
 
 
@@ -2749,7 +2800,41 @@ class _Builder:
                 # the scalar's deps (`x.f`, `s.length`).
                 return _scalar_of(val) | index_deps
             if key is None:
-                return _scalar_of(val) | index_deps
+                # `o[k]` — every field is a candidate, and every
+                # getter up the class chain may run: invoke them
+                # all and union the results.
+                read_union = _scalar_of(val) | index_deps
+                klass = val.klass
+                seen_getters: set = set()
+                while klass is not None:
+                    for gkey, gval in klass.getters.items():
+                        if (
+                            gkey in val.fields
+                            or id(gval) in seen_getters
+                        ):
+                            continue
+                        seen_getters.add(id(gval))
+                        result = self._invoke_callable(
+                            gval,
+                            (),
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            _span(node),
+                            this_val=val,
+                        )
+                        transfers.append(
+                            TsCall(
+                                _span(node),
+                                node.text.decode(),
+                                (),
+                                result,
+                            )
+                        )
+                        read_union |= result
+                    klass = klass.parent
+                return read_union
             if key not in val.fields:
                 # Missing fields on an instance fall through to
                 # the class's accessors/methods (the prototype) —
@@ -2807,14 +2892,17 @@ class _Builder:
         conditional,
     ) -> None:
         """`o.f = v` — copy-on-write the field into the base binding.
-        The base must bind a `_Composite` in a writable scope; a
-        dynamic subscript key can't pick a field, so it closes.
+        The base must bind a `_Composite` in a writable scope. A
+        dynamic subscript key can't pick the field, so every field
+        at that level takes the write as a may-write and every
+        setter up the class chain is invoked.
         Composite bindings alias (`p = o` shares the instance), so
         the write propagates to every name holding it."""
         base, path, _ = self._member_target(
             node, params, locals_, transfers, count
         )
-        if any(key is None for key in path):
+        has_dynamic = any(key is None for key in path)
+        if has_dynamic and base == "super":
             raise _Unsupported("unsupported_expression", _span(node))
         if base == "super":
             # `super.f = v` stores on `this`: an inherited
@@ -2858,6 +2946,27 @@ class _Builder:
                 raise _Unsupported("binding_unavailable", _span(node))
         else:
             old = target.get(base)
+        if isinstance(old, _Class) and has_dynamic:
+            # `C[k] = v` — every static field is a may-write and
+            # every static setter may run.
+            vdeps = _scalar_of(value)
+            for sname, sval in list(old.statics.items()):
+                old.statics[sname] = sval | vdeps
+            for sset in old.ssetters.values():
+                result = self._invoke_callable(
+                    sset,
+                    (vdeps,),
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    this_val=old,
+                )
+                transfers.append(
+                    TsCall(_span(node), node.text.decode(), (vdeps,), result)
+                )
+            return
         if isinstance(old, _Class) and len(path) == 1:
             if (
                 path[0] in old.ssetters
@@ -2887,6 +2996,45 @@ class _Builder:
             return
         if not isinstance(old, _Composite):
             raise _Unsupported("unsupported_expression", _span(node))
+        if has_dynamic:
+            # `o[k] = v` — the written field is unknown, so every
+            # field at that level is a may-write and every setter
+            # up the class chain may run.
+            vdeps = _scalar_of(value)
+            klass = old.klass
+            seen_setters: set = set()
+            while klass is not None:
+                for skey, sset in klass.setters.items():
+                    if skey in old.fields or id(sset) in seen_setters:
+                        continue
+                    seen_setters.add(id(sset))
+                    result = self._invoke_callable(
+                        sset,
+                        (vdeps,),
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        _span(node),
+                        this_val=old,
+                    )
+                    transfers.append(
+                        TsCall(
+                            _span(node),
+                            node.text.decode(),
+                            (vdeps,),
+                            result,
+                        )
+                    )
+                klass = klass.parent
+            new = _composite_dyn_set(old, path, value, _span(node))
+            for name, val in locals_.items():
+                if val is old:
+                    locals_[name] = new
+            for name, val in self.module_locals.items():
+                if val is old:
+                    self.module_locals[name] = new
+            return
         if (
             len(path) == 1
             and old.klass is not None
