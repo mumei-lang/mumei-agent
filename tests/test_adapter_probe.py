@@ -10,8 +10,10 @@ from agent.adapter_probe import (
     AdapterProbeOutcome,
     AdapterProbeRequest,
     MAX_PROBE_HISTORY,
+    MAX_PLAN_ROUNDS,
     PROBE_SCHEMA,
     observe_probes,
+    plan_with_probes,
     probe_request_for,
     probe_requests_for,
     run_probe,
@@ -479,3 +481,109 @@ def test_probe_history_validation():
         AdapterProbeHistory(
             "zendingsol.host.lean_scaffold", "nothex"
         )
+
+
+def test_plan_with_probes_selects_after_probe():
+    registry = _registry(
+        probe_argv=[sys.executable, "-c", "import sys; sys.exit(0)"]
+    )
+    policy = PlannerPolicy()
+    out = plan_with_probes(
+        registry, _route(), policy, stamp=1, tool_version="4.0.0"
+    )
+    assert out.plan.selected is not None
+    assert (
+        out.plan.selected.adapter_id
+        == "zendingsol.host.lean_scaffold"
+    )
+    assert [o.availability for o in out.observations] == [
+        "available"
+    ]
+
+
+def test_plan_with_probes_missing_stays_excluded():
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )
+    assert out.plan.selected is None
+    assert [o.availability for o in out.observations] == ["missing"]
+
+
+def test_plan_with_probes_already_selected_runs_nothing():
+    registry = _registry()
+    policy = PlannerPolicy()
+    observed = (
+        RuntimeObservation(
+            "zendingsol.host.lean_scaffold",
+            availability="available",
+            tool_version="4.0.0",
+            stamp=1,
+        ),
+    )
+    out = plan_with_probes(
+        registry, _route(), policy, observed, stamp=2
+    )
+    assert out.plan.selected is not None
+    assert out.observations == ()
+
+
+def test_plan_with_probes_no_requests_stops():
+    m = _manifest()
+    del m["probe_argv"]
+    registry = AdapterRegistry()
+    registry.register(AdapterDescriptor.from_manifest(m))
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )
+    assert out.plan.selected is None
+    assert out.observations == ()
+
+
+def test_plan_with_probes_validation():
+    registry = _registry()
+    with pytest.raises(ValueError):
+        plan_with_probes(object(), _route(), PlannerPolicy(), stamp=1)
+    with pytest.raises(ValueError):
+        plan_with_probes(registry, object(), PlannerPolicy(), stamp=1)
+    with pytest.raises(ValueError):
+        plan_with_probes(registry, _route(), object(), stamp=1)
+    with pytest.raises(ValueError):
+        plan_with_probes(registry, _route(), PlannerPolicy(), stamp=0)
+    for bad in (0, -1, MAX_PLAN_ROUNDS + 1):
+        with pytest.raises(ValueError):
+            plan_with_probes(
+                registry, _route(), PlannerPolicy(), stamp=1,
+                rounds=bad,
+            )
+
+
+def test_plan_with_probes_reprobe_replaces_observation():
+    """A second probe of the same adapter must not trip plan()'s
+    duplicate-observation rejection."""
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stamp=1, rounds=2
+    )
+    assert out.plan.selected is None
+    # Deduped by adapter id so the result chains into plan().
+    assert [o.availability for o in out.observations] == ["missing"]
+    registry.plan(_route(), PlannerPolicy(), out.observations)
+
+
+def test_plan_with_probes_replaces_initial_observation():
+    """An adapter carrying a stale initial observation that is
+    re-probed lands in `observed` exactly once."""
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    stale = (
+        RuntimeObservation(
+            "zendingsol.host.lean_scaffold",
+            availability="unknown",
+            stamp=1,
+        ),
+    )
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stale, stamp=2
+    )
+    assert out.plan.selected is None
+    assert len(out.observations) == 1
