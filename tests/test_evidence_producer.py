@@ -72,9 +72,25 @@ def test_identity_match(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     )
     assert descriptor["identity"] == "match"
     assert descriptor["mismatched"] == []
+    assert descriptor["tool_name"] == "mumei"
+    assert descriptor["tool_version"] == "0.9.2"
+    assert descriptor["adapter_id"] == "mumei-agent"
+    assert descriptor["adapter_version"] == "0.1.0"
     assert "producer_authenticity" not in descriptor["checks_not_performed"]
     assert "claim_truth" in descriptor["checks_not_performed"]
     assert "file_identity" in descriptor["checks_not_performed"]
+
+
+def test_utf16_document_is_static_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """A document that decodes under an encoding sniff is still a
+    static error — the route binds UTF-8 bytes like the sibling
+    evidence routes."""
+    evidence = _write(
+        tmp_path, "e.json", _evidence().encode("utf-16")
+    )
+    assert main_producer(_args(evidence)) == 1
 
 
 def test_identity_match_with_version_pins(

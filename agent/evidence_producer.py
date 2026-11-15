@@ -114,7 +114,11 @@ def _read_evidence_provenance(path: str) -> dict:
     """
     raw = _read_declared_bytes(path)
     try:
-        value = json.loads(raw)
+        value = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError(
+            "declared evidence record is not UTF-8"
+        ) from None
     except json.JSONDecodeError:
         raise ValueError(
             "declared evidence record is not JSON"
@@ -209,6 +213,10 @@ def compute_producer_descriptor(
     return {
         "schema_version": DESCRIPTOR_SCHEMA,
         "evidence_schema_version": EVIDENCE_SCHEMA,
+        "tool_name": provenance["tool"]["name"],
+        "tool_version": provenance["tool"]["version"],
+        "adapter_id": provenance["adapter"]["id"],
+        "adapter_version": provenance["adapter"]["version"],
         "identity": "mismatch" if mismatched else "match",
         "mismatched": mismatched,
         "checks_not_performed": [
