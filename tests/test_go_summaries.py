@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.go_summaries import build_parser, main
+from agent.go_summaries import build_check_parser, build_parser, main, main_check
 from agent.go_type_snapshot import PACKAGE_PROFILE, TARGETS
 from tests.test_go_type_snapshot import SOURCE, schema_fixture
 
@@ -88,6 +88,30 @@ def _run(capsys, argv: list[str]):
         code = exc.code
     out = capsys.readouterr()
     return code, out.out, out.err
+
+
+def _run_check(capsys, argv: list[str]):
+    try:
+        code = main_check(build_check_parser().parse_args(argv))
+    except SystemExit as exc:
+        code = exc.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def _check_args(helper: Path, manifest: Path, *sources: Path, extra=()):
+    return _args(
+        helper, *sources, extra=["--manifest", str(manifest), *extra]
+    )
+
+
+def _produce_manifest(tmp_path, capsys, helper: Path, *sources: Path):
+    """Run the produce route and persist its manifest for a check run."""
+    code, out, err = _run(capsys, _args(helper, *sources))
+    assert code == 0 and err == ""
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(out, encoding="utf-8")
+    return manifest
 
 
 def _package_fixture(files: dict[str, str]) -> dict:
@@ -428,6 +452,175 @@ def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
         for call in entry["calls"]
     ]
     assert calls and any(call["result"] for call in calls)
+
+
+def test_check_round_trip_marks_everything_reusable(tmp_path, capsys):
+    files = {
+        "a.go": "package p\nfunc F0() int64 { return 1 }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    helper = _write_helper(
+        tmp_path, json.dumps(_package_fixture(files)).encode()
+    )
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, *paths)
+    manifest = json.loads(manifest_path.read_text())
+    code, out, err = _run_check(
+        capsys, _check_args(helper, manifest_path, *paths)
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["schema_version"] == "mumei.go-summary-check/v1"
+    assert report["context_match"] is True
+    ids = [f["binding_id"] for f in manifest["functions"]]
+    assert sorted(report["reusable"]) == sorted(ids)
+    assert report["stale"] == [] and report["missing"] == []
+
+
+def test_check_partitions_stale_and_missing(tmp_path, capsys):
+    files = {
+        "a.go": "package p\nfunc F0() int64 { return 1 }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    helper = _write_helper(
+        tmp_path, json.dumps(_package_fixture(files)).encode()
+    )
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, *paths)
+    manifest = json.loads(manifest_path.read_text())
+    first = manifest["functions"][0]
+    first["calls"] = [
+        {
+            "span": {"file": 0, "start": 0, "end": 1},
+            "target": "absent-target",
+            "arguments": [],
+            "result": [],
+        }
+    ]
+    manifest["functions"].append(
+        {
+            "binding_id": "gone-fn",
+            "key": "gone",
+            "parameters": [],
+            "calls": [],
+            "gaps": [],
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_check(
+        capsys, _check_args(helper, manifest_path, *paths)
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["stale"] == [first["binding_id"]]
+    assert report["missing"] == ["gone-fn"]
+    assert report["reusable"] == [
+        manifest["functions"][1]["binding_id"]
+    ]
+
+
+def test_check_counts_member_identity_lists_as_known(tmp_path, capsys):
+    """An identity declared only inside a member's `signature_type_ids`
+    list is still produced by the fresh report — pinning it must not be
+    flagged stale."""
+    files = {
+        "a.go": "package p\nfunc F0() int64 { return 1 }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    report = _package_fixture(files)
+    type_id = "sha256:" + "ab" * 32 + ":1:2:3:4"
+    member_id = "sha256:" + "cd" * 32 + ":0:0:0:5"
+    report["imported_members"] = [
+        {
+            "id": member_id,
+            "name": "G",
+            "kind": "function",
+            "type": {
+                "kind": "function",
+                "basic_name": "",
+                "bit_width": 0,
+                "signed": None,
+                "type_id": "",
+            },
+            "signature_type_ids": [type_id],
+        }
+    ]
+    helper = _write_helper(tmp_path, json.dumps(report).encode())
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, *paths)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["functions"][0]["pinned"] = [type_id]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_check(
+        capsys, _check_args(helper, manifest_path, *paths)
+    )
+    assert code == 0 and err == ""
+    report_out = json.loads(out)
+    assert report_out["reusable"] == [
+        f["binding_id"] for f in manifest["functions"]
+    ]
+    assert report_out["stale"] == [] and report_out["missing"] == []
+
+
+def test_check_rejects_a_malformed_manifest(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    code, out, err = _run_check(capsys, _check_args(helper, bad, source))
+    assert code == 1 and out == "" and "not JSON" in err
+    bad.write_text(
+        json.dumps(
+            {
+                "schema_version": "mumei.other/v9",
+                "context_key": "x",
+                "functions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    code, out, err = _run_check(capsys, _check_args(helper, bad, source))
+    assert code == 1 and out == "" and "malformed" in err
+
+
+def test_check_output_equal_to_the_manifest_fails(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    original = manifest_path.read_text()
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            helper, manifest_path, source, extra=["--output", str(manifest_path)]
+        ),
+    )
+    assert code == 1 and out == "" and "overwrite" in err
+    assert manifest_path.read_text() == original
+
+
+def test_real_helper_check_round_trip(tmp_path, capsys, real_go_types):
+    """The check route reads back what the produce route emitted through
+    the real helper: every function stays reusable."""
+    source = _write_source(
+        tmp_path,
+        "main.go",
+        "package p\n"
+        "func F(x int64) int64 { return x }\n"
+        "func G(y int64) int64 { return F(y) }\n",
+    )
+    manifest_path = _produce_manifest(
+        tmp_path, capsys, real_go_types, source
+    )
+    manifest = json.loads(manifest_path.read_text())
+    code, out, err = _run_check(
+        capsys, _check_args(real_go_types, manifest_path, source)
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["context_match"] is True
+    ids = [f["binding_id"] for f in manifest["functions"]]
+    assert sorted(report["reusable"]) == sorted(ids)
+    assert report["stale"] == [] and report["missing"] == []
 
 
 def test_real_helper_import_round_trip(tmp_path, capsys, real_go_types):
