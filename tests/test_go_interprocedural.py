@@ -9153,12 +9153,14 @@ def test_summary_manifest_marks_imported_transfers(go_types_helper):
 def test_summary_manifest_gap_serializes_span_and_callee(go_types_helper):
     source, snapshot, summaries = unit(
         go_types_helper,
-        "type I interface{Get() int64}\n"
-        "func F(x I) int64 { return x.Get() }",
+        "func F(x int64) int64 {\n"
+        "\tif x <= 0 { return 0 }\n"
+        "\treturn F(x - 1)\n"
+        "}",
     )
     entry = summaries.to_dict()["functions"][0]
     gap = entry["gaps"][0]
-    assert gap["reason"]
+    assert gap["reason"] == "recursive_call_graph"
     assert gap.get("callee")
     assert gap["span"] is None or gap["span"]["start"] <= gap["span"]["end"]
 
