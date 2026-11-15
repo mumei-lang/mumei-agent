@@ -129,7 +129,8 @@ class AttemptRunResult:
     """One observed run: a terminal record plus the bounded captured bytes.
 
     `stdout`/`complete` are collection observations, not success or Evidence
-    claims; hosts still bind snapshots with `AttemptOutput` and own canonical
+    claims; a dispatched run binds its snapshot through
+    `AttemptDispatch.captured_output()`, and hosts still own canonical
     publication. The record is terminal by construction.
     """
 
