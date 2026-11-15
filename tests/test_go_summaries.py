@@ -995,3 +995,20 @@ def test_attempt_rejects_missing_helper(tmp_path, capsys):
     )
     assert code == 1
     assert "go-summaries-attempt" in err
+
+
+def test_attempt_rejects_output_overwriting_declared_input(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, b"{}")
+    source = tmp_path / "main.go"
+    source.write_text("package main\n")
+    code, _, err = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper, source, extra=["--output", str(source)]
+        ),
+    )
+    assert code == 1
+    assert "overwrite a declared source" in err
+    assert source.read_text() == "package main\n"

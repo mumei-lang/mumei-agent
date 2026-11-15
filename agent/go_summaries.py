@@ -372,16 +372,8 @@ def _summarize(sources: dict[str, str], payload: bytes, target_arch: str):
     )
 
 
-def _run_declared(
-    args: argparse.Namespace,
-) -> tuple[dict[str, str], bytes]:
-    """Read declared inputs, build the helper request and run it.
-
-    Shared by both routes: the produce route emits the manifest, the
-    check route compares a declared manifest against the same fresh
-    report.
-    """
-    sources = _read_sources(args.source)
+def _declared_paths(args: argparse.Namespace) -> set[Path]:
+    """Every file whose bytes the route declares or reads as input."""
     try:
         declared = {Path(raw).resolve() for raw in args.source}
         declared.update(
@@ -391,8 +383,18 @@ def _run_declared(
         manifest = getattr(args, "manifest", None)
         if manifest is not None:
             declared.add(Path(manifest).resolve())
+        go_types = getattr(args, "go_types", None)
+        if go_types is not None:
+            declared.add(Path(go_types).resolve())
     except RuntimeError:
         raise SnapshotError("declared path cannot be resolved") from None
+    return declared
+
+
+def _check_output_path(
+    args: argparse.Namespace, declared: set[Path]
+) -> None:
+    """Fail statically when ``--output`` names a declared input."""
     if args.output is not None:
         try:
             output_path = Path(args.output).resolve()
@@ -404,6 +406,20 @@ def _run_declared(
             raise SnapshotError(
                 "declared output path would overwrite a declared source"
             )
+
+
+def _run_declared(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str], bytes]:
+    """Read declared inputs, build the helper request and run it.
+
+    Shared by both routes: the produce route emits the manifest, the
+    check route compares a declared manifest against the same fresh
+    report.
+    """
+    sources = _read_sources(args.source)
+    declared = _declared_paths(args)
+    _check_output_path(args, declared)
     if len(sources) == 1:
         request: dict = {
             "source": next(iter(sources.values())),
@@ -680,6 +696,7 @@ def main_attempt(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_attempt_parser().parse_args()
     try:
+        _check_output_path(args, _declared_paths(args))
         from agent.attempt_runner import dispatch_and_publish
         from agent.verification_attempt import (
             AttemptSequence,
