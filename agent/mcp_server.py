@@ -2864,7 +2864,9 @@ def native_recheck(
     same wiring as the `native-recheck` CLI route. `recheck` is
     claimed only for uniquely-mapped exit codes (0 `equivalent`,
     3 `inconclusive`); mid-run drift reports `inputs_changed` with no
-    claimed outcome.
+    claimed outcome. An `equivalent` recheck reports `discharged_checks`
+    — `artifact_semantics` — with the remaining checks in
+    `checks_not_performed`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
