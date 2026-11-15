@@ -253,6 +253,14 @@ Admitted:
   `_Composite` in module scope: bare members are dep-free and an
   initializer contributes its own deps, so `E.A` reads as a
   field.
+* Class accessors — `get p()`/`set p(v)` on a class admit:
+  `o.p` on an instance invokes the getter like a no-arg method
+  (`this` is the instance) and records a `TsCall`; `o.p = v`
+  invokes the setter with the written deps as its actual, unless
+  the instance carries an own data field `p` (a field shadows
+  the accessor). Static accessors and object-literal
+  `{get p(){}}` still close — the latter would bind `this` to
+  the literal.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -268,12 +276,15 @@ Closed with declared gaps: ambient/`declare`
 declarations, non-declaration top-level statements and a
 module-scope declarator the model can't evaluate close the
 whole unit (`unsupported_unit`);
-`extends` on a non-class value, getters/setters,
-`any`/composite/missing parameter
+`extends` on a non-class value, static/object-literal
+accessors, `any`/composite/missing parameter
 types, `eval`, `with`, and `new` on a non-class/non-function
 ctor stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
+A member store's setter runs for its own deps like any invoked
+body — `this` writes propagate through the same may-write
+merge-back member calls use.
 """
 
 from __future__ import annotations
@@ -551,17 +562,21 @@ class _Class:
     """A class value: `ctor` (`_Callable` or None), `methods` /
     `statics` (name -> `_Callable` for methods, scalar deps for
     static fields), `field_inits` (name -> initializer node) and
-    `parent` (the `extends` `_Class` or None). Getters/setters,
-    generators and computed names close the class instead.
+    `parent` (the `extends` `_Class` or None). `getters`/`setters`
+    hold `get p()`/`set p(v)` accessors — a read invokes the
+    getter like a no-arg method, a store invokes the setter with
+    the written deps. Generators, `abstract` members and
+    computed names close the class instead.
     `captured` flattens the whole class to a scalar."""
 
     __slots__ = (
         "ctor", "methods", "statics", "field_inits", "captured",
-        "parent",
+        "parent", "getters", "setters",
     )
 
     def __init__(
-        self, ctor, methods, statics, field_inits, captured, parent=None
+        self, ctor, methods, statics, field_inits, captured,
+        parent=None, getters=None, setters=None,
     ):
         self.ctor = ctor
         self.methods = methods
@@ -569,6 +584,8 @@ class _Class:
         self.field_inits = field_inits
         self.captured = captured
         self.parent = parent
+        self.getters = getters if getters is not None else {}
+        self.setters = setters if setters is not None else {}
 
 
 def _scalar_of(value) -> frozenset[int]:
@@ -2343,10 +2360,28 @@ class _Builder:
                 return _scalar_of(val) | index_deps
             if key not in val.fields:
                 # Missing fields on an instance fall through to
-                # the class's methods (the prototype) — still
-                # missing means `undefined`, dep-free.
-                if val.klass is not None and key in val.klass.methods:
-                    return val.klass.methods[key]
+                # the class's accessors/methods (the prototype) —
+                # still missing means `undefined`, dep-free.
+                if val.klass is not None:
+                    if key in val.klass.getters:
+                        # `o.p` invokes `get p()` like a no-arg
+                        # method call on the instance.
+                        result = self._invoke_callable(
+                            val.klass.getters[key],
+                            (),
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            _span(node),
+                            this_val=val,
+                        )
+                        transfers.append(
+                            TsCall(_span(node), key, (), result)
+                        )
+                        return result
+                    if key in val.klass.methods:
+                        return val.klass.methods[key]
                 return frozenset()
             val = val.fields[key]
         return val
@@ -2401,6 +2436,29 @@ class _Builder:
             return
         if not isinstance(old, _Composite):
             raise _Unsupported("unsupported_expression", _span(node))
+        if (
+            len(path) == 1
+            and old.klass is not None
+            and path[0] in old.klass.setters
+            and path[0] not in old.fields
+        ):
+            # `o.p = v` invokes `set p(v)` — the write's deps
+            # become the setter's actual.
+            actual = _scalar_of(value)
+            result = self._invoke_callable(
+                old.klass.setters[path[0]],
+                (actual,),
+                params,
+                locals_,
+                transfers,
+                count,
+                _span(node),
+                this_val=old,
+            )
+            transfers.append(
+                TsCall(_span(node), path[0], (actual,), result)
+            )
+            return
         if isinstance(value, _Composite):
             # `o.f = o2` would alias `o2` at field level — writes
             # would diverge, so a composite field value collapses.
@@ -2618,8 +2676,11 @@ class _Builder:
         by their `#` text; `static { ... }` blocks evaluate once
         at class build with `C` bound to the class itself, their
         deps joining `captured` (static writes update the shared
-        `statics` table). `extends`/`implements`, getters/setters,
-        computed names and `abstract`/decorated members all close."""
+        `statics` table). Instance `get`/`set` accessors collect
+        into `getters`/`setters` — invoked on member read/store
+        like a no-arg/one-arg method. `extends`/`implements`,
+        static accessors, computed names and `abstract`/decorated
+        members all close."""
         parent = None
         for child in node.children:
             if child.type == "class_heritage":
@@ -2663,13 +2724,15 @@ class _Builder:
         methods: dict = {}
         statics: dict = {}
         field_inits: dict = {}
+        getters: dict = {}
+        setters: dict = {}
         static_blocks: list = []
         for member in _children(body_node):
             if member.type == "method_definition":
                 markers = {
                     c.type for c in member.children if not c.is_named
                 }
-                if markers & {"get", "set", "abstract"}:
+                if markers & {"abstract"}:
                     raise _Unsupported(
                         "unsupported_expression", _span(member)
                     )
@@ -2691,7 +2754,16 @@ class _Builder:
                     rest,
                     is_method=True,
                 )
-                if key == "constructor":
+                if markers & {"get", "set"}:
+                    if "static" in markers:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(member)
+                        )
+                    if "get" in markers:
+                        getters[key] = mval
+                    else:
+                        setters[key] = mval
+                elif key == "constructor":
                     ctor = mval
                 elif "static" in markers:
                     statics[key] = mval
@@ -2756,7 +2828,7 @@ class _Builder:
             if cname is not None:
                 block_locals[cname.text.decode()] = _Class(
                     ctor, methods, statics, field_inits, captured,
-                    parent,
+                    parent, getters, setters,
                 )
             block_deps = [frozenset()]
             block_saw = [False]
@@ -2803,13 +2875,20 @@ class _Builder:
             ifields = dict(parent.field_inits)
             ifields.update(field_inits)
             field_inits = ifields
+            igetters = dict(parent.getters)
+            igetters.update(getters)
+            getters = igetters
+            isetters = dict(parent.setters)
+            isetters.update(setters)
+            setters = isetters
             if ctor is None:
                 # A derived class without a ctor defaults to one
                 # that runs the parent's.
                 ctor = parent.ctor
             all_deps |= parent.captured
         return _Class(
-            ctor, methods, statics, field_inits, all_deps, parent
+            ctor, methods, statics, field_inits, all_deps, parent,
+            getters, setters,
         )
 
     def _construct(self, cls, actual, params, locals_, transfers, count, span):

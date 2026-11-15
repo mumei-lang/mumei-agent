@@ -3061,6 +3061,24 @@ are dep-free and an `enum_assignment` carries its
 initializer's deps. `E.A` reads as a plain field, so enum
 members flow like object fields.
 
+### C06 TypeScript class accessors (slice 33)
+
+`get p()` / `set p(v)` on a class admit: `o.p` on an
+instance invokes the getter like a no-arg method call with
+`this` bound to the instance (recording a `TsCall`), and
+`o.p = v` invokes the setter with the written deps as its
+actual. An own data field `p` shadows the accessor for both
+directions (plain field read/store). Accessor tables merge
+through `extends` like methods; `super.p` resolves through
+the parent chain the same way.
+
+Boundaries: `static get`/`static set` and object-literal
+`{get p(){...}}` still close — a literal accessor would
+need `this` bound to the object under construction.
+Private `get #p` keys by the `#` name like other members,
+and `super.p` reaches an inherited getter through the
+parent merge.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -3404,3 +3404,83 @@ def test_declare_still_closes():
     )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_unit"
+
+
+# --- slice 33: class getters/setters ----------------------------------------
+
+
+def test_class_getter_invokes():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { get p() { return 1; } }"
+        " const c = new C();"
+        " return c.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+    assert s.calls and s.calls[-1].callee == "p"
+
+
+def test_getter_reads_this():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { v = 0; get p() { return this.v; } }"
+        " const c = new C();"
+        " c.v = x;"
+        " return c.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_setter_invokes():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { v = 0; set p(vv: number) { this.v = vv; } }"
+        " const c = new C();"
+        " c.p = x;"
+        " return c.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_inherited_getter():
+    s = _fn(
+        "function f(x: number): number {"
+        " class B { get p() { return 1; } }"
+        " class C extends B {}"
+        " const c = new C();"
+        " return c.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_own_field_shadows_setter():
+    # An own data field wins over the prototype setter — plain
+    # store semantics.
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { p = 0; set p(v: number) { this.q = v; } }"
+        " const c = new C();"
+        " c.p = x;"
+        " return c.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_literal_getter_closes():
+    # `{get p(){...}}` would bind `this` to the literal — not
+    # modelled; closes.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = { get p() { return x; } };"
+        " return o.p; }"
+    )
+    assert not s.available
+
+
+def test_static_getter_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { static get p() { return 1; } }"
+        " return C.p; }"
+    )
+    assert not s.available
