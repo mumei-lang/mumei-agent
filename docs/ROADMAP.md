@@ -3459,6 +3459,18 @@ callee's captured deps plus every actual, the same shape an
 opaque callee produces, so recursion keeps the summary
 available with a dep-union result.
 
+### C06 TypeScript destructured callable parameters (slice 58)
+
+`g = ({a}, [b]) => ...`, `function ({a}) {}` values, class
+methods and `new` constructors with `object_pattern`/
+`array_pattern` parameters destructure the bound actual at
+invoke time: each sub-name binds the member read at its
+path, a scalar actual over-approximates every sub-name to
+the whole union, and a `= d` default on the pattern
+evaluates like an identifier default. `a.fill(v)` mutates
+in place — every element takes the actual union via the
+same copy-on-write rebind `push` uses.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

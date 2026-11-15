@@ -5514,3 +5514,59 @@ def test_finite_nesting_still_inlines():
         " return a(a(a(a(a(x))))); }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_pattern_param_destructures_actual():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = ({a}) => a; return g({a: x}); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_pattern_param_destructures_actual():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = ([a, b]) => a + b; return g([x, 2]); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_pattern_param_default_evaluates():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = ({a} = {a: x}) => a; return g(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_pattern_param_nested():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = ({p: {q}}) => q; return g({p: {q: x}}); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_pattern_param_scalar_actual_unions():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = ({a}) => a; return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_method_pattern_param():
+    s = _fn(
+        "class C { m({a}) { return a + this.b; } b = 1; }"
+        " function f(x: number) { return new C().m({a: x}); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_fill_writes_actual_into_elements():
+    s = _fn(
+        "function f(x: number) {"
+        " let a = [0]; a.fill(x); return a[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

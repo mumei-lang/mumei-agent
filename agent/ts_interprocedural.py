@@ -321,6 +321,11 @@ Admitted:
   self-recursive or mutually recursive function values
   over-approximate to captured ∪ actuals past the bound
   instead of exhausting the interpreter stack.
+* Destructured callable parameters (`({a}, [b]) => ...`)
+  bind their sub-names through `_destructure` at invoke
+  time — a scalar actual over-approximates each sub-name
+  to the whole union; `a.fill(v)` may-writes its actual
+  into every element.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -769,7 +774,7 @@ class _Callable:
 
     __slots__ = (
         "node", "params", "defaults", "captured", "rest",
-        "is_method", "param_props", "origin", "bound",
+        "is_method", "param_props", "origin", "bound", "patterns",
     )
 
     def __init__(
@@ -791,6 +796,11 @@ class _Callable:
         # invocation's actuals — the params stay full-length so
         # bound positions bind their recorded values.
         self.bound = None
+        # Parameter positions declared as `object_pattern`/
+        # `array_pattern` — `g = ({a}, [b]) => ...` stores the
+        # pattern node per index; the invoke binds its sub-names
+        # through `_destructure` instead of a scalar slot.
+        self.patterns: dict = {}
         # The `_Builder` that created this value — a callable
         # imported from another module invokes under its own
         # module's scope (its private helpers and module bindings
@@ -1029,7 +1039,8 @@ def _composite_dyn_set(composite, path, value, span):
             )
             widened.param_props = fval.param_props
             widened.origin = fval.origin
-            widened.param_props = fval.param_props
+            widened.patterns = fval.patterns
+            widened.bound = fval.bound
             fields[fname] = widened
         else:
             fields[fname] = _scalar_of(fval) | vdeps
@@ -3284,6 +3295,8 @@ class _Builder:
                     )
                     widened.param_props = cval.param_props
                     widened.origin = cval.origin
+                    widened.patterns = cval.patterns
+                    widened.bound = cval.bound
                     self._fn_cache[name] = widened
             return self._fn_cache[name]
         if name in self.imported_bindings:
@@ -3781,13 +3794,14 @@ class _Builder:
         the definition site, so the closure's free reads are
         over-approximated even when the callable escapes (returned
         or passed as an argument)."""
-        names, defaults, rest = self._callable_params(node)
+        names, defaults, rest, patterns = self._callable_params(node)
         captured = frozenset(params.values())
         for val in locals_.values():
             captured |= _scalar_of(val)
         value = _Callable(
             node, names, defaults, captured, rest, is_method
         )
+        value.patterns = patterns
         value.origin = self
         return value
 
@@ -3795,7 +3809,10 @@ class _Builder:
         """`(a, b = d, ...rest)` / `x =>` — the formal parameter
         names plus any default expressions (evaluated at the call
         site) and the rest index (-1 when absent). A rest
-        parameter must come last; destructured patterns close.
+        parameter must come last. An `object_pattern`/
+        `array_pattern` parameter gets a synthetic `@i` slot name
+        and its node in `patterns` — the invoke destructures the
+        bound actual into the pattern's sub-names.
         Annotations are type-level and ignored — `a: Foo` binds
         positionally like `a`."""
         params_node = node.child_by_field_name("parameters")
@@ -3805,9 +3822,10 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
-            return (p.text.decode(),), {}, -1
+            return (p.text.decode(),), {}, -1, {}
         names: list[str] = []
         defaults: dict[int, object] = {}
+        patterns: dict[int, object] = {}
         rest = -1
         for param in _children(params_node):
             if rest >= 0:
@@ -3847,18 +3865,40 @@ class _Builder:
             elif pattern.type == "assignment_pattern":
                 left = pattern.child_by_field_name("left")
                 right = pattern.child_by_field_name("right")
-                if left is None or left.type != "identifier":
+                if left is None or left.type not in {
+                    "identifier",
+                    "object_pattern",
+                    "array_pattern",
+                }:
                     raise _Unsupported(
                         "unsupported_expression", _span(param)
                     )
-                names.append(left.text.decode())
+                if left.type == "identifier":
+                    names.append(left.text.decode())
+                else:
+                    # `({a} = {a: 1})` — the pattern binds via
+                    # `_destructure`; the synthetic slot name is
+                    # never user-visible.
+                    names.append(f"@{len(names)}")
+                    patterns[len(names) - 1] = left
                 if right is not None:
                     defaults[len(names) - 1] = right
+            elif pattern.type in {"object_pattern", "array_pattern"}:
+                # `g = ({a, b}, [x, y]) => ...` — the slot keeps
+                # one positional index; `_invoke_callable_body`
+                # destructures the bound actual into its
+                # sub-names. A `= d` default on the parameter
+                # evaluates like an identifier default.
+                names.append(f"@{len(names)}")
+                patterns[len(names) - 1] = pattern
+                dflt = param.child_by_field_name("value")
+                if dflt is not None:
+                    defaults[len(names) - 1] = dflt
             else:
                 raise _Unsupported(
                     "unsupported_expression", _span(param)
                 )
-        return tuple(names), defaults, rest
+        return tuple(names), defaults, rest, patterns
 
     def _invoke_callable(
         self,
@@ -3961,6 +4001,7 @@ class _Builder:
         saved_aliased = self._aliased_objs
         self._aliased_objs = set(saved_aliased)
         inner = dict(locals_)
+        destructured_params: list = []
         if this_val is not None:
             inner["this"] = this_val
             if isinstance(this_val, _Composite):
@@ -3988,6 +4029,16 @@ class _Builder:
                 deps |= self.expression(
                     dnode, params, inner, transfers, count
                 )
+            pnode = cval.patterns.get(i)
+            if pnode is not None:
+                # `g = ({a}, [b]) => ...` — the sub-names bind via
+                # `_destructure` once `inner` becomes the live
+                # frame; a scalar actual over-approximates each
+                # sub-name to the whole union.
+                destructured_params.append(
+                    (pnode, aval if aval is not None else deps)
+                )
+                continue
             if aval is not None and not isinstance(aval, frozenset):
                 # A value-typed actual (a `_Callable`/`_Composite`
                 # passed as an argument) binds its identity — a
@@ -4024,6 +4075,18 @@ class _Builder:
         saved_var, self.var_names = self.var_names, set()
         saved_flocals, self.function_locals = self.function_locals, inner
         saved_yields, self.yield_deps = self.yield_deps, []
+        for pnode, psource in destructured_params:
+            self._destructure(
+                pnode,
+                psource,
+                params,
+                inner,
+                transfers,
+                count,
+                False,
+                False,
+                span,
+            )
         try:
             if body_node.type == "statement_block":
                 # Nested `function inner() {}` declarations hoist
@@ -4172,7 +4235,7 @@ class _Builder:
                     for inner in _children(mname):
                         self.expression(inner, params, locals_, [], [0])
                     try:
-                        cnames, cdefaults, crest = (
+                        cnames, cdefaults, crest, cpat = (
                             self._callable_params(member)
                         )
                         _mc = _Callable(
@@ -4183,6 +4246,7 @@ class _Builder:
                             crest,
                             is_method=True,
                         )
+                        _mc.patterns = cpat
                         _mc.origin = self
                         methods[f"[computed:{member.start_byte}]"] = (
                             _mc
@@ -4198,7 +4262,9 @@ class _Builder:
                         "unsupported_expression", _span(member)
                     )
                 key = mname.text.decode()
-                names, defaults, rest = self._callable_params(member)
+                names, defaults, rest, mpat = (
+                    self._callable_params(member)
+                )
                 mval = _Callable(
                     member,
                     names,
@@ -4207,6 +4273,7 @@ class _Builder:
                     rest,
                     is_method=True,
                 )
+                mval.patterns = mpat
                 mval.origin = self
                 if key == "constructor":
                     # `constructor(private a, readonly b)` —
@@ -4756,6 +4823,7 @@ class _Builder:
                 this_val,
             )
             out.origin = base.origin
+            out.patterns = base.patterns
             transfers.append(
                 TsCall(
                     _span(node),
@@ -4974,6 +5042,36 @@ class _Builder:
                 if val is old:
                     locals_[name] = new
             return record(actual_union)
+        if prop == "fill":
+            # `a.fill(v)` mutates in place — every element takes
+            # the actual union (COW rebind like `push`).
+            tbase, tpath, _ = self._member_target(
+                obj_node, params, locals_, transfers, count
+            )
+            if tpath and any(k is None for k in tpath):
+                raise _Unsupported("unsupported_expression", span)
+            target = self._write_scope(tbase, locals_, params)
+            if target is None:
+                raise _Unsupported("binding_unavailable", span)
+            old = target.get(tbase)
+            if not isinstance(old, _Composite):
+                raise _Unsupported("unsupported_expression", span)
+            added = {
+                k: _scalar_of(v) | actual_union
+                for k, v in old.fields.items()
+            }
+            new = (
+                _Composite(added, klass=old.klass)
+                if not tpath
+                else _composite_set(
+                    old, tpath, _Composite(added, klass=old.klass),
+                    True, span,
+                )
+            )
+            for name, val in locals_.items():
+                if val is old:
+                    locals_[name] = new
+            return record(actual_union)
         if prop in {"map", "flatMap"}:
             result = cb_result if cb_result is not None else elem
             return record(_Composite({str(0): result}))
@@ -4987,7 +5085,6 @@ class _Builder:
             "flat",
             "sort",
             "reverse",
-            "fill",
         }:
             return record(
                 _Composite({str(0): elem | actual_union})
