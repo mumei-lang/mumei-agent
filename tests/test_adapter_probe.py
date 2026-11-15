@@ -481,3 +481,35 @@ def test_plan_with_probes_validation():
                 registry, _route(), PlannerPolicy(), stamp=1,
                 rounds=bad,
             )
+
+
+def test_plan_with_probes_reprobe_replaces_observation():
+    """A second probe of the same adapter must not trip plan()'s
+    duplicate-observation rejection."""
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stamp=1, rounds=2
+    )
+    assert out.plan.selected is None
+    assert [o.availability for o in out.observations] == [
+        "missing",
+        "missing",
+    ]
+
+
+def test_plan_with_probes_replaces_initial_observation():
+    """An adapter carrying a stale initial observation that is
+    re-probed lands in `observed` exactly once."""
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    stale = (
+        RuntimeObservation(
+            "zendingsol.host.lean_scaffold",
+            availability="unknown",
+            stamp=1,
+        ),
+    )
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stale, stamp=2
+    )
+    assert out.plan.selected is None
+    assert len(out.observations) == 1

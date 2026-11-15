@@ -432,6 +432,12 @@ def plan_with_probes(
             reqs, runner=runner, cancel_event=cancel_event
         )
         seen.extend(fresh)
-        observed = observed + fresh
+        # A re-probed adapter replaces its prior observation —
+        # `plan()` rejects duplicate adapter ids, and the freshest
+        # stamped observation is the one that counts anyway.
+        by_id = {o.adapter_id: o for o in observed}
+        for o in fresh:
+            by_id[o.adapter_id] = o
+        observed = tuple(by_id.values())
         plan = registry.plan(request, policy, observed)
     return AdapterProbePlan(plan, tuple(seen))
