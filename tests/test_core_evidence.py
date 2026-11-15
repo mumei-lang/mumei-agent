@@ -1055,3 +1055,90 @@ def test_check_failure_is_a_value_error_subclass(executable):
             core_executable=executable(report_script(code=7)),
             timeout_ms=100,
         )
+
+
+# --- declared check-record restoration and acceptance normalization --------
+
+from agent.core_evidence import evaluate_evidence_check
+from agent.verification_attempt import AttemptEvidenceCheck
+
+
+def _selected():
+    output = snapshot()
+    sequence = matching_sequence(output).select_result(output)
+    return sequence, output
+
+
+def test_evidence_check_record_round_trip():
+    sequence, _ = _selected()
+    check = sequence.evidence_check(
+        sequence.evidence_candidate(), "valid"
+    )
+    restored = AttemptEvidenceCheck.from_dict(check.to_dict())
+    assert restored == check
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.pop("outcome"),
+        lambda d: d.update(extra=1),
+        lambda d: d.update(schema_version="mumei.other/v1"),
+        lambda d: d.update(outcome="bogus"),
+        lambda d: d.update(attempt_number="1"),
+    ],
+)
+def test_evidence_check_record_rejects_malformed(mutate):
+    sequence, _ = _selected()
+    data = sequence.evidence_check(
+        sequence.evidence_candidate(), "valid"
+    ).to_dict()
+    mutate(data)
+    with pytest.raises(ValueError):
+        AttemptEvidenceCheck.from_dict(data)
+
+
+def test_evaluate_accepts_a_current_valid_check():
+    sequence, _ = _selected()
+    check = sequence.evidence_check(
+        sequence.evidence_candidate(), "valid"
+    )
+    out = evaluate_evidence_check(sequence, check)
+    assert out["schema_version"] == "mumei.evidence-check-acceptance/v1"
+    assert out["candidate_match"] is True
+    assert out["accepted"] is True
+    assert len(out["checks_not_performed"]) == 6
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+def test_evaluate_rejects_non_valid_outcomes(outcome):
+    sequence, _ = _selected()
+    check = sequence.evidence_check(
+        sequence.evidence_candidate(), outcome
+    )
+    out = evaluate_evidence_check(sequence, check)
+    assert out["candidate_match"] is True
+    assert out["accepted"] is False
+
+
+def test_evaluate_rejects_a_stale_or_foreign_check():
+    sequence, _ = _selected()
+    # A check recorded against a different selected output can never
+    # describe the current candidate.
+    other = snapshot(body=b"other-body")
+    other_seq = matching_sequence(other).select_result(other)
+    foreign = other_seq.evidence_check(
+        other_seq.evidence_candidate(), "valid"
+    )
+    out = evaluate_evidence_check(sequence, foreign)
+    assert out["candidate_match"] is False
+    assert out["accepted"] is False
+
+
+def test_evaluate_requires_a_selected_result():
+    output = snapshot()
+    sequence = matching_sequence(output)
+    other, _ = _selected()
+    check = other.evidence_check(other.evidence_candidate(), "valid")
+    with pytest.raises(ValueError):
+        evaluate_evidence_check(sequence, check)

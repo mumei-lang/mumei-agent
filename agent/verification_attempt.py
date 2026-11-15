@@ -860,6 +860,39 @@ class AttemptEvidenceCheck:
             "outcome": self.outcome,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptEvidenceCheck":
+        """Rebuild a declared check record; the constructor re-validates it.
+
+        The record is a host declaration: restoration re-checks the exact
+        key set and schema, then the constructor re-checks every invariant
+        (fingerprints, ordinal, declared outcome). A foreign schema,
+        unknown keys or malformed members are static errors — the record
+        still carries no bytes and asserts no acceptance."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version") != "mumei.verifier-evidence-check/v1"
+        ):
+            raise ValueError(
+                "evidence check requires its declared record schema"
+            )
+        required = {
+            "request_fingerprint",
+            "attempt_number",
+            "output_fingerprint",
+            "outcome",
+        }
+        if set(data) != required | {"schema_version"}:
+            raise ValueError(
+                "evidence check record has unknown or missing keys"
+            )
+        return cls(
+            data["request_fingerprint"],
+            data["attempt_number"],
+            data["output_fingerprint"],
+            data["outcome"],
+        )
+
 
 @dataclass(frozen=True)
 class AttemptNormalizedResult:
