@@ -294,14 +294,18 @@ class _Builder:
                         if d.type == "identifier"
                     ]
                     if bound:
-                        param_names.append(pat.text.decode())
                         for d in bound:
                             locals_[d.text.decode()] = frozenset(
                                 {idx}
                             )
+                    param_names.append(pat.text.decode())
+                else:
+                    param_names.append("_")
                 # Wildcards (`_`), pattern-less and unbound
                 # patterns still consume a parameter slot —
-                # skipping them would shift every later index.
+                # `params` keeps a placeholder name so a dep
+                # index stays aligned with the entry at that
+                # position.
                 idx += 1
         summary = RustFunctionSummary(
             name=name, params=(), available=False,
