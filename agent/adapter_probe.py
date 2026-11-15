@@ -36,6 +36,14 @@ observations in request order — the caller feeds them back into
 `plan()` to close the observe → re-plan loop. Normalized results stay
 inside `run_probe`; only availability/stamp/version cross the boundary.
 
+`plan_with_probes(registry, request, policy, observations, stamp=...)`
+runs that loop for a bounded number of rounds (default 1, at most
+`MAX_PLAN_ROUNDS`): plan, probe the observation-excluded candidates,
+re-plan with the fresh observations — incrementing the stamp per round
+so the registry's freshness check accepts them. It stops early on a
+selection or an empty schedule, returns the final plan plus the new
+observations, and never authorizes or accepts Evidence itself.
+
 Boundary held honestly: a probe reports **observed command behavior**,
 not tool health, availability proof, version truth or acceptance. The
 command is host-declared, so a lying or wrong probe simply records a
@@ -70,6 +78,7 @@ from agent.verification_planner import (
     PlannerPolicy,
     RouteRequirements,
     RuntimeObservation,
+    VerificationPlan,
     _label,
     _positive,
     _version,
@@ -347,3 +356,82 @@ def observe_probes(
         outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
         out.append(outcome.observation)
     return tuple(out)
+
+# Bound on observe → re-plan iterations inside `plan_with_probes` —
+# each round re-probes the same observation-excluded set, so a
+# bound keeps a perpetually-missing adapter from probing forever.
+MAX_PLAN_ROUNDS = 4
+
+
+@dataclass(frozen=True)
+class AdapterProbePlan:
+    """Result of a bounded probe-driven planning pass."""
+
+    plan: VerificationPlan
+    observations: tuple[RuntimeObservation, ...]
+
+
+def plan_with_probes(
+    registry: AdapterRegistry,
+    request: RouteRequirements,
+    policy: PlannerPolicy,
+    observations: tuple[RuntimeObservation, ...] = (),
+    *,
+    stamp: int,
+    tool_version: str | None = None,
+    runner: AttemptRunner | None = None,
+    cancel_event: "threading.Event | None" = None,
+    rounds: int = 1,
+) -> AdapterProbePlan:
+    """Plan, probe the observation-excluded candidates, re-plan.
+
+    One round is: `plan()` → `probe_requests_for` → `observe_probes`
+    → feed every observation back in. Stamps increment per round so
+    the registry's freshness check accepts each new observation.
+    `rounds` (1..MAX_PLAN_ROUNDS) bounds the loop: more than one
+    round only re-probes adapters still excluded by observation —
+    a probe that timed out may deserve one retry, a structurally
+    excluded adapter is never re-asked. The driver stops early when
+    a candidate is selected or a round emits no requests.
+
+    The caller owns `stamp` allocation: pass a base stamp that is
+    fresh for every adapter, then keep the returned observations to
+    chain further planning. Nothing here authorizes, retries beyond
+    `rounds`, or accepts Evidence — the loop only schedules and
+    observes declared probes.
+    """
+    if not isinstance(registry, AdapterRegistry):
+        raise ValueError("probe planning requires a registry")
+    if not isinstance(request, RouteRequirements):
+        raise ValueError("probe planning requires a route request")
+    if not isinstance(policy, PlannerPolicy):
+        raise ValueError("probe planning requires a policy")
+    if type(stamp) is not int or not 1 <= stamp <= MAX_STAMP:
+        raise ValueError("invalid probe planning stamp")
+    if not isinstance(rounds, int) or not 1 <= rounds <= MAX_PLAN_ROUNDS:
+        raise ValueError("probe planning rounds out of bounds")
+    if runner is None:
+        runner = AttemptRunner()
+    seen: list[RuntimeObservation] = []
+    observed = tuple(observations)
+    plan = registry.plan(request, policy, observed)
+    for offset in range(rounds):
+        if plan.selected is not None:
+            break
+        reqs = probe_requests_for(
+            registry,
+            request,
+            policy,
+            observed,
+            stamp=stamp + offset,
+            tool_version=tool_version,
+        )
+        if not reqs:
+            break
+        fresh = observe_probes(
+            reqs, runner=runner, cancel_event=cancel_event
+        )
+        seen.extend(fresh)
+        observed = observed + fresh
+        plan = registry.plan(request, policy, observed)
+    return AdapterProbePlan(plan, tuple(seen))
