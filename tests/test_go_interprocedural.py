@@ -9090,8 +9090,16 @@ def test_summary_manifest_function_fields(go_types_helper):
         "func F(x, y int64) int64 { return x + y }\n"
         "func G(a int64) int64 { return F(a, a) }",
     )
-    by_name = {f.key: f for f in summaries.to_dict()["functions"]}
-    entry = by_name["G"]
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "G"
+    )
+    entry = next(
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
+    )
     call = next(c for c in entry["calls"])
     assert call["arguments"] == [[0], [0]]
     assert call["result"] == [0]
@@ -9102,12 +9110,22 @@ def test_summary_manifest_function_fields(go_types_helper):
 
 def test_summary_manifest_omits_unavailable_dependencies(go_types_helper):
     source, snapshot, summaries = unit(
-        go_types_helper, "func F() int64 { return U() }"
+        go_types_helper,
+        "func G(){}\nfunc F(x int64) int64 { defer G(); return x }",
     )
-    entry = summaries.to_dict()["functions"][0]
+    binding_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    entry = next(
+        f
+        for f in summaries.to_dict()["functions"]
+        if f["binding_id"] == binding_id
+    )
     # A gap-closed summary never serializes a null dependencies field.
     assert "return_dependencies" not in entry
-    assert entry["gaps"] or entry["calls"]
+    assert entry["gaps"]
 
 
 def test_summary_manifest_marks_imported_transfers(go_types_helper):
@@ -9134,11 +9152,14 @@ def test_summary_manifest_marks_imported_transfers(go_types_helper):
 
 def test_summary_manifest_gap_serializes_span_and_callee(go_types_helper):
     source, snapshot, summaries = unit(
-        go_types_helper, "func F() int64 { return U() }"
+        go_types_helper,
+        "type I interface{Get() int64}\n"
+        "func F(x I) int64 { return x.Get() }",
     )
     entry = summaries.to_dict()["functions"][0]
     gap = entry["gaps"][0]
     assert gap["reason"]
+    assert gap.get("callee")
     assert gap["span"] is None or gap["span"]["start"] <= gap["span"]["end"]
 
 
