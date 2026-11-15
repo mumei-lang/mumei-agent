@@ -2194,6 +2194,13 @@ class _Builder:
                 # Dynamic dispatch: a virtual callee may resolve
                 # to any descendant override — union every
                 # override declared below the caller's contract.
+                # Copy first: `targets` may be the shared
+                # overload-group list `_lookup_fns` returned, and
+                # appending into it would pollute every later
+                # lookup (base candidates would grow descendant
+                # overrides, and `super.g()` could recurse into
+                # the subclass).
+                targets = list(targets)
                 descendants = [
                     c
                     for c in self._contract_names

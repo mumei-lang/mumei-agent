@@ -2251,3 +2251,26 @@ def test_review_comment_before_short_circuit_operator():
     # A comment ahead of `&&` made `children[1]` a comment, so
     # the RHS ran unconditionally and dropped `a`'s dep.
     assert s.return_dependencies == frozenset({0, 1})
+
+
+
+def test_review_virtual_dispatch_keeps_overload_groups_clean():
+    src = """contract B {
+  function g(uint256 x) public virtual returns (uint256) {
+    return x;
+  }
+  function f(uint256 x) public returns (uint256) {
+    return g(x);
+  }
+}
+contract D is B {
+  function g(uint256 x) public virtual override returns (uint256) {
+    return super.g(x);
+  }
+}"""
+    b = sol._Builder(src.encode())
+    b.build()
+    # The descendant candidate list used to be appended into
+    # the shared overload group — `B.g` would keep `D.g` as a
+    # candidate for later lookups (including `super.g()`).
+    assert b._overload_groups["B.g"] == ["B.g"]
