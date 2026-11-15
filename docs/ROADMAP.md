@@ -2110,6 +2110,16 @@ doubly-derefed base (`(**t).F`), a struct-valued intermediate
 (`t.A.B` on `A S3`), a method value (`t.PF`) and a composite-typed
 field stay closed.
 
+A field read through an index chain admits the same way:
+`lib.VSM[k].F` on `map[string]S` or `lib.VSS[i].F` on `[]S` reads a
+field of external state — dep-free apart from the indexes' own
+dependencies (literal indexes carry none, like `lib.VM["k"]`),
+recording the imported transfer against the field's identity and
+pinning the container member's whole fact tree so the element's
+named type flags `stale_dependents` too. The element of the whole
+chain must resolve — a computed operand (`g()[0].F`) names no member
+and stays closed, and a scalar element cannot compile anyway.
+
 ### C06 imported member type identities
 
 A member's declared type fact now carries `type_id` when the type is
