@@ -705,3 +705,71 @@ def test_reuse_route_merges_and_rekeys(tmp_path, capsys):
     assert out["context_key"] == fresh.context_key
     by_name = {f["name"]: f for f in out["functions"]}
     assert by_name["g"]["return_dependencies"] == []
+
+
+def test_manifest_restoration_rejects_duplicate_function_names():
+    s = summarize_rust(_RS_SRC).to_dict()
+    s["functions"].append(dict(s["functions"][0]))
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(s)
+
+
+def test_accept_route_prefers_an_exact_name_over_suffix_matches(
+    tmp_path, capsys
+):
+    both = (
+        "fn f(x: u64) -> u64 { x }"
+        "struct P;"
+        "impl P { fn f(&self, x: u64) -> u64 { x + 1 } }"
+    )
+    src = tmp_path / "a.rs"
+    src.write_text(both)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(summarize_rust(both).to_dict()))
+    # `f` is the emitted name of the top-level function — it wins
+    # over the `P.f` suffix match.
+    args = type(
+        "A",
+        (),
+        {
+            "source": str(src),
+            "manifest": str(manifest),
+            "function": "f",
+            "output": None,
+        },
+    )()
+    with pytest.raises(SystemExit):
+        rust.main_accept(args)
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "f"
+
+
+def test_accept_route_bare_name_covers_qualified_records(
+    tmp_path, capsys
+):
+    impl_only = (
+        "struct P;"
+        "impl P { fn f(&self, x: u64) -> u64 { x + 1 } }"
+    )
+    src = tmp_path / "a.rs"
+    src.write_text(impl_only)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(summarize_rust(impl_only).to_dict())
+    )
+    args = type(
+        "A",
+        (),
+        {
+            "source": str(src),
+            "manifest": str(manifest),
+            "function": "f",
+            "output": None,
+        },
+    )()
+    with pytest.raises(SystemExit):
+        rust.main_accept(args)
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "P.f"

@@ -226,10 +226,18 @@ class RustSummarySet:
         _require_manifest(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
         _require_manifest(len(functions) <= MAX_MANIFEST_MEMBERS)
+        restored = [
+            RustFunctionSummary.from_dict(f) for f in functions
+        ]
+        names = [f.name for f in restored]
+        # A declared duplicate name would let a forged record adopt a
+        # same-named honest record's reuse — names are unique in every
+        # honest derivation, so a duplicate is malformed.
+        _require_manifest(len(set(names)) == len(names))
         return cls(
             _string(v["context_key"]),
             PROFILE,
-            [RustFunctionSummary.from_dict(f) for f in functions],
+            restored,
         )
 
 
@@ -1583,13 +1591,20 @@ def main_accept(args=None) -> None:
         # Emit the freshly derived record, never the declared one —
         # identical for honest manifests, and removes the manifest-
         # forgery channel entirely. A bare member name must resolve
-        # to exactly one function.
+        # to exactly one function. An exact match on the emitted name
+        # (`f`, `P.f`) wins over the bare-member-name fallback; the
+        # fallback compares name stems, so `P.f#2` also answers to `f`
+        # and an undiscriminated name stays ambiguous.
         matches = [
-            f
-            for f in live.functions
-            if f.name == args.function
-            or f.name.rsplit(".", 1)[-1] == args.function
+            f for f in live.functions if f.name == args.function
         ]
+        if not matches:
+            matches = [
+                f
+                for f in live.functions
+                if f.name.rsplit(".", 1)[-1].split("#", 1)[0]
+                == args.function
+            ]
         if not matches:
             report["reason"] = "unknown_function"
         elif len(matches) > 1:
