@@ -2398,6 +2398,45 @@ def test_review7_shadowing_decl_evicts_storage_alias():
     assert s.return_dependencies == frozenset({1})
 
 
+def test_review7_conditional_retarget_keeps_all_targets():
+    # `if (c) { xs = other; }` may not run — after it `xs` can
+    # still point at `arr`, so the write-through and the read
+    # both keep `a`'s dep.
+    src = """contract C {
+  uint256[] arr;
+  uint256[] other;
+  bool c;
+  function f(uint256 a) public returns (uint256) {
+    uint256[] storage xs = arr;
+    if (c) { xs = other; }
+    xs[0] = a;
+    return arr[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.effects == "state_writes"
+    assert 0 in s.return_dependencies
+
+
+def test_review7_inner_shadow_restores_outer_alias():
+    # `{ uint256 xs = 0; }` shadows only inside its block — the
+    # outer storage pointer survives the block end.
+    src = """contract C {
+  uint256[] arr;
+  function f(uint256 a) public returns (uint256) {
+    uint256[] storage xs = arr;
+    { uint256 xs = 0; }
+    xs[0] = a;
+    return arr[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.effects == "state_writes"
+    assert 0 in s.return_dependencies
+
+
 def test_review7_storage_rebind_retargets_pointer():
     # `xs = other` retargets the storage pointer — the indexed
     # write after it must land on `other`, not keep hitting `arr`.

@@ -508,6 +508,33 @@ class _Builder:
             out |= self._all_state_vars.get(c, set())
         return out
 
+    def _storage_targets(self, name):
+        """Candidate slots a local name may resolve to — every
+        `_storage_alias` value is a frozenset because a name that
+        retargets only on some paths keeps all candidates."""
+        tgt = self._storage_alias.get(name)
+        return tuple(tgt) if tgt is not None else (name,)
+
+    def _merge_alias_paths(self, *paths):
+        """Union-merge storage-pointer maps from paths that may or
+        may not have run: a divergent name keeps every candidate
+        target (over-report is the safe direction for effects)."""
+        for path in paths:
+            for name, tgts in path.items():
+                self._storage_alias[name] = self._storage_alias.get(
+                    name, frozenset()
+                ) | tgts
+
+    def _merge_alias_scope(self, inner_alias, decls):
+        """Merge an inner scope's pointer map back: names declared
+        inside stay scoped; surviving names keep every candidate."""
+        for name, tgts in inner_alias.items():
+            if name in decls:
+                continue
+            self._storage_alias[name] = self._storage_alias.get(
+                name, frozenset()
+            ) | tgts
+
     def _lookup_fns(self, contract, name, skip_self=False):
         for c in self._hierarchy(contract):
             if skip_self and c == contract:
@@ -1034,6 +1061,7 @@ class _Builder:
             # A fresh declaration shadows any earlier binding —
             # drop a stale alias for the name first.
             self._storage_alias.pop(name.text.decode(), None)
+            # Aliases are frozensets of candidate targets.
             if (
                 expr is not None
                 and any(
@@ -1057,7 +1085,7 @@ class _Builder:
                 ):
                     self._storage_alias[
                         name.text.decode()
-                    ] = ein.text.decode()
+                    ] = frozenset({ein.text.decode()})
             return None
         if t == "expression_statement":
             expr = next(
@@ -1115,18 +1143,25 @@ class _Builder:
             ret = None
             results = []
             first = variants[0]
+            base_alias = self._storage_alias
+            self._storage_alias = dict(base_alias)
             results.append(
                 self._block(body, first, param_index, summary)
                 if body is not None
                 else None
             )
+            aliases = [self._storage_alias]
             for ci, cc in variants[1:]:
+                self._storage_alias = dict(base_alias)
                 cbody = cc.child_by_field_name("body")
                 results.append(
                     self._block(cbody, ci, param_index, summary)
                     if cbody is not None
                     else None
                 )
+                aliases.append(self._storage_alias)
+            self._storage_alias = base_alias
+            self._merge_alias_paths(*aliases)
             scopes = [first] + [v[0] for v in variants[1:]]
             for name in set().union(*scopes):
                 merged = frozenset()
@@ -1148,16 +1183,25 @@ class _Builder:
             ]
             left_locals = dict(locals_)
             right_locals = dict(locals_)
+            base_alias = self._storage_alias
+            self._storage_alias = dict(base_alias)
             left_ret = None
             right_ret = None
             if branches:
                 left_ret = self._block(
                     branches[0], left_locals, param_index, summary
                 )
+            left_alias = self._storage_alias
+            self._storage_alias = dict(base_alias)
             if len(branches) > 1:
                 right_ret = self._block(
                     branches[1], right_locals, param_index, summary
                 )
+            right_alias = self._storage_alias
+            self._storage_alias = base_alias
+            # A retarget on one arm only is conditional — keep
+            # every candidate the two arms can leave.
+            self._merge_alias_paths(left_alias, right_alias)
             merged = frozenset()
             if cond is not None:
                 merged |= self._expr(
@@ -1285,6 +1329,8 @@ class _Builder:
             # destroying them; assignments to outer names
             # propagate back, inner decls don't leak.
             inner = dict(locals_)
+            outer_alias = self._storage_alias
+            self._storage_alias = dict(outer_alias)
             self._decls.append(set())
             try:
                 ret = self._block(
@@ -1292,6 +1338,8 @@ class _Builder:
                 )
             finally:
                 decls = self._decls.pop()
+            inner_alias = self._storage_alias
+            self._storage_alias = outer_alias
             # A state slot first written inside the block
             # propagates back too; only block-local decls stay
             # scoped.
@@ -1304,6 +1352,7 @@ class _Builder:
                     and (name in locals_ or name in svars)
                 ):
                     locals_[name] = inner[name]
+            self._merge_alias_scope(inner_alias, decls)
             return ret
         raise _Unsupported("unsupported_statement", _span(st))
 
@@ -1317,6 +1366,8 @@ class _Builder:
         Condition deps join every slot the body may have
         touched, matching the if-join."""
         inner = dict(locals_)
+        outer_alias = self._storage_alias
+        self._storage_alias = dict(outer_alias)
         self._writes.append(set())
         self._decls.append(set())
         merged = frozenset()
@@ -1353,7 +1404,9 @@ class _Builder:
             touched = self._writes.pop()
             # Loop-init decls (`for (uint i = 0; ...)`)
             # stay scoped to the loop.
-            self._decls.pop()
+            loop_decls = self._decls.pop()
+        inner_alias = self._storage_alias
+        self._storage_alias = outer_alias
         # A state slot first written inside the loop joins
         # the merge too — `name not in locals_` is not a
         # reason to drop it.
@@ -1370,6 +1423,9 @@ class _Builder:
                 # enclosing loop reads at merge-back.
                 if self._writes:
                     self._writes[-1].add(name)
+        # The body may not have run — every candidate either
+        # side could leave stays on the merged pointer map.
+        self._merge_alias_scope(inner_alias, loop_decls)
         if ret is not None:
             # `while (n > 0) { return x; }` — whether the body
             # ran at all depends on the condition.
@@ -1513,25 +1569,25 @@ class _Builder:
                     raise _Unsupported(
                         "unsupported_statement", _span(expr)
                     )
-                name = self._storage_alias.get(
-                    node.text.decode(), node.text.decode()
-                )
-                if name in self._all_state_vars_of(
-                    getattr(self, "_current_contract", "")
+                for name in self._storage_targets(
+                    node.text.decode()
                 ):
-                    locals_.setdefault(name, frozenset())
-                if name not in locals_:
-                    raise _Unsupported(
-                        "unsupported_statement", _span(expr)
-                    )
-                locals_[name] = locals_[name] | deps
-                if self._writes:
-                    self._writes[-1].add(name)
-                if name in self._all_state_vars_of(
-                    getattr(self, "_current_contract", "")
-                ):
-                    summary.effects = "state_writes"
-                    self._effects_touched = True
+                    if name in self._all_state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    ):
+                        locals_.setdefault(name, frozenset())
+                    if name not in locals_:
+                        raise _Unsupported(
+                            "unsupported_statement", _span(expr)
+                        )
+                    locals_[name] = locals_[name] | deps
+                    if self._writes:
+                        self._writes[-1].add(name)
+                    if name in self._all_state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    ):
+                        summary.effects = "state_writes"
+                        self._effects_touched = True
                 return deps
             lident = (
                 _children(left)[0]
@@ -1576,7 +1632,7 @@ class _Builder:
             if expr.type == "augmented_assignment_expression":
                 deps |= locals_[lident.text.decode()]
             raw = lident.text.decode()
-            lname = self._storage_alias.get(raw, raw)
+            lnames = self._storage_targets(raw)
             if (
                 expr.type == "assignment_expression"
                 and raw in self._storage_alias
@@ -1608,28 +1664,29 @@ class _Builder:
                         getattr(self, "_current_contract", "")
                     )
                 ):
-                    target = rroot
+                    target = frozenset({rroot})
                 if target is not None:
                     self._storage_alias[raw] = target
-                    lname = raw
-            locals_[lname] = deps
-            if self._writes:
-                self._writes[-1].add(lname)
-            shadowed = (
-                lname in param_index
-                or any(
-                    lname in frame for frame in self._decls
+                    lnames = (raw,)
+            for lname in lnames:
+                locals_[lname] = deps
+                if self._writes:
+                    self._writes[-1].add(lname)
+                shadowed = (
+                    lname in param_index
+                    or any(
+                        lname in frame for frame in self._decls
+                    )
                 )
-            )
-            if (
-                not shadowed
-                and lname
-                in self._state_vars_of(
-                    getattr(self, "_current_contract", "")
-                )
-            ):
-                summary.effects = "state_writes"
-                self._effects_touched = True
+                if (
+                    not shadowed
+                    and lname
+                    in self._state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    )
+                ):
+                    summary.effects = "state_writes"
+                    self._effects_touched = True
             return deps
         if expr.type == "update_expression":
             target = expr.child_by_field_name("argument")
@@ -1689,21 +1746,23 @@ class _Builder:
                 )
         t = node.type
         if t == "identifier":
-            name = self._storage_alias.get(
-                node.text.decode(), node.text.decode()
-            )
-            if name not in locals_:
-                if name in self._all_state_vars_of(
-                    getattr(self, "_current_contract", "")
-                ):
-                    # A non-scalar state var (`arr`, `m`) is an
-                    # opaque container — dep-free external read,
-                    # not a binding failure.
-                    return frozenset()
-                raise _Unsupported(
-                    "binding_unavailable", _span(node)
-                )
-            return locals_[name]
+            out = frozenset()
+            for name in self._storage_targets(
+                node.text.decode()
+            ):
+                if name not in locals_:
+                    if name in self._all_state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    ):
+                        # A non-scalar state var (`arr`, `m`) is
+                        # an opaque container — dep-free
+                        # external read, not a binding failure.
+                        continue
+                    raise _Unsupported(
+                        "binding_unavailable", _span(node)
+                    )
+                out |= locals_[name]
+            return out
         if t in {
             "number_literal",
             "boolean_literal",
@@ -1845,9 +1904,14 @@ class _Builder:
                     named[0], locals_, param_index, summary
                 )
                 inner = dict(locals_)
+                base_alias = self._storage_alias
+                self._storage_alias = dict(base_alias)
                 deps |= self._expr(
                     named[1], inner, param_index, summary
                 )
+                rhs_alias = self._storage_alias
+                self._storage_alias = base_alias
+                self._merge_alias_paths(rhs_alias)
                 for name, deps_ in inner.items():
                     if deps_ != locals_.get(name):
                         locals_[name] = (
@@ -1872,12 +1936,18 @@ class _Builder:
                 named[0], locals_, param_index, summary
             )
             arms = []
+            arm_aliases = []
+            base_alias = self._storage_alias
             for arm in named[1:]:
                 inner = dict(locals_)
+                self._storage_alias = dict(base_alias)
                 deps |= self._expr(
                     arm, inner, param_index, summary
                 )
                 arms.append(inner)
+                arm_aliases.append(self._storage_alias)
+            self._storage_alias = base_alias
+            self._merge_alias_paths(*arm_aliases)
             for name in set().union(
                 *(set(a) for a in arms)
             ):
