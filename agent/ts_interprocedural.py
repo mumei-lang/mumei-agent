@@ -310,7 +310,8 @@ Admitted:
   at call sites — `b ? g : h` joins callables to their
   captured union and the call dep-unions. `extends` on a
   non-class value ends the parent chain; the heritage
-  expression's deps fold into the class's `captured`.
+  expression's deps record as `opaque_extends` and seed the
+  instance's `"*"` field bucket at construction.
 * `new Map()`/`new Set()` (and weak variants) build a
   `_Composite` tagged `_MAP_SET_KLASS`: `set`/`add`/
   `delete`/`clear` may-write the entry table (literal keys
