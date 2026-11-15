@@ -2653,6 +2653,20 @@ in-process; no audit/CLI/MCP route changes.
   ordinary member writes (`effects = "state_writes"`).
   Non-scalar tuple elements still close the statement.
 
+### C06 Solidity single-file inheritance (slice 6)
+
+- `contract B is A` records ancestors per contract; lookup of
+  plain `f(...)`, `this.f(...)`, state vars and modifiers
+  walks the hierarchy (self first, then ancestors in
+  declaration order, depth-first with dedup) before falling
+  back to unrelated contracts in the file.
+- `super.f(...)` runs the same lookup with the caller's own
+  contract skipped, so a same-name override can't recurse
+  into itself.
+- Inherited scalar state vars seed dep-free slots in the
+  derived contract's functions and modifier scopes; writes
+  mark `state_writes` as usual.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

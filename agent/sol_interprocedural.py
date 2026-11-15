@@ -194,6 +194,7 @@ class _Builder:
         self._state_vars: dict[str, set[str]] = {}
         self._overload_groups: dict[str, list[str]] = {}
         self.modifiers: dict[str, object] = {}
+        self._parents: dict[str, list[str]] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -233,6 +234,38 @@ class _Builder:
             context_key=f"{PROFILE}:{key}", functions=summaries
         )
 
+    def _hierarchy(self, contract):
+        # Linearized-ish: contract first, then ancestors in
+        # declaration order, depth-first with dedup.
+        order: list[str] = []
+        seen: set[str] = set()
+
+        def visit(c):
+            if c in seen:
+                return
+            seen.add(c)
+            order.append(c)
+            for p in self._parents.get(c, ()):
+                visit(p)
+
+        visit(contract)
+        return order
+
+    def _state_vars_of(self, contract):
+        out: set[str] = set()
+        for c in self._hierarchy(contract):
+            out |= self._state_vars.get(c, set())
+        return out
+
+    def _lookup_fns(self, contract, name, skip_self=False):
+        for c in self._hierarchy(contract):
+            if skip_self and c == contract:
+                continue
+            key = f"{c}.{name}"
+            if key in self._overload_groups:
+                return self._overload_groups[key]
+        return []
+
     def _register_contract(self, node) -> None:
         name_node = node.child_by_field_name("name") or next(
             (c for c in _children(node) if c.type == "identifier"),
@@ -247,6 +280,21 @@ class _Builder:
         )
         if body is None:
             return
+        for c in _children(node):
+            if c.type == "inheritance_specifier":
+                anc = c.child_by_field_name("ancestor")
+                aname = next(
+                    (
+                        d
+                        for d in _children(anc or c)
+                        if d.type == "identifier"
+                    ),
+                    None,
+                )
+                if aname is not None:
+                    self._parents.setdefault(
+                        contract, []
+                    ).append(aname.text.decode())
         for member in _children(body):
             if member.type == "state_variable_declaration":
                 tnode = next(
@@ -371,9 +419,7 @@ class _Builder:
         # Scalar state variables read as dep-free external
         # values; writes still flow through the slot and set
         # `effects`.
-        for sv in self._state_vars.get(
-            self.contracts[key], ()
-        ):
+        for sv in self._state_vars_of(self.contracts[key]):
             locals_.setdefault(sv, frozenset())
         for ret_name in ret_names:
             if ret_name not in locals_:
@@ -443,13 +489,14 @@ class _Builder:
             actual.append(
                 self._expr(expr, locals_, param_index, summary)
             )
-        mnode = (
-            self.modifiers.get(
-                f"{self._current_contract}.{iname.text.decode()}"
-            )
-            if iname is not None
-            else None
-        )
+        mnode = None
+        if iname is not None:
+            for c in self._hierarchy(self._current_contract):
+                mnode = self.modifiers.get(
+                    f"{c}.{iname.text.decode()}"
+                )
+                if mnode is not None:
+                    break
         mparams = (
             [p for p in _children(mnode) if p.type == "parameter"]
             if mnode is not None
@@ -481,8 +528,8 @@ class _Builder:
         try:
             mlocals: dict[str, frozenset[int]] = {
                 sv: frozenset()
-                for sv in self._state_vars.get(
-                    self._current_contract, ()
+                for sv in self._state_vars_of(
+                    self._current_contract
                 )
             }
             for i, p in enumerate(mparams):
@@ -924,11 +971,10 @@ class _Builder:
                         len(idents) == 2
                         and idents[0].text == b"this"
                         and idents[1].text.decode()
-                        in self._state_vars.get(
+                        in self._state_vars_of(
                             getattr(
                                 self, "_current_contract", ""
-                            ),
-                            (),
+                            )
                         )
                     ):
                         name = idents[1].text.decode()
@@ -963,9 +1009,8 @@ class _Builder:
                     len(idents) == 2
                     and idents[0].text == b"this"
                     and idents[1].text.decode()
-                    in self._state_vars.get(
-                        getattr(self, "_current_contract", ""),
-                        (),
+                    in self._state_vars_of(
+                        getattr(self, "_current_contract", "")
                     )
                 ):
                     lident = idents[1]
@@ -988,8 +1033,8 @@ class _Builder:
             locals_[lident.text.decode()] = deps
             if self._writes:
                 self._writes[-1].add(lident.text.decode())
-            if lident.text.decode() in self._state_vars.get(
-                getattr(self, "_current_contract", ""), ()
+            if lident.text.decode() in self._state_vars_of(
+                getattr(self, "_current_contract", "")
             ):
                 summary.effects = "state_writes"
                 self._effects_touched = True
@@ -1013,8 +1058,8 @@ class _Builder:
                 )
             if self._writes:
                 self._writes[-1].add(tident.text.decode())
-            if tident.text.decode() in self._state_vars.get(
-                getattr(self, "_current_contract", ""), ()
+            if tident.text.decode() in self._state_vars_of(
+                getattr(self, "_current_contract", "")
             ):
                 summary.effects = "state_writes"
                 self._effects_touched = True
@@ -1106,8 +1151,8 @@ class _Builder:
                 len(idents) == 2
                 and idents[0].text == b"this"
                 and idents[1].text.decode()
-                in self._state_vars.get(
-                    getattr(self, "_current_contract", ""), ()
+                in self._state_vars_of(
+                    getattr(self, "_current_contract", "")
                 )
             ):
                 # `this.s` — state var read through `this`.
@@ -1150,6 +1195,7 @@ class _Builder:
         self, node, locals_, param_index, summary, void=False
     ) -> frozenset[int]:
         abi_member = None
+        super_call = False
         fn_expr = node.child_by_field_name("function")
         if (
             fn_expr is not None
@@ -1171,6 +1217,12 @@ class _Builder:
                 and idents[0].text == b"this"
             ):
                 fn_expr = idents[1]
+            elif (
+                len(idents) == 2
+                and idents[0].text == b"super"
+            ):
+                fn_expr = idents[1]
+                super_call = True
             elif (
                 len(idents) == 2
                 and idents[0].text.decode() == "abi"
@@ -1234,20 +1286,22 @@ class _Builder:
                 )
             )
             return actual_union
-        # Same-contract resolution first — two contracts may
-        # declare the same function name.
+        # Hierarchy-aware resolution: the caller's contract and
+        # its ancestors first (`super.x` skips the caller), then
+        # any other contract in the file.
         targets: list[str] = []
-        cands = [getattr(self, "_current_contract", "")]
-        cands += [
-            c
-            for c in dict.fromkeys(self.contracts.values())
-            if c != cands[0]
-        ]
-        for cname in cands:
-            base = f"{cname}.{name}"
-            if base in self._overload_groups:
-                targets = self._overload_groups[base]
-                break
+        current = getattr(self, "_current_contract", "")
+        targets = self._lookup_fns(
+            current, name, skip_self=super_call
+        )
+        if not targets:
+            for cname in dict.fromkeys(self.contracts.values()):
+                if cname in self._hierarchy(current):
+                    continue
+                base = f"{cname}.{name}"
+                if base in self._overload_groups:
+                    targets = self._overload_groups[base]
+                    break
         if not targets:
             if void:
                 # Unknown callee whose result is discarded —

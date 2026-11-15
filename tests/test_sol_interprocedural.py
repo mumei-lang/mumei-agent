@@ -661,3 +661,83 @@ def test_slice5_non_scalar_return_param_closes():
     )
     assert not s.available
     assert any(g.reason == "unsupported_signature" for g in s.gaps)
+
+
+def test_slice6_inherited_function_call():
+    s = _fn(
+        """contract A {
+    function g(uint a) returns (uint) { return a + 1; }
+}
+contract B is A {
+    function f(uint a) public returns (uint) { return g(a); }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice6_super_call():
+    s = _fn(
+        """contract A {
+    function g(uint a) returns (uint) { return a + 1; }
+}
+contract B is A {
+    function f(uint a) public returns (uint) { return super.g(a); }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice6_super_skips_own_contract():
+    # `super.g` must not resolve to B's own `g` (which would
+    # recurse) — it picks the ancestor's.
+    src = """contract A {
+    function g(uint a) returns (uint) { return a + 1; }
+}
+contract B is A {
+    function g(uint a) returns (uint) { return super.g(a); }
+    function f(uint a) public returns (uint) { return super.g(a); }
+}"""
+    r = _summarize(src)
+    bf = next(f for f in r.functions if f.name.endswith(".f"))
+    assert bf.available and bf.return_dependencies == frozenset({0})
+
+
+def test_slice6_inherited_state_var():
+    s = _fn(
+        """contract A { uint s; }
+contract B is A {
+    function f(uint a) public returns (uint) {
+        s = a;
+        return this.s;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice6_inherited_modifier():
+    s = _fn(
+        """contract A {
+    modifier m(uint p) { _; }
+}
+contract B is A {
+    function f(uint a) public m(a) returns (uint) { return a; }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice6_transitive_ancestor():
+    s = _fn(
+        """contract A { function g(uint a) returns (uint) { return a; } }
+contract B is A { }
+contract C is B {
+    function f(uint a) public returns (uint) { return g(a); }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
