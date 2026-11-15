@@ -387,6 +387,44 @@ def probe_requests_for(
         )
     return tuple(out)
 
+def _run_probe_batch(
+    requests: tuple[AdapterProbeRequest, ...],
+    *,
+    runner: AttemptRunner,
+    cancel_event: "threading.Event | None",
+    max_parallel: int,
+) -> tuple[AdapterProbeOutcome, ...]:
+    """Execute probe requests, preserving order; returns full outcomes.
+
+    The parallel path is only taken when no request declares a
+    `memory_bound_mb`: `AttemptRunner` installs that limit through a
+    `preexec_fn`, and `preexec_fn` forces the fork+exec spawn path,
+    which can deadlock in a multithreaded process. A batch carrying a
+    memory-bound probe falls back to sequential execution rather than
+    risk a spawn that can stall before timeout accounting starts.
+    """
+    if (
+        max_parallel == 1
+        or len(requests) <= 1
+        or any(req.memory_bound_mb is not None for req in requests)
+    ):
+        return tuple(
+            run_probe(req, runner=runner, cancel_event=cancel_event)
+            for req in requests
+        )
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_parallel
+    ) as pool:
+        return tuple(
+            pool.map(
+                lambda req: run_probe(
+                    req, runner=runner, cancel_event=cancel_event
+                ),
+                requests,
+            )
+        )
+
+
 def observe_probes(
     requests: tuple[AdapterProbeRequest, ...],
     *,
@@ -428,20 +466,12 @@ def observe_probes(
         raise ValueError("probe parallelism bound must be a positive int")
     if runner is None:
         runner = AttemptRunner()
-    if (
-        max_parallel == 1
-        or len(requests) <= 1
-        or any(req.memory_bound_mb is not None for req in requests)
-    ):
-        out: list[RuntimeObservation] = []
-        for req in requests:
-            outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
-            out.append(outcome.observation)
-        return tuple(out)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as pool:
-        outcomes = list(
-            pool.map(lambda req: run_probe(req, runner=runner, cancel_event=cancel_event), requests)
-        )
+    outcomes = _run_probe_batch(
+        requests,
+        runner=runner,
+        cancel_event=cancel_event,
+        max_parallel=max_parallel,
+    )
     return tuple(outcome.observation for outcome in outcomes)
 
 # Bound on recorded probe attempts per adapter request — mirrors
@@ -546,6 +576,7 @@ class AdapterProbePlan:
 
     plan: VerificationPlan
     observations: tuple[RuntimeObservation, ...]
+    histories: tuple["AdapterProbeHistory", ...] = ()
 
 
 def plan_with_probes(
@@ -560,25 +591,35 @@ def plan_with_probes(
     cancel_event: "threading.Event | None" = None,
     rounds: int = 1,
     max_parallel: int = 1,
+    histories: tuple["AdapterProbeHistory", ...] = (),
+    max_attempts: int = MAX_PROBE_HISTORY,
 ) -> AdapterProbePlan:
     """Plan, probe the observation-excluded candidates, re-plan.
 
-    One round is: `plan()` → `probe_requests_for` → `observe_probes`
-    → feed every observation back in. Stamps increment per round so
-    the registry's freshness check accepts each new observation.
-    `rounds` (1..MAX_PLAN_ROUNDS) bounds the loop: more than one
-    round only re-probes adapters still excluded by observation —
-    a probe that timed out may deserve one retry, a structurally
-    excluded adapter is never re-asked. `max_parallel` forwards to
-    `observe_probes`: probes inside one round may run concurrently,
-    rounds still run one after another. The driver stops early when
-    a candidate is selected or a round emits no requests.
+    One round is: `plan()` → `probe_retry_requests` → run the
+    requests → feed every observation back in. Stamps increment
+    per round so the registry's freshness check accepts each new
+    observation. `rounds` (1..MAX_PLAN_ROUNDS) bounds the loop:
+    more than one round only re-probes adapters still excluded by
+    observation — a probe that timed out may deserve one retry, a
+    structurally excluded adapter is never re-asked. `max_parallel`
+    bounds concurrency inside one round; rounds still run one
+    after another. The driver stops early when a candidate is
+    selected or a round emits no requests.
+
+    `histories` carries prior per-adapter `AdapterProbeHistory`
+    records: each round's requests are scheduled by
+    `probe_retry_requests`, so an adapter's attempt number advances
+    with its recorded history and is skipped once `max_attempts`
+    (bounded by MAX_PROBE_HISTORY) is reached. Every observed
+    outcome is appended to the adapter's history, and the updated
+    histories come back on the returned `AdapterProbePlan` for the
+    caller to persist or chain.
 
     The caller owns `stamp` allocation: pass a base stamp that is
     fresh for every adapter, then keep the returned observations to
-    chain further planning. Nothing here authorizes, retries beyond
-    `rounds`, or accepts Evidence — the loop only schedules and
-    observes declared probes.
+    chain further planning. Nothing here authorizes or accepts
+    Evidence — the loop only schedules and observes declared probes.
     """
     if not isinstance(registry, AdapterRegistry):
         raise ValueError("probe planning requires a registry")
@@ -592,43 +633,66 @@ def plan_with_probes(
         raise ValueError("probe planning rounds out of bounds")
     if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel < 1:
         raise ValueError("probe parallelism bound must be a positive int")
+    if type(histories) is not tuple or any(
+        type(h) is not AdapterProbeHistory for h in histories
+    ):
+        raise ValueError("probe planning requires probe histories")
+    if type(max_attempts) is not int or not (
+        1 <= max_attempts <= MAX_PROBE_HISTORY
+    ):
+        raise ValueError("probe planning attempt bound out of range")
     if runner is None:
         runner = AttemptRunner()
     # Latest observation per adapter — the result must be
     # chainable back into `plan()`, which rejects duplicate ids.
     seen: dict[str, RuntimeObservation] = {}
+    by_hist: dict[str, AdapterProbeHistory] = {}
+    for h in histories:
+        if h.adapter_id in by_hist:
+            raise ValueError("duplicate probe history")
+        by_hist[h.adapter_id] = h
     observed = tuple(observations)
     plan = registry.plan(request, policy, observed)
     for offset in range(rounds):
         if plan.selected is not None:
             break
-        reqs = probe_requests_for(
+        reqs = probe_retry_requests(
             registry,
             request,
             policy,
             observed,
+            histories=tuple(by_hist.values()),
             stamp=stamp + offset,
+            max_attempts=max_attempts,
             tool_version=tool_version,
         )
         if not reqs:
             break
-        fresh = observe_probes(
+        outcomes = _run_probe_batch(
             reqs,
             runner=runner,
             cancel_event=cancel_event,
             max_parallel=max_parallel,
         )
-        # A re-probed adapter replaces its prior observation —
-        # `plan()` rejects duplicate adapter ids, and the freshest
-        # stamped observation is the one that counts anyway.
-        for o in fresh:
-            seen[o.adapter_id] = o
         by_id = {o.adapter_id: o for o in observed}
-        for o in fresh:
+        for req, outcome in zip(reqs, outcomes):
+            o = outcome.observation
+            # A re-probed adapter replaces its prior observation —
+            # `plan()` rejects duplicate adapter ids, and the
+            # freshest stamped observation is the one that counts.
+            seen[o.adapter_id] = o
             by_id[o.adapter_id] = o
+            hist = by_hist.get(req.adapter_id)
+            by_hist[req.adapter_id] = (
+                AdapterProbeHistory.start(req).record(req, outcome)
+                if hist is None
+                else hist.record(req, outcome)
+            )
         observed = tuple(by_id.values())
         plan = registry.plan(request, policy, observed)
-    return AdapterProbePlan(plan, tuple(seen.values()))
+    return AdapterProbePlan(
+        plan, tuple(seen.values()), tuple(by_hist.values())
+    )
 
 
 def probe_retry_requests(

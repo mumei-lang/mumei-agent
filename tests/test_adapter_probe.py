@@ -710,6 +710,81 @@ def test_plan_with_probes_replaces_initial_observation():
     assert len(out.observations) == 1
 
 
+def test_plan_with_probes_records_history():
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    out = plan_with_probes(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )
+    assert len(out.histories) == 1
+    hist = out.histories[0]
+    assert hist.adapter_id == "zendingsol.host.lean_scaffold"
+    assert hist.attempt_count == 1
+    assert hist.outcomes[0].attempt_number == 1
+
+
+def test_plan_with_probes_retry_advances_attempt():
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    req = probe_requests_for(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )[0]
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    out = plan_with_probes(
+        registry,
+        _route(),
+        PlannerPolicy(),
+        stamp=2,
+        histories=(hist,),
+    )
+    assert out.plan.selected is None
+    assert len(out.histories) == 1
+    assert out.histories[0].attempt_count == 2
+    assert out.histories[0].outcomes[1].attempt_number == 2
+
+
+def test_plan_with_probes_stops_at_attempt_bound():
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    req = probe_requests_for(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )[0]
+    hist = AdapterProbeHistory.start(req)
+    import dataclasses as _dc
+
+    for n in range(1, MAX_PROBE_HISTORY + 1):
+        req_n = _dc.replace(req, attempt_number=n, stamp=n)
+        hist = hist.record(req_n, run_probe(req_n))
+    out = plan_with_probes(
+        registry,
+        _route(),
+        PlannerPolicy(),
+        stamp=10,
+        histories=(hist,),
+    )
+    # History-bound candidate emits no request: nothing is probed.
+    assert out.plan.selected is None
+    assert out.observations == ()
+    assert out.histories[0].attempt_count == MAX_PROBE_HISTORY
+
+
+def test_plan_with_probes_histories_validation():
+    registry = _registry()
+    hist = AdapterProbeHistory.start(_req())
+    with pytest.raises(ValueError, match="probe histories"):
+        plan_with_probes(
+            registry, _route(), PlannerPolicy(), stamp=1,
+            histories=[hist],
+        )
+    with pytest.raises(ValueError, match="duplicate"):
+        plan_with_probes(
+            registry, _route(), PlannerPolicy(), stamp=1,
+            histories=(hist, hist),
+        )
+    with pytest.raises(ValueError, match="attempt bound"):
+        plan_with_probes(
+            registry, _route(), PlannerPolicy(), stamp=1,
+            max_attempts=0,
+        )
+
+
 def test_probe_retry_first_attempt_without_history():
     reqs = probe_retry_requests(
         _registry(), _route(), PlannerPolicy(), stamp=1
