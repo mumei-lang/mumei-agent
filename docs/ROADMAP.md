@@ -2718,6 +2718,21 @@ slice 15.
 Boundaries: `this` inside a method still closes at invoke —
 there is no receiver binding.
 
+### C06 TypeScript rest formal parameters (slice 17)
+
+`f(a, ...rest)` admits: the rest name occupies the last index
+slot in `parameters`. For a declared function the call arm
+already unions every evaluated argument into the result, so a
+callee reading `rest` needs no extra precision. For a
+`_Callable` (arrow/method value) the rest name binds the union
+of all actuals at index ≥ rest — a sound over-approximation
+(reading `rest[0]` yields the whole union, matching the
+member-read scalar rule).
+
+Boundaries: a parameter after `...rest` is unreachable and
+closes; rest combined with destructured formals
+(`f(...{a})`) closes on the non-identifier target.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -289,10 +289,10 @@ def test_default_parameter_records_calls():
     assert s.calls[0].callee == "g"
 
 
-def test_rest_parameter_closes():
+def test_rest_parameter_admits():
+    # Slice 17: `...xs` occupies the last index slot.
     s = _fn("function f(...xs: number[]): number { return 0; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available and s.parameters == ("xs",)
 
 
 def test_uninitialized_let_binds_no_deps():
@@ -2311,3 +2311,60 @@ def test_async_method_admits():
         " return x; }"
     )
     assert s.available
+
+
+# --- slice 17: rest formal parameters
+
+
+def test_rest_param_declared():
+    s = _fn(
+        "function f(a: number, ...rest: number[]): number { return rest; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+    assert s.parameters == ("a", "rest")
+
+
+def test_rest_param_call_unions_extras():
+    s = _fn(
+        "function g(a: number, ...rest: number[]): number { return rest; }"
+        "function f(x: number, y: number, z: number): number {"
+        " return g(x, y, z); }",
+        name="f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_rest_param_arrow():
+    s = _fn(
+        "function f(x: number, y: number, z: number): number {"
+        " const g = (a: number, ...r: number[]) => r;"
+        " return g(x, y, z); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1, 2})
+
+
+def test_rest_param_empty_collects_nothing():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (a: number, ...r: number[]) => r;"
+        " return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_rest_param_mid_params_closes():
+    s = _fn(
+        "function f(...rest: number[], a: number): number { return a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_signature"
+
+
+def test_rest_arrow_mid_params_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (...r: number[], a: number) => a;"
+        " return g(x); }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"

@@ -117,6 +117,11 @@ Admitted:
   the operand's deps through and `async` admits at the signature
   gate. `for await (x of y)` iterates like `of`. Generators
   (`function*`, `yield`) stay closed — a `yield` has no dep slot.
+* Rest formal parameters `f(a, ...rest)` — the rest name
+  occupies the last index slot; a declared-function call already
+  unions every evaluated argument into the result, and a
+  `_Callable` invocation binds the rest name to the union of the
+  remaining actuals. A parameter after `...rest` closes.
 * Shorthand method definitions `{m(v) { ... }}` — a callable
   field value like an arrow, invoked through the slice-13 member
   call path (`o.m(x)`). `get`/`set`/`*`/`static` markers stay
@@ -161,7 +166,7 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 `this`, getters/setters,
 generators, `any`/composite/missing parameter
-types, rest formal parameters, `new` and
+types, `new` and
 generator/tagged-template function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
@@ -286,15 +291,18 @@ class _Callable:
     bound to a name. `params`/`defaults` describe its formal
     parameters; `captured` over-approximates its closure reads —
     the union of every visible binding's deps at the definition
-    site — so passing or returning the value is a scalar."""
+    site — so passing or returning the value is a scalar.
+    `rest` is the index of a `...rest` formal (-1 when absent):
+    invocation binds it to the union of every remaining actual."""
 
-    __slots__ = ("node", "params", "defaults", "captured")
+    __slots__ = ("node", "params", "defaults", "captured", "rest")
 
-    def __init__(self, node, params, defaults, captured) -> None:
+    def __init__(self, node, params, defaults, captured, rest=-1) -> None:
         self.node = node
         self.params = params
         self.defaults = defaults
         self.captured = captured
+        self.rest = rest
 
 
 def _scalar_of(value) -> frozenset[int]:
@@ -523,6 +531,7 @@ class _Builder:
             raise _Unsupported("unsupported_signature", _span(node))
         params: dict[str, int] = {}
         destructured: list = []
+        rest_seen = False
         for param in _children(params_node):
             # `x?: number` and `x: number = 0` admit like a required
             # parameter — the index position is what the summary
@@ -531,6 +540,26 @@ class _Builder:
                 raise _Unsupported("unsupported_signature", _span(param))
             pattern = param.child_by_field_name("pattern")
             ptype = param.child_by_field_name("type")
+            if rest_seen:
+                raise _Unsupported("unsupported_signature", _span(param))
+            if pattern is not None and pattern.type == "rest_pattern":
+                # `...rest` occupies the last slot; the index's dep
+                # stands for "args at this index and beyond" — the
+                # call arm already unions every evaluated argument,
+                # so reading `rest` is sound under the index model.
+                target = next(iter(_children(pattern)), None)
+                if target is None or target.type != "identifier":
+                    raise _Unsupported(
+                        "unsupported_signature", _span(param)
+                    )
+                pname = target.text.decode()
+                if pname in params:
+                    raise _Unsupported(
+                        "unsupported_signature", _span(param)
+                    )
+                params[pname] = len(params)
+                rest_seen = True
+                continue
             if pattern is not None and pattern.type in {
                 "object_pattern",
                 "array_pattern",
@@ -1768,16 +1797,18 @@ class _Builder:
         the definition site, so the closure's free reads are
         over-approximated even when the callable escapes (returned
         or passed as an argument)."""
-        names, defaults = self._callable_params(node)
+        names, defaults, rest = self._callable_params(node)
         captured = frozenset(params.values())
         for val in locals_.values():
             captured |= _scalar_of(val)
-        return _Callable(node, names, defaults, captured)
+        return _Callable(node, names, defaults, captured, rest)
 
     def _callable_params(self, node):
-        """`(a, b = d)` / `x =>` — the formal parameter names plus
-        any default expressions (evaluated at the call site).
-        Rest/destructured/typed-non-scalar parameters close."""
+        """`(a, b = d, ...rest)` / `x =>` — the formal parameter
+        names plus any default expressions (evaluated at the call
+        site) and the rest index (-1 when absent). A rest
+        parameter must come last; destructured/typed-non-scalar
+        parameters close."""
         params_node = node.child_by_field_name("parameters")
         if params_node is None:
             p = node.child_by_field_name("parameter")
@@ -1785,10 +1816,17 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
-            return (p.text.decode(),), {}
+            return (p.text.decode(),), {}, -1
         names: list[str] = []
         defaults: dict[int, object] = {}
+        rest = -1
         for param in _children(params_node):
+            if rest >= 0:
+                # A parameter after `...rest` is unreachable —
+                # closed rather than analyzed wrongly.
+                raise _Unsupported(
+                    "unsupported_expression", _span(param)
+                )
             if param.type not in {
                 "required_parameter",
                 "optional_parameter",
@@ -1798,6 +1836,17 @@ class _Builder:
                 )
             pattern = param.child_by_field_name("pattern")
             ptype = param.child_by_field_name("type")
+            if pattern is not None and pattern.type == "rest_pattern":
+                target = next(
+                    iter(_children(pattern)), None
+                )
+                if target is None or target.type != "identifier":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(param)
+                    )
+                names.append(target.text.decode())
+                rest = len(names) - 1
+                continue
             if pattern is None or (
                 ptype is not None
                 and not self._scalar_annotation(ptype)
@@ -1824,7 +1873,7 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_expression", _span(param)
                 )
-        return tuple(names), defaults
+        return tuple(names), defaults, rest
 
     def _invoke_callable(
         self,
@@ -1845,7 +1894,14 @@ class _Builder:
         restored."""
         inner = dict(locals_)
         for i, pname in enumerate(cval.params):
-            deps = actual[i] if i < len(actual) else frozenset()
+            if i == cval.rest:
+                # `...rest` collects every remaining argument —
+                # dep-wise the union of them all.
+                deps = frozenset()
+                for extra in actual[i:]:
+                    deps |= extra
+            else:
+                deps = actual[i] if i < len(actual) else frozenset()
             dnode = cval.defaults.get(i)
             if dnode is not None:
                 deps |= self.expression(
