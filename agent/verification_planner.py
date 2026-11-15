@@ -19,6 +19,7 @@ METHODS = frozenset(
         "finite_execution",
         "static_heuristic",
         "identity_check",
+        "summary_derivation",
     }
 )
 LOCATIONS = frozenset({"local", "container", "remote"})
