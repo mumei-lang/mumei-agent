@@ -530,6 +530,11 @@ class _Builder:
                 "broke_always": False, "switch": True,
             }
             self.frames.append(frame)
+            # `let`/`const` in a clause share the switch's block scope —
+            # they restore when the switch ends, not at the enclosing
+            # block's exit.
+            saved: dict[str, frozenset[int] | None] = {}
+            self.block_stack.append(saved)
             try:
                 scope = dict(locals_)
                 for clause in _children(body):
@@ -556,8 +561,14 @@ class _Builder:
                         params, scope, transfers, count, deps,
                         saw_return, True,
                     )
+                for name, prev in saved.items():
+                    if prev is None:
+                        scope.pop(name, None)
+                    else:
+                        scope[name] = prev
                 self._join(locals_, scope, params, self.var_names)
             finally:
+                self.block_stack.pop()
                 self.frames.pop()
             return
         if kind == "do_statement":

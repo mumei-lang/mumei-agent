@@ -415,6 +415,17 @@ def test_continue_inside_switch_targets_the_loop():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
+def test_let_in_a_case_restores_at_switch_end():
+    # `let y` in a clause is block-scoped to the switch — it must not
+    # shadow the outer `y` past the switch's end.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " switch (x) { case 1: let y: number = x; break; default: break; }"
+        " return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
 def test_do_while_admits():
     s = _fn(
         "function f(x: number): number {"
