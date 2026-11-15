@@ -5937,7 +5937,7 @@ def test_review6_unsupported_alt_keeps_opaque_writes():
         "  let c = new C();"
         "  c.m = (v: number) => x;"
         "  if (x > 0) { delete c.m }"
-        "  let o = {v: x};"
+        "  let o = {v: 0, src: x};"
         "  c.m(o);"
         "  return o.v"
         "}"
@@ -5977,3 +5977,71 @@ def test_review6_method_value_keeps_alt_captured():
         "}"
     )
     assert frozenset({0, 1}) <= s.return_dependencies
+
+
+def test_review7_alt_write_through_wrapper_param():
+    # The alternate's write to a composite actual passed through a
+    # wrapper's parameter must reach the outer caller's object —
+    # merging the clone back into the original in place keeps the
+    # aliasing the primary candidate relies on.
+    s = _fn(
+        "class C {"
+        "  m(p: any): number { p.v = p.src; return 0 }"
+        "}"
+        "function w(c: C, q: any): number {"
+        "  c.m(q);"
+        "  return 0"
+        "}"
+        "function f(x: number): number {"
+        "  let c = new C();"
+        "  c.m = (p: any) => x;"
+        "  if (x > 0) { delete c.m }"
+        "  let o = {v: 0, src: x};"
+        "  w(c, o);"
+        "  return o.v"
+        "}"
+    )
+    assert frozenset({0}) <= s.return_dependencies
+
+
+def test_review7_unchanged_function_stays_callable():
+    # A name still bound to the same function must not collapse to
+    # a scalar on merge-back — the later call needs its body's
+    # writes, which a scalarized callee would drop.
+    s = _fn(
+        "class C {"
+        "  m(v: number): number { return v }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let c = new C();"
+        "  c.m = (v: number) => v;"
+        "  if (x > 0) { delete c.m }"
+        "  const cap = {v: 0};"
+        "  const g = () => { cap.v = y; return 0 };"
+        "  c.m(x);"
+        "  g();"
+        "  return cap.v"
+        "}"
+    )
+    assert frozenset({1}) <= s.return_dependencies
+
+
+def test_review7_aliased_names_keep_object_identity():
+    # Two names bound to the same object must still alias after
+    # merge-back: a write through one reaches reads of the other.
+    s = _fn(
+        "class C {"
+        "  m(v: number): number { return v }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let c = new C();"
+        "  c.m = (v: number) => v;"
+        "  if (x > 0) { delete c.m }"
+        "  let o = {v: 0};"
+        "  let p = o;"
+        "  c.m(x);"
+        "  p.v = y;"
+        "  return o.v"
+        "}"
+    )
+    assert frozenset({1}) <= s.return_dependencies

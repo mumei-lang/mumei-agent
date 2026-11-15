@@ -998,6 +998,25 @@ def _merge_vals(old, new):
     return _scalar_of(old) | _scalar_of(new)
 
 
+def _merge_into(old, new):
+    """In-place union of an isolated-candidate world's writes into
+    the caller's composite — mutating preserves object identity, so
+    every alias (another frame name, an outer caller holding the
+    same object) sees the merged writes too."""
+    for key, nval in new.fields.items():
+        if key in old.fields:
+            oval = old.fields[key]
+            if isinstance(oval, _Composite) and isinstance(
+                nval, _Composite
+            ):
+                _merge_into(oval, nval)
+            else:
+                old.fields[key] = _merge_vals(oval, nval)
+        else:
+            old.fields[key] = nval
+    old.deleted |= new.deleted
+
+
 def _val_leq(new, old) -> bool:
     """`new` adds nothing over `old` — the fixed-point test."""
     if isinstance(old, _Composite) and isinstance(new, _Composite):
@@ -4339,12 +4358,65 @@ class _Builder:
                     result |= opaque
                     self._opaque_call_writes(actual_values, opaque)
                 for name, aval in alt_locals.items():
-                    if name in locals_:
-                        locals_[name] = _merge_vals(
-                            locals_[name], aval
+                    if name not in locals_:
+                        continue
+                    old = locals_[name]
+                    if isinstance(old, _Composite) and isinstance(
+                        aval, _Composite
+                    ):
+                        # Merge in place — rebinding would lose
+                        # aliases (an outer caller holding the
+                        # same object through a wrapper's
+                        # parameter would miss the writes).
+                        _merge_into(old, aval)
+                    elif isinstance(old, _Callable) and isinstance(
+                        aval, _Callable
+                    ):
+                        if aval.node is old.node:
+                            # Unchanged clone — keep the original
+                            # callable (scalarizing here would
+                            # kill a later `name()` analysis).
+                            continue
+                        # The name may hold either function —
+                        # model it as the original plus the
+                        # alternate as an extra candidate.
+                        merged_c = _Callable(
+                            old.node,
+                            old.params,
+                            old.defaults,
+                            old.captured | aval.captured,
+                            old.rest,
+                            old.is_method,
                         )
+                        merged_c.param_props = old.param_props
+                        merged_c.origin = old.origin
+                        merged_c.patterns = old.patterns
+                        merged_c.bound = old.bound
+                        merged_c.alts = old.alts + (aval,)
+                        merged_c.extra = old.extra | aval.extra
+                        locals_[name] = merged_c
+                    elif isinstance(old, _Callable) and isinstance(
+                        aval, frozenset
+                    ):
+                        # Function-or-scalar — keep the callable
+                        # invocable and union the scalar deps.
+                        widened_c = _Callable(
+                            old.node,
+                            old.params,
+                            old.defaults,
+                            old.captured | aval,
+                            old.rest,
+                            old.is_method,
+                        )
+                        widened_c.param_props = old.param_props
+                        widened_c.origin = old.origin
+                        widened_c.patterns = old.patterns
+                        widened_c.bound = old.bound
+                        widened_c.alts = old.alts
+                        widened_c.extra = old.extra | aval
+                        locals_[name] = widened_c
                     else:
-                        locals_[name] = aval
+                        locals_[name] = _merge_vals(old, aval)
             if cval.extra:
                 if isinstance(result, frozenset):
                     result = result | cval.extra
