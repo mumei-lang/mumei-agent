@@ -2803,16 +2803,25 @@ package units and without it for single-file units; anything that is
 not a declared `ByteSpan`/`FileSpan` fails statically rather than
 serializing a foreign shape.
 
+`GoSummarySet.from_dict()` rebuilds a declared set with the same
+boundary discipline as the C11 snapshot restorations: strict key sets
+at every level, the schema name matched exactly, member lists bounded,
+function identities unique, dependencies validated as non-negative
+ordinals inside the declared parameter count, and spans shape-checked
+(byte ranges are metadata — there is no source here to bound them
+against, so a consumer that slices bytes must re-derive bounds itself).
+A restored set is **declared data, not derived truth**: reuse still
+goes through `for_function`/`for_package_function` — which reject
+after any source, target or report change — and `stale_dependents`
+still flags dependents of replaced identities, so a foreign or stale
+manifest can only describe reuse, never authorize it.
+
 This is a **handoff surface, not a route**: a host may persist the
-manifest or feed it to a scheduler, but reuse still goes through
-`for_function`/`for_package_function` — which reject after any
-source, target or report change — and `stale_dependents` still flags
-dependents of replaced identities. No I/O, `from_dict`, transport,
-versioning negotiation, evidence semantics, plugin, runner/scheduler,
-or default audit/CLI/MCP route is added; TS/Solidity/Rust adapter
-summary sets keep their own shapes. C06 stays partially delivered —
-the manifest is the first declared output surface a consumable route
-can bind.
+manifest or feed it to a scheduler, but no I/O, transport, versioning
+negotiation, evidence semantics, plugin, runner/scheduler, or default
+audit/CLI/MCP route is added; TS/Solidity/Rust adapter summary sets
+keep their own shapes. C06 stays partially delivered — the manifest
+is the first declared output surface a consumable route can bind.
 
 
 ### C11 declared availability probes

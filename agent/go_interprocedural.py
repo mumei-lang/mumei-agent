@@ -89,11 +89,18 @@ from agent.go_type_snapshot import (
     GoTypeSnapshot,
     PackageMember,
     SnapshotError,
+    _boolean,
+    _list,
+    _string,
 )
 
 PROFILE = "mumei.go-scalar-parameter-deps/v1"
 MAX_FUNCTIONS = 128
 MAX_DEPTH = 48
+# Manifest restoration caps only the wire shape: the analyzer emits a
+# summary for every declared function (over-limit ones as analysis_limit
+# gaps), so a valid manifest can far exceed MAX_FUNCTIONS.
+MAX_MANIFEST_MEMBERS = 8192
 MAX_EXPRESSION_NODES = 2048
 _BINARY = frozenset(
     {
@@ -145,6 +152,15 @@ class SummaryGap:
             result["callee"] = self.callee
         return result
 
+    @classmethod
+    def from_dict(cls, value: Any) -> "SummaryGap":
+        v = _manifest_record(value, ("reason", "span"), ("callee",))
+        return cls(
+            _string(v["reason"]),
+            _span_from_dict(v["span"]),
+            _string(v["callee"]) if "callee" in v else "",
+        )
+
 
 @dataclass(frozen=True)
 class CallTransfer:
@@ -166,6 +182,23 @@ class CallTransfer:
         if self.imported:
             result["imported"] = True
         return result
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "CallTransfer":
+        v = _manifest_record(
+            value, ("span", "target", "arguments", "result"), ("imported",)
+        )
+        span = _span_from_dict(v["span"])
+        _require_restore(span is not None)
+        arguments = _list(v["arguments"])
+        _require_restore(len(arguments) <= MAX_MANIFEST_MEMBERS)
+        return cls(
+            span,
+            _string(v["target"]),
+            tuple(_deps_from_list(a) for a in arguments),
+            _deps_from_list(v["result"]),
+            _boolean(v["imported"]) if "imported" in v else False,
+        )
 
 
 def _span_dict(span: ByteSpan | FileSpan | None) -> dict | None:
@@ -193,6 +226,74 @@ def _type_dict(t: GoType) -> dict:
     if t.key is not None:
         result["key"] = _type_dict(t.key)
     return result
+
+
+def _type_from_dict(value: Any, depth: int = 0) -> GoType:
+    """Rebuild a declared type fact; every field is re-validated, none trusted."""
+    _require_restore(depth <= MAX_DEPTH)
+    v = _manifest_record(
+        value,
+        ("kind", "basic_name", "bit_width", "signed", "type_id"),
+        ("elem", "key"),
+    )
+    signed = v["signed"]
+    _require_restore(type(signed) is bool or signed is None)
+    _require_restore(type(v["bit_width"]) is int and v["bit_width"] >= 0)
+    return GoType(
+        _string(v["kind"]),
+        _string(v["basic_name"]),
+        v["bit_width"],
+        signed,
+        _string(v["type_id"]),
+        _type_from_dict(value["elem"], depth + 1) if "elem" in value else None,
+        _type_from_dict(value["key"], depth + 1) if "key" in value else None,
+    )
+
+
+def _span_from_dict(value: Any) -> ByteSpan | FileSpan | None:
+    """Rebuild a declared span. Offsets are metadata — no source to check them
+    against here, so only shape and ordering are validated; a consumer that
+    slices bytes must re-derive bounds itself."""
+    if value is None:
+        return None
+    _require_restore(isinstance(value, dict))
+    keys = set(value)
+    if keys == {"start", "end"}:
+        start, end = value["start"], value["end"]
+        _require_restore(type(start) is int and type(end) is int and 0 <= start <= end)
+        return ByteSpan(start, end)
+    if keys == {"file", "start", "end"}:
+        file, start, end = value["file"], value["start"], value["end"]
+        _require_restore(
+            type(file) is int
+            and type(start) is int
+            and type(end) is int
+            and file >= -1
+            and 0 <= start <= end
+        )
+        return FileSpan(file, start, end)
+    _require_restore(False)
+
+
+def _deps_from_list(value: Any) -> frozenset[int]:
+    deps = _list(value)
+    _require_restore(
+        len(deps) <= MAX_MANIFEST_MEMBERS
+        and all(type(d) is int and d >= 0 for d in deps)
+    )
+    return frozenset(deps)
+
+
+def _require_restore(condition: bool) -> None:
+    if not condition:
+        raise SnapshotError("declared summary manifest is malformed")
+
+
+def _manifest_record(value: Any, required: tuple[str, ...], optional: tuple[str, ...] = ()) -> dict:
+    """Like `_record` but tolerant of the declared optional keys."""
+    _require_restore(isinstance(value, dict))
+    _require_restore(set(required) <= set(value) <= set(required) | set(optional))
+    return value
 
 
 @dataclass(frozen=True)
@@ -253,6 +354,62 @@ class FunctionSummary:
         if self.pinned:
             result["pinned"] = list(self.pinned)
         return result
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "FunctionSummary":
+        """Rebuild a declared summary: strict shape, then the same invariants
+        the analyzer maintains — dependencies are non-negative ordinals,
+        member lists are bounded, and declared fields carry declared types.
+        A restored summary is *declared* data: it still answers through
+        `for_function`/`stale_dependents`, so a stale or foreign manifest
+        cannot authorize reuse — only describe it."""
+        v = _manifest_record(
+            value,
+            ("binding_id", "key", "parameters", "calls", "gaps"),
+            ("result_type", "return_dependencies", "pinned"),
+        )
+        parameters = _list(v["parameters"])
+        _require_restore(len(parameters) <= MAX_MANIFEST_MEMBERS)
+        calls = _list(v["calls"])
+        gaps = _list(v["gaps"])
+        _require_restore(len(calls) + len(gaps) <= MAX_MANIFEST_MEMBERS)
+        deps = (
+            _deps_from_list(v["return_dependencies"])
+            if "return_dependencies" in v
+            else None
+        )
+        if deps is not None:
+            _require_restore(all(d < len(parameters) for d in deps))
+        pinned = (
+            tuple(_string(p) for p in _list(v["pinned"]))
+            if "pinned" in v
+            else ()
+        )
+        _require_restore(
+            len(pinned) <= MAX_MANIFEST_MEMBERS
+            and len(set(pinned)) == len(pinned)
+        )
+        restored_calls = tuple(CallTransfer.from_dict(c) for c in calls)
+        # Every dependency ordinal a call records must name a declared
+        # parameter, just like `return_dependencies`.
+        _require_restore(
+            all(
+                d < len(parameters)
+                for c in restored_calls
+                for argument in (*c.arguments, c.result)
+                for d in argument
+            )
+        )
+        return cls(
+            _string(v["binding_id"]),
+            _string(v["key"]),
+            tuple(_type_from_dict(t) for t in parameters),
+            _type_from_dict(v["result_type"]) if "result_type" in v else None,
+            deps,
+            restored_calls,
+            tuple(SummaryGap.from_dict(g) for g in gaps),
+            pinned,
+        )
 
 
 def _context(source: str, snapshot: GoTypeSnapshot) -> tuple[bytes, str]:
@@ -374,6 +531,25 @@ class GoSummarySet:
             "context_key": self.context_key,
             "functions": [f.to_dict() for f in self.functions],
         }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "GoSummarySet":
+        """Rebuild a declared summary set under `mumei.go-scalar-parameter-deps/v1`.
+
+        Strict shape at the boundary, constructor invariants inside: the
+        schema name must match exactly, member lists stay bounded, function
+        identities must not repeat. The restored set is declared data, not
+        derived truth — `for_function`/`for_package_function` still gate on
+        the live snapshot's context key and `stale_dependents` still flags
+        dependents of replaced identities, so a foreign manifest can only
+        describe reuse, never authorize it."""
+        v = _manifest_record(value, ("schema_version", "context_key", "functions"))
+        _require_restore(v["schema_version"] == PROFILE)
+        functions = _list(v["functions"])
+        _require_restore(len(functions) <= MAX_MANIFEST_MEMBERS)
+        restored = tuple(FunctionSummary.from_dict(f) for f in functions)
+        _require_restore(len({f.binding_id for f in restored}) == len(restored))
+        return cls(_string(v["context_key"]), restored)
 
 
 class _Unsupported(Exception):

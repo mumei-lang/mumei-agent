@@ -9,7 +9,9 @@ import pytest
 
 from agent import control_flow, go_interprocedural as ip
 from agent.go_type_snapshot import (
+    ByteSpan,
     FileSpan,
+    GoType,
     SnapshotError,
     load_go_package_snapshot,
     load_go_snapshot,
@@ -9211,3 +9213,161 @@ def test_summary_manifest_rejects_foreign_spans():
     gap = ip.SummaryGap("opaque", span=object())
     with pytest.raises(ValueError):
         gap.to_dict()
+
+
+def _manifest_set():
+    """A synthetic declared set — the restore path needs no compiler."""
+    named_t = GoType(
+        "named", "", 64, True, "p.T",
+        elem=GoType("basic", "int64", 64, True, ""),
+    )
+    fn = ip.FunctionSummary(
+        "b1",
+        "k",
+        (named_t, GoType("basic", "int64", 64, True, "")),
+        GoType("basic", "int64", 64, True, ""),
+        frozenset({0, 1}),
+        (
+            ip.CallTransfer(
+                FileSpan(0, 10, 20), "callee", (frozenset({0}),), frozenset({0}),
+                True,
+            ),
+        ),
+        (ip.SummaryGap("opaque", ByteSpan(1, 5), "m.U"),),
+        ("p.T",),
+    )
+    return ip.GoSummarySet("ctx", (fn,))
+
+
+def test_summary_manifest_restores_a_declared_set():
+    summaries = _manifest_set()
+    restored = ip.GoSummarySet.from_dict(summaries.to_dict())
+    assert restored == summaries
+    assert restored.to_dict() == summaries.to_dict()
+
+
+def test_summary_manifest_restore_rejects_foreign_schema():
+    data = _manifest_set().to_dict()
+    data["schema_version"] = "mumei.other/v1"
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_extra_and_missing_keys():
+    data = _manifest_set().to_dict()
+    data["extra"] = 1
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+    data = _manifest_set().to_dict()
+    del data["context_key"]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_out_of_range_dependencies():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["return_dependencies"] = [0, 7]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_null_dependencies_claim():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["return_dependencies"] = None
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_duplicate_binding_ids():
+    data = _manifest_set().to_dict()
+    data["functions"].append(dict(data["functions"][0]))
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_duplicate_pins():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["pinned"] = ["p.T", "p.T"]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_inverted_span():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["gaps"][0]["span"] = {"start": 9, "end": 2}
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_null_call_span():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["calls"][0]["span"] = None
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_foreign_member_shape():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["calls"].append({"what": 1})
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_foreign_type_facts():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["parameters"][0]["signed"] = "yes"
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_bounds_type_nesting():
+    nested = {"kind": "pointer", "basic_name": "", "bit_width": 64,
+              "signed": None, "type_id": ""}
+    tip = nested
+    for _ in range(ip.MAX_DEPTH + 5):
+        tip = dict(tip)
+        tip["elem"] = nested
+        nested = tip
+    data = _manifest_set().to_dict()
+    data["functions"][0]["parameters"][0] = nested
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_restored_set_still_gates_reuse_through_for_function(go_types_helper):
+    restored = ip.GoSummarySet.from_dict(_manifest_set().to_dict())
+    source, snapshot, _ = unit(
+        go_types_helper, "func F(x int64) int64 { return x }"
+    )
+    with pytest.raises(SnapshotError):
+        restored.for_function(source, snapshot, "b1")
+
+
+def test_summary_manifest_restore_allows_more_than_analysis_bound_functions():
+    fn = ip.FunctionSummary(
+        "b", "k", (GoType("basic", "int64", 64, True, ""),), None,
+        None, (), (ip.SummaryGap("analysis_limit"),),
+    )
+    data = ip.GoSummarySet(
+        "ctx", tuple(replace(fn, binding_id=f"b{i}") for i in range(200))
+    ).to_dict()
+    assert len(ip.GoSummarySet.from_dict(data).functions) == 200
+
+
+def test_summary_manifest_restore_rejects_call_dependencies_beyond_parameters():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["calls"][0]["arguments"] = [[7]]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+    data = _manifest_set().to_dict()
+    data["functions"][0]["calls"][0]["result"] = [8]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_non_dict_spans_as_snapshot_errors():
+    for bad in (7, ["start", "end"], "01"):
+        data = _manifest_set().to_dict()
+        data["functions"][0]["calls"][0]["span"] = bad
+        with pytest.raises(SnapshotError):
+            ip.GoSummarySet.from_dict(data)
