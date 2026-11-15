@@ -187,9 +187,17 @@ Admitted:
   `import type` and bare `import 'm'` bind nothing. `export`
   strips to the declaration it wraps (`export function`,
   `export class`, `export default function` register
-  normally; `export {}`/`export const` bind nothing the
+  normally; `export {}`/`export *` bind nothing the
   function model reads). Imports are top-level only — one
   inside a body closes.
+* Module-scope `let`/`const`/`var`/`export const` — a second
+  pass over top-level declarators evaluates each into
+  `self.module_locals` (params empty; `var` writes land in
+  the same dict via `function_locals`). Functions read the
+  module scope through `_lookup` after params; a declarator
+  the model can't evaluate (an unbound call, an
+  unsupported shape) closes the whole unit, and a write to
+  a module-scope name from inside a function closes.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -202,7 +210,8 @@ Admitted:
   non-callable field, unresolved names — stays closed.
 
 Closed with declared gaps: ambient/`declare`
-declarations and other unknown top-level nodes close the
+declarations, non-declaration top-level statements and a
+module-scope declarator the model can't evaluate close the
 whole unit (`unsupported_unit`);
 `extends` on a non-class value, getters/setters,
 generators, `any`/composite/missing parameter
@@ -248,6 +257,8 @@ _TOP_LEVEL = {
     "import_statement",
     "export_statement",
     "empty_statement",
+    "lexical_declaration",
+    "variable_declaration",
 }
 
 
@@ -519,6 +530,11 @@ class _Builder:
         # top-level statements all qualify.
         self.unit_gap: TsGap | None = None
         self.imports: set[str] = set()
+        # Module-scope value bindings — top-level declarators
+        # evaluated in source order in pass 2, read by `_lookup`
+        # after params and before the class/import registries.
+        self.module_locals: dict = {}
+        declarators: list = []
         for child in root.named_children:
             if child.type in _TOP_LEVEL:
                 if child.type == "function_declaration":
@@ -534,9 +550,8 @@ class _Builder:
                 if child.type == "export_statement":
                     # `export` wraps a declaration — strip the
                     # marker and register what it declares; a
-                    # `export {}`/`export default`/`export *` or
-                    # a value declaration binds nothing the
-                    # function model reads.
+                    # `export {}`/`export default`/`export *`
+                    # binds nothing the function model reads.
                     for inner in child.named_children:
                         if inner.type == "function_declaration":
                             name = inner.child_by_field_name("name")
@@ -550,6 +565,16 @@ class _Builder:
                                 self.classes[
                                     name.text.decode()
                                 ] = inner
+                        if inner.type in {
+                            "lexical_declaration",
+                            "variable_declaration",
+                        }:
+                            declarators.append(inner)
+                if child.type in {
+                    "lexical_declaration",
+                    "variable_declaration",
+                }:
+                    declarators.append(child)
             else:
                 if self.unit_gap is None:
                     self.unit_gap = TsGap("unsupported_unit", _span(child))
@@ -566,6 +591,34 @@ class _Builder:
         # Labels the next loop/switch frame claims — a `break L` or
         # `continue L` looks its frame up by name.
         self.pending_labels: list[str] = []
+        # Pass 2 — evaluate module-scope declarators in source
+        # order now that every function/class name is registered
+        # (a `const g = f()` may call a declaration hoisted past
+        # its site). `var` writes land in `module_locals` by
+        # pointing `function_locals` at it for the pass. A
+        # declarator that can't be modelled closes the unit.
+        saved_flocals = self.function_locals
+        self.function_locals = self.module_locals
+        mcount = [0]
+        for node in declarators:
+            try:
+                self.statement(
+                    node,
+                    {},
+                    self.module_locals,
+                    [],
+                    mcount,
+                    [frozenset()],
+                    [False],
+                    False,
+                )
+            except _Unsupported:
+                if self.unit_gap is None:
+                    self.unit_gap = TsGap(
+                        "unsupported_unit", _span(node)
+                    )
+                break
+        self.function_locals = saved_flocals
 
     def _register_import(self, node) -> None:
         """`import {a, b as c} from 'm'` / `import * as ns` /
@@ -1920,6 +1973,8 @@ class _Builder:
             return self.function_locals[name]
         if name in params:
             return frozenset({params[name]})
+        if name in self.module_locals:
+            return self.module_locals[name]
         if name in self.classes:
             if name not in self._class_cache:
                 self._class_cache[name] = self._class_value(

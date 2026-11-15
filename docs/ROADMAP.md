@@ -2870,6 +2870,33 @@ through anything but a plain identifier collapses it to a
 dep-free scalar (calls on that scalar close as before).
 `export =` / `export * as ns` admit but bind nothing.
 
+### C06 TypeScript module-scope bindings (slice 24)
+
+`const g = e;` / `var g = e;` / `export const g = e;` at
+top level — `lexical_declaration`/`variable_declaration`
+join `_TOP_LEVEL`, and a second pass in `__init__`
+evaluates each collected declarator in source order into
+`self.module_locals` (`params` empty; `function_locals`
+points at the dict so `var` lands there). `_lookup`
+consults it after params and before classes/imports, so
+`return cfg.a` on a module composite descends the usual
+member path.
+
+Hoisting holds: pass 1 registers every function/class/
+import before pass 2 runs, so `const c = g()` resolves a
+declaration that textually follows it. Module calls record
+no transfers — they land in a throwaway list; the bound
+deps are what matter.
+
+Boundaries: a declarator the model can't evaluate closes
+the whole unit (`unsupported_unit` — the alternative is
+silently dep-free bindings, an under-approximation).
+Writes to module-scope names from inside a function close
+(`_write_scope` only sees the function's own scopes).
+Module-scope `var` is modelled as module-scoped — real
+JS hoists it to global scope, but nothing else in the
+unit can see the difference.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

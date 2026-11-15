@@ -905,7 +905,7 @@ def test_top_level_class_admits_unit():
 
 def test_top_level_statement_closes_unit():
     src = (
-        "const g = 1;\n"
+        "run_side_effect();\n"
         "function f(x: number): number { return x; }"
     )
     s = _fn(src)
@@ -2782,3 +2782,81 @@ def test_body_import_closes():
         "function f(x: number): number { import {g} from './m'; return x; }"
     )
     assert not s.available
+
+
+# --- slice 24: module-scope bindings
+
+
+def test_module_const_read():
+    s = _fn(
+        "const g = 5;\n"
+        "function f(x: number): number { return g + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_var_read():
+    s = _fn(
+        "var g = 5;\n"
+        "function f(x: number): number { return g + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_composite_member_read():
+    s = _fn(
+        "const cfg = {a: 1, b: 2};\n"
+        "function f(x: number): number { return cfg.a + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_value_from_call():
+    s = _fn(
+        "function g(): number { return 1; }\n"
+        "const c = g();\n"
+        "function f(x: number): number { return c + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_call_forward_declared():
+    s = _fn(
+        "const c = g();\n"
+        "function g(): number { return 1; }\n"
+        "function f(x: number): number { return c + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_const_read():
+    s = _fn(
+        "export const g = 5;\n"
+        "function f(x: number): number { return g + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_unmodellable_closes_unit():
+    s = _fn(
+        "const g = unknown_fn();\n"
+        "function f(x: number): number { return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_unit"
+
+
+def test_module_write_from_function_closes():
+    s = _fn(
+        "const cfg = {a: 1};\n"
+        "function f(x: number): number { cfg.a = x; return 0; }"
+    )
+    assert not s.available
+
+
+def test_local_shadows_module():
+    s = _fn(
+        "const g = 5;\n"
+        "function f(x: number): number { let g = x; return g; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
