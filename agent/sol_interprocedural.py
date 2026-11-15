@@ -1064,9 +1064,17 @@ class _Builder:
                 )
             ret = None
             if body is not None:
-                ret = self._block(
-                    body, inner, param_index, summary
-                )
+                # The body's own decls frame keeps `uint s`
+                # inside `{...}` from shadowing a state `s`
+                # for the still-live loop frame — cond and
+                # update see only the init decls.
+                self._decls.append(set())
+                try:
+                    ret = self._block(
+                        body, inner, param_index, summary
+                    )
+                finally:
+                    self._decls.pop()
             if update is not None:
                 self._assign_or_call(
                     update, inner, param_index, summary
@@ -1087,6 +1095,11 @@ class _Builder:
             deps = inner.get(name, frozenset())
             if deps != locals_[name] or name in touched:
                 locals_[name] = locals_[name] | deps | merged
+                # An inner loop's may-write is the parent's
+                # may-write too — record it in the frame an
+                # enclosing loop reads at merge-back.
+                if self._writes:
+                    self._writes[-1].add(name)
         if ret is not None:
             # `while (n > 0) { return x; }` — whether the body
             # ran at all depends on the condition.

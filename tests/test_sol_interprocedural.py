@@ -1408,3 +1408,41 @@ function f(uint x) public {
         "f",
     )
     assert s.available and s.effects == "state_writes"
+
+
+def test_review4_cond_state_write_not_shadowed_by_body_local():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    for (uint i = 0; (s = 1) < 5; i++) { uint s = 0; }
+} }""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_review4_update_state_write_not_shadowed_by_body_local():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    for (uint i = 0; i < 5; s = i) { uint s = 0; }
+} }""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_review4_inner_loop_write_reaches_outer_may_union():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public returns (uint) {
+    uint s = 0;
+    for (uint i = 0; i < x; i++) {
+        for (uint j = 0; (s = 0) < 5; j++) { }
+    }
+    return s;
+} }""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == {0}
