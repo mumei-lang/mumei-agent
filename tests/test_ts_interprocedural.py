@@ -4173,3 +4173,62 @@ def test_new_without_parens_ctor_runs():
         " const c = new C; return c.a; }"
     )
     assert s.available and s.return_dependencies == frozenset()
+
+
+# --- slice 43: nested function captures -------------------------
+
+
+def test_nested_function_capture():
+    # `function h(){ return x; }` inside f reads the enclosing
+    # parameter — the hoisted `_Callable` sees call-site bindings.
+    s = _fn(
+        "function f(x: number): number {"
+        " function h() { return x; } return h(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_function_hoisted_call():
+    # A call before the declaration still resolves (hoisting).
+    s = _fn(
+        "function f(x: number): number {"
+        " const r = h(); function h() { return x; } return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_function_in_block():
+    s = _fn(
+        "function f(x: number): number {"
+        " let r = 0; if (x > 0) { function h() { return x; }"
+        " r = h(); } return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_function_deep():
+    s = _fn(
+        "function f(x: number): number {"
+        " function g() { function h() { return x; } return h(); }"
+        " return g(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_callable_call():
+    # `const g = (x) => {...}` at module scope binds a callable —
+    # `g(y)` inside f invokes it.
+    s = _fn(
+        "const g = (x: number) => { return x; }\n"
+        "function f(y: number): number { return g(y); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_callable_nested_capture():
+    s = _fn(
+        "const g = (x: number) => { function h() { return x; }"
+        " return h(); }\n"
+        "function f(y: number): number { return g(y); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

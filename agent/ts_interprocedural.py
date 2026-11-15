@@ -337,10 +337,15 @@ Admitted:
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
-  each nested declaration gets its own summary, and one that reads
-  an enclosing local closes itself (no closures) without disturbing
-  the caller's admission. The result conservatively depends on
-  every evaluated argument and records a `TsCall` transfer; the callee
+  each nested declaration gets its own summary. A nested
+  declaration ALSO binds a `_Callable` in the enclosing frame at
+  body start, so `inner()` inside the enclosing body invokes the
+  body inline with call-site bindings — `function h(){ return x; }`
+  reads the enclosing parameter's deps (closures capture by
+  reference). Module-scope `const g = (x) => {...}` binds a
+  callable in `module_locals`, so `g(y)` resolves through the
+  bound-callee path. The result conservatively depends on every
+  evaluated argument and records a `TsCall` transfer; the callee
   body is opaque (self-recursion records a transfer like any other
   name-resolved call). Everything else — calls through a
   non-callable field, unresolved names — stays closed.
@@ -1082,10 +1087,15 @@ class _Builder:
                 # Default import — the clause's bare name.
                 self.imports.add(child.text.decode())
 
-    def _register_nested_functions(self, node) -> None:
+    def _register_nested_functions(self, node, params, locals_) -> None:
         """Register every `function inner() {}` declaration under
-        `node` in the unit's call table — function declarations
-        hoist within their enclosing function."""
+        `node` in the unit's call table AND bind it in `locals_`
+        as a `_Callable` — function declarations hoist within
+        their enclosing function, so calls resolve wherever they
+        appear and free-variable reads see the call site's
+        bindings (closures capture by reference). The call-table
+        entry stays so the body is also summarized as a unit
+        function."""
         if node.type in {
             "function_declaration",
             "generator_function_declaration",
@@ -1093,9 +1103,18 @@ class _Builder:
             inner_name = node.child_by_field_name("name")
             if inner_name is not None:
                 self.functions[inner_name.text.decode()] = node
+                try:
+                    locals_[inner_name.text.decode()] = (
+                        self._callable_value(node, params, locals_)
+                    )
+                except _Unsupported:
+                    # A declaration the callable model can't
+                    # represent (destructured/typed-non-scalar
+                    # params) stays in the call table only.
+                    pass
             return
         for child in _children(node):
-            self._register_nested_functions(child)
+            self._register_nested_functions(child, params, locals_)
 
     def summarize_all(self) -> tuple[TsFunctionSummary, ...]:
         # Summarizing a body can register nested function
@@ -1272,7 +1291,7 @@ class _Builder:
         # scope — pre-register every `function inner() {}` in the
         # body subtree so calls resolve wherever they appear.
         for inner_decl in body.children:
-            self._register_nested_functions(inner_decl)
+            self._register_nested_functions(inner_decl, params, locals_)
         self.frames = []
         saw_return = [False]
         saved_yields, self.yield_deps = self.yield_deps, []
@@ -3091,6 +3110,12 @@ class _Builder:
         saved_yields, self.yield_deps = self.yield_deps, []
         try:
             if body_node.type == "statement_block":
+                # Nested `function inner() {}` declarations hoist
+                # into the callable's own frame.
+                for inner_decl in body_node.children:
+                    self._register_nested_functions(
+                        inner_decl, params, inner
+                    )
                 adeps = [frozenset()]
                 saw = [False]
                 self._sequence(
@@ -4596,6 +4621,7 @@ class _Builder:
                 or callee in self.function_locals
                 or callee in params
                 or callee in self.imports
+                or callee in self.module_locals
                 or callee in _GLOBALS
             )
             if not bound and callee not in self.functions:

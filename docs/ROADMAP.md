@@ -3218,6 +3218,19 @@ function body binds its composite in the local scope. `new C`
 without parentheses constructs with no actuals (the ctor
 still runs its defaults).
 
+### C06 TypeScript nested-function captures (slice 43)
+
+A nested `function h(){...}` declaration binds a `_Callable`
+in the enclosing frame at body start (hoisted — a call before
+the site resolves), so `h()` inside the body invokes the body
+inline with call-site bindings: `function h(){ return x; }`
+now reads the enclosing parameter's deps instead of losing
+them to the name-only call table (a real under-approximation
+fix — closures capture by reference). The declaration stays
+in the unit call table for its own summary. Module-scope
+`const g = (x) => {...}` binds a callable in `module_locals`
+and `g(y)` resolves through the bound-callee path.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
