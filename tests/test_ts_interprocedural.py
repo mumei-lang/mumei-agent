@@ -6227,3 +6227,19 @@ def test_conditional_module_write_keeps_alias_identity():
         "}"
     )
     assert s.available and s.return_dependencies == frozenset({2})
+
+
+def test_conditional_function_field_stays_invocable():
+    # A conditional write to a shared object's function field must
+    # keep the field invocable — scalarizing the join would skip the
+    # body of a later `o.g?.(x)` and lose its writes.
+    s = _fn(
+        "function f(c: boolean, x: number): number {"
+        "  let o = {g: (v: number) => v};"
+        "  let w = {h: 0};"
+        "  if (c) { o.g = (v: number) => { w.h = v; return v; }; }"
+        "  o.g?.(x);"
+        "  return w.h;"
+        "}"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})

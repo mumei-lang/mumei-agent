@@ -998,9 +998,84 @@ def _merge_vals(old, new):
         )
     if isinstance(old, _Composite) or isinstance(new, _Composite):
         return _scalar_of(old) | _scalar_of(new)
-    # Two callables (or a callable and a scalar) join to the
-    # captured-deps union — the name may hold either callee.
+    if isinstance(old, _Callable) and isinstance(new, _Callable):
+        # Both candidates stay invocable — scalarizing here would
+        # stop a later `name(x)`/`o.f(x)` from analyzing the body.
+        return _merge_callables(old, new)
+    if isinstance(old, _Callable) and isinstance(new, frozenset):
+        return _widen_callable(old, new)
+    if isinstance(new, _Callable) and isinstance(old, frozenset):
+        return _widen_callable(new, old)
+    # Two scalars union their leaf deps.
     return _scalar_of(old) | _scalar_of(new)
+
+
+def _merge_callables(old, new):
+    """Join two function values keeping both invocable: the merged
+    value is `old` carrying `new` as an extra alternate candidate."""
+    if old.node is new.node:
+        # Same primary candidate — but `new` may carry alts the
+        # branch-local merge already collected (e.g. `g = n`
+        # inside a branch merged `n` first, then `_join` merges
+        # that result against `old`). Keep every candidate.
+        seen = {id(alt.node) for alt in old.alts}
+        kept = tuple(
+            alt for alt in new.alts if id(alt.node) not in seen
+        )
+        if not kept and not (new.extra - old.extra) and not (
+            new.captured - old.captured
+        ):
+            return old
+        merged = _Callable(
+            old.node,
+            old.params,
+            old.defaults,
+            old.captured | new.captured,
+            old.rest,
+            old.is_method,
+        )
+        merged.param_props = old.param_props
+        merged.origin = old.origin
+        merged.patterns = old.patterns
+        merged.bound = old.bound
+        merged.alts = old.alts + kept
+        merged.extra = old.extra | new.extra
+        return merged
+    merged = _Callable(
+        old.node,
+        old.params,
+        old.defaults,
+        old.captured | new.captured,
+        old.rest,
+        old.is_method,
+    )
+    merged.param_props = old.param_props
+    merged.origin = old.origin
+    merged.patterns = old.patterns
+    merged.bound = old.bound
+    merged.alts = old.alts + (new,)
+    merged.extra = old.extra | new.extra
+    return merged
+
+
+def _widen_callable(old, deps):
+    """Join a function value with scalar deps: stays invocable with
+    the deps folded into its extra bucket."""
+    widened = _Callable(
+        old.node,
+        old.params,
+        old.defaults,
+        old.captured | deps,
+        old.rest,
+        old.is_method,
+    )
+    widened.param_props = old.param_props
+    widened.origin = old.origin
+    widened.patterns = old.patterns
+    widened.bound = old.bound
+    widened.alts = old.alts
+    widened.extra = old.extra | deps
+    return widened
 
 
 def _merge_into(old, new):
