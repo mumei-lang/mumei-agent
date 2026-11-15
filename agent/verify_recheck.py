@@ -24,6 +24,17 @@ drifted mid-run it skips the selection, claims no recheck outcome
 (the observed exit code applies to bytes outside the declared
 request) and reports ``inputs_changed``.
 
+A ``consistent`` outcome also discharges two of the six semantic
+acceptance checks at representation level: the record still binds the
+declared source bytes' fresh same-profile query, so it is CURRENT
+(``freshness``) and its claims still correspond to the source's
+verified semantics (``semantic_correspondence``). ``claim_truth``
+stays unassessed — consistency with a fresh verdict is not itself a
+truth receipt — along with ``file_identity`` and
+``producer_authenticity`` (their own declared routes) and
+``artifact_semantics`` (the C09 artifact layer). A non-consistent run
+discharges nothing.
+
 The report carries a ``recheck`` field naming the terminal outcome
 only when the exit code is unambiguous: ``"consistent"`` (0) or
 ``"inconclusive"`` (3). Exit 1 conflates ``Refuted`` with every
@@ -71,6 +82,27 @@ MAX_INPUT_BYTES = 65_536
 # InconsistentSavedEvidence), so it gets no claimed outcome — the
 # lineage carries the raw code.
 RECHECK_OUTCOMES = {0: "consistent", 3: "inconclusive"}
+
+# The six semantic acceptance checks of the C02 contract. A consistent
+# recheck proves the saved record still binds the declared source's
+# fresh same-profile verdict — current (freshness) and corresponding
+# to the source's verified semantics (semantic_correspondence).
+CHECK_VOCABULARY = frozenset(
+    {
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+        "artifact_semantics",
+    }
+)
+
+
+class DischargedChecks:
+    """Semantic checks a terminal recheck outcome discharges."""
+
+    CONSISTENT = frozenset({"freshness", "semantic_correspondence"})
 
 DEFAULT_SOLVER_TIMEOUT_MS = "5000"
 DEFAULT_SOLVER_RESOURCE_LIMIT = "1000000"
@@ -303,6 +335,11 @@ def run_recheck(args: argparse.Namespace) -> dict:
         report["inputs_changed"] = True
     elif exit_code in RECHECK_OUTCOMES:
         report["recheck"] = RECHECK_OUTCOMES[exit_code]
+        if report["recheck"] == "consistent":
+            report["discharged_checks"] = sorted(DischargedChecks.CONSISTENT)
+            report["checks_not_performed"] = sorted(
+                CHECK_VOCABULARY - DischargedChecks.CONSISTENT
+            )
     if published.selected_result is not None:
         report["candidate"] = (
             published.evidence_candidate().to_dict()
