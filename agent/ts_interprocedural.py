@@ -1217,6 +1217,12 @@ class _Builder:
         # (e.g. a loop-join artifact) must keep copy-on-write
         # so the fixed-point's pre-write snapshot survives.
         self._aliased_objs: set = set()
+        # >0 while evaluating code that may not run (a conditional
+        # branch, a loop body, the RHS of `&&`/`||`/`??`, a `?:` arm
+        # or a `?.` call): in-place writes to shared composites then
+        # UNION instead of replacing, so the skipped-path value
+        # survives the join.
+        self._may_depth = 0
         # Optional module resolver: maps an import specifier to
         # source text (None = no resolver / unresolvable — the
         # names stay `_External`, the existing over-approximation).
@@ -2528,6 +2534,32 @@ class _Builder:
         saw_return,
         conditional,
     ) -> None:
+        if conditional:
+            self._may_depth += 1
+            try:
+                self._statement(
+                    node, params, locals_, transfers, count, deps,
+                    saw_return, conditional,
+                )
+            finally:
+                self._may_depth -= 1
+            return
+        self._statement(
+            node, params, locals_, transfers, count, deps,
+            saw_return, conditional,
+        )
+
+    def _statement(
+        self,
+        node,
+        params,
+        locals_,
+        transfers,
+        count,
+        deps,
+        saw_return,
+        conditional,
+    ) -> None:
         count[0] += 1
         if count[0] > MAX_NODES:
             raise _Unsupported("analysis_limit", _span(node))
@@ -3346,19 +3378,28 @@ class _Builder:
                         # `captured` is a dep frozenset, not a
                         # dict — compare it as a set.
                         snap[sname] = ("captured", sval.captured)
-                self.statement(
-                    body, params, inner, transfers, count, deps,
-                    saw_return, conditional,
-                )
-                if increment is not None and not frame["broke_always"]:
-                    # The increment runs after each pass so its writes
-                    # seed the next iteration — a `break` skips it
-                    # only when no exit reaches the increment at all,
-                    # and a conditional break keeps it a may-write.
-                    self._for_part(
-                        increment, params, inner, transfers, count, deps,
-                        saw_return, conditional or frame["broke"],
+                # The body and increment may run zero times, so
+                # writes they make into shared composites must union
+                # with the pre-loop value rather than replace it.
+                self._may_depth += 1
+                try:
+                    self.statement(
+                        body, params, inner, transfers, count, deps,
+                        saw_return, conditional,
                     )
+                    if increment is not None and not frame["broke_always"]:
+                        # The increment runs after each pass so its
+                        # writes seed the next iteration — a `break`
+                        # skips it only when no exit reaches the
+                        # increment at all, and a conditional break
+                        # keeps it a may-write.
+                        self._for_part(
+                            increment, params, inner, transfers, count,
+                            deps, saw_return,
+                            conditional or frame["broke"],
+                        )
+                finally:
+                    self._may_depth -= 1
                 changed = False
                 for sname, sentry in snap.items():
                     skind, before = sentry[0], sentry[1]
@@ -3651,6 +3692,7 @@ class _Builder:
                     count,
                     _span(node),
                     this_val=this,
+                    may=_has_optional_chain(node),
                 )
                 transfers.append(
                     TsCall(_span(node), key0, (), result)
@@ -3693,6 +3735,7 @@ class _Builder:
                         count,
                         _span(node),
                         this_val=val,
+                        may=_has_optional_chain(node),
                     )
                     transfers.append(
                         TsCall(_span(node), key, (), result)
@@ -3733,6 +3776,7 @@ class _Builder:
                             count,
                             _span(node),
                             this_val=val,
+                            may=_has_optional_chain(node),
                         )
                         transfers.append(
                             TsCall(
@@ -3766,6 +3810,7 @@ class _Builder:
                         count,
                         _span(node),
                         this_val=val,
+                        may=_has_optional_chain(node),
                     )
                     transfers.append(
                         TsCall(_span(node), key, (), result)
@@ -3878,10 +3923,15 @@ class _Builder:
         new = _composite_delete(old, path, _span(node))
         if old in self._aliased_objs:
             # Shared with an unseen scope — mutate in place so
-            # the delete reaches it.
-            old.fields.clear()
-            old.fields.update(new.fields)
-            old.deleted = new.deleted
+            # the delete reaches it. Under `_may_depth` (or an
+            # `?.`-guarded target) the delete may not have run —
+            # union so the kept-path fields and deps survive.
+            if self._may_depth or _has_optional_chain(node):
+                _merge_into(old, new)
+            else:
+                old.fields.clear()
+                old.fields.update(new.fields)
+                old.deleted = new.deleted
         for name, val in locals_.items():
             if val is old:
                 locals_[name] = new
@@ -4106,9 +4156,14 @@ class _Builder:
             # marked object takes an in-place write at most once,
             # so later writes compose on the copy and a loop join
             # keeps its pre-write snapshot.
-            old.fields.clear()
-            old.fields.update(new.fields)
-            old.deleted = new.deleted
+            if self._may_depth:
+                # The store may not have run — union the write so
+                # the pre-branch value survives on every alias.
+                _merge_into(old, new)
+            else:
+                old.fields.clear()
+                old.fields.update(new.fields)
+                old.deleted = new.deleted
         # Every binding IN THIS SCOPE sharing the instance is an
         # alias — the write reaches all of them. Only `locals_` is
         # scanned: eagerly rewriting the enclosing scope would
@@ -4120,10 +4175,14 @@ class _Builder:
         # Module scope is the other writable scope — a composite
         # aliased across scopes (`let p = o` where `o` is module
         # scope) needs the copy-on-write result in both, or the
-        # store is lost on the module side.
+        # store is lost on the module side. Under `_may_depth` the
+        # may-write unions instead of rebinding so the module
+        # scope keeps the skipped-path value.
         for name, val in self.module_locals.items():
             if val is old:
-                self.module_locals[name] = new
+                self.module_locals[name] = (
+                    _merge_vals(old, new) if self._may_depth else new
+                )
 
     def expression(self, node, params, locals_, transfers, count):
         """Evaluate a node to scalar dependencies — a composite
@@ -4257,6 +4316,7 @@ class _Builder:
         construct=False,
         actual_values=None,
         alt_this=None,
+        may=False,
     ) -> frozenset[int]:
         """`g(args)` where `g` binds an arrow/function value —
         evaluate the body inline. Captured names read the CALL
@@ -4287,6 +4347,10 @@ class _Builder:
             self._opaque_call_writes(actual_values, result)
             return result
         self._invoke_depth += 1
+        if may:
+            # `o?.f(x)` / `f?.(x)` — the callee may be absent, so
+            # its writes to shared composites are may-writes.
+            self._may_depth += 1
         try:
             saved_frame = dict(locals_) if cval.alts else None
             snap_memo = None
@@ -4488,6 +4552,8 @@ class _Builder:
                     result = widened
             return result
         finally:
+            if may:
+                self._may_depth -= 1
             self._invoke_depth -= 1
 
     def _invoke_callable_body(
@@ -4515,6 +4581,7 @@ class _Builder:
                 this_val=this_val,
                 construct=construct,
                 actual_values=actual_values,
+                may=self._may_depth > 0,
             )
         if cval.bound is not None:
             # `bind(t, a...)` — prepend the recorded partial
@@ -5431,6 +5498,7 @@ class _Builder:
         count,
         node,
         callee_text,
+        may=False,
     ):
         """`Function.prototype.call/apply/bind` where the receiver
         is a known `_Callable` value (`g.call(t, a)`,
@@ -5526,6 +5594,7 @@ class _Builder:
             _span(node),
             this_val=this_val,
             actual_values=call_vals,
+            may=may,
         )
         transfers.append(
             TsCall(_span(node), callee_text, deps, result)
@@ -5544,6 +5613,7 @@ class _Builder:
         transfers,
         count,
         node,
+        may=False,
     ):
         """`a.map(cb)` / `a.push(x)` / `a.join(s)` — built-in
         container methods on a `_Composite`. `elem` is the union
@@ -5589,6 +5659,7 @@ class _Builder:
                     transfers,
                     count,
                     span,
+                    may=may,
                 )
             )
         elif cb_node is not None and cb_node.type == "identifier":
@@ -5606,6 +5677,7 @@ class _Builder:
                         transfers,
                         count,
                         span,
+                        may=may,
                     )
                 )
         actual_union = frozenset()
@@ -6238,9 +6310,24 @@ class _Builder:
                 or op.type not in _BINARY_OPS
             ):
                 raise _Unsupported("unsupported_expression", _span(node))
-            return self.expression(
+            left_deps = self.expression(
                 left, params, locals_, transfers, count
-            ) | self.expression(right, params, locals_, transfers, count)
+            )
+            if op.type in {"&&", "||", "??"}:
+                # Short-circuit: the RHS may not run — its writes
+                # to shared composites are may-writes.
+                self._may_depth += 1
+                try:
+                    right_deps = self.expression(
+                        right, params, locals_, transfers, count
+                    )
+                finally:
+                    self._may_depth -= 1
+            else:
+                right_deps = self.expression(
+                    right, params, locals_, transfers, count
+                )
+            return left_deps | right_deps
         if kind == "yield_expression":
             # `yield e` / `yield* e` — the operand's deps are the
             # iterator's element deps; the sent-back value is
@@ -6512,6 +6599,7 @@ class _Builder:
                             transfers,
                             count,
                             node,
+                            may=optional_call,
                         )
                     if isinstance(base_val2, frozenset):
                         # A member call on a scalar base
@@ -6552,6 +6640,7 @@ class _Builder:
                             count,
                             node,
                             _callee_name(function),
+                            may=optional_call,
                         )
                     if (
                         isinstance(base_val2, _Composite)
@@ -6586,6 +6675,7 @@ class _Builder:
                                         if fval.is_method
                                         else None
                                     ),
+                                    may=optional_call,
                                 )
                         transfers.append(
                             TsCall(
@@ -6653,6 +6743,7 @@ class _Builder:
                     this_val=this_val,
                     actual_values=vals_m,
                     alt_this=alt_this,
+                    may=optional_call,
                 )
                 transfers.append(
                     TsCall(
@@ -6700,6 +6791,7 @@ class _Builder:
                     this_val=this_v,
                     construct=True,
                     actual_values=vals_s,
+                    may=optional_call,
                 )
                 locals_["this"] = inst
                 transfers.append(
@@ -6763,6 +6855,7 @@ class _Builder:
                         count,
                         _span(node),
                         actual_values=vals_e,
+                        may=optional_call,
                     )
                     transfers.append(
                         TsCall(
@@ -6867,6 +6960,7 @@ class _Builder:
                     count,
                     _span(node),
                     actual_values=vals,
+                    may=optional_call,
                 )
                 transfers.append(
                     TsCall(_span(node), callee, actual, result)
@@ -6925,11 +7019,21 @@ class _Builder:
                 or alternative is None
             ):
                 raise _Unsupported("unsupported_expression", _span(node))
-            return (
-                self.expression(condition, params, locals_, transfers, count)
-                | self.expression(consequence, params, locals_, transfers, count)
-                | self.expression(alternative, params, locals_, transfers, count)
+            deps = self.expression(
+                condition, params, locals_, transfers, count
             )
+            # Each arm may not run — writes inside are may-writes.
+            self._may_depth += 1
+            try:
+                deps |= self.expression(
+                    consequence, params, locals_, transfers, count
+                )
+                deps |= self.expression(
+                    alternative, params, locals_, transfers, count
+                )
+            finally:
+                self._may_depth -= 1
+            return deps
         raise _Unsupported("unsupported_expression", _span(node))
 
 

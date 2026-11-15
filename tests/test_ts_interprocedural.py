@@ -5347,6 +5347,79 @@ def test_invoke_alias_mark_does_not_leak():
     assert s.available and s.return_dependencies == frozenset({0, 1})
 
 
+def test_conditional_call_keeps_prewrite_field_deps():
+    # `g()` inside `if (b)` may not run — the callee's write to a
+    # captured composite must union with the pre-branch value, not
+    # replace it through the in-place (shared-object) write path.
+    s = _fn(
+        "function f(x: number, y: number, b: boolean) {"
+        " let o = {v: x}; const g = () => { o.v = y; };"
+        " if (b) { g(); } return o.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_conditional_call_reaches_caller_alias():
+    # The may-write union lands on the shared object itself, so
+    # every alias (`p = o`) sees `{0,1}`, not just `o`.
+    s = _fn(
+        "function f(x: number, y: number, b: boolean) {"
+        " let o = {v: x}; let p = o; const g = () => { o.v = y; };"
+        " if (b) { g(); } return p.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_zero_trip_loop_call_keeps_prewrite_field_deps():
+    # A loop body may run zero times — a callee's in-place write
+    # on the captured composite is a may-write.
+    s = _fn(
+        "function f(x: number, y: number, c: boolean) {"
+        " let o = {v: x}; const g = () => { o.v = y; };"
+        " while (c) { g(); } return o.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_short_circuit_call_is_may_write():
+    # `b && g()` — the RHS may not run.
+    s = _fn(
+        "function f(x: number, y: number, b: boolean) {"
+        " let o = {v: x}; const g = () => { o.v = y; };"
+        " b && g(); return o.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_ternary_call_is_may_write():
+    s = _fn(
+        "function f(x: number, y: number, b: boolean) {"
+        " let o = {v: x}; const g = () => { o.v = y; };"
+        " b ? g() : 0; return o.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_optional_call_is_may_write():
+    # `g?.()` — the callee may be absent.
+    s = _fn(
+        "function f(x: number, y: number) {"
+        " let o = {v: x}; const g = () => { o.v = y; };"
+        " g?.(); return o.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_unconditional_call_replaces_field_deps():
+    # Sanity: without a conditional context the write stays exact.
+    s = _fn(
+        "function f(x: number, y: number) {"
+        " let o = {v: x}; const g = () => { o.v = y; };"
+        " g(); return o.v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
 def test_opaque_call_may_add_fields():
     # A dep-union (uninlined) callee may ADD fields — a read of
     # a field the call site never wrote still carries the
