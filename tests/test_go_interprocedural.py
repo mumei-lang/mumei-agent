@@ -9341,3 +9341,33 @@ def test_restored_set_still_gates_reuse_through_for_function(go_types_helper):
     )
     with pytest.raises(SnapshotError):
         restored.for_function(source, snapshot, "b1")
+
+
+def test_summary_manifest_restore_allows_more_than_analysis_bound_functions():
+    fn = ip.FunctionSummary(
+        "b", "k", (GoType("basic", "int64", 64, True, ""),), None,
+        None, (), (ip.SummaryGap("analysis_limit"),),
+    )
+    data = ip.GoSummarySet(
+        "ctx", tuple(replace(fn, binding_id=f"b{i}") for i in range(200))
+    ).to_dict()
+    assert len(ip.GoSummarySet.from_dict(data).functions) == 200
+
+
+def test_summary_manifest_restore_rejects_call_dependencies_beyond_parameters():
+    data = _manifest_set().to_dict()
+    data["functions"][0]["calls"][0]["arguments"] = [[7]]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+    data = _manifest_set().to_dict()
+    data["functions"][0]["calls"][0]["result"] = [8]
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(data)
+
+
+def test_summary_manifest_restore_rejects_non_dict_spans_as_snapshot_errors():
+    for bad in (7, ["start", "end"], "01"):
+        data = _manifest_set().to_dict()
+        data["functions"][0]["calls"][0]["span"] = bad
+        with pytest.raises(SnapshotError):
+            ip.GoSummarySet.from_dict(data)

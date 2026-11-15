@@ -97,6 +97,10 @@ from agent.go_type_snapshot import (
 PROFILE = "mumei.go-scalar-parameter-deps/v1"
 MAX_FUNCTIONS = 128
 MAX_DEPTH = 48
+# Manifest restoration caps only the wire shape: the analyzer emits a
+# summary for every declared function (over-limit ones as analysis_limit
+# gaps), so a valid manifest can far exceed MAX_FUNCTIONS.
+MAX_MANIFEST_MEMBERS = 8192
 MAX_EXPRESSION_NODES = 2048
 _BINARY = frozenset(
     {
@@ -187,7 +191,7 @@ class CallTransfer:
         span = _span_from_dict(v["span"])
         _require_restore(span is not None)
         arguments = _list(v["arguments"])
-        _require_restore(len(arguments) <= MAX_FUNCTIONS)
+        _require_restore(len(arguments) <= MAX_MANIFEST_MEMBERS)
         return cls(
             span,
             _string(v["target"]),
@@ -228,7 +232,9 @@ def _type_from_dict(value: Any, depth: int = 0) -> GoType:
     """Rebuild a declared type fact; every field is re-validated, none trusted."""
     _require_restore(depth <= MAX_DEPTH)
     v = _manifest_record(
-        value, ("kind", "basic_name", "bit_width", "signed", "type_id"), ("elem", "key")
+        value,
+        ("kind", "basic_name", "bit_width", "signed", "type_id"),
+        ("elem", "key"),
     )
     signed = v["signed"]
     _require_restore(type(signed) is bool or signed is None)
@@ -250,6 +256,7 @@ def _span_from_dict(value: Any) -> ByteSpan | FileSpan | None:
     slices bytes must re-derive bounds itself."""
     if value is None:
         return None
+    _require_restore(isinstance(value, dict))
     keys = set(value)
     if keys == {"start", "end"}:
         start, end = value["start"], value["end"]
@@ -271,7 +278,7 @@ def _span_from_dict(value: Any) -> ByteSpan | FileSpan | None:
 def _deps_from_list(value: Any) -> frozenset[int]:
     deps = _list(value)
     _require_restore(
-        len(deps) <= MAX_FUNCTIONS
+        len(deps) <= MAX_MANIFEST_MEMBERS
         and all(type(d) is int and d >= 0 for d in deps)
     )
     return frozenset(deps)
@@ -362,10 +369,10 @@ class FunctionSummary:
             ("result_type", "return_dependencies", "pinned"),
         )
         parameters = _list(v["parameters"])
-        _require_restore(len(parameters) <= MAX_FUNCTIONS)
+        _require_restore(len(parameters) <= MAX_MANIFEST_MEMBERS)
         calls = _list(v["calls"])
         gaps = _list(v["gaps"])
-        _require_restore(len(calls) + len(gaps) <= MAX_EXPRESSION_NODES)
+        _require_restore(len(calls) + len(gaps) <= MAX_MANIFEST_MEMBERS)
         deps = (
             _deps_from_list(v["return_dependencies"])
             if "return_dependencies" in v
@@ -379,8 +386,19 @@ class FunctionSummary:
             else ()
         )
         _require_restore(
-            len(pinned) <= MAX_EXPRESSION_NODES
+            len(pinned) <= MAX_MANIFEST_MEMBERS
             and len(set(pinned)) == len(pinned)
+        )
+        restored_calls = tuple(CallTransfer.from_dict(c) for c in calls)
+        # Every dependency ordinal a call records must name a declared
+        # parameter, just like `return_dependencies`.
+        _require_restore(
+            all(
+                d < len(parameters)
+                for c in restored_calls
+                for argument in (*c.arguments, c.result)
+                for d in argument
+            )
         )
         return cls(
             _string(v["binding_id"]),
@@ -388,7 +406,7 @@ class FunctionSummary:
             tuple(_type_from_dict(t) for t in parameters),
             _type_from_dict(v["result_type"]) if "result_type" in v else None,
             deps,
-            tuple(CallTransfer.from_dict(c) for c in calls),
+            restored_calls,
             tuple(SummaryGap.from_dict(g) for g in gaps),
             pinned,
         )
@@ -528,7 +546,7 @@ class GoSummarySet:
         v = _manifest_record(value, ("schema_version", "context_key", "functions"))
         _require_restore(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
-        _require_restore(len(functions) <= MAX_FUNCTIONS)
+        _require_restore(len(functions) <= MAX_MANIFEST_MEMBERS)
         restored = tuple(FunctionSummary.from_dict(f) for f in functions)
         _require_restore(len({f.binding_id for f in restored}) == len(restored))
         return cls(_string(v["context_key"]), restored)
