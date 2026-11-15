@@ -6911,6 +6911,103 @@ def test_imported_deref_member_write_dot_import(go_types_helper):
     assert result.available
 
 
+def test_imported_deref_field_member_write_is_admitted(go_types_helper):
+    # `*lib.VS2.P = v` — a dereference store through an imported
+    # pointer-typed *field* member resolves the field like a field
+    # read: the write records the field member's identity while the
+    # base member's identity pins beside the pointee `T`'s.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { *lib.VS2.P = lib.T(v)\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    (write,) = [
+        c for c in result.calls if c.imported and len(c.arguments) == 0
+    ]
+    assert write.target == members["P"]["id"]
+    assert members["VS2"]["id"] in result.pinned
+    assert members["T"]["id"] in result.pinned
+
+
+def test_imported_deref_field_member_write_dot_import(go_types_helper):
+    # `*VS2.P = v` — the dot-imported field store resolves the same
+    # member pair.
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(v int64) int64 { *VS2.P = T(v)\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_imported_deref_field_member_write_folds_into_escaped(
+    go_types_helper,
+):
+    # `*lib.VS2.P = v` where `lib.VS2.P` may hold `&x` — the same
+    # escaped-binding fold `*lib.PV = v` uses: `x` picks up the
+    # stored value's dependencies.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { x := lib.T(0)\n"
+        "\tlib.VS2.P = &x\n"
+        "\t*lib.VS2.P = lib.T(v)\n\treturn int64(x) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_deref_field_member_unnamed_pointee_is_admitted(
+    go_types_helper,
+):
+    # `*lib.VS3.PU = v` — the field member's pointee tree names
+    # nothing, so `pointee_type_ids` is the empty list and the field
+    # member's own identity covers the declaration, exactly like
+    # `*lib.PU = v` admits.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype S3 struct{ PU *int64 }\nvar VS3 S3\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { *lib.VS3.PU = v\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    (write,) = [
+        c for c in result.calls if c.imported and len(c.arguments) == 0
+    ]
+    assert write.target == members["PU"]["id"]
+
+
 def test_imported_deref_member_inc_unnamed_pointee_is_admitted(
     go_types_helper,
 ):

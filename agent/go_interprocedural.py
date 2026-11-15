@@ -1051,7 +1051,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         store-time dependency fold. A LHS that resolves to no
         imported member — a bound local's field, a computed operand,
         an unknown name — returns None and keeps the statement
-        closed.
+        closed. A deref through a pointer-typed *field* member,
+        `*lib.VS.P = v`, resolves the field like a field read and
+        records the field member's identity, pinning the base
+        member's beside the pointee's.
         """
         while node is not None and node.type == "parenthesized_expression":
             node = next(
@@ -1098,6 +1101,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 member = self._package_member(cur)
                 if member is not None:
                     break
+                if saw_deref:
+                    # `*lib.VS.P = v` — a store through an imported
+                    # pointer-typed *field* member: the field resolves
+                    # like a field read does, and the same staleness
+                    # cover applies — the base member's identity pins
+                    # beside the field's pointee.
+                    pair = self._imported_field_read(cur)
+                    if pair is not None:
+                        base, field_member = pair
+                        if (
+                            field_member.type.kind == "pointer"
+                            and (
+                                field_member.type.type_id
+                                or field_member.pointee_type_ids
+                                is not None
+                            )
+                        ):
+                            self.pinned.add(base.id)
+                            self._pin_member_type(base)
+                            member = field_member
+                            break
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "index_expression":
