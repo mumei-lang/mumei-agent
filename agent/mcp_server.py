@@ -2436,6 +2436,69 @@ def native_recheck(
 
 
 @mcp.tool()
+def native_attempt(
+    core_path: str,
+    source_path: str,
+    bundle_dir: str,
+    attempt_timeout_ms: int = 60000,
+) -> str:
+    """Produce a native bundle as one declared attempt (C02/C10).
+
+    Runs `native-bundle build` as one declared attempt — the same
+    wiring as the `native-attempt` CLI route. Selection requires an
+    `exited` run with exit 0, a parseable `Build ID` line and the full
+    declared member set written under `bundle_dir`; mid-run drift
+    reports `inputs_changed` with no claimed `build_id`.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        source_path: Absolute path to the declared .mm source file (at
+            most 64 KiB).
+        bundle_dir: Absolute path of the declared bundle output
+            directory the Core writes the `mumei.native-bundle/v1`
+            members into.
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the `mumei.native-attempt-report/v1`
+        document (including `build_id` and `candidate` when selected)
+        — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.native_attempt import run_attempt
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("source_path", source_path),
+        ("bundle_dir", bundle_dir),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        source=source_path,
+        bundle=bundle_dir,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_attempt(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, source_path, bundle_dir]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 

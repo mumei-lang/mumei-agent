@@ -652,6 +652,29 @@ drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
 C02/C10 stay partial.
 
+### C02/C10 declared native-attempt route (native-attempt)
+
+`python -m agent native-attempt --core <path> --source <path>
+--bundle <dir>` declares a native bundle production as one attempt:
+`<core> native-bundle build <source> -o <dir>` under a
+`mumei.native-attempt-request/v1` fingerprint binding the Core
+executable's bytes, the source's bytes and the declared output path.
+Where verify-attempt selects on a clean exit alone (the evidence
+record IS the stdout document), `native-bundle build` writes the
+`mumei.native-bundle/v1` directory as a side effect — so selection
+requires three post-conditions: an `exited` run with `exit_code == 0`,
+a parseable `Build ID: <sha256>` line in the bounded capture, and the
+full declared member set present (`native-bundle.json`,
+`program.ll`, `program.o`, `proof-cert.json`, `program`). The
+reported `build_id` is the Core-computed SHA-256 of
+`native-bundle.json` — the exact identity a `native-recheck` call
+pins via `--expected-build-id`. Bundle bytes are outputs: they never
+enter the request fingerprint or the report. Mid-run drift reports
+`inputs_changed` with no claimed `build_id`. The route is also the
+`native_attempt` MCP tool (same `run_attempt` report production,
+declared-path validation and basename redaction as the other spawn
+tools). C02/C10 stay partial.
+
 ### C02 declared evidence file-identity route (evidence-identity-check)
 
 `python -m agent evidence-identity-check --evidence <path>

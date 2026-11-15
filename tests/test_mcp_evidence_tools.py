@@ -431,3 +431,68 @@ class TestEvidenceCompareTool:
         b = tmp_path / "b.json"; b.write_text(self._evidence(_sha256("x")))
         out = json.loads(mcp_server.evidence_compare(str(a), str(b)))
         assert out["status"] == "error"
+
+
+class TestNativeAttemptTool:
+    def _write_build_core(self, tmp_path, complete: bool = True,
+                          build_exit: int = 0):
+        names = ("native-bundle.json", "program.ll", "program.o",
+                 "proof-cert.json", "program")
+        members = "\n".join(
+            f'    printf %s "{n}-bytes" > "$out/{n}"'
+            for n in (names if complete else names[:-1])
+        )
+        py = (
+            "import hashlib,sys;"
+            'print(hashlib.sha256(open(sys.argv[1],"rb").read())'
+            ".hexdigest())"
+        )
+        core = tmp_path / "mumei-stub"
+        core.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "native-bundle" ] && [ "$2" = "build" ]; then\n'
+            '    out="$5"\n'
+            "    mkdir -p \"$out\"\n"
+            f"{members}\n"
+            '    printf "Build ID: %s\\n" '
+            f'"$(python3 -c \'{py}\' "$out/native-bundle.json")"\n'
+            f"    exit {build_exit}\n"
+            "fi\n"
+            "exit 2\n"
+        )
+        core.chmod(0o755)
+        return core
+
+    def test_selected_build_reports_build_id(self, tmp_path):
+        core = self._write_build_core(tmp_path)
+        src = tmp_path / "main.mm"; src.write_text("atom")
+        bundle = tmp_path / "bundle"
+        out = json.loads(mcp_server.native_attempt(
+            str(core), str(src), str(bundle)))
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["schema_version"] == "mumei.native-attempt-report/v1"
+        assert report["build_id"] == hashlib.sha256(
+            (bundle / "native-bundle.json").read_bytes()).hexdigest()
+        assert report["candidate"]["schema_version"] == (
+            "mumei.verifier-evidence-candidate/v1"
+        )
+        assert (bundle / "program").is_file()
+
+    def test_incomplete_bundle_selects_nothing(self, tmp_path):
+        core = self._write_build_core(tmp_path, complete=False)
+        src = tmp_path / "main.mm"; src.write_text("atom")
+        out = json.loads(mcp_server.native_attempt(
+            str(core), str(src), str(tmp_path / "bundle")))
+        assert out["status"] == "ok"
+        assert "candidate" not in out["report"]
+
+    def test_bad_args_and_redaction(self, tmp_path):
+        src = tmp_path / "main.mm"; src.write_text("atom")
+        out = json.loads(mcp_server.native_attempt("", str(src), "/b"))
+        assert out["status"] == "error"
+        missing = tmp_path / "missing-mumei"
+        out = json.loads(mcp_server.native_attempt(
+            str(missing), str(src), str(tmp_path / "bundle")))
+        assert out["status"] == "error"
+        assert str(missing) not in out["error"]

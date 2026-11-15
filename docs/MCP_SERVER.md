@@ -75,6 +75,7 @@ Exported tools:
 | `verify_attempt(core_path, source_path, solver_timeout_ms=5000, solver_resource_limit=1000000, attempt_timeout_ms=30000)` | Run `evidence verify-source` as one declared attempt (same wiring as the `verify-attempt` route) and return `mumei.verify-attempt-report/v1` — including `candidate`, `evidence_check` and `acceptance` when a result is selected; representation-level acceptance only |
 | `verify_recheck(core_path, evidence_path, source_path, solver_timeout_ms=5000, solver_resource_limit=1000000, attempt_timeout_ms=30000)` | Run `evidence recheck-source` as one declared attempt (same wiring as `verify-recheck`); `recheck` is claimed only for uniquely-mapped exit codes and mid-run drift reports `inputs_changed` |
 | `native_recheck(core_path, bundle_dir, source_path, expected_build_id, attempt_timeout_ms=30000)` | Run `native-bundle recheck-llvm` as one declared attempt (same wiring as `native-recheck`) and return `mumei.native-recheck-report/v1` |
+| `native_attempt(core_path, source_path, bundle_dir, attempt_timeout_ms=60000)` | Run `native-bundle build` as one declared attempt (same wiring as `native-attempt`) and return `mumei.native-attempt-report/v1` — `build_id` + `candidate` only when the produced bundle holds the full declared member set |
 | `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
@@ -146,6 +147,7 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `evidence_compare` | `evidence_a_path: str, evidence_b_path: str` | `comparison` |
 | `evidence_identity_check` | `evidence_path: str, source_path: str` | `identity` |
 | `native_recheck` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 30000` | `report` |
+| `native_attempt` | `core_path: str, source_path: str, bundle_dir: str, attempt_timeout_ms: int = 60000` | `report` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
 | `suggest_mm_migration` | `code_file: str, language: str, issues_json: str = '[]'` | `migration_hints` |
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |
