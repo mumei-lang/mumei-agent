@@ -2692,6 +2692,20 @@ Boundaries: rest `...args` formal parameters still close, as
 do pattern defaults `f({a} = d)` and non-identifier pattern
 targets beyond `_destructure`'s reach.
 
+### C06 TypeScript async/await (slice 15)
+
+`async` functions and async arrows admit: a promise is its
+resolved value in the dep model, so `await e` passes the
+operand's deps through (`await g(x)` carries the call result's
+deps) and `async` is no longer a signature gate. `for await
+(x of y)` iterates through the slice-8 `for..of` walk — the
+suspension schedule has no effect on which deps reach the
+result.
+
+Boundaries: generators (`function*`, `yield`) stay closed —
+a `yield` has no slot in the dep model and `yield`'s
+send/receive semantics are out of the supported fragment.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

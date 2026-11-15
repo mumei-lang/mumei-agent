@@ -362,12 +362,12 @@ def test_non_scalar_return_type_closes():
     assert s.gaps[0].reason == "unsupported_signature"
 
 
-def test_async_function_closes():
+def test_async_function_admits_scalar():
+    # Slice 15: `async` admits — `await` degrades to operand deps.
     s = _fn(
         "async function f(x: number): number { return x; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_generator_closes():
@@ -810,12 +810,14 @@ def test_subscript_on_scalar_closes():
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_await_closes():
+def test_await_passthrough():
+    # Slice 15: `await` degrades to operand deps; `p` being unbound
+    # still closes with its own reason.
     s = _fn(
         "function f(x: number): number { return x + await p; }"
     )
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.gaps[0].reason == "binding_unavailable"
 
 
 def test_division_modulo_exponent_close():
@@ -2195,3 +2197,58 @@ def test_nested_destructured_param():
         "function f({a: {c}}: T): number { return c; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 15: async / await
+
+
+def test_async_function_admits():
+    s = _fn(
+        "async function f(x: number): number { return x + 1; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_await_call_passthrough():
+    s = _fn(
+        "async function g(x: number): number { return x; }"
+        "async function f(x: number): number { return await g(x); }",
+        name="f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "g"
+
+
+def test_await_passthrough_expression():
+    s = _fn(
+        "async function f(x: number): number { const v = await x; return v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_async_arrow_value():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = async (v: number) => v + 1;"
+        " return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_generator_still_closes():
+    # `function*` is a generator_function_declaration — a closed
+    # top-level node, so no `f` summary is produced.
+    summaries = _summarize(
+        "function* f(x: number): number { yield x; return x; }"
+    ).functions
+    assert all(s.name != "f" for s in summaries)
+
+
+def test_for_await_of_iterates():
+    s = _fn(
+        "async function f(x: number): number {"
+        " const a = [x];"
+        " for await (const e of a) { x = e; }"
+        " return x; }"
+    )
+    assert s.available

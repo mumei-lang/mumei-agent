@@ -112,6 +112,11 @@ Admitted:
   (`{f: v => v}`) — the member read resolves the callee and the
   body evaluates as with a name call. There is no `this`
   binding: a body that reads `this` closes inside.
+* `async` functions, async arrows and `await` expressions — in the
+  dep model a promise is its resolved value, so `await e` passes
+  the operand's deps through and `async` admits at the signature
+  gate. `for await (x of y)` iterates like `of`. Generators
+  (`function*`, `yield`) stay closed — a `yield` has no dep slot.
 * Destructured formal parameters `f({a, b}, [x])` — the pattern
   occupies one scalar index; its sub-names bind member reads of
   the slot at body start (each sees the slot's whole dep set).
@@ -151,7 +156,7 @@ Admitted:
 Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 `this`, shorthand method definitions (`{m(){}}`),
-generators, `async`/`await`, `any`/composite/missing parameter
+generators, `any`/composite/missing parameter
 types, rest formal parameters, `new` and
 generator/tagged-template function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
@@ -498,11 +503,12 @@ class _Builder:
     def body(self, node, name: str) -> TsFunctionSummary:
         # Signature gates: named function, every parameter a scalar
         # `identifier: number|boolean`, a declared scalar return type
-        # and a statement_block body. `async`/`function*` markers —
-        # anonymous children of the declaration — stay closed, as do
-        # optional/rest/default/destructured parameters.
+        # and a statement_block body. `function*` (`*` markers) stays
+        # closed — a `yield` needs state the model has no slot for;
+        # `async` admits since `await` degrades to operand deps in the
+        # dep model (a promise resolves to its value).
         for child in node.children:
-            if not child.is_named and child.type in {"async", "*"}:
+            if not child.is_named and child.type == "*":
                 raise _Unsupported("unsupported_signature", _span(node))
         params_node = node.child_by_field_name("parameters")
         body = node.child_by_field_name("body")
@@ -2055,6 +2061,16 @@ class _Builder:
             if len(exprs) != 1:
                 raise _Unsupported("unsupported_expression", _span(node))
             return self.expression(exprs[0], params, locals_, transfers, count)
+        if kind == "await_expression":
+            # `await` yields the operand's value — for the dep model
+            # that's a pass-through. `for await (...)` iterates the
+            # same way the plain `of` loop does.
+            operand = next(
+                (c for c in node.children if c.is_named), None
+            )
+            if operand is None:
+                raise _Unsupported("unsupported_expression", _span(node))
+            return self.expression(operand, params, locals_, transfers, count)
         if kind == "unary_expression":
             op = node.child_by_field_name("operator")
             argument = node.child_by_field_name("argument")
