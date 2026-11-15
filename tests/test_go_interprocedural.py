@@ -8263,6 +8263,34 @@ def test_imported_map_index_read_comma_ok_nested_index_deps(
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+def test_imported_map_index_read_comma_ok_slice_root_is_admitted(
+    go_types_helper,
+):
+    # `v, ok := lib.V[i]["k"]` — the outermost index's container is
+    # the map element of an imported slice: the root need not be a
+    # map itself.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar VSM []map[string]int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 { v, ok := lib.VSM[k][\"b\"]\n"
+        "\tif ok { return v }\n\treturn 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_imported_map_index_read_comma_ok_map_value_stays_closed(
     go_types_helper,
 ):

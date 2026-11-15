@@ -1034,10 +1034,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         expression whose operand names an imported map `var`
         admits. A nested chain (`v, ok := lib.VM2[k1][k2]`) admits
         when the outermost index's own container is still a map —
-        one `elem` descent per inner level. The read itself still
-        goes through `_imported_index_read`, so the element's
-        scalar-or-pointer classification and the pins apply
-        unchanged.
+        one `elem` descent per inner level, so the root may be any
+        container (`v, ok := lib.V[i]["k"]` on a `[]map[K]V`). The
+        read itself still goes through `_imported_index_read`, so
+        the element's scalar-or-pointer classification and the pins
+        apply unchanged.
         """
         if width != 2 or node is None or node.type != "index_expression":
             return None
@@ -1045,7 +1046,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if resolved is None:
             return None
         member, levels = resolved
-        if member.kind != "var" or member.type.kind != "map":
+        if member.kind != "var":
             return None
         fact = member.type
         for _ in range(levels):

@@ -2445,8 +2445,9 @@ the same way the single-value read does. A comma-ok read on a
 nested chain admits when the outermost index's container is still
 map-typed — `v, ok := lib.VM2[k1][k2]` descends one `elem` fact per
 level and requires the surviving container fact to be a `map`, so
-`v, ok := lib.VM2[k]` (whose value is a map the model cannot
-bind) stays closed. A member
+the root need not itself be a map (`v, ok := lib.V[i]["k"]` on a
+`[]map[K]V` admits), while `v, ok := lib.VM2[k]` (whose value is a
+map the model cannot bind) stays closed. A member
 write (`lib.VM[k] = v`) pins the named key's identity too.
 
 The member record's `signature_type_ids` for a method now include
