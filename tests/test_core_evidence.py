@@ -849,3 +849,209 @@ def test_matching_sequence_does_not_change_timeout_cancel_or_error_protocol(exec
         attempt_sequence=sequence,
     )
     assert sequence.check_output_binding(output) is None
+
+
+def selected(output):
+    return matching_sequence(output).select_result(output)
+
+
+@pytest.mark.parametrize("exit_code", [0, 7, -9])
+def test_record_evidence_check_records_valid(executable, exit_code):
+    output = snapshot(b"payload", exit_code)
+    sequence = selected(output)
+    check = core_evidence.record_evidence_check(
+        sequence,
+        output,
+        core_executable=executable(report_script()),
+        timeout_ms=2000,
+    )
+    assert check.outcome == "valid"
+    assert check == sequence.evidence_check(
+        sequence.evidence_candidate(), "valid"
+    )
+    assert check.to_dict() == {
+        "schema_version": "mumei.verifier-evidence-check/v1",
+        "request_fingerprint": sequence.request_fingerprint,
+        "attempt_number": output.attempt.attempt_number,
+        "output_fingerprint": output.to_dict()["output_fingerprint"],
+        "outcome": "valid",
+    }
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        report_script(stderr=PRIVATE),
+        report_script(code=7),
+        report_script(b"{}"),
+        "import time\ntime.sleep(60)\n",
+    ],
+    ids=["stderr", "exit-7", "wrong-diagnostic", "timeout"],
+)
+def test_record_evidence_check_records_failed(executable, script):
+    output = snapshot()
+    sequence = selected(output)
+    check = core_evidence.record_evidence_check(
+        sequence,
+        output,
+        core_executable=executable(script),
+        timeout_ms=50,
+    )
+    assert check.outcome == "failed"
+    assert check.output_fingerprint == output.to_dict()["output_fingerprint"]
+
+
+def test_record_evidence_check_records_cancelled(executable, monkeypatch):
+    output = snapshot()
+    sequence = selected(output)
+    event = threading.Event()
+    event.set()
+    monkeypatch.setattr(
+        core_evidence.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("spawned"),
+    )
+    check = core_evidence.record_evidence_check(
+        sequence,
+        output,
+        core_executable=executable(report_script()),
+        timeout_ms=2000,
+        cancel_event=event,
+    )
+    assert check.outcome == "cancelled"
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    ["not-a-sequence", 1, None],
+    ids=["str", "int", "none"],
+)
+def test_record_evidence_check_rejects_foreign_sequence_type(sequence):
+    output = snapshot()
+    with pytest.raises(
+        ValueError, match="^unsupported Core representation check request$"
+    ):
+        core_evidence.record_evidence_check(
+            sequence, output, core_executable="/core", timeout_ms=100
+        )
+
+
+def test_record_evidence_check_requires_a_selected_result(executable, monkeypatch):
+    output = snapshot()
+    monkeypatch.setattr(
+        core_evidence.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("spawned"),
+    )
+    with pytest.raises(
+        ValueError, match="^evidence candidate requires a selected result$"
+    ):
+        core_evidence.record_evidence_check(
+            matching_sequence(output),
+            output,
+            core_executable=executable(report_script()),
+            timeout_ms=100,
+        )
+
+
+def test_record_evidence_check_rejects_unbound_output_before_spawn(
+    executable, monkeypatch
+):
+    output = snapshot()
+    sequence = selected(output)
+    foreign_attempt = AttemptRecord(
+        "b" * 64, 1, 1000,
+        (AttemptEvent("started", 0), AttemptEvent("exited", 1, 0)),
+    )
+    other = AttemptOutput(
+        foreign_attempt, PRIVATE, hashlib.sha256(PRIVATE).hexdigest()
+    )
+    monkeypatch.setattr(
+        core_evidence.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("spawned"),
+    )
+    with pytest.raises(
+        ValueError, match="^output does not match the current sequence record$"
+    ):
+        core_evidence.record_evidence_check(
+            sequence,
+            other,
+            core_executable=executable(report_script()),
+            timeout_ms=100,
+        )
+
+
+def test_record_evidence_check_rejects_unselected_output_before_spawn(
+    executable, monkeypatch
+):
+    output = snapshot()
+    sequence = selected(output)
+    unchecked = AttemptOutput(
+        output.attempt, b"different", hashlib.sha256(b"different").hexdigest()
+    )
+    monkeypatch.setattr(
+        core_evidence.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("spawned"),
+    )
+    with pytest.raises(
+        ValueError, match="^evidence check output is not the selected result$"
+    ):
+        core_evidence.record_evidence_check(
+            sequence,
+            unchecked,
+            core_executable=executable(report_script()),
+            timeout_ms=100,
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"core_executable": "relative/core"},
+        {"core_executable": "/core\x00null"},
+        {"core_executable": "/core", "timeout_ms": 0},
+        {"core_executable": "/core", "timeout_ms": MAX_CHECK_TIMEOUT_MS + 1},
+        {"core_executable": "/core", "timeout_ms": True},
+        {"core_executable": "/core", "cancel_event": object()},
+    ],
+    ids=[
+        "relative-path",
+        "nul-path",
+        "zero-timeout",
+        "oversize-timeout",
+        "bool-timeout",
+        "foreign-event",
+    ],
+)
+def test_record_evidence_check_rejects_malformed_requests(
+    executable, monkeypatch, kwargs
+):
+    output = snapshot()
+    sequence = selected(output)
+    monkeypatch.setattr(
+        core_evidence.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("spawned"),
+    )
+    kwargs.setdefault("timeout_ms", 100)
+    with pytest.raises(
+        ValueError, match="^unsupported Core representation check request$"
+    ):
+        core_evidence.record_evidence_check(sequence, output, **kwargs)
+
+
+def test_check_failure_is_a_value_error_subclass(executable):
+    with pytest.raises(ValueError, match="^Core Evidence"):
+        check_evidence_representation(
+            snapshot(),
+            core_executable=executable(report_script(code=7)),
+            timeout_ms=100,
+        )
+    with pytest.raises(core_evidence.CoreCheckFailed):
+        check_evidence_representation(
+            snapshot(),
+            core_executable=executable(report_script(code=7)),
+            timeout_ms=100,
+        )
