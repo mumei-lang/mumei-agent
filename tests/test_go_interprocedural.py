@@ -4156,6 +4156,54 @@ def test_imported_method_on_package_member_receiver(go_types_helper):
     assert transfers  # the `lib.V` var read is on record
 
 
+def test_imported_method_on_composite_var_receiver(go_types_helper):
+    # `lib.VS.PF()` — a struct-typed imported var receiver: the
+    # method reads external state, so the receiver is dep-free and
+    # still records the imported transfer for staleness.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.VS.PF() + x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    transfers = [
+        t for t in result.calls if t.imported and t.arguments == ()
+    ]
+    assert transfers  # the `lib.VS` receiver read is on record
+
+
+def test_imported_method_on_composite_var_receiver_dot_import(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return VS.PF() + x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_method_on_indexed_receiver_stays_closed(go_types_helper):
+    # `lib.VSS[0].PF()` — the receiver is an index read whose
+    # element is a struct, not a member name: stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VSS[0].PF() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_method_on_const_receiver(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"

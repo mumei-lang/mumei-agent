@@ -2287,7 +2287,11 @@ consumer also evaluates the receiver expression: the result depends
 on the receiver and every evaluated argument. `x.M(y)` on a
 parameter, `lib.V.M(x)` on package state (its var read still records
 the staleness transfer) and `lib.K.M(x)` on a constant all share the
-path. A method *expression* `lib.T.M(recv, args)` needs no flag —
+path. A composite imported var receiver admits too — `lib.VS.PF()`
+on a struct var reads external state like the member itself, so it
+is dep-free and records the imported transfer against the member —
+while a receiver that is an index or call result (`lib.VSS[0].PF()`)
+still names no member and stays closed. A method *expression* `lib.T.M(recv, args)` needs no flag —
 the receiver is already the leading argument, so the plain
 `direct_import` result-depends-on-every-argument model covers it
 (`(*lib.T).PM(t, x)` records the same wire shape and summarizes the

@@ -3251,14 +3251,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # unit's own binding identity, so a regenerated report for it
         # still flags this summary via `stale_dependents`. Package-level
         # state is not modelled. A method call also depends on its
-        # receiver expression, evaluated before the arguments.
-        receiver_deps = (
-            self.expression(
-                receiver, fn, params, locals_, transfers, count, depth + 1
-            )
-            if receiver is not None
-            else frozenset()
-        )
+        # receiver expression, evaluated before the arguments. A
+        # composite imported var receiver (`lib.VS.PM(x)` on a struct
+        # var) reads external state like the member itself — a plain
+        # member read would reject it as unrepresentable, but as a
+        # receiver it is dep-free and still records the imported
+        # transfer.
+        receiver_deps = frozenset()
+        if receiver is not None:
+            receiver_member = self._imported_member_operand(receiver)
+            if (
+                receiver_member is not None
+                and receiver_member.kind == "var"
+                and receiver_member.type is not None
+                and receiver_member.type.kind
+                not in {"integer", "boolean", "pointer"}
+            ):
+                self._pin_member_type(receiver_member)
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            receiver.start_byte,
+                            receiver.end_byte,
+                        ),
+                        receiver_member.id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+            else:
+                receiver_deps = self.expression(
+                    receiver, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
         # `t.W.Get()` — a nested-selector receiver reads dep-free like
         # any field read, but a `t.W.f = v` write folded the value's
         # deps into the chain's root binding and a method call on the
