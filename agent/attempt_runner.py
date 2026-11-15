@@ -11,6 +11,7 @@ truncation happened, not that the producer stopped writing.
 
 import hashlib
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -68,6 +69,83 @@ CANCEL_GRACE_MS = 1000
 READ_CHUNK = 65_536
 COLLECTOR_JOIN_SECONDS = 5.0
 MAX_MEMORY_BOUND_MB = 1_048_576
+# Upper bound on bytes a host may feed into a spawned attempt's stdin.
+MAX_FEED_BYTES = 65_536
+
+
+def _writable_poller(fd: int) -> "select.poll | None":
+    """A writability waiter with no fd-number ceiling, or None.
+
+    `select.select` refuses descriptors >= FD_SETSIZE (1024) on POSIX:
+    a long-running host holding that many descriptors (an MCP server
+    on a busy box) hands the feed pipe a high-numbered fd, every
+    select() raises ValueError, and the feed silently becomes empty.
+    `poll` has no such bound; `select` stays only as the fallback."""
+    try:
+        poller = select.poll()
+    except AttributeError:
+        return None
+    try:
+        poller.register(
+            fd,
+            select.POLLOUT | select.POLLERR | select.POLLHUP | select.POLLNVAL,
+        )
+    except (OSError, ValueError):
+        return None
+    return poller
+
+
+def _feed_stdin(
+    process: subprocess.Popen, data: bytes, stop: threading.Event
+) -> None:
+    """Write `data` to the child's stdin then close it.
+
+    Runs on a daemon thread writing in non-blocking chunks: a
+    bounded write (<= MAX_FEED_BYTES) fits the pipe buffer or drains
+    as the child reads; a child that exits early or never reads
+    surfaces `BrokenPipeError`/EPIPE — simply the observed run
+    outcome. `stop` (set once the run is terminal) bounds the worst
+    case: a descendant that inherits the read end but never reads
+    leaves the pipe full forever, and without the event the blocked
+    write would linger past the join timeout."""
+    fd = process.stdin.fileno()
+    try:
+        os.set_blocking(fd, False)
+    except OSError:
+        pass
+    poller = _writable_poller(fd)
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view) and not stop.is_set():
+        if poller is not None:
+            try:
+                events = poller.poll(int(POLL_SECONDS * 1000) or 1)
+            except OSError:
+                break
+            if not events:
+                continue
+            mask = events[0][1]
+            if mask & select.POLLNVAL:
+                break
+            if not mask & (select.POLLOUT | select.POLLERR | select.POLLHUP):
+                continue
+        else:
+            try:
+                _, writable, _ = select.select([], [fd], [], POLL_SECONDS)
+            except (OSError, ValueError):
+                break
+            if not writable:
+                continue
+        try:
+            offset += os.write(fd, view[offset:])
+        except BlockingIOError:
+            continue
+        except (BrokenPipeError, OSError, ValueError):
+            break
+    try:
+        process.stdin.close()
+    except (OSError, ValueError):
+        pass
 
 
 def _memory_bound_preexec(bound_mb: int):
@@ -246,6 +324,7 @@ class AttemptRunner:
         argv: tuple[str, ...],
         cancel_event: "threading.Event | None" = None,
         memory_bound_mb: int | None = None,
+        feed_bytes: bytes | None = None,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -288,6 +367,10 @@ class AttemptRunner:
             raise ValueError(
                 "attempt run memory bound requires a POSIX resource boundary"
             )
+        if feed_bytes is not None and (
+            type(feed_bytes) is not bytes or len(feed_bytes) > MAX_FEED_BYTES
+        ):
+            raise ValueError("invalid attempt run feed")
         record = AttemptRecord(
             request.request_fingerprint,
             request.attempt_number,
@@ -329,6 +412,7 @@ class AttemptRunner:
         try:
             process = subprocess.Popen(
                 spawn_argv,
+                stdin=subprocess.PIPE if feed_bytes is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=preexec,
@@ -342,6 +426,15 @@ class AttemptRunner:
                 b"",
                 True,
             )
+        feed_stop = threading.Event()
+        feeder = None
+        if feed_bytes is not None:
+            feeder = threading.Thread(
+                target=_feed_stdin,
+                args=(process, feed_bytes, feed_stop),
+                daemon=True,
+            )
+            feeder.start()
         started_at = time.monotonic()
         collector = _BoundedCollector(process.stdout)
         collector.start()
@@ -389,6 +482,9 @@ class AttemptRunner:
             except subprocess.TimeoutExpired:
                 pass
         collector.join(COLLECTOR_JOIN_SECONDS)
+        if feeder is not None:
+            feed_stop.set()
+            feeder.join(COLLECTOR_JOIN_SECONDS)
         for event in events:
             record = record.record(event)
         return AttemptRunResult(record, collector.data, not collector.truncated)
@@ -456,6 +552,7 @@ def dispatch_attempt(
     runner: "AttemptRunner | None" = None,
     cancel_event: "threading.Event | None" = None,
     memory_bound_mb: int | None = None,
+    feed_bytes: bytes | None = None,
     report_stamp: int | None = None,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
@@ -491,6 +588,7 @@ def dispatch_attempt(
         argv,
         cancel_event=cancel_event,
         memory_bound_mb=memory_bound_mb,
+        feed_bytes=feed_bytes,
     )
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run

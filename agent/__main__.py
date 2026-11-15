@@ -49,6 +49,7 @@ _SUBCOMMANDS = {
     "sol-summaries-check",
     "sol-summaries-reuse",
     "sol-summaries-attempt",
+    "evidence-check",
     "evidence-check-accept",
     "evidence-compare",
     "evidence-identity-check",
@@ -615,6 +616,24 @@ def main() -> None:
         go_summaries_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_attempt_main(args))
+    elif command == "evidence-check":
+        import argparse
+        from agent.evidence_check_route import (
+            build_check_parser as evidence_check_build_parser,
+            main_check as evidence_check_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check",
+            description=(
+                "Run a declared Core Evidence representation check on "
+                "a saved record as one attempt and emit the reconciled "
+                "lineage plus the declared representation outcome."
+            ),
+        )
+        evidence_check_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_check_main(args))
     elif command == "evidence-check-accept":
         import argparse
         from agent.evidence_check import (

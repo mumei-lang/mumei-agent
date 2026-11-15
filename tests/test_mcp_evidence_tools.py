@@ -253,8 +253,10 @@ def _write_stub_core(tmp_path, exits: dict):
         f'    exit {exits.get("verify-source", 0)}\n'
         'elif [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
         "    cat >/dev/null\n"
-        f'    printf \'%s\' \'{json.dumps(diagnostic)}\'\n'
-        "    exit 0\n"
+        f'    if [ {exits.get("check", 0)} -eq 0 ]; then\n'
+        f'        printf \'%s\' \'{json.dumps(diagnostic)}\'\n'
+        "    fi\n"
+        f'    exit {exits.get("check", 0)}\n'
         'elif [ "$1" = "evidence" ] && [ "$2" = "recheck-source" ]; then\n'
         f'    printf \'%s\' \'{{"schema_version":"mumei.evidence-consistency/v1"}}\'\n'
         f'    exit {exits.get("recheck-source", 0)}\n'
@@ -431,8 +433,6 @@ class TestEvidenceCompareTool:
         b = tmp_path / "b.json"; b.write_text(self._evidence(_sha256("x")))
         out = json.loads(mcp_server.evidence_compare(str(a), str(b)))
         assert out["status"] == "error"
-
-
 class TestNativeAttemptTool:
     def _write_build_core(self, tmp_path, complete: bool = True,
                           build_exit: int = 0):
@@ -494,5 +494,43 @@ class TestNativeAttemptTool:
         missing = tmp_path / "missing-mumei"
         out = json.loads(mcp_server.native_attempt(
             str(missing), str(src), str(tmp_path / "bundle")))
+        assert out["status"] == "error"
+        assert str(missing) not in out["error"]
+class TestEvidenceCheckTool:
+    def test_valid_record_reports_representation(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"check": 0})
+        evidence = _write_evidence(tmp_path / "ev.json", _sha256(SOURCE))
+        out = json.loads(
+            mcp_server.evidence_check(str(core), str(evidence))
+        )
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["schema_version"] == "mumei.evidence-check-report/v1"
+        assert report["representation"] == "valid"
+        assert report["candidate"]["schema_version"] == (
+            "mumei.verifier-evidence-candidate/v1"
+        )
+
+    def test_rejected_record_claims_nothing(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"check": 1})
+        evidence = _write_evidence(tmp_path / "ev.json", _sha256(SOURCE))
+        out = json.loads(
+            mcp_server.evidence_check(str(core), str(evidence))
+        )
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert "representation" not in report
+        assert "candidate" not in report
+        assert report["normalized"]["exit_code"] == 1
+
+    def test_bad_args_and_redaction(self, tmp_path):
+        evidence = _write_evidence(tmp_path / "ev.json", _sha256(SOURCE))
+        out = json.loads(mcp_server.evidence_check("", str(evidence)))
+        assert out["status"] == "error"
+        missing = tmp_path / "missing.json"
+        core = _write_stub_core(tmp_path, {})
+        out = json.loads(
+            mcp_server.evidence_check(str(core), str(missing))
+        )
         assert out["status"] == "error"
         assert str(missing) not in out["error"]

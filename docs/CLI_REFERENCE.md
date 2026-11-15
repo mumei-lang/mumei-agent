@@ -45,6 +45,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `evidence-check` | 5 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -622,6 +623,21 @@ Run the go-summaries produce route as one declared attempt and emit the reconcil
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+
+
+## `mumei-agent evidence-check`
+
+Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check`. |
+| `--evidence` | `<PATH>` | yes | — | Declared saved Evidence record (absolute path, a common mumei.verification-evidence/v1 JSON, at most 65536 bytes); its bytes are fed to the check on stdin. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
 
 
 ## `mumei-agent evidence-check-accept`
