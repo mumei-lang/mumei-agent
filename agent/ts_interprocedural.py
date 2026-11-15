@@ -214,6 +214,10 @@ Admitted:
   maybe-absent callee as run is the sound
   over-approximation. A `_Callable`/`_External` callee
   takes the normal invoke/external path.
+* `arguments` binds a per-function `_Composite` whose every
+  element over-approximates to the whole parameter/actual
+  union — `arguments[0]` and `arguments[i]` read it; a
+  `f(...a)` spread actual contributes its operand's dep union.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -867,6 +871,13 @@ class _Builder:
                 False,
                 False,
                 _span(pat),
+            )
+        if params:
+            # `arguments` — every element over-approximates to the
+            # whole parameter union.
+            arg_union = frozenset(params.values())
+            locals_["arguments"] = _Composite(
+                {str(i): arg_union for i in range(len(params))}
             )
         # Function declarations hoist to the enclosing function's
         # scope — pre-register every `function inner() {}` in the
@@ -2342,6 +2353,13 @@ class _Builder:
                     dnode, params, inner, transfers, count
                 )
             inner[pname] = deps
+        if actual:
+            # `arguments` inside an invoked function value — every
+            # element over-approximates to the actuals' union.
+            actual_union = frozenset().union(*actual)
+            inner["arguments"] = _Composite(
+                {str(i): actual_union for i in range(len(actual))}
+            )
         body_node = cval.node.child_by_field_name("body")
         if body_node is None:
             raise _Unsupported("unsupported_expression", span)
@@ -2675,10 +2693,26 @@ class _Builder:
             return tuple(actuals)
         if arguments.type != "arguments":
             raise _Unsupported("unsupported_expression", _span(node))
-        return tuple(
-            self.expression(arg, params, locals_, transfers, count)
-            for arg in _children(arguments)
-        )
+        actuals = []
+        for arg in _children(arguments):
+            if arg.type == "spread_element":
+                # `f(...a)` — the spread actual contributes the
+                # operand's dep union.
+                operand = next(iter(_children(arg)), None)
+                if operand is None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(arg)
+                    )
+                actuals.append(
+                    self.expression(
+                        operand, params, locals_, transfers, count
+                    )
+                )
+                continue
+            actuals.append(
+                self.expression(arg, params, locals_, transfers, count)
+            )
+        return tuple(actuals)
 
     def _eval(self, node, params, locals_, transfers, count):
         """Evaluate a node to its raw value: a scalar dependency set

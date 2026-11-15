@@ -3036,3 +3036,67 @@ def test_static_block_deps_captured():
         " return c.m(x); }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 28: `arguments` and spread actuals
+
+
+def test_arguments_index():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " return arguments[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_arguments_dynamic_index():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const i = x;"
+        " return arguments[i]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_arguments_in_invoked_callable():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = function(a: number, b: number) {"
+        "   return arguments[1]; };"
+        " return g(x, 0); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_arguments_length_dep_free():
+    s = _fn(
+        "function f(x: number): number { return arguments.length; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_spread_call_actual():
+    s = _fn(
+        "function g(a: number, b: number): number { return a + b; }\n"
+        "function f(x: number): number {"
+        " const arr = [x];"
+        " return g(...arr, 0); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "g"
+
+
+def test_spread_call_scalar_operand():
+    s = _fn(
+        "function g(v: number): number { return v; }\n"
+        "function f(x: number): number { return g(...[x]); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_spread_in_declared_call_records():
+    s = _fn(
+        "function g(a: number): number { return a; }\n"
+        "function f(x: number): number { return g(...[x]); }"
+    )
+    assert s.calls and s.calls[0].arguments == (frozenset({0}),)

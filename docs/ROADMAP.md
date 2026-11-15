@@ -2959,6 +2959,24 @@ Boundaries: a deeper static path (`C.s.f = v`) still
 closes — it needs a composite static the model doesn't
 descend.
 
+### C06 TypeScript `arguments` and spread actuals (slice 28)
+
+`arguments` binds a `_Composite` whose every element
+over-approximates to the whole parameter union —
+`arguments[0]` and `arguments[i]` both read every
+parameter's deps (the model can't correlate an index to
+a slot, so the union is the sound approximation). Inside
+an invoked `_Callable` it maps over the actuals. A
+no-parameter function leaves `arguments` unbound —
+`arguments[0]` there is `binding_unavailable`, the same
+as any undeclared name (an empty composite would say
+"dep-free", an under-approximation if a caller passed
+extras the model can't see).
+
+`f(...a)` in an argument list evaluates the spread
+operand's dep union as one actual — matching how a
+positional argument contributes its deps.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
