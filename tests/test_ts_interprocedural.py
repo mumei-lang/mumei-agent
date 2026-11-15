@@ -4121,3 +4121,55 @@ def test_debugger_is_noop():
         "function f(x: number): number { debugger; return x; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 42: overloads, enum initializers, `new C` -----------
+
+
+def test_function_overload_signature_admits():
+    # Bodiless overload signatures are type-level; the
+    # implementation declaration registers `g`.
+    s = _fn(
+        "function g(v: number): number;"
+        " function g(v: number): number { return v; }"
+        " function f(x: number): number { return g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_enum_initializer_references_member():
+    s = _fn(
+        "enum E { A = 1, B = A + 1 }"
+        " function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_enum_initializer_carries_deps():
+    # `E.A = m` where m is a module binding — `E.A` reads the
+    # field's deps.
+    s = _fn(
+        "function f(x: number): number {"
+        " const u = x;"
+        " enum E { A = u }"
+        " return E.A; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_new_without_parens():
+    s = _fn(
+        "class C { a: number = 0; }"
+        " function f(x: number): number {"
+        " const c = new C; return c.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_new_without_parens_ctor_runs():
+    s = _fn(
+        "class C { a: number; constructor() { this.a = 1; } }"
+        " function f(x: number): number {"
+        " const c = new C; return c.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()

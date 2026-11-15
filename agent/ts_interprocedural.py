@@ -286,8 +286,13 @@ Admitted:
   nothing); `declare`/ambient declarations still close. `enum
   E { A, B = expr }` (and `const enum`, `export enum`) binds a
   `_Composite` in module scope: bare members are dep-free and an
-  initializer contributes its own deps, so `E.A` reads as a
-  field.
+  initializer contributes its own deps — an initializer may
+  name earlier members (`B = A + 1` — dep-free numbers bound
+  into the eval scope), so `E.A` reads as a field. Bodiless
+  `function g(v: T): R;` overload signatures are type-level and
+  skipped (the implementation declaration registers the name —
+  later declarations win, matching JS hoisting). `new C`
+  without parentheses constructs with no actuals.
 * Expression callees — `(() => x)()`, `(g)(x)`, `f?.()`: a
   non-identifier callee evaluates to a value; a `_Callable`
   invokes inline, an `_External` yields the actuals' union,
@@ -403,6 +408,10 @@ _TOP_LEVEL = {
     "type_alias_declaration",
     "enum_declaration",
     "internal_module",
+    # A bodyless `function g(v: T): R;` overload signature — the
+    # implementation declaration registers the name; signatures
+    # are type-level and skipped.
+    "function_signature",
 }
 
 # Well-known platform/library globals read as `_External` — reads
@@ -912,23 +921,32 @@ class _Builder:
                 break
         self.function_locals = saved_flocals
 
-    def _register_enum(self, node) -> None:
+    def _register_enum(self, node, scope_locals=None) -> None:
         """Bind `enum E { A, B = expr, ... }` as a `_Composite`
-        in module scope. Member values are numbers/strings, so a
+        in module scope (or `scope_locals` when declared inside a
+        function body). Member values are numbers/strings, so a
         bare member is dep-free and an `enum_assignment` carries
         its initializer's deps — no correlation or increment
         tracking is needed."""
         name = node.child_by_field_name("name")
         if name is None:
             raise _Unsupported("unsupported_unit", _span(node))
+        target = (
+            self.module_locals if scope_locals is None else scope_locals
+        )
         fields: dict = {}
         body = next(
             (c for c in node.children if c.type == "enum_body"),
             None,
         )
+        # Member initializers can name earlier members
+        # (`B = A + 1`) — they read dep-free numbers, so bind
+        # each member into the eval scope as it registers.
+        scope = dict(target)
         for member in _children(body or node):
             if member.type == "property_identifier":
                 fields[member.text.decode()] = frozenset()
+                scope[member.text.decode()] = frozenset()
             elif member.type == "enum_assignment":
                 kids = [c for c in member.children if c.is_named]
                 if len(kids) < 1:
@@ -938,13 +956,14 @@ class _Builder:
                     fields[mname] = self.expression(
                         kids[1],
                         {},
-                        self.module_locals,
+                        scope,
                         [],
                         [0],
                     )
                 else:
                     fields[mname] = frozenset()
-        self.module_locals[name.text.decode()] = _Composite(fields)
+                scope[mname] = frozenset()
+        target[name.text.decode()] = _Composite(fields)
 
     def _register_namespace(self, node, scope_locals=None):
         """`namespace N { export const v = e; export function
@@ -1764,6 +1783,11 @@ class _Builder:
         if kind == "function_declaration":
             # Already registered by the hoisting pass — a declaration
             # statement evaluates to nothing.
+            return
+        if kind == "enum_declaration":
+            # `enum E { ... }` inside a body binds its composite in
+            # the local scope (enums are block-scoped values).
+            self._register_enum(node, locals_)
             return
         if kind == "expression_statement":
             self._expression_statement(
@@ -4221,12 +4245,17 @@ class _Builder:
             # on anything else closes.
             ctor_node = node.child_by_field_name("constructor")
             args_node = node.child_by_field_name("arguments")
-            if ctor_node is None or args_node is None:
+            if ctor_node is None:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
-            actual_n = self._call_actuals(
-                args_node, params, locals_, transfers, count, node
+            # `new C` without parentheses constructs with no args.
+            actual_n = (
+                self._call_actuals(
+                    args_node, params, locals_, transfers, count, node
+                )
+                if args_node is not None
+                else ()
             )
             if ctor_node.type == "identifier":
                 raw_n = self._lookup(

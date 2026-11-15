@@ -3205,6 +3205,19 @@ disposal protocol is dep-invisible and the grammar's
 assignment-shaped `has_error` node is detected by its `using`
 marker. `debugger;` is a no-op like `;`.
 
+### C06 TypeScript overloads + enum init + `new C` (slice 42)
+
+Bodiless `function g(v: T): R;` overload signatures are
+type-level and skipped — the implementation declaration
+registers the name (later declarations win, matching JS
+hoisting). `enum E { A = 1, B = A + 1 }` initializers can
+name earlier members: each member binds dep-free into the
+eval scope as it registers, and an initializer's own deps
+flow into the field — `E.B` reads the union. `enum` inside a
+function body binds its composite in the local scope. `new C`
+without parentheses constructs with no actuals (the ctor
+still runs its defaults).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
