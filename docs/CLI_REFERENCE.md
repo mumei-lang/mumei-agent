@@ -50,6 +50,11 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
 | `rust-summaries-reuse` | 2 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
 | `rust-summaries-attempt` | 3 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `ts-summaries` | 1 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `ts-summaries-accept` | 3 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `ts-summaries-check` | 3 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
+| `ts-summaries-reuse` | 3 | Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `ts-summaries-attempt` | 4 | Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -684,6 +689,100 @@ Run the rust-summaries produce route as one declared attempt and emit the reconc
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
+
+
+## `mumei-agent ts-summaries`
+
+Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+
+
+## `mumei-agent ts-summaries-accept`
+
+Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to accept from. |
+| `--function` | `<<NAME>>` | yes | — | Name of the function whose summary to accept — accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
+
+
+## `mumei-agent ts-summaries-check`
+
+Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to check. |
+| `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
+
+
+## `mumei-agent ts-summaries-reuse`
+
+Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to reuse unchanged summaries from. |
+| `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+
+
+## `mumei-agent ts-summaries-attempt`
+
+Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |

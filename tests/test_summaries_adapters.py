@@ -6,6 +6,7 @@ import json
 import pytest
 
 from agent.adapter_probe import AdapterProbeHistory
+from agent.ts_interprocedural import PROFILE as TS_SUMMARY_PROFILE
 from agent.summaries_adapters import (
     SUMMARY_DERIVATION,
     go_summaries_adapter,
@@ -13,6 +14,7 @@ from agent.summaries_adapters import (
     plan_summary_route,
     summary_descriptors,
     summary_registry,
+    ts_summaries_adapter,
     summary_requirements,
 )
 from agent.go_interprocedural import PROFILE as GO_SUMMARY_PROFILE
@@ -128,6 +130,8 @@ def test_registry_holds_every_descriptor():
     assert [d.adapter_id for d in summary_descriptors()] == [
         "agent.go-summaries",
         "agent.rust-summaries",
+        "agent.go-summaries",
+        "agent.ts-summaries",
     ]
 
 
@@ -257,3 +261,21 @@ def test_summaries_plan_route_resumes_declared_histories(capsys, tmp_path):
     second = json.loads(capsys.readouterr().out)
     first_count = len(first["histories"][0]["outcomes"])
     assert len(second["histories"][0]["outcomes"]) == first_count + 1
+
+
+def test_ts_summaries_descriptor_is_valid_and_in_process():
+    descriptor = ts_summaries_adapter()
+    assert descriptor.adapter_id == "agent.ts-summaries"
+    assert TS_SUMMARY_PROFILE in descriptor.profiles
+    assert descriptor.required_permissions == frozenset({"filesystem.read"})
+    registry = summary_registry()
+    result = registry.plan(
+        summary_requirements(TS_SUMMARY_PROFILE),
+        PlannerPolicy(allowed_permissions=_PERMISSIONS),
+        (
+            RuntimeObservation(
+                "agent.ts-summaries", "available", "1.0.0"
+            ),
+        ),
+    )
+    assert result.selected.adapter_id == "agent.ts-summaries"

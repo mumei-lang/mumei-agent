@@ -16,6 +16,7 @@ from pathlib import Path
 
 from agent.go_interprocedural import PROFILE as GO_SUMMARY_PROFILE
 from agent.rust_interprocedural import PROFILE as RUST_SUMMARY_PROFILE
+from agent.ts_interprocedural import PROFILE as TS_SUMMARY_PROFILE
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
     AdapterDescriptor,
@@ -103,9 +104,37 @@ def rust_summaries_adapter() -> AdapterDescriptor:
     )
 
 
+def ts_summaries_adapter() -> AdapterDescriptor:
+    """The declared descriptor for the `ts-summaries` produce route.
+
+    Fully in-process (tree-sitter): declares only `filesystem.read` —
+    the `process.spawn` in its `probe_argv` belongs to the C11 probe
+    boundary, not the route.
+    """
+    return AdapterDescriptor(
+        adapter_id="agent.ts-summaries",
+        adapter_version="1.0.0",
+        profiles=frozenset({TS_SUMMARY_PROFILE}),
+        methods=frozenset({SUMMARY_DERIVATION}),
+        input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+        required_permissions=frozenset({"filesystem.read"}),
+        result_contracts=(
+            summary_requirements(TS_SUMMARY_PROFILE).result_contract,
+        ),
+        probe_argv=(
+            sys.executable,
+            "-m",
+            "agent",
+            "ts-summaries",
+            "--help",
+        ),
+    )
+
+
 def summary_descriptors() -> tuple[AdapterDescriptor, ...]:
     """Every declared summary-route descriptor, in registry order."""
     return (go_summaries_adapter(), rust_summaries_adapter())
+    return (go_summaries_adapter(), ts_summaries_adapter())
 
 
 def summary_registry() -> AdapterRegistry:

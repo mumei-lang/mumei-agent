@@ -3130,6 +3130,31 @@ units). Tool-level failures report under `error` via `_err` like
 every other tool.
 
 
+### C06 declared TypeScript summary route family
+
+`agent.ts_interprocedural` promotes the TypeScript summary spike to the
+declared route family: `python -m agent ts-summaries` emits
+`mumei.ts-scalar-parameter-deps/v1` for single-file TypeScript — an
+in-process tree-sitter summarizer covering scalar parameters and
+returns, local declarations, assignments, `if`/`else` joins, loops,
+same-file calls, closures, destructuring, classes, and recorded gaps
+for everything outside the fragment. `--resolve-modules` is refused
+on the attempt route because implicit module resolution names files
+the request identity cannot cover.
+
+`ts-summaries-accept` applies the strict whole-context gate to one
+function's declared summary, `ts-summaries-check` and
+`ts-summaries-reuse` partition and merge a declared manifest against
+the fresh derivation, and `ts-summaries-attempt` runs the produce
+route as one declared attempt through the C11 dispatch lifecycle and
+emits `mumei.ts-summaries-attempt-report/v1`. The `agent.ts-summaries`
+adapter descriptor declares `filesystem.read` only — the route runs
+in-process, so the `process.spawn` in its `probe_argv` belongs to the
+C11 probe boundary, not the route.
+
+Producing or accepting a summary is not a proof, an audit or a
+verification verdict — the routes emit declared routing evidence only.
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe
