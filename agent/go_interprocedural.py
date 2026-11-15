@@ -736,6 +736,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if member.type.type_id:
             self.pinned.add(member.type.type_id)
 
+    def _composite_var_read(
+        self,
+        node: Any,
+        member: PackageMember,
+        transfers: list[CallTransfer],
+    ) -> bool:
+        """A composite imported `var` in a receiver position reads
+        external state: dep-free with the member's imported transfer
+        on record and its whole type pinned. False for scalar-typed
+        members — those evaluate through the normal expression path
+        (`lib.VP.PM` keeps its member-read shape)."""
+        if member.type is None or member.type.kind in {
+            "integer",
+            "boolean",
+            "pointer",
+        }:
+            return False
+        self._pin_fact_identities(member.type)
+        transfers.append(
+            CallTransfer(
+                FileSpan(self.current_file, node.start_byte, node.end_byte),
+                member.id,
+                (),
+                frozenset(),
+                imported=True,
+            )
+        )
+        return True
+
     def _pin_fact_identities(self, fact: Any) -> None:
         """Pin every named type identity inside a fact tree — each
         container level's own and key identities plus the terminal
@@ -3359,28 +3388,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         receiver_deps = frozenset()
         if receiver is not None:
             receiver_member = self._imported_member_operand(receiver)
-            if (
+            if not (
                 receiver_member is not None
                 and receiver_member.kind == "var"
-                and receiver_member.type is not None
-                and receiver_member.type.kind
-                not in {"integer", "boolean", "pointer"}
-            ):
-                self._pin_member_type(receiver_member)
-                transfers.append(
-                    CallTransfer(
-                        FileSpan(
-                            self.current_file,
-                            receiver.start_byte,
-                            receiver.end_byte,
-                        ),
-                        receiver_member.id,
-                        (),
-                        frozenset(),
-                        imported=True,
-                    )
+                and self._composite_var_read(
+                    receiver, receiver_member, transfers
                 )
-            else:
+            ):
                 receiver_deps = self.expression(
                     receiver, fn, params, locals_, transfers, count,
                     depth + 1,
@@ -3398,12 +3412,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     receiver_deps |= locals_[binding_id]
                 elif binding_id in params:
                     receiver_deps |= frozenset({params[binding_id]})
-        actual = tuple(
-            self.expression(
-                arg, fn, params, locals_, transfers, count, depth + 1
+        # A method expression `lib.T.M(recv, args)` carries the
+        # receiver as its leading argument — a composite imported var
+        # in that slot reads external state like `lib.VS.PF()` does:
+        # dep-free with the member's transfer on record.
+        actual = []
+        for i, arg in enumerate(arguments):
+            arg_member = (
+                self._imported_member_operand(arg)
+                if i == 0 and getattr(call, "method_expr", False)
+                else None
             )
-            for arg in arguments
-        )
+            if (
+                arg_member is not None
+                and arg_member.kind == "var"
+                and self._composite_var_read(arg, arg_member, transfers)
+            ):
+                actual.append(frozenset())
+                continue
+            actual.append(
+                self.expression(
+                    arg, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+            )
+        actual = tuple(actual)
         result = (
             frozenset().union(*actual) if actual else frozenset()
         ) | receiver_deps

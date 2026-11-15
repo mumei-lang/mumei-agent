@@ -126,6 +126,12 @@ type call struct {
 	// at this call site alone, where the member record's signature pins
 	// could never cover a substitution declared nowhere.
 	TypeArgTypeIDs []string `json:"type_arg_type_ids,omitempty"`
+	// MethodExpr marks a `direct_import` call recorded from a method
+	// expression `lib.T.M(recv, args)`: the leading argument is the
+	// receiver, so the consumer applies the receiver rules to it — a
+	// composite imported var receiver (`lib.S.PF(lib.VS)`) is a
+	// dep-free external read like `lib.VS.PF()`.
+	MethodExpr bool `json:"method_expr,omitempty"`
 }
 
 type gap struct {
@@ -1303,6 +1309,14 @@ func analyze(req request) (out snapshot) {
 				if override, ok := special[node]; ok {
 					kind, target, method, results, typeArgIDs = override, "", false, 0, nil
 				}
+				methodExpr := false
+				if kind == "direct_import" {
+					if e, ok := unparen(node.Fun).(*ast.SelectorExpr); ok {
+						if sel := ix.info.Selections[e]; sel != nil {
+							methodExpr = sel.Kind() == types.MethodExpr
+						}
+					}
+				}
 				// `results` only travels on a `direct_import` record
 				// whose callee returns more than one value — the
 				// consumer needs the declared arity to admit tuple
@@ -1318,7 +1332,7 @@ func analyze(req request) (out snapshot) {
 				for _, arg := range node.Args {
 					args = append(args, ix.nodeSpan(arg))
 				}
-				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs})
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs, methodExpr})
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}

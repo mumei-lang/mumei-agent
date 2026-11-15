@@ -2295,11 +2295,12 @@ path. A composite imported var receiver admits too — `lib.VS.PF()`
 on a struct var reads external state like the member itself, so it
 is dep-free and records the imported transfer against the member —
 while a receiver that is an index or call result (`lib.VSS[0].PF()`)
-still names no member and stays closed. A method *expression* `lib.T.M(recv, args)` needs no flag —
-the receiver is already the leading argument, so the plain
-`direct_import` result-depends-on-every-argument model covers it
-(`(*lib.T).PM(t, x)` records the same wire shape and summarizes the
-same way — see the pointer-typed signature section below).
+still names no member and stays closed. A method *expression*
+`lib.T.M(recv, args)` records `method_expr: true` so the consumer
+applies the receiver rules to the leading argument — `lib.S.PM(lib.VS,
+x)` admits through the same composite-var receiver read
+(`(*lib.T).PM(t, x)` on a scalar receiver still evaluates it like
+any argument).
 
 Pointer-typed parameters and results now belong to the signature
 fragment: a `*lib.T` parameter reports `kind: "pointer"` with the
