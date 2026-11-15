@@ -314,6 +314,15 @@ def test_real_helper_round_trip(tmp_path, capsys, real_go_types):
     manifest = json.loads(out)
     assert manifest["schema_version"] == "mumei.go-scalar-parameter-deps/v1"
     assert len(manifest["functions"]) == 2
+    # The G -> F call edge must survive the route end-to-end: a transfer
+    # whose result depends on the actual would be invisible to a
+    # function-count-only assertion.
+    calls = [
+        call
+        for entry in manifest["functions"]
+        for call in entry["calls"]
+    ]
+    assert calls and any(call["result"] for call in calls)
 
 
 def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
@@ -326,3 +335,9 @@ def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
     assert code == 0 and err == ""
     manifest = json.loads(out)
     assert len(manifest["functions"]) == 2
+    calls = [
+        call
+        for entry in manifest["functions"]
+        for call in entry["calls"]
+    ]
+    assert calls and any(call["result"] for call in calls)
