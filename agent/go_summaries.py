@@ -474,7 +474,7 @@ def summarize_declared(
 
 def _run_declared(
     args: argparse.Namespace,
-) -> tuple[dict[str, str], bytes]:
+) -> tuple[dict[str, str], "GoSummarySet", bytes]:
     """Read declared inputs, run the helper and summarize.
 
     Shared by both routes: the produce route emits the manifest, the
@@ -488,7 +488,7 @@ def _run_declared(
     summary, report = summarize_declared(
         sources, args.go_types, args.target_arch, imports, args.timeout
     )
-    return sources, report
+    return sources, summary, report
 
 
 def _emit(document: str, output: str | None) -> None:
@@ -502,8 +502,8 @@ def main(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_parser().parse_args()
     try:
-        sources, report = _run_declared(args)
-        manifest = _summarize(sources, report, args.target_arch).to_dict()
+        _sources, live, _report = _run_declared(args)
+        manifest = live.to_dict()
         document = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
@@ -552,8 +552,7 @@ def main_check(args: argparse.Namespace | None = None) -> int:
         args = build_check_parser().parse_args()
     try:
         restored = _read_manifest(args.manifest)
-        sources, report = _run_declared(args)
-        live = _summarize(sources, report, args.target_arch)
+        _sources, live, report = _run_declared(args)
         reusable, stale_ids, missing = _reuse_partition(restored, live, report)
         document = (
             json.dumps(
@@ -596,8 +595,7 @@ def main_reuse(args: argparse.Namespace | None = None) -> int:
                 "declared manifest was derived for a different "
                 "target architecture"
             )
-        sources, report = _run_declared(args)
-        live = _summarize(sources, report, args.target_arch)
+        _sources, live, report = _run_declared(args)
         reusable, _, _ = _reuse_partition(restored, live, report)
         by_id = {f.binding_id: f for f in restored.functions}
         merged = GoSummarySet(
@@ -632,8 +630,7 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
         args = build_accept_parser().parse_args()
     try:
         restored = _read_manifest(args.manifest)
-        sources, report = _run_declared(args)
-        live = _summarize(sources, report, args.target_arch)
+        _sources, live, report = _run_declared(args)
         context_match = restored.context_key == live.context_key
         by_id = {f.binding_id: f for f in restored.functions}
         live_by_id = {f.binding_id: f for f in live.functions}
