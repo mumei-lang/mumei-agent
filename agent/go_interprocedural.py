@@ -52,9 +52,11 @@ statement shape stay unsupported.
 Scalar conversions ``T(e)`` are effect-free — the result inherits the
 operand's dependencies; the type change itself (truncation, widening)
 is not modelled. The pure builtins ``min``/``max`` union their
-arguments' dependencies; ``len``/``cap`` additionally admit a single
-imported container ``var`` operand (``len(lib.VA)``) as a dep-free
-external read, and every other builtin stays opaque.
+arguments' dependencies; ``len``/``cap`` additionally admit an
+imported container ``var`` operand (``len(lib.VA)``) or an index
+chain reaching a container-typed element of one (``len(lib.V2[i])``)
+as a dep-free external read (the indexes' own dependencies carry),
+and every other builtin stays opaque.
 Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 ``stale_dependents`` maps callee replacement to the summaries that must be
@@ -3011,11 +3013,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # dependencies; `panic`, `append` and the rest stay
                 # opaque. `len`/`cap` admit one extra shape: a single
                 # argument naming an imported container `var`
-                # (`len(lib.VA)`) reads external state like the member
-                # itself, so the result is dep-free — the call still
-                # records the imported transfer and pins the declared
-                # identity. Any other operand (`len(xs)` on a binding,
-                # `len(f())`, `len(lib.VM2["a"])`) stays opaque.
+                # (`len(lib.VA)`) or an index chain on one whose
+                # element is itself a container (`len(lib.V2[i])`,
+                # `len(lib.VM2["a"])` on a map-valued map) reads
+                # external state like the member itself, so the result
+                # is dep-free apart from the indexes' own dependencies
+                # — the call still records the imported transfer and
+                # pins the declared identities. Any other operand
+                # (`len(xs)` on a binding, `len(f())`,
+                # `len(lib.VS2.G)` on a field) stays opaque.
                 function_node = node.child_by_field_name("function")
                 while (
                     function_node is not None
@@ -3035,11 +3041,85 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "unresolved_or_opaque_call", _span(node)
                         )
                     member = self._imported_member_operand(arguments[0])
+                    fact = member.type if member is not None else None
+                    index_deps = frozenset()
+                    if member is None:
+                        # `len(lib.V2[i])` — a container-typed element
+                        # reached through an index chain on an imported
+                        # var is external state like the var itself:
+                        # the result is dep-free apart from the
+                        # indexes' own dependencies, exactly like the
+                        # index read the same chain admits.
+                        operand = arguments[0]
+                        while (
+                            operand is not None
+                            and operand.type
+                            == "parenthesized_expression"
+                        ):
+                            operand = next(
+                                (
+                                    c
+                                    for c in operand.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if (
+                            operand is None
+                            or operand.type != "index_expression"
+                        ):
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call", _span(node)
+                            )
+                        resolved = self._index_member(operand)
+                        if resolved is None:
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call", _span(node)
+                            )
+                        member, levels = resolved
+                        fact = member.type
+                        for _ in range(levels):
+                            fact = (
+                                fact.elem if fact is not None else None
+                            )
+                        indexes = [
+                            operand.child_by_field_name("index")
+                        ]
+                        inner = operand.child_by_field_name("operand")
+                        while (
+                            inner is not None
+                            and inner.type == "index_expression"
+                        ):
+                            indexes.append(
+                                inner.child_by_field_name("index")
+                            )
+                            inner = inner.child_by_field_name("operand")
+                        for idx in reversed(indexes):
+                            if idx is None:
+                                raise _Unsupported(
+                                    "unresolved_or_opaque_call",
+                                    _span(node),
+                                )
+                            if idx.type in {
+                                "int_literal",
+                                "float_literal",
+                                "imaginary_literal",
+                                "rune_literal",
+                                "interpreted_string_literal",
+                                "raw_string_literal",
+                            }:
+                                # A literal index carries no
+                                # dependencies, like the index read's
+                                # rule for `lib.VM["k"]`.
+                                continue
+                            index_deps |= self.expression(
+                                idx, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
                     if member is None or member.kind != "var":
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
-                    fact = member.type
                     if not (
                         fact is not None
                         and (
@@ -3053,7 +3133,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
-                    self._pin_fact_identities(fact)
+                    self._pin_fact_identities(member.type)
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -3067,7 +3147,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    return frozenset()
+                    return index_deps
                 deps = frozenset()
                 for arg in arguments:
                     deps |= self.expression(
