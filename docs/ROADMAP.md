@@ -2651,6 +2651,21 @@ argv host-declared verbatim text, and the emitted request still goes
 through `run_probe` for actual execution. Retry policy, concurrency,
 probe ordering across stamps and Evidence acceptance remain open.
 
+### C11 probe execution driver
+
+`agent.adapter_probe.observe_probes(requests, runner=..., cancel_event=...)`
+executes a scheduled request tuple through one shared `AttemptRunner`
+and returns the `RuntimeObservation` tuple in request order — the
+half-step that closes the observe → re-plan loop: `probe_requests_for`
+emits, `observe_probes` executes, and the caller feeds the observations
+back into `registry.plan` (or the next scheduling round) itself. The
+driver never plans, reorders or retries on its own.
+
+Normalized attempt results stay inside `run_probe`: only
+availability/stamp/tool_version cross the boundary into observations,
+so probe stdout or exit detail cannot leak into a routing decision.
+Concurrency, retry policy and Evidence acceptance remain open.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

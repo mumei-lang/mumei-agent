@@ -9,6 +9,9 @@ from agent.adapter_probe import (
     AdapterProbeOutcome,
     AdapterProbeRequest,
     PROBE_SCHEMA,
+    observe_probes,
+    probe_request_for,
+    probe_requests_for,
     run_probe,
 )
 from agent.verification_planner import RuntimeObservation
@@ -348,3 +351,51 @@ def test_probe_requests_validation():
         probe_requests_for(registry, _route(), object(), stamp=1)
     with pytest.raises(ValueError):
         probe_requests_for(registry, _route(), PlannerPolicy(), stamp=0)
+
+
+def test_observe_probes_runs_each_request():
+    obs = observe_probes(
+        (
+            _req(argv=(sys.executable, "-c", "import sys; sys.exit(0)")),
+            _req(argv=(sys.executable, "-c", "import sys; sys.exit(2)")),
+        )
+    )
+    assert [o.availability for o in obs] == ["available", "missing"]
+    assert all(o.stamp == 1 for o in obs)
+
+
+def test_observe_probes_empty_tuple():
+    assert observe_probes(()) == ()
+
+
+def test_observe_probes_rejects_non_tuple():
+    with pytest.raises(ValueError, match="request tuple"):
+        observe_probes([_req()])
+
+
+def test_observe_probes_feeds_replan():
+    """Round-trip: schedule → observe → plan sees the observation."""
+    registry = _registry(
+        probe_argv=[sys.executable, "-c", "import sys; sys.exit(0)"]
+    )
+    policy = PlannerPolicy()
+    assert registry.plan(_route(), policy, ()).selected is None
+    reqs = probe_requests_for(
+        registry, _route(), policy, stamp=1, tool_version="4.0.0"
+    )
+    assert len(reqs) == 1
+    obs = observe_probes(reqs)
+    plan2 = registry.plan(_route(), policy, obs)
+    assert plan2.selected is not None
+    assert (
+        plan2.selected.adapter_id == "zendingsol.host.lean_scaffold"
+    )
+
+
+def test_observe_probes_missing_keeps_excluded():
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    policy = PlannerPolicy()
+    reqs = probe_requests_for(registry, _route(), policy, stamp=1)
+    obs = observe_probes(reqs)
+    assert obs[0].availability == "missing"
+    assert registry.plan(_route(), policy, obs).selected is None
