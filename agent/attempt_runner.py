@@ -58,7 +58,37 @@ def _memory_bound_preexec(bound_mb: int):
 # still a pure exec chain. `preexec_fn` remains only as the last
 # resort when neither wrapper exists.
 _PRLIMIT = shutil.which("prlimit")
-_SH = shutil.which("sh")
+
+
+def _detect_ulimit_sh() -> "str | None":
+    """A POSIX `sh` supporting `ulimit -v` (RLIMIT_AS), or None.
+
+    The fallback bound depends on the shell actually applying the
+    limit, so it is probed once at import: `ulimit -v` with no operand
+    queries the current bound and exits nonzero where `-v` is
+    unsupported. A present-but-incapable `sh` is treated as absent so
+    the `preexec_fn` fallback still applies. Only a POSIX host
+    qualifies — on Windows an `sh` in PATH (e.g. Git Bash) may answer
+    the probe yet cannot enforce RLIMIT_AS, and accepting a bound the
+    platform cannot honor is worse than rejecting it statically."""
+    if os.name != "posix":
+        return None
+    sh = shutil.which("sh")
+    if sh is None:
+        return None
+    try:
+        supported = subprocess.run(
+            [sh, "-c", "ulimit -v >/dev/null 2>&1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        supported = False
+    return sh if supported else None
+
+
+_SH = _detect_ulimit_sh()
 
 
 def memory_bound_spawn_thread_safe() -> bool:
