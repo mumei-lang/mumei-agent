@@ -412,7 +412,9 @@ def plan_with_probes(
         raise ValueError("probe planning rounds out of bounds")
     if runner is None:
         runner = AttemptRunner()
-    seen: list[RuntimeObservation] = []
+    # Latest observation per adapter — the result must be
+    # chainable back into `plan()`, which rejects duplicate ids.
+    seen: dict[str, RuntimeObservation] = {}
     observed = tuple(observations)
     plan = registry.plan(request, policy, observed)
     for offset in range(rounds):
@@ -431,13 +433,14 @@ def plan_with_probes(
         fresh = observe_probes(
             reqs, runner=runner, cancel_event=cancel_event
         )
-        seen.extend(fresh)
         # A re-probed adapter replaces its prior observation —
         # `plan()` rejects duplicate adapter ids, and the freshest
         # stamped observation is the one that counts anyway.
+        for o in fresh:
+            seen[o.adapter_id] = o
         by_id = {o.adapter_id: o for o in observed}
         for o in fresh:
             by_id[o.adapter_id] = o
         observed = tuple(by_id.values())
         plan = registry.plan(request, policy, observed)
-    return AdapterProbePlan(plan, tuple(seen))
+    return AdapterProbePlan(plan, tuple(seen.values()))

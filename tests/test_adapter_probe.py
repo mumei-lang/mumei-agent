@@ -491,10 +491,9 @@ def test_plan_with_probes_reprobe_replaces_observation():
         registry, _route(), PlannerPolicy(), stamp=1, rounds=2
     )
     assert out.plan.selected is None
-    assert [o.availability for o in out.observations] == [
-        "missing",
-        "missing",
-    ]
+    # Deduped by adapter id so the result chains into plan().
+    assert [o.availability for o in out.observations] == ["missing"]
+    registry.plan(_route(), PlannerPolicy(), out.observations)
 
 
 def test_plan_with_probes_replaces_initial_observation():
