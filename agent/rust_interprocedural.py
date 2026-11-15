@@ -267,20 +267,18 @@ class _Builder:
         locals_: dict = {}
         param_index: dict = {}
         if params is not None:
+            idx = 0
             for p in _children(params):
                 if p.type == "self_parameter":
-                    idx = len(param_names)
                     param_names.append("self")
                     param_index["self"] = idx
                     locals_["self"] = frozenset({idx})
+                    idx += 1
                     continue
-                if p.type != "parameter":
+                if p.type not in ("parameter", "variadic_parameter"):
                     continue
                 pat = p.child_by_field_name("pattern")
-                if pat is None:
-                    continue
-                idx = len(param_names)
-                if pat.type == "identifier":
+                if pat is not None and pat.type == "identifier":
                     # Any identifier param — scalar or not —
                     # gets a dep index (over-approx: reads carry
                     # the param's dep).
@@ -288,18 +286,23 @@ class _Builder:
                     param_names.append(pname)
                     param_index[pname] = idx
                     locals_[pname] = frozenset({idx})
-                    continue
-                # Destructured `(a, b)` / `S { x }` patterns —
-                # bind each identifier inside to the dep index.
-                bound = [
-                    d for d in _descendants(pat)
-                    if d.type == "identifier"
-                ]
-                if not bound:
-                    continue
-                param_names.append(pat.text.decode())
-                for d in bound:
-                    locals_[d.text.decode()] = frozenset({idx})
+                elif pat is not None:
+                    # Destructured `(a, b)` / `S { x }` patterns —
+                    # bind each identifier inside to the dep index.
+                    bound = [
+                        d for d in _descendants(pat)
+                        if d.type == "identifier"
+                    ]
+                    if bound:
+                        param_names.append(pat.text.decode())
+                        for d in bound:
+                            locals_[d.text.decode()] = frozenset(
+                                {idx}
+                            )
+                # Wildcards (`_`), pattern-less and unbound
+                # patterns still consume a parameter slot —
+                # skipping them would shift every later index.
+                idx += 1
         summary = RustFunctionSummary(
             name=name, params=(), available=False,
             return_dependencies=None,
@@ -476,6 +479,9 @@ class _Builder:
                 merged = self._expr(
                     cond, locals_, param_index, summary
                 )
+        before_pw = dict(
+            getattr(summary, "param_writes", None) or {}
+        )
         left_locals = dict(locals_)
         if lc_pat is not None:
             # `if let Some(v) = it` — `v` binds the value's deps
@@ -509,6 +515,13 @@ class _Builder:
                 | right_locals.get(name, frozenset())
                 | merged
             )
+        pw = getattr(summary, "param_writes", None)
+        if pw:
+            # A write inside a branch is conditioned on the
+            # branch's deps — they join the recorded write.
+            for key, val in pw.items():
+                if val != before_pw.get(key, frozenset()):
+                    pw[key] = val | merged
         ret = None
         if left_ret is not None:
             ret = left_ret
@@ -592,6 +605,9 @@ class _Builder:
                     if val is not None
                     else frozenset()
                 )
+        before_pw = dict(
+            getattr(summary, "param_writes", None) or {}
+        )
         self._writes.append(set())
         try:
             ret = None
@@ -616,6 +632,15 @@ class _Builder:
             deps = inner.get(name, frozenset())
             if deps != locals_[name] or name in touched:
                 locals_[name] = locals_[name] | deps | merged
+                if self._writes:
+                    # An inner may-write is the parent's
+                    # may-write too.
+                    self._writes[-1].add(name)
+        pw = getattr(summary, "param_writes", None)
+        if pw:
+            for key, val in pw.items():
+                if val != before_pw.get(key, frozenset()):
+                    pw[key] = val | merged
         if ret is not None:
             # `while s > 0 { return x; }` — whether the body ran
             # depends on the condition.
@@ -642,7 +667,7 @@ class _Builder:
             )
             name = left.text.decode()
             if expr.type == "compound_assignment_expr":
-                deps |= locals_[name]
+                deps |= locals_.get(name, frozenset())
             locals_[name] = deps
             if self._writes:
                 self._writes[-1].add(name)
@@ -653,33 +678,43 @@ class _Builder:
             return deps
         if left is not None and left.type in _EXPR_TYPES:
             # `*p = v`, `x.f = v`, `a[i] = v` — non-scalar
-            # targets: the value's deps still flow. When the
-            # root is a parameter (`self`, `p: &mut T`) record
-            # the write so callers can merge it into the slot
-            # the argument binds.
+            # targets. The target path's own deps (index
+            # expressions, receiver roots) join the write, and
+            # the rooted slot stores the union so later reads
+            # see it. When the root is a parameter (`self`,
+            # `p: &mut T`) the write is also recorded so callers
+            # can merge it into the slot the argument binds.
             deps = (
                 self._expr(right, locals_, param_index, summary)
                 if right is not None
                 else frozenset()
             )
-            root = _arg_root(left)
-            if root is not None and root in param_index:
-                pw = getattr(
-                    summary, "param_writes", None
-                )
-                if pw is None:
-                    pw = {}
-                    summary.param_writes = pw
-                pw[param_index[root]] = (
-                    pw.get(param_index[root], frozenset())
-                    | deps
-                )
             try:
                 deps |= self._expr(
                     left, locals_, param_index, summary
                 )
             except _Unsupported:
                 pass
+            root = _arg_root(left)
+            if root is not None:
+                if root in locals_:
+                    locals_[root] = locals_[root] | deps
+                    if self._writes:
+                        self._writes[-1].add(root)
+                if root in param_index:
+                    pw = getattr(
+                        summary, "param_writes", None
+                    )
+                    if pw is None:
+                        pw = {}
+                        summary.param_writes = pw
+                    pw[param_index[root]] = (
+                        pw.get(param_index[root], frozenset())
+                        | deps
+                    )
+                if root in self.mut_globals:
+                    # `static mut` writes are observable.
+                    summary.effects = "unknown"
             return deps
         raise _Unsupported("unsupported_statement", _span(expr))
 
@@ -850,19 +885,40 @@ class _Builder:
         ).items():
             # `f(&mut p)` / `p.set(x)` — writes the callee made
             # through the parameter merge into the slot the
-            # caller's argument roots at.
+            # caller's argument roots at. `pdeps` live in the
+            # callee's index space: dep `j` binds `actual[j]`.
             if pidx >= len(roots):
                 continue
+            projected = frozenset()
+            for j in pdeps:
+                if j < len(actual):
+                    projected |= actual[j]
             rname = roots[pidx]
             if rname is None:
                 if summary.effects != "state_writes":
                     summary.effects = "unknown"
                 continue
             locals_[rname] = (
-                locals_.get(rname, frozenset()) | pdeps
+                locals_.get(rname, frozenset()) | projected
             )
             if self._writes:
                 self._writes[-1].add(rname)
+            if rname in self.mut_globals:
+                summary.effects = "unknown"
+            if rname in param_index:
+                # The callee wrote through a reference this
+                # function itself received — that is this
+                # function's own param write for its callers.
+                pw = getattr(
+                    summary, "param_writes", None
+                )
+                if pw is None:
+                    pw = {}
+                    summary.param_writes = pw
+                pw[param_index[rname]] = (
+                    pw.get(param_index[rname], frozenset())
+                    | projected
+                )
         if callee.effects == "unknown" and summary.effects != "state_writes":
             summary.effects = "unknown"
         return frozenset() if void else deps

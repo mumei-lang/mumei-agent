@@ -336,7 +336,7 @@ def test_slice4_mut_arg_write_propagates():
 fn f(x: u64) -> u64 { let mut s = 0u64; st(&mut s, x); s }""",
         "f",
     )
-    assert s.available and s.return_dependencies == frozenset({1})
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_slice4_mut_arg_root_resolution():
@@ -414,3 +414,53 @@ fn f(x: u64) -> u64 { inner::h(x) }""",
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review1_wildcard_param_consumes_slot():
+    s = _fn(
+        """fn h(_: u64, y: u64) -> u64 { y }
+fn f(x: u64) -> u64 { h(0, x) }""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review1_static_mut_compound_assign():
+    s = _fn(
+        """static mut S: u64 = 0;
+fn f(x: u64) { unsafe { S += x; } }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "unknown"
+
+
+def test_review1_element_write_reaches_read():
+    s = _fn(
+        "fn f(x: u64) -> u64 { let mut a = [0]; a[0] = x; a[0] }",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review1_wrapper_propagates_ref_write():
+    s = _fn(
+        """fn inner(p: &mut u64, x: u64) { *p = x; }
+fn w(p: &mut u64, x: u64) { inner(p, x); }
+fn f(s: u64, y: u64) -> u64 { let mut s2 = s; w(&mut s2, y); s2 }""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0, 1})
+
+
+def test_review1_conditional_write_carries_condition_deps():
+    s = _fn(
+        """fn st(p: &mut u64, c: u64, x: u64) { if c > 0 { *p = x; } }
+fn f(s: u64, c: u64, x: u64) -> u64 { let mut s2 = s; st(&mut s2, c, x); s2 }""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0, 1, 2})
