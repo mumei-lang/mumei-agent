@@ -315,9 +315,9 @@ class AttemptDispatch:
     `sequence` is the sequence reconciled with the run's terminal record;
     `run` is the observed run itself — terminal record, bounded stdout and
     the `complete` collection claim. Nothing here selects a canonical
-    result, binds an `AttemptOutput` snapshot or publishes lineage: the
-    host still calls `select_result`, builds `AttemptOutput` and publishes
-    through `AttemptSequenceStore`.
+    result or publishes lineage: the host still calls `select_result` —
+    typically on the `captured_output()` snapshot, the canonical builder
+    for this run's bytes — and publishes through `AttemptSequenceStore`.
     """
 
     sequence: AttemptSequence
@@ -380,8 +380,10 @@ def dispatch_attempt(
     sequence has the run's terminal record reconciled in. A stamped
     sequence requires `report_stamp` — it is checked before spawn so a
     missing, malformed or non-fresh stamp fails statically instead of
-    losing an observed run. Reconciling does not select a result, capture
-    an `AttemptOutput` or publish — those stay explicit host steps.
+    losing an observed run. Reconciling does not select a result or
+    publish — `captured_output()` binds the run's bytes as the declared
+    `AttemptOutput` snapshot, and selection and publication stay explicit
+    host steps.
     """
     if type(sequence) is not AttemptSequence:
         raise ValueError("attempt dispatch requires an attempt sequence")
