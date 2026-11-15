@@ -171,3 +171,71 @@ def test_slice1_tuple_field_read():
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice2_impl_method_self_param():
+    s = _fn(
+        """struct P { x: u64 }
+impl P { fn get(&self) -> u64 { self.x } }""",
+        "P.get",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.params == ("self",)
+
+
+def test_slice2_scoped_call_inlines():
+    s = _fn(
+        """struct P { x: u64 }
+impl P { fn add(a: u64, b: u64) -> u64 { a + b } }
+fn f(x: u64) -> u64 { P::add(x, 1) }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice2_method_call_binds_self():
+    s = _fn(
+        """struct P { x: u64 }
+impl P { fn dbl(&self, v: u64) -> u64 { self.x + v } }
+fn f(p: &P, y: u64) -> u64 { p.dbl(y) }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice2_reference_param():
+    s = _fn("fn f(p: &u64, y: u64) -> u64 { *p + y }", "f")
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice2_unsafe_block():
+    s = _fn("fn f(x: u64) -> u64 { unsafe { x } }", "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice2_macro_opaque_call():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    println!("{}", x);
+    x
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"
+    assert any(c.callee == "println!" for c in s.calls)
+
+
+def test_slice2_generic_call_inlines():
+    s = _fn(
+        """fn id<T>(v: T) -> T { v }
+fn f(x: u64) -> u64 { id::<u64>(x) }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice2_tuple_pattern_binds():
+    s = _fn("fn f((a, b): (u64, u64)) -> u64 { a + b }", "f")
+    assert s.available and s.return_dependencies == frozenset({0})

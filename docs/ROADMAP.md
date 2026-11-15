@@ -2566,6 +2566,13 @@ the consumer: the left-hand width must equal it.
   joins, a one-pass loop may-analysis, intra-file `fn`
   inlining (return-dep projection onto actuals) and opaque
   `RustCall` records.
+- `impl T` methods register as `T.f`; `P::add(x)` scoped
+  calls and uniquely-named `p.m(x)` method calls inline with
+  `self` bound to the receiver deps (param index 0). Every
+  identifier parameter — scalar, reference or destructured —
+  gets a dep index (over-approx). `unsafe { }` blocks act as
+  plain blocks; `m!(tokens)` records an opaque call whose
+  deps union every evaluable token.
 - `for i in it` binds the pattern to the iterator's deps;
   loop returns gain condition deps; `x.m(args)` method calls
   union the receiver deps into the opaque result; index/

@@ -73,6 +73,20 @@ def _children(node):
     return [c for c in node.children if c.is_named]
 
 
+def _descendants(node):
+    out = []
+
+    def walk(n):
+        for c in n.children:
+            if not c.is_named:
+                continue
+            out.append(c)
+            walk(c)
+
+    walk(node)
+    return out
+
+
 def _span(node):
     return node.start_byte
 
@@ -94,6 +108,7 @@ class _Builder:
         self._inline_depth = 0
         self._writes: list = []
         self._decls: list = []
+        self.methods: dict = {}
 
     # -- unit scan -------------------------------------------------
 
@@ -104,12 +119,33 @@ class _Builder:
         parser = Parser(Language(tree_sitter_rust.language()))
         root = parser.parse(self.source).root_node
         for top in _children(root):
-            if top.type != "function_item":
+            if top.type == "function_item":
+                name = top.child_by_field_name("name")
+                if name is None:
+                    continue
+                self.functions[name.text.decode()] = top
                 continue
-            name = top.child_by_field_name("name")
-            if name is None:
+            if top.type != "impl_item":
                 continue
-            self.functions[name.text.decode()] = top
+            decls = top.child_by_field_name("body")
+            typ = top.child_by_field_name("type")
+            if decls is None or typ is None:
+                continue
+            tname = typ.text.decode()
+            for item in _children(decls):
+                if item.type != "function_item":
+                    continue
+                name = item.child_by_field_name("name")
+                if name is None:
+                    continue
+                base = name.text.decode()
+                ukey = f"{tname}.{base}"
+                n = 1
+                while ukey in self.functions:
+                    n += 1
+                    ukey = f"{tname}.{base}#{n}"
+                self.functions[ukey] = item
+                self.methods.setdefault(base, set()).add(ukey)
         if len(self.functions) > MAX_FUNCTIONS:
             raise _Unsupported("analysis_limit", 0)
         summaries = []
@@ -142,23 +178,38 @@ class _Builder:
         param_index: dict = {}
         if params is not None:
             for p in _children(params):
+                if p.type == "self_parameter":
+                    idx = len(param_names)
+                    param_names.append("self")
+                    param_index["self"] = idx
+                    locals_["self"] = frozenset({idx})
+                    continue
                 if p.type != "parameter":
                     continue
                 pat = p.child_by_field_name("pattern")
-                typ = p.child_by_field_name("type")
-                if (
-                    pat is None
-                    or pat.type != "identifier"
-                    or not _scalar_type(typ)
-                ):
-                    raise _Unsupported(
-                        "unsupported_parameter", _span(p)
-                    )
-                pname = pat.text.decode()
+                if pat is None:
+                    continue
                 idx = len(param_names)
-                param_names.append(pname)
-                param_index[pname] = idx
-                locals_[pname] = frozenset({idx})
+                if pat.type == "identifier":
+                    # Any identifier param — scalar or not —
+                    # gets a dep index (over-approx: reads carry
+                    # the param's dep).
+                    pname = pat.text.decode()
+                    param_names.append(pname)
+                    param_index[pname] = idx
+                    locals_[pname] = frozenset({idx})
+                    continue
+                # Destructured `(a, b)` / `S { x }` patterns —
+                # bind each identifier inside to the dep index.
+                bound = [
+                    d for d in _descendants(pat)
+                    if d.type == "identifier"
+                ]
+                if not bound:
+                    continue
+                param_names.append(pat.text.decode())
+                for d in bound:
+                    locals_[d.text.decode()] = frozenset({idx})
         summary = RustFunctionSummary(
             name=name, params=(), available=False,
             return_dependencies=None,
@@ -268,7 +319,19 @@ class _Builder:
             return self._loop(st, locals_, param_index, summary)
         if t == "match_expression":
             return self._match(st, locals_, param_index, summary)
-        if t == "block":
+        if t in {"block", "unsafe_block"}:
+            if t == "unsafe_block":
+                inner = next(
+                    (c for c in _children(st)
+                     if c.type == "block"),
+                    None,
+                )
+                return (
+                    self._block(
+                        inner, locals_, param_index, summary
+                    )
+                    if inner is not None else None
+                )
             return self._block(st, locals_, param_index, summary)
         if t in {"break_expression", "continue_expression"}:
             return None
@@ -498,12 +561,54 @@ class _Builder:
                 except _Unsupported:
                     recv_deps = frozenset()
             actual_union |= recv_deps
-        name = (
-            fn_expr.text.decode()
-            if fn_expr is not None
+        name = None
+        if (
+            fn_expr is not None
             and fn_expr.type == "identifier"
-            else None
-        )
+        ):
+            name = fn_expr.text.decode()
+        elif (
+            fn_expr is not None
+            and fn_expr.type == "scoped_identifier"
+        ):
+            # `T::f(args)` — resolve `T.f` among impl methods.
+            path = fn_expr.child_by_field_name("path")
+            nm = fn_expr.child_by_field_name("name")
+            if path is not None and nm is not None:
+                cand = (
+                    f"{path.text.decode()}."
+                    f"{nm.text.decode()}"
+                )
+                if cand in self.functions:
+                    name = cand
+        elif (
+            fn_expr is not None
+            and fn_expr.type == "generic_function"
+        ):
+            # `f::<T>(args)` — same function, resolve the inner
+            # callee name.
+            inner_fn = fn_expr.child_by_field_name("function")
+            if (
+                inner_fn is not None
+                and inner_fn.type == "identifier"
+            ):
+                name = inner_fn.text.decode()
+        elif (
+            fn_expr is not None
+            and fn_expr.type == "field_expression"
+        ):
+            # `x.m(args)` — resolve `m` when exactly one impl in
+            # the file defines it; `self` binds the receiver deps
+            # (param index 0).
+            fld = fn_expr.child_by_field_name("field")
+            if fld is not None:
+                ukeys = self.methods.get(
+                    fld.text.decode(), set()
+                )
+                if len(ukeys) == 1:
+                    name = next(iter(ukeys))
+                    actual.insert(0, recv_deps)
+                    actual_t = tuple(actual)
         if name is None or name not in self.functions:
             # method calls, fn-pointers, macros — opaque record.
             cname = fn_expr.text.decode() if fn_expr is not None else None
@@ -551,7 +656,7 @@ class _Builder:
         if self.count[0] > MAX_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         t = node.type
-        if t == "identifier":
+        if t == "identifier" or t == "self":
             name = node.text.decode()
             if name in locals_:
                 return locals_[name]
@@ -604,12 +709,49 @@ class _Builder:
             return self._block(node, locals_, param_index, summary) or frozenset()
         if t in {"break_expression", "continue_expression"}:
             return frozenset()
+        if t == "unsafe_block":
+            inner = next(
+                (c for c in _children(node)
+                 if c.type == "block"),
+                None,
+            )
+            return (
+                self._block(
+                    inner, locals_, param_index, summary
+                )
+                or frozenset()
+            ) if inner is not None else frozenset()
+        if t == "macro_invocation":
+            # `m!(tokens)` — opaque call; deps = every evaluable
+            # token inside the token tree (macros have arbitrary
+            # grammar, so a token that fails contributes nothing).
+            mname = node.child_by_field_name("macro")
+            cname = (
+                f"{mname.text.decode()}!"
+                if mname is not None else None
+            )
+            deps = frozenset()
+            for c in _children(node):
+                if c.type != "token_tree":
+                    continue
+                for tok in _children(c):
+                    try:
+                        deps |= self._expr(
+                            tok, locals_, param_index, summary
+                        )
+                    except _Unsupported:
+                        continue
+            summary.calls.append(
+                RustCall(_span(node), cname, (deps,), deps)
+            )
+            if summary.effects != "state_writes":
+                summary.effects = "unknown"
+            return deps
         if t in {
             "tuple_expression", "range_expression",
             "array_expression", "struct_expression",
             "field_expression", "index_expression",
-            "await_expression", "macro_invocation",
-            "generic_function",
+            "await_expression", "generic_function",
         }:
             # Containers/member access/`f!()`/`x.await` — union
             # every named child's deps (over-approx: field/index
