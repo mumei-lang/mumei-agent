@@ -6243,3 +6243,19 @@ def test_conditional_function_field_stays_invocable():
         "}"
     )
     assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_rebound_actual_keeps_inplace_writes():
+    # The alternate candidate writes the shared object in place,
+    # then rebinds the name — the in-place write still belongs to
+    # the caller's object, so `o.f` keeps x's dep.
+    s = _fn(
+        "function f(c: boolean, x: number): number {"
+        "  let o = {f: 0};"
+        "  let g = (v: number) => v;"
+        "  if (c) { g = (v: number) => { o.f = v; o = {f: v}; return v; }; }"
+        "  g?.(x);"
+        "  return o.f;"
+        "}"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})

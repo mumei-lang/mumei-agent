@@ -4563,9 +4563,17 @@ class _Builder:
                             _merge_into(old, aval)
                         else:
                             # The name was rebound to a different
-                            # object — the old binding and every
-                            # alias keep their value; the name may
-                            # hold either object afterwards.
+                            # object — but in-place writes the
+                            # candidate made to the shared clone
+                            # before the rebind still belong to
+                            # the shared object, so harvest them
+                            # into `old` first.
+                            clone = memo.get(id(old))
+                            if isinstance(clone, _Composite):
+                                _merge_into(old, clone)
+                            # The old binding and every alias keep
+                            # their value; the name may hold either
+                            # object afterwards.
                             locals_[name] = _merge_vals(old, aval)
                     elif isinstance(old, _Callable) and isinstance(
                         aval, _Callable
