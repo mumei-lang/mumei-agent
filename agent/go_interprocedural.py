@@ -805,6 +805,87 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         return True
 
+    def _index_receiver_read(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int] | None:
+        """A composite *element* of an imported container in a
+        receiver position — `lib.VSS[i].PF()` or `lib.VSM[k].PF()`, and
+        the leading argument of a method expression — reads external
+        state like the container itself: the receiver carries only the
+        indexes' dependencies, records the container member's imported
+        transfer, and pins the whole fact tree. Scalar-typed elements
+        return None — they evaluate through the normal index-read
+        path, which already carries the index dependencies."""
+        inner = node
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "index_expression":
+            return None
+        resolved = self._index_member(inner)
+        if resolved is None:
+            return None
+        member, levels = resolved
+        if member.kind != "var":
+            return None
+        fact = member.type
+        for _ in range(levels + 1):
+            fact = fact.elem if fact is not None else None
+        if fact is None or fact.kind in {"integer", "boolean", "pointer"}:
+            return None
+        index_nodes = [inner.child_by_field_name("index")]
+        cur = inner.child_by_field_name("operand")
+        while True:
+            while cur is not None and cur.type == "parenthesized_expression":
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+            if cur is None or cur.type != "index_expression":
+                break
+            index_nodes.append(cur.child_by_field_name("index"))
+            cur = cur.child_by_field_name("operand")
+        self.pinned.add(member.id)
+        self._pin_fact_identities(member.type)
+        transfers.append(
+            CallTransfer(
+                FileSpan(self.current_file, node.start_byte, node.end_byte),
+                member.id,
+                (),
+                frozenset(),
+                imported=True,
+            )
+        )
+        deps = frozenset()
+        for idx in reversed(index_nodes):
+            if idx is None:
+                raise _Unsupported("non_parameter_reference", _span(node))
+            if idx.type in {
+                "int_literal",
+                "float_literal",
+                "imaginary_literal",
+                "rune_literal",
+                "interpreted_string_literal",
+                "raw_string_literal",
+            }:
+                # A literal index carries no dependencies — the
+                # expression path resolves `true`/`false` instead, in
+                # case the predeclared names are shadowed.
+                continue
+            deps |= self.expression(
+                idx, fn, params, locals_, transfers, count, depth + 1
+            )
+        return deps
+
     def _pin_fact_identities(self, fact: Any) -> None:
         """Pin every named type identity inside a fact tree — each
         container level's own and key identities plus the terminal
@@ -3491,17 +3572,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
         receiver_deps = frozenset()
         if receiver is not None:
             receiver_member = self._imported_member_operand(receiver)
-            if not (
+            handled = (
                 receiver_member is not None
                 and receiver_member.kind == "var"
                 and self._composite_var_read(
                     receiver, receiver_member, transfers
                 )
-            ):
-                receiver_deps = self.expression(
+            )
+            if not handled:
+                # `lib.VSS[i].PF()` — a composite element of an
+                # imported container as the receiver reads external
+                # state like the container, dep-free apart from the
+                # indexes.
+                index_deps = self._index_receiver_read(
                     receiver, fn, params, locals_, transfers, count,
-                    depth + 1,
+                    depth,
                 )
+                if index_deps is not None:
+                    receiver_deps = index_deps
+                else:
+                    receiver_deps = self.expression(
+                        receiver, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
         # `t.W.Get()` — a nested-selector receiver reads dep-free like
         # any field read, but a `t.W.f = v` write folded the value's
         # deps into the chain's root binding and a method call on the
@@ -3532,6 +3625,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and self._composite_var_read(arg, arg_member, transfers)
             ):
                 actual.append(frozenset())
+                continue
+            arg_index_deps = (
+                self._index_receiver_read(
+                    arg, fn, params, locals_, transfers, count, depth
+                )
+                if i == 0 and getattr(call, "method_expr", False)
+                else None
+            )
+            if arg_index_deps is not None:
+                actual.append(arg_index_deps)
                 continue
             actual.append(
                 self.expression(
