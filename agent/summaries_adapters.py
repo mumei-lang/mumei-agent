@@ -17,6 +17,8 @@ from agent.go_interprocedural import PROFILE as GO_SUMMARY_PROFILE
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
     AdapterDescriptor,
+    AdapterRegistry,
+    PlannerPolicy,
     ResultContract,
     RouteRequirements,
 )
@@ -69,4 +71,56 @@ def go_summaries_adapter() -> AdapterDescriptor:
             "go-summaries",
             "--help",
         ),
+    )
+
+
+def summary_descriptors() -> tuple[AdapterDescriptor, ...]:
+    """Every declared summary-route descriptor, in registry order."""
+    return (go_summaries_adapter(),)
+
+
+def summary_registry() -> AdapterRegistry:
+    """A registry holding every declared summary-route descriptor."""
+    registry = AdapterRegistry()
+    for descriptor in summary_descriptors():
+        registry.register(descriptor)
+    return registry
+
+
+def plan_summary_route(
+    profile: str,
+    policy: PlannerPolicy,
+    *,
+    stamp: int,
+    tool_version: str | None = None,
+    histories: tuple = (),
+    rounds: int = 1,
+    max_parallel: int = 1,
+    cancel_event=None,
+    runner=None,
+):
+    """Plan the summary route for `profile` through the probe boundary.
+
+    Composes `summary_registry()` with `plan_with_probes`: an adapter
+    excluded only because its availability or version was never
+    observed gets its declared `probe_argv` run through `AttemptRunner`
+    and is re-planned with the fresh observation. Returns the
+    `AdapterProbePlan` — selected candidate (when probing cleared the
+    exclusion), the observations and the updated probe histories the
+    caller persists to schedule retries. Selecting is routing only:
+    nothing here runs the route or accepts a manifest.
+    """
+    from agent.adapter_probe import plan_with_probes
+
+    return plan_with_probes(
+        summary_registry(),
+        summary_requirements(profile),
+        policy,
+        stamp=stamp,
+        tool_version=tool_version,
+        runner=runner,
+        cancel_event=cancel_event,
+        rounds=rounds,
+        max_parallel=max_parallel,
+        histories=histories,
     )
