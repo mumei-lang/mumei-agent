@@ -7445,6 +7445,73 @@ def test_imported_field_read_is_admitted(go_types_helper):
     assert calls[0].target == members["N"].id
 
 
+def test_index_element_field_read_is_admitted(go_types_helper):
+    # `lib.VSM["k"].F` — a field of an index-read's struct element is
+    # dep-free like `lib.VS.F`, recording the transfer on the field's
+    # identity; the literal index carries no dependencies.
+    files = _files_member_read("return lib.VSM[\"k\"].F")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    members = {m.name: m for m in snapshot.imported_members}
+    calls = [c for c in result.calls if c.imported]
+    assert len(calls) == 1
+    assert calls[0].target == members["F"].id
+
+
+def test_index_element_field_read_carries_index_deps(go_types_helper):
+    # `lib.VSS[i].F` — the index's own dependencies carry like the
+    # index read's `lib.VM[k]` rule.
+    files = _files_member_read("return lib.VSS[i].F", "func F(i int64) int64")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_index_element_field_read_dot_import(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F() int64 { return VSM[\"k\"].F }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_index_element_field_read_pins_element_type(go_types_helper):
+    # `lib.VSM["k"].F` pins `S` — redeclaring the element's own type
+    # flags the summary stale like `lib.VS.F` pinning `S2` does.
+    files = _files_member_read("return lib.VSM[\"k\"].F")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    vsm = next(m for m in snapshot.imported_members if m.name == "VSM")
+    assert vsm.type.elem.type_id in result.pinned
+
+
+def test_computed_index_element_field_read_stays_closed(go_types_helper):
+    # `g()[0].F` — the operand names no imported member, so the field
+    # read stays closed like `f()[i]` does.
+    files = _files_member_read(
+        "return g()[0].F", "func g() []lib.S { return nil }\nfunc F() int64"
+    )
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_field_read_flags_stale_dependents(go_types_helper):
     # Redeclaring `S2` flags `F` — `lib.VS2.N` pinned the struct var's
     # declared type identity.

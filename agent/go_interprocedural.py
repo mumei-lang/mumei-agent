@@ -444,6 +444,25 @@ class _Builder:
         base = None
         if operand.type == "selector_expression":
             base = self._package_member(operand)
+        elif operand.type == "index_expression":
+            # `lib.VSM[k].F` / `lib.VSS[i].F` — a field of a
+            # container element reads external state like the member
+            # itself. The element of the whole chain must exist (a
+            # named struct resolves the field's own reference below;
+            # an anonymous one cannot, and a scalar element is
+            # uncompilable anyway).
+            resolved = self._index_member(operand)
+            if resolved is None:
+                return None
+            member, levels = resolved
+            if member.kind != "var":
+                return None
+            fact = member.type
+            for _ in range(levels + 1):
+                fact = fact.elem if fact is not None else None
+            if fact is None:
+                return None
+            base = member
         elif operand.type == "identifier":
             ref = self.references.get(self.node_key(operand))
             if ref is not None and ref.kind == "import":
@@ -1167,7 +1186,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         ):
                             self.pinned.add(base.id)
-                            self._pin_member_type(base)
+                            self._pin_fact_identities(base.type)
                             member = field_member
                             break
                 cur = cur.child_by_field_name("operand")
@@ -1492,7 +1511,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if pair is not None and pair[1].type.kind == "pointer":
                     base, field_member = pair
                     self.pinned.add(base.id)
-                    self._pin_member_type(base)
+                    self._pin_fact_identities(base.type)
                     member = field_member
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
@@ -2807,14 +2826,72 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # transfer against the field's own identity and pins
                 # both records' named types, so redeclaring the struct
                 # or the field's type flags the summary.
+                # A field through an index chain (`lib.VSM[k].F`)
+                # additionally carries the indexes' own dependencies —
+                # a literal index carries none, like the read's own
+                # `lib.VM["k"]` rule.
+                field_index_deps = frozenset()
+                operand = node.child_by_field_name("operand")
+                while (
+                    operand is not None
+                    and operand.type == "parenthesized_expression"
+                ):
+                    operand = next(
+                        (
+                            c
+                            for c in operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if operand is not None and operand.type == "index_expression":
+                    indexes = [operand.child_by_field_name("index")]
+                    inner = operand.child_by_field_name("operand")
+                    while True:
+                        while (
+                            inner is not None
+                            and inner.type == "parenthesized_expression"
+                        ):
+                            inner = next(
+                                (
+                                    c
+                                    for c in inner.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if inner is None or inner.type != "index_expression":
+                            break
+                        indexes.append(inner.child_by_field_name("index"))
+                        inner = inner.child_by_field_name("operand")
+                    for idx in reversed(indexes):
+                        if idx is None:
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call", _span(node)
+                            )
+                        if idx.type in {
+                            "int_literal",
+                            "float_literal",
+                            "imaginary_literal",
+                            "rune_literal",
+                            "interpreted_string_literal",
+                            "raw_string_literal",
+                        }:
+                            continue
+                        field_index_deps |= self.expression(
+                            idx, fn, params, locals_, transfers, count,
+                            depth + 1,
+                        )
                 pair = self._imported_field_read(node)
                 if pair is not None:
                     base, field_member = pair
                     # The transfer targets the field's identity; pin
                     # the base member's own identity too so redeclaring
-                    # `VS` in its own file still flags the summary.
+                    # `VS` in its own file still flags the summary. An
+                    # index base (`lib.VSM[k]`) pins the whole fact
+                    # tree so the element's named type is covered.
                     self.pinned.add(base.id)
-                    self._pin_member_type(base)
+                    self._pin_fact_identities(base.type)
                     self._pin_member_type(field_member)
                     transfers.append(
                         CallTransfer(
@@ -2829,7 +2906,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    return frozenset()
+                    return field_index_deps
                 # `t.F` — a field read through a bound `*S`. Same
                 # dep-free external-state model: the field's value is
                 # caller memory the dep model never tracks (struct-
