@@ -52,6 +52,7 @@ _SUBCOMMANDS = {
     "evidence-check-accept",
     "verify-attempt",
     "verify-recheck",
+    "native-recheck",
 }
 
 
@@ -665,6 +666,24 @@ def main() -> None:
         verify_recheck_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(verify_recheck_main(args))
+    elif command == "native-recheck":
+        import argparse
+        from agent.native_recheck import (
+            build_recheck_parser as native_recheck_build_parser,
+            main_recheck as native_recheck_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-recheck",
+            description=(
+                "Run a declared Core native consumer recheck as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared recheck outcome."
+            ),
+        )
+        native_recheck_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_recheck_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (

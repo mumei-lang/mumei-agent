@@ -48,6 +48,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
+| `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -664,6 +665,23 @@ Run a declared Core source-evidence recheck as one attempt and emit the reconcil
 | `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path); the saved record's own labels/paths are never read. |
 | `--solver-timeout` | `<<MS>>` | no | 5000 | Bounded solver budget passed to `evidence recheck-source` (ms); must match the producer's explicit budget. |
 | `--solver-resource-limit` | `<<N>>` | no | 1000000 | Bounded solver resource limit passed to `evidence recheck-source`. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the recheck report JSON here instead of stdout. |
+
+
+## `mumei-agent native-recheck`
+
+Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle recheck-llvm`. |
+| `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json, program.ll, program.o, proof-cert.json and program. |
+| `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
+| `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel. |
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the recheck report JSON here instead of stdout. |
