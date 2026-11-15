@@ -10,6 +10,7 @@ truncation happened, not that the producer stopped writing.
 """
 
 import hashlib
+import os
 import shutil
 import subprocess
 import threading
@@ -60,6 +61,19 @@ def memory_bound_spawn_thread_safe() -> bool:
     bound is applied by an exec wrapper instead, making bounded
     spawns thread-safe."""
     return _PRLIMIT is not None
+
+
+def _spawn_target_resolvable(name: str) -> bool:
+    """Whether execvp would locate `name` under the current PATH.
+
+    `shutil.which` treats an empty PATH as no directories, while
+    execvp searches the working directory for it — mirror that one
+    case so resolution agrees with the spawn the runner performs."""
+    if shutil.which(name) is not None:
+        return True
+    if os.environ.get("PATH") == "":
+        return shutil.which(name, path=".") is not None
+    return False
 
 
 class _BoundedCollector:
@@ -211,7 +225,7 @@ class AttemptRunner:
         preexec = None
         if memory_bound_mb is not None:
             if _PRLIMIT is not None:
-                if shutil.which(spawn_argv[0]) is not None:
+                if _spawn_target_resolvable(spawn_argv[0]):
                     spawn_argv = [
                         _PRLIMIT,
                         f"--as={memory_bound_mb * 1_048_576}",

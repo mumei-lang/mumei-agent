@@ -473,6 +473,37 @@ def test_run_memory_bound_missing_target_reports_failed():
     assert result.record.state == "failed"
 
 
+def test_run_memory_bound_wraps_target_found_via_empty_path(
+    tmp_path, monkeypatch
+):
+    # `shutil.which` treats PATH="" as no directories while execvp
+    # searches the working directory — the wrapper must still apply
+    # the bound for a command only the working directory provides.
+    import agent.attempt_runner as runner_mod
+
+    probe = tmp_path / "probe"
+    probe.write_text("#!/bin/sh\nexit 0\n")
+    probe.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    AttemptRunner().run(request(), ("probe",), memory_bound_mb=64)
+    assert spawned["args"] == [
+        "/usr/bin/prlimit",
+        "--as=67108864",
+        "--",
+        "probe",
+    ]
+
+
 def test_memory_bound_spawn_thread_safe(monkeypatch):
     import agent.attempt_runner as runner_mod
 
