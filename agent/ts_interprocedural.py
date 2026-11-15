@@ -5916,6 +5916,7 @@ class _Builder:
         if arguments.type != "arguments":
             raise _Unsupported("unsupported_expression", _span(node))
         actuals = []
+        tail_from = None
         for arg in _children(arguments):
             if arg.type == "spread_element":
                 # `f(...a)` — a composite operand contributes one
@@ -5949,6 +5950,12 @@ class _Builder:
                         if star is not None:
                             if values_out is not None:
                                 values_out.append(star)
+                            # The `*` tail means the spread length
+                            # is unknown, so every argument at or
+                            # after this slot lands at an ambiguous
+                            # position.
+                            if tail_from is None:
+                                tail_from = len(actuals)
                             actuals.append(_scalar_of(star))
                 else:
                     if values_out is not None:
@@ -5956,6 +5963,15 @@ class _Builder:
                     actuals.append(_scalar_of(sval))
                 continue
             actuals.append(add(arg))
+        if tail_from is not None:
+            # Union the whole ambiguous tail into each of its
+            # slots — otherwise a named argument after the spread
+            # would be bound to the wrong parameter (or dropped).
+            tail = frozenset()
+            for a in actuals[tail_from:]:
+                tail |= a
+            for i in range(tail_from, len(actuals)):
+                actuals[i] = tail
         return tuple(actuals)
 
     def _array_base(

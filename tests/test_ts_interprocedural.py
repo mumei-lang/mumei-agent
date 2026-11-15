@@ -6961,6 +6961,20 @@ def test_review_conditional_array_mutation_keeps_deps():
     assert s.available and s.return_dependencies == frozenset({1})
 
 
+def test_review_spread_wildcard_tail_keeps_later_actuals():
+    # `g(...a, x)` where `a` has a `*` tail: the spread length is
+    # unknown, so `x` lands at an ambiguous position — its deps
+    # must still reach a callee parameter.
+    s = _fn(
+        "const g = (a: number, b: number): number => b;"
+        "function f(x: number): number {"
+        " const a: number[] = [];"
+        " a.push(0);"
+        " return g(...a, x); }",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
 def test_review_fs_resolver_importer_relative(tmp_path):
     # `./c` imported from `sub/b.ts` resolves `sub/c.ts`, not the
     # entry directory's `c.ts`.
