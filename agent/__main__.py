@@ -31,6 +31,7 @@ _SUBCOMMANDS = {
     "go-summaries",
     "go-summaries-check",
     "go-summaries-reuse",
+    "go-summaries-accept",
 }
 
 
@@ -537,6 +538,24 @@ def main() -> None:
         go_summaries_reuse_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_reuse_main(args))
+    elif command == "go-summaries-accept":
+        import argparse
+        from agent.go_summaries import (
+            build_accept_parser as go_summaries_accept_build_parser,
+            main_accept as go_summaries_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent go-summaries-accept",
+            description=(
+                "Run a provisioned go-types helper on declared Go sources "
+                "and accept one function's declared summary under the "
+                "strict whole-context gate."
+            ),
+        )
+        go_summaries_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(go_summaries_accept_main(args))
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

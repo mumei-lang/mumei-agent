@@ -15,10 +15,12 @@ from pathlib import Path
 import pytest
 
 from agent.go_summaries import (
+    build_accept_parser,
     build_check_parser,
     build_parser,
     build_reuse_parser,
     main,
+    main_accept,
     main_check,
     main_reuse,
 )
@@ -122,6 +124,21 @@ def _run_reuse(capsys, argv: list[str]):
 
 
 def _reuse_args(helper: Path, manifest: Path, *sources: Path, extra=()):
+    return _check_args(helper, manifest, *sources, extra=extra)
+
+
+def _run_accept(capsys, argv: list[str]):
+    try:
+        code = main_accept(build_accept_parser().parse_args(argv))
+    except SystemExit as exc:
+        code = exc.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def _accept_args(
+    helper: Path, manifest: Path, *sources: Path, extra=()
+):
     return _check_args(helper, manifest, *sources, extra=extra)
 
 
@@ -696,6 +713,92 @@ def test_reuse_rejects_a_malformed_manifest(tmp_path, capsys):
         capsys, _reuse_args(helper, bad, source)
     )
     assert code == 1 and "manifest" in err
+
+
+def test_accept_returns_the_declared_summary(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    manifest = json.loads(manifest_path.read_text())
+    binding = manifest["functions"][0]["binding_id"]
+    code, out, err = _run_accept(
+        capsys,
+        _accept_args(
+            helper, manifest_path, source, extra=["--binding", binding]
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["schema_version"] == "mumei.go-summary-accept/v1"
+    assert report["accepted"] is True
+    assert report["context_match"] is True
+    assert report["binding_id"] == binding
+    assert report["summary"] == manifest["functions"][0]
+
+
+def test_accept_fails_closed_on_context_mismatch(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    manifest = json.loads(manifest_path.read_text())
+    binding = manifest["functions"][0]["binding_id"]
+    manifest["context_key"] = "tampered-context"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_accept(
+        capsys,
+        _accept_args(
+            helper, manifest_path, source, extra=["--binding", binding]
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["accepted"] is False
+    assert report["context_match"] is False
+    assert report["reason"] == "context_mismatch"
+    assert "summary" not in report
+
+
+def test_accept_emits_the_live_record_not_a_tampered_declared_one(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    manifest = json.loads(manifest_path.read_text())
+    live_record = dict(manifest["functions"][0])
+    binding = live_record["binding_id"]
+    # Tamper the declared record while keeping the true context key:
+    # accept must not echo the forged field back.
+    manifest["functions"][0]["key"] = "forged"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_accept(
+        capsys,
+        _accept_args(
+            helper, manifest_path, source, extra=["--binding", binding]
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["accepted"] is True
+    assert report["summary"] == live_record
+
+
+def test_accept_rejects_an_unknown_binding(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    code, out, err = _run_accept(
+        capsys,
+        _accept_args(
+            helper, manifest_path, source,
+            extra=["--binding", "absent-binding"],
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["accepted"] is False
+    assert report["reason"] == "unknown_binding"
+    assert "summary" not in report
 
 
 def test_reuse_output_equal_to_the_manifest_fails(tmp_path, capsys):

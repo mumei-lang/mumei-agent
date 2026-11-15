@@ -45,6 +45,7 @@ MAX_IMPORTS = 64
 # manifest file the check route reads.
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 CHECK_PROFILE = "mumei.go-summary-check/v1"
+ACCEPT_PROFILE = "mumei.go-summary-accept/v1"
 
 
 def build_parser(
@@ -148,6 +149,40 @@ def build_reuse_parser(
         elif action.dest == "output":
             action.help = (
                 "Write the merged manifest JSON here instead of stdout."
+            )
+    return parser
+
+
+def build_accept_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """Parser for ``go-summaries-accept``: the produce route's declared
+    inputs plus ``--manifest`` and ``--binding`` naming the manifest and
+    the function identity whose declared summary is accepted."""
+    parser = build_check_parser(parser)
+    parser.description = (
+        "Run a provisioned go-types helper on declared Go sources and "
+        "accept one function's declared summary under the strict "
+        "whole-context gate."
+    )
+    parser.add_argument(
+        "--binding",
+        required=True,
+        metavar="<ID>",
+        help=(
+            "Binding identity of the function whose declared summary to "
+            "accept."
+        ),
+    )
+    for action in parser._actions:
+        if action.dest == "manifest":
+            action.help = (
+                "Summary manifest (mumei.go-scalar-parameter-deps/v1) "
+                "to accept from."
+            )
+        elif action.dest == "output":
+            action.help = (
+                "Write the accept report JSON here instead of stdout."
             )
     return parser
 
@@ -488,5 +523,57 @@ def main_reuse(args: argparse.Namespace | None = None) -> int:
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"go-summaries-reuse: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return 0
+
+
+def main_accept(args: argparse.Namespace | None = None) -> int:
+    """Accept one declared summary under the strict whole-set gate.
+
+    Emits ``mumei.go-summary-accept/v1``: `accepted` is true only when
+    the manifest's declared context key still matches the fresh
+    derivation — the same monolithic check `for_function` enforces —
+    and the named binding survives in the fresh report. The weaker
+    identity partition never authorizes: a single changed byte anywhere
+    in the unit refuses the summary outright. The accepted record is
+    the fresh derivation's — the manifest's records are never trusted,
+    only its context key and binding identities.
+    """
+    if args is None:
+        args = build_accept_parser().parse_args()
+    try:
+        restored = _read_manifest(args.manifest)
+        sources, report = _run_declared(args)
+        live = _summarize(sources, report, args.target_arch)
+        context_match = restored.context_key == live.context_key
+        by_id = {f.binding_id: f for f in restored.functions}
+        live_by_id = {f.binding_id: f for f in live.functions}
+        entry = by_id.get(args.binding)
+        accepted = (
+            context_match
+            and entry is not None
+            and entry.binding_id in live_by_id
+        )
+        report_dict: dict[str, object] = {
+            "schema_version": ACCEPT_PROFILE,
+            "accepted": accepted,
+            "binding_id": args.binding,
+            "context_match": context_match,
+        }
+        if not context_match:
+            report_dict["reason"] = "context_mismatch"
+        elif entry is None or entry.binding_id not in live_by_id:
+            report_dict["reason"] = "unknown_binding"
+        if accepted:
+            # The strict gate checks the manifest's context key, not its
+            # records: emit the freshly derived summary — identical for
+            # an honest manifest, immune to a tampered declared record.
+            report_dict["summary"] = live_by_id[entry.binding_id].to_dict()
+        document = (
+            json.dumps(report_dict, indent=2, sort_keys=True) + "\n"
+        )
+        _emit(document, args.output)
+    except (SnapshotError, OSError, UnicodeDecodeError) as exc:
+        print(f"go-summaries-accept: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0

@@ -2920,6 +2920,27 @@ not equal any declared input (sources, import files or the manifest
 itself). No scheduling or audit route is wired yet; Evidence
 normalization/acceptance stays open.
 
+### C06 declared summary strict acceptance (go-summaries-accept)
+
+`python -m agent go-summaries-accept` is the fourth consumable route
+and the strict counterpart of check and reuse: it runs the same
+provisioned helper on the same declared inputs plus `--manifest` and
+`--binding <ID>`, and emits `mumei.go-summary-accept/v1` — `accepted`
+is true only when the manifest's declared context key still matches
+the fresh derivation (the monolithic `for_function` gate) and the
+named binding survives in the fresh report. A refusal names its
+`reason` — `context_mismatch` when any byte of the unit moved, or
+`unknown_binding` — and never carries a `summary`; an accepted report
+carries the freshly derived function record — under the strict gate it
+is identical to the declared one, and emitting the live record removes
+any tamper channel in the declared record itself.
+
+The weaker identity partition never authorizes here: reuse's
+per-function freshness choice stays the host's, while accept refuses
+a summary after any change anywhere in the unit. `--output` may not
+equal any declared input. No scheduling or audit route is wired yet;
+Evidence normalization/acceptance stays open.
+
 
 ### C11 declared availability probes
 
