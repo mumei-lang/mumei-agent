@@ -39,7 +39,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harvest-tests` | 3 | Deterministically harvest observations from Python and Rust tests. |
 | `observe-tests` | 5 | Check harvested Python and Rust test observations against Mumei atoms. |
 | `config` | 2 | Show effective settings and where each value comes from |
-| `go-summaries` | 5 | Run a provisioned go-types helper on declared Go sources and print the summary manifest JSON. |
+| `go-summaries` | 6 | Run a provisioned go-types helper on declared Go sources and print the summary manifest JSON. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -505,6 +505,7 @@ Run a provisioned go-types helper on declared Go sources and print the summary m
 | `--source` | `<<PATH>>` | yes | — | Go source file to summarize. Repeat for a multi-file package unit; each file is declared under its basename and basenames must be unique. |
 | `--target-arch` | `{386, amd64, arm64}` | no | amd64 | Target architecture for gc sizes (default: amd64). |
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
+| `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the manifest JSON here instead of stdout. |
 
 

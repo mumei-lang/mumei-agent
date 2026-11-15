@@ -29,10 +29,12 @@ from agent.go_type_snapshot import (
     load_go_snapshot,
 )
 
-# Mirrors `maxRequest` in tools/go-types/main.go — the helper rejects
-# any JSON request larger than 512 KiB, so the route checks the same
-# declared bound before spawning instead of reporting a helper failure.
+# Mirrors `maxRequest`/`maxImports` in tools/go-types/main.go — the
+# helper rejects a JSON request larger than 512 KiB or declaring more
+# than 64 import units, so the route checks the same declared bounds
+# before spawning instead of reporting a helper failure.
 MAX_REQUEST_BYTES = 512 * 1024
+MAX_IMPORTS = 64
 
 
 def build_parser(
@@ -75,6 +77,18 @@ def build_parser(
         help="Helper process timeout in seconds (default: 30).",
     )
     parser.add_argument(
+        "--import",
+        dest="imports",
+        action="append",
+        default=[],
+        metavar="<IMPORT_PATH>=<FILE>",
+        help=(
+            "Declare one source file of an importable package. Repeat "
+            "per file and per import path; each path declares a "
+            "package unit. Requires a multi-file --source package unit."
+        ),
+    )
+    parser.add_argument(
         "--output",
         metavar="<PATH>",
         help="Write the manifest JSON here instead of stdout.",
@@ -102,6 +116,43 @@ def _read_sources(paths: list[str]) -> dict[str, str]:
     if len(sources) > MAX_FILES:
         raise SnapshotError(f"declared sources exceed {MAX_FILES} files")
     return sources
+
+
+def _read_imports(specs: list[str]) -> dict[str, dict[str, str]]:
+    """Group declared ``<IMPORT_PATH>=<FILE>`` pairs per import path.
+
+    Same per-unit discipline as `_read_sources`: every file bounded,
+    basenames unique inside a unit, unit count bounded — mirroring the
+    helper's `imports` contract so a malformed declaration fails at the
+    route, not as an `invalid_request` report gap.
+    """
+    units: dict[str, dict[str, str]] = {}
+    for spec in specs:
+        path, sep, raw = spec.partition("=")
+        if not sep or not path or not raw:
+            raise SnapshotError(
+                "declared import must be <IMPORT_PATH>=<FILE>"
+            )
+        data = Path(raw).read_bytes()
+        if len(data) > MAX_SOURCE_BYTES:
+            raise SnapshotError(
+                f"declared source exceeds {MAX_SOURCE_BYTES} bytes"
+            )
+        unit = units.setdefault(path, {})
+        name = Path(raw).name
+        if name in unit:
+            raise SnapshotError(
+                f"duplicate declared source name {name!r} in import {path!r}"
+            )
+        unit[name] = data.decode("utf-8")
+    if len(units) > MAX_IMPORTS:
+        raise SnapshotError(f"declared imports exceed {MAX_IMPORTS} units")
+    for path, unit in units.items():
+        if len(unit) > MAX_FILES:
+            raise SnapshotError(
+                f"declared import {path!r} exceeds {MAX_FILES} files"
+            )
+    return units
 
 
 def _run_helper(binary: str, payload: bytes, timeout: int) -> bytes:
@@ -170,6 +221,22 @@ def main(args: argparse.Namespace | None = None) -> int:
                 ],
                 "target_arch": args.target_arch,
             }
+        imports = _read_imports(args.imports)
+        if imports and len(sources) == 1:
+            raise SnapshotError(
+                "declared imports require a multi-file --source package unit"
+            )
+        if imports:
+            request["imports"] = [
+                {
+                    "path": path,
+                    "sources": [
+                        {"name": name, "source": text}
+                        for name, text in unit.items()
+                    ],
+                }
+                for path, unit in imports.items()
+            ]
         payload = json.dumps(request).encode()
         if len(payload) > MAX_REQUEST_BYTES:
             raise SnapshotError(

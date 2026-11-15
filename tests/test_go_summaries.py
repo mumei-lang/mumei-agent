@@ -47,12 +47,18 @@ def real_go_types(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return binary
 
 
-def _write_helper(tmp_path: Path, payload: bytes | None, *, fail: str = "") -> Path:
+def _write_helper(
+    tmp_path: Path, payload: bytes | None, *, fail: str = ""
+) -> Path:
     helper = tmp_path / "go-types-stub"
     if fail == "exit":
         body = "echo 'broken' >&2; exit 3"
     elif fail == "stderr":
         body = "echo 'noise' >&2; cat >/dev/null; echo '{}'"
+    elif fail == "capture":
+        report = tmp_path / "report.json"
+        report.write_bytes(payload)
+        body = f"cat > {tmp_path}/captured.json; cat {report}"
     else:
         report = tmp_path / "report.json"
         report.write_bytes(payload)
@@ -298,6 +304,64 @@ def test_target_arch_choices_cover_every_declared_target():
     parser = build_parser()
     action = next(a for a in parser._actions if a.dest == "target_arch")
     assert set(action.choices) == set(TARGETS)
+
+
+def test_imports_declare_their_units_in_the_request(tmp_path, capsys):
+    files = {
+        "a.go": "package p\nimport l \"my/lib\"\nfunc F0() int64 { return l.G(1) }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    helper = _write_helper(
+        tmp_path, json.dumps(_package_fixture(files)).encode(), fail="capture"
+    )
+    lib = _write_source(
+        tmp_path, "lib.go", "package lib\nfunc G(x int64) int64 { return x }\n"
+    )
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    code, _, err = _run(
+        capsys, _args(helper, *paths, extra=["--import", f"my/lib={lib}"])
+    )
+    assert code == 0 and err == ""
+    request = json.loads((tmp_path / "captured.json").read_text())
+    assert [s["name"] for s in request["sources"]] == ["a.go", "b.go"]
+    assert request["imports"] == [
+        {
+            "path": "my/lib",
+            "sources": [{"name": "lib.go", "source": lib.read_text()}],
+        }
+    ]
+
+
+def test_import_requires_a_package_unit(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    lib = _write_source(tmp_path, "lib.go", "package lib\n")
+    code, _, err = _run(
+        capsys, _args(helper, source, extra=["--import", f"my/lib={lib}"])
+    )
+    assert code == 1 and "package unit" in err
+
+
+def test_malformed_and_duplicate_import_specs_fail(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    lib = _write_source(tmp_path, "lib.go", "package lib\n")
+    code, _, err = _run(
+        capsys, _args(helper, source, extra=["--import", "my/lib"])
+    )
+    assert code == 1 and "<IMPORT_PATH>=<FILE>" in err
+    other = tmp_path / "other"
+    other.mkdir()
+    dup = _write_source(other, "lib.go", "package lib\n")
+    code, _, err = _run(
+        capsys,
+        _args(
+            helper,
+            source,
+            extra=["--import", f"my/lib={lib}", "--import", f"my/lib={dup}"],
+        ),
+    )
+    assert code == 1 and "duplicate" in err
 
 
 def test_real_helper_round_trip(tmp_path, capsys, real_go_types):
