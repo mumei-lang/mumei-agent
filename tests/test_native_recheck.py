@@ -96,6 +96,14 @@ def test_equivalent_recheck_selects_report(tmp_path, capsys):
     assert report["schema_version"] == "mumei.native-recheck-report/v1"
     assert report["recheck"] == "equivalent"
     assert report["sequence"]["selected_result"] is not None
+    assert report["discharged_checks"] == ["artifact_semantics"]
+    assert report["checks_not_performed"] == [
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+    ]
     assert (
         report["candidate"]["schema_version"]
         == "mumei.verifier-evidence-candidate/v1"
@@ -129,6 +137,7 @@ def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert report["recheck"] == "inconclusive"
+    assert "discharged_checks" not in report
     assert report["sequence"].get("selected_result") is None
     assert report["normalized"]["exit_code"] == 3
 
@@ -164,6 +173,7 @@ def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert report["inputs_changed"] is True
+    assert "discharged_checks" not in report
     assert "recheck" not in report
     assert "candidate" not in report
     assert report["sequence"].get("selected_result") is None

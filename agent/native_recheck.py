@@ -42,7 +42,12 @@ normalized run-result descriptor, the declared recheck outcome and —
 only when equivalent — the ``mumei.verifier-evidence-candidate/v1``
 handoff for the produced evidence report. The report carries no bundle
 or record bytes; the child's output is only observed through its
-bounded capture claim.
+bounded capture claim. An ``equivalent`` outcome also discharges
+``artifact_semantics`` at representation level — the bundle's
+user-body LLVM corresponds to the declared source's verified
+semantics — while the other five checks stay in
+``checks_not_performed`` (linker, runtime and binary correctness
+remain outside the profile).
 """
 
 from __future__ import annotations
@@ -75,6 +80,28 @@ BUNDLE_MEMBERS = ("program.ll", "program.o", "proof-cert.json", "program")
 # 3 = Inconclusive. Exit 1 is shared by Different/UndefinedBehavior
 # outcomes and every `Err` path, so it gets no claimed outcome.
 RECHECK_OUTCOMES = {0: "equivalent", 3: "inconclusive"}
+
+# The six semantic acceptance checks of the C02 contract. An
+# `equivalent` recheck proves the pinned bundle's user-body LLVM
+# corresponds to the declared source's verified semantics — the
+# artifact-semantics duty at the deepest layer the pipeline covers
+# (linker, runtime and binary correctness stay out of the profile).
+CHECK_VOCABULARY = frozenset(
+    {
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+        "artifact_semantics",
+    }
+)
+
+
+class DischargedChecks:
+    """Semantic checks a terminal recheck outcome discharges."""
+
+    EQUIVALENT = frozenset({"artifact_semantics"})
 
 DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000
 
@@ -333,6 +360,11 @@ def run_recheck(args: argparse.Namespace) -> dict:
         report["inputs_changed"] = True
     elif exit_code in RECHECK_OUTCOMES:
         report["recheck"] = RECHECK_OUTCOMES[exit_code]
+        if report["recheck"] == "equivalent":
+            report["discharged_checks"] = sorted(DischargedChecks.EQUIVALENT)
+            report["checks_not_performed"] = sorted(
+                CHECK_VOCABULARY - DischargedChecks.EQUIVALENT
+            )
     if published.selected_result is not None:
         report["candidate"] = (
             published.evidence_candidate().to_dict()
