@@ -81,6 +81,13 @@ Admitted:
   `o.f = o2` member stores, `{o}` shorthand), so no sub-object
   alias can diverge. Spread/method/computed-key object members
   and member access on a scalar or unbound base stay closed.
+* `for (const k in o)` / `for (const e of o)` over a composite —
+  `in` binds the key as an opaque dep-free string (a `o[k]` read
+  inside still unions every field), `of` binds the union of every
+  field's deps; a `let`/`const` key or element is scoped to the
+  loop while `var` escapes, and a bare identifier target binds as
+  a may-write (the loop may not run). Any other right-hand side
+  or a non-identifier left closes.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -97,7 +104,7 @@ declarations close the whole unit (`unsupported_unit`); classes,
 member CALLS (`o.m()` — no closure methods), `this`, arrow-function
 values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new`, `for`-`in`/`of` and function
+spread, destructuring, `new` and function
 expressions/`=>` values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
@@ -699,6 +706,69 @@ class _Builder:
                         scope.pop(name, None)
                     else:
                         scope[name] = prev
+                self.block_stack.pop()
+            self._join(locals_, scope, params, self.var_names)
+            return
+        if kind == "for_in_statement":
+            # `for (const k in o)` iterates a composite's fields — the
+            # key is an opaque string (dep-free); `for (const e of o)`
+            # iterates values — the element binds the union of every
+            # field's deps (the model has no arrays, so composites are
+            # the only admitted right-hand side; anything else closes).
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            kind_node = node.child_by_field_name("kind")
+            op = node.child_by_field_name("operator")
+            body = node.child_by_field_name("body")
+            if (
+                left is None
+                or right is None
+                or op is None
+                or body is None
+                or left.type != "identifier"
+                or (kind_node is not None and kind_node.type not in {
+                    "let", "const", "var",
+                })
+            ):
+                raise _Unsupported("unsupported_statement", _span(node))
+            iterated = self._eval(right, params, locals_, transfers, count)
+            if not isinstance(iterated, _Composite):
+                raise _Unsupported("unsupported_statement", _span(node))
+            scope = dict(locals_)
+            if op.type == "in":
+                element = frozenset()
+            else:
+                element = _scalar_of(iterated)
+            kname = left.text.decode()
+            is_var = kind_node is not None and kind_node.type == "var"
+            for_saved: dict[str, object] = {}
+            self.block_stack.append(for_saved)
+            try:
+                if kind_node is not None:
+                    if is_var:
+                        self.var_names.add(kname)
+                    else:
+                        for_saved[kname] = scope.get(kname)
+                    scope[kname] = element
+                else:
+                    # `for (k in o)` — an assignment target: the loop
+                    # may not run, so the bind is a may-write.
+                    target = self._write_scope(kname, scope, params)
+                    if target is None:
+                        raise _Unsupported(
+                            "binding_unavailable", _span(left)
+                        )
+                    self._store(target, params, kname, element, True)
+                self._loop(
+                    body, None, None, params, scope, transfers, count,
+                    deps, saw_return, conditional, node,
+                )
+            finally:
+                for sname, prev in for_saved.items():
+                    if prev is None:
+                        scope.pop(sname, None)
+                    else:
+                        scope[sname] = prev
                 self.block_stack.pop()
             self._join(locals_, scope, params, self.var_names)
             return

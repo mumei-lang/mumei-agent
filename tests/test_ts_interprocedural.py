@@ -567,22 +567,24 @@ def test_do_while_admits():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_for_of_closes():
+def test_for_of_on_array_literal_closes():
+    # `[1]` is an `array` node — array literals are not yet modelled.
     s = _fn(
         "function f(x: number): number {"
         " let a = 0; for (const v of [1]) { a = v; } return a; }"
     )
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_for_in_closes():
+def test_for_in_on_empty_object_admits():
+    # `{}` has no fields — the body over-approximates as a may-run,
+    # so its writes still union into the joined scope.
     s = _fn(
         "function f(x: number): number {"
         " let a = 0; for (const k in {}) { a = x; } return a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_labeled_break_admits():
@@ -1500,3 +1502,97 @@ def test_shorthand_composite_collapses():
     )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_expression"
+
+
+# --- slice 7: for..in / for..of over composites ---------------------------
+
+
+def test_for_in_key_reads_fields():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let s2 = 0; let o = {a: x, b: y};"
+        " for (const k in o) { s2 = o[k]; }"
+        " return s2; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_for_in_key_name_dep_free():
+    s = _fn(
+        "function f(x: number): number {"
+        " let s2 = 1; let o = {a: x};"
+        " for (const k in o) { s2 = 0; }"
+        " return s2; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_for_in_let_scoped_to_loop():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x};"
+        " for (let k in o) { x = 0; }"
+        " return k; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_for_in_var_escapes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x};"
+        " for (var k in o) { x = 0; }"
+        " return 0; }"
+    )
+    assert s.available
+
+
+def test_for_of_binds_field_union():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let s2 = 0; let o = {a: x, b: y};"
+        " for (const e of o) { s2 = e; }"
+        " return s2; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_for_in_on_scalar_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " for (const k in x) { x = 0; } return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_statement"
+
+
+def test_for_in_assignment_target_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let k = 0; let o = {a: x};"
+        " for (k in o) { x = 0; }"
+        " return x; }"
+    )
+    assert s.available
+
+
+def test_for_in_assignment_target_unbound_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x};"
+        " for (k in o) { x = 0; }"
+        " return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_for_in_break_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = {a: x};"
+        " for (const k in o) { break; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

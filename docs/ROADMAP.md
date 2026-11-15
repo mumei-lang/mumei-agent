@@ -2553,6 +2553,23 @@ CALLS (`o.m()` — no closure methods), member access on a scalar
 or unbound base, classes/`this`, and function values bound to
 names stay closed — the member model tracks data fields only.
 
+### C06 TypeScript for..in/for..of over composites (slice 7)
+
+`for (const k in o)` iterates a composite's fields: the key binds
+an opaque dep-free string, so a `o[k]` read inside unions every
+field at that level plus the key's (empty) deps. `for (const e of
+o)` iterates values: the element binds the union of every field's
+deps — the model has no arrays, so a composite is the only
+admitted right-hand side and anything else closes. `let`/`const`
+keys scope to the loop, `var` escapes like any `var`, and a bare
+identifier target binds as a may-write since the loop may run
+zero times. `break`/`continue` and labels behave exactly as in
+other loops — the iteration reuses the `_loop` fixed point.
+
+Boundaries: `for..of` over arrays stays closed (array literals
+aren't modelled yet), destructuring or member-expression left
+sides close, and `for..in` on a scalar closes.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
