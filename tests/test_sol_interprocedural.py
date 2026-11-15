@@ -588,3 +588,76 @@ def test_slice4_modifier_arity_mismatch_is_opaque():
     assert s.available
     assert s.effects == "unknown"
     assert any(c.callee == "m" for c in s.calls)
+
+
+def test_slice5_tuple_declaration():
+    s = _fn(
+        """contract C {
+    function g(uint a) returns (uint, uint) { return (a, a + 1); }
+    function f(uint a) public returns (uint) {
+        (uint x, uint y) = g(a);
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice5_tuple_assignment():
+    s = _fn(
+        """contract C {
+    function g(uint a) returns (uint, uint) { return (a, a + 1); }
+    function f(uint a) public returns (uint) {
+        uint x; uint y;
+        (x, y) = g(a);
+        return y;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice5_named_multi_return_bare_return():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint r, uint s) {
+        r = a;
+        s = a + 1;
+        return;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice5_tuple_member_target_writes_state():
+    s = _fn(
+        """contract C {
+    uint t;
+    function g(uint a) returns (uint, uint) { return (a, a); }
+    function f(uint a) public returns (uint) {
+        uint x;
+        (x, this.t) = g(a);
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice5_non_scalar_return_param_closes():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint, uint[]) {
+        uint[] memory arr;
+        return (a, arr);
+    }
+}""",
+        "f",
+    )
+    assert not s.available
+    assert any(g.reason == "unsupported_signature" for g in s.gaps)

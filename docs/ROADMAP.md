@@ -2639,6 +2639,20 @@ in-process; no audit/CLI/MCP route changes.
   (tracked separately from the default-effects marker so the
   closing flatten pass can't lose it).
 
+### C06 Solidity multi-return tuples (slice 5)
+
+- `returns (uint, uint)` admits any all-scalar return list;
+  `return (a, b)` unions every tuple component into the
+  summary's single dep set — the model is position-insensitive
+  on purpose (sound over-approximation, not value semantics).
+- Named multi-returns `returns (uint r, uint s)` seed one
+  writable slot each; a bare `return` unions all of them.
+- Destructuring `(uint x, uint y) = g(a)` and tuple
+  assignment `(x, y) = g(a)` give every declared slot the RHS
+  union; `this.s` member elements inside the tuple behave like
+  ordinary member writes (`effects = "state_writes"`).
+  Non-scalar tuple elements still close the statement.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

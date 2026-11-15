@@ -32,9 +32,10 @@ The fragment is deliberately small:
   reads, member calls (`this.f`, `obj.f`), loops and
   same-contract modifiers with scalar params are modelled
   (an unresolvable or non-scalar modifier degrades to an
-  opaque call and marks effects `unknown`). Multiple or
-  unnamed results, structs/arrays/mappings and inherited
-  modifiers stay closed — a gap records why.
+  opaque call and marks effects `unknown`). Multi-return
+  tuples are position-insensitive — every slot reads the
+  union. Unnamed results, structs/arrays/mappings and
+  inherited modifiers stay closed — a gap records why.
 
 This is a conservative dependency analysis, not value
 evaluation, correctness or proof: effects are always
@@ -157,8 +158,8 @@ def _scalar_param(param) -> tuple[str, str] | None:
 
 
 def _return_scalar(fn) -> bool:
-    """The `returns (...)` clause declares exactly one scalar
-    type (named or unnamed)."""
+    """Every parameter of the `returns (...)` clause is scalar
+    (one or more — multi-return tuples are union-modelled)."""
     ret = fn.child_by_field_name("return_type") or next(
         (
             c
@@ -170,9 +171,12 @@ def _return_scalar(fn) -> bool:
     if ret is None:
         return False
     params = [c for c in _children(ret) if c.type == "parameter"]
-    if len(params) != 1:
+    if not params:
         return False
-    return _scalar_type(params[0].child_by_field_name("type"))
+    return all(
+        _scalar_type(p.child_by_field_name("type"))
+        for p in params
+    )
 
 
 class _Builder:
@@ -340,16 +344,14 @@ class _Builder:
                 ],
             )
         ret = fn_node.child_by_field_name("return_type")
-        ret_name = None
+        ret_names: list[str] = []
         if ret is not None:
-            rparam = next(
-                (c for c in _children(ret) if c.type == "parameter"),
-                None,
-            )
-            if rparam is not None:
+            for rparam in _children(ret):
+                if rparam.type != "parameter":
+                    continue
                 rn = rparam.child_by_field_name("name")
                 if rn is not None:
-                    ret_name = rn.text.decode()
+                    ret_names.append(rn.text.decode())
         body = fn_node.child_by_field_name("body") or next(
             (c for c in _children(fn_node) if c.type == "function_body"),
             None,
@@ -373,11 +375,12 @@ class _Builder:
             self.contracts[key], ()
         ):
             locals_.setdefault(sv, frozenset())
-        if ret_name is not None and ret_name not in locals_:
-            # Named result (`returns (uint256 r)`) — a writable
-            # local slot a bare `return` reads back.
-            locals_[ret_name] = frozenset()
-        self._ret_name = ret_name
+        for ret_name in ret_names:
+            if ret_name not in locals_:
+                # Named result (`returns (uint256 r)`) — a writable
+                # local slot a bare `return` reads back.
+                locals_[ret_name] = frozenset()
+        self._ret_names = ret_names
         mods = [
             c
             for c in _children(fn_node)
@@ -539,11 +542,69 @@ class _Builder:
                 None,
             )
             if expr is None:
-                return locals_.get(
-                    getattr(self, "_ret_name", ""), frozenset()
-                )
+                bare = frozenset()
+                for rn in getattr(self, "_ret_names", ()):
+                    bare |= locals_.get(rn, frozenset())
+                return bare
+            tinner = _children(expr)
+            if (
+                len(tinner) == 1
+                and tinner[0].type == "tuple_expression"
+            ):
+                # `return (a, b)` — the multi-return tuple is
+                # union-modelled as a single dep set.
+                deps = frozenset()
+                for el in _children(tinner[0]):
+                    if el.type == "expression":
+                        deps |= self._expr(
+                            el, locals_, param_index, summary
+                        )
+                return deps
             return self._expr(expr, locals_, param_index, summary)
         if t == "variable_declaration_statement":
+            tdecl = next(
+                (
+                    c
+                    for c in _children(st)
+                    if c.type == "variable_declaration_tuple"
+                ),
+                None,
+            )
+            expr = st.child_by_field_name("value")
+            if tdecl is not None:
+                decls = [
+                    c
+                    for c in _children(tdecl)
+                    if c.type == "variable_declaration"
+                ]
+                names = []
+                for d in decls:
+                    name = d.child_by_field_name("name")
+                    tnode = d.child_by_field_name("type")
+                    if name is None or (
+                        tnode is not None
+                        and not _scalar_type(tnode)
+                    ):
+                        raise _Unsupported(
+                            "unsupported_statement", _span(st)
+                        )
+                    names.append(name.text.decode())
+                deps = (
+                    self._expr(
+                        expr, locals_, param_index, summary
+                    )
+                    if expr is not None
+                    else frozenset()
+                )
+                for n in names:
+                    # Tuple destructuring is position-insensitive:
+                    # each declared slot reads the whole union.
+                    locals_[n] = deps
+                    if self._writes:
+                        self._writes[-1].add(n)
+                    if self._decls:
+                        self._decls[-1].add(n)
+                return None
             decl = next(
                 (
                     c
@@ -552,7 +613,6 @@ class _Builder:
                 ),
                 None,
             )
-            expr = st.child_by_field_name("value")
             if decl is None:
                 raise _Unsupported(
                     "unsupported_statement", _span(st)
@@ -813,6 +873,75 @@ class _Builder:
         }:
             left = expr.child_by_field_name("left")
             right = expr.child_by_field_name("right")
+            tinner = (
+                _children(left)
+                if left is not None
+                and left.type == "expression"
+                else []
+            )
+            if (
+                len(tinner) == 1
+                and tinner[0].type == "tuple_expression"
+            ):
+                # `(x, y) = f(...)` — every slot reads the RHS
+                # union; member targets behave like `this.s = v`.
+                if right is None:
+                    raise _Unsupported(
+                        "unsupported_statement", _span(expr)
+                    )
+                deps = self._expr(
+                    right, locals_, param_index, summary
+                )
+                for el in _children(tinner[0]):
+                    if el.type != "expression":
+                        continue
+                    ein = (
+                        _children(el)[0]
+                        if len(_children(el)) == 1
+                        else el
+                    )
+                    if ein.type == "identifier":
+                        name = ein.text.decode()
+                        if name not in locals_:
+                            raise _Unsupported(
+                                "unsupported_statement",
+                                _span(el),
+                            )
+                        locals_[name] = deps
+                        if self._writes:
+                            self._writes[-1].add(name)
+                        continue
+                    idents = (
+                        [
+                            c
+                            for c in _children(ein)
+                            if c.type == "identifier"
+                        ]
+                        if ein.type == "member_expression"
+                        else []
+                    )
+                    if (
+                        len(idents) == 2
+                        and idents[0].text == b"this"
+                        and idents[1].text.decode()
+                        in self._state_vars.get(
+                            getattr(
+                                self, "_current_contract", ""
+                            ),
+                            (),
+                        )
+                    ):
+                        name = idents[1].text.decode()
+                        locals_[name] = deps
+                        if self._writes:
+                            self._writes[-1].add(name)
+                        summary.effects = "state_writes"
+                        self._effects_touched = True
+                        continue
+                    raise _Unsupported(
+                        "unsupported_statement", _span(el)
+                    )
+                return deps
             lident = (
                 _children(left)[0]
                 if left is not None
@@ -1138,7 +1267,7 @@ class _Builder:
                         "analysis_limit", _span(node)
                     )
                 self._inline_depth += 1
-                prev_ret = getattr(self, "_ret_name", None)
+                prev_ret = getattr(self, "_ret_names", ())
                 prev_contract = getattr(
                     self, "_current_contract", None
                 )
@@ -1148,7 +1277,7 @@ class _Builder:
                         target, self.functions[target]
                     )
                 finally:
-                    self._ret_name = prev_ret
+                    self._ret_names = prev_ret
                     self._current_contract = prev_contract
                     self._effects_touched = prev_touch
                     self._inline_depth -= 1
