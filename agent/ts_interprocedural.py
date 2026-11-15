@@ -138,7 +138,10 @@ Admitted:
   nested pattern descends); a scalar source binds every sub-name
   to the whole dep union, and a composite member binds as a
   scalar (member-path rule). Positions count holes — `[p, , q]`
-  binds `q` to element 2.
+  binds `q` to element 2. The same walk drives assignment
+  destructuring `({a} = o)` / `[x] = arr` — leaves write
+  existing bindings via `_write_scope` and member targets
+  (`{a: o.f} = src`) via `_member_store`.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -166,8 +169,8 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 `this`, getters/setters,
 generators, `any`/composite/missing parameter
-types, `new` and
-generator/tagged-template function values stay
+types, `for`-loop pattern bindings,
+`new` and generator/tagged-template function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -706,6 +709,23 @@ class _Builder:
                     saved[name] = locals_.get(name)
             self._store(locals_, params, name, value, conditional)
 
+    def _bind_target(
+        self, name, value, is_var, conditional, params, locals_,
+        declare, span,
+    ) -> None:
+        """Leaf binding of a destructure — a declaration binds via
+        `_declare_name`; an assignment destructuring (`({a} = o)`)
+        writes the existing binding through `_write_scope`."""
+        if declare:
+            self._declare_name(
+                name, value, is_var, conditional, params, locals_
+            )
+            return
+        scope = self._write_scope(name, locals_, params)
+        if scope is None:
+            raise _Unsupported("binding_unavailable", span)
+        self._store(scope, params, name, value, conditional)
+
     def _destructure(
         self,
         pattern,
@@ -717,6 +737,7 @@ class _Builder:
         is_var,
         conditional,
         span,
+        declare=True,
     ) -> None:
         """`const {a, b: c = d, ...rest} = o` / `const [x, y] = arr` —
         each sub-name binds the member read at its path; a scalar
@@ -749,13 +770,15 @@ class _Builder:
                     raise _Unsupported("binding_unavailable", span)
                 # The remaining fields are unknowable — the whole
                 # union over-approximates.
-                self._declare_name(
+                self._bind_target(
                     inner.text.decode(),
                     _scalar_of(value),
                     is_var,
                     conditional,
                     params,
                     locals_,
+                    declare,
+                    span,
                 )
                 continue
             if child.type == "pair_pattern":
@@ -777,7 +800,7 @@ class _Builder:
                 fval = self._pattern_read(value, kname)
                 self._destructure_target(
                     target, fval, params, locals_, transfers, count,
-                    is_var, conditional, span,
+                    is_var, conditional, span, declare,
                 )
                 continue
             if pattern.type == "array_pattern":
@@ -792,6 +815,7 @@ class _Builder:
                     is_var,
                     conditional,
                     span,
+                    declare,
                 )
                 continue
             if child.type in {
@@ -804,13 +828,15 @@ class _Builder:
                     "shorthand_property_identifier_pattern",
                 }:
                     name = child.text.decode()
-                    self._declare_name(
+                    self._bind_target(
                         name,
                         _scalar_of(self._pattern_read(value, name)),
                         is_var,
                         conditional,
                         params,
                         locals_,
+                        declare,
+                        span,
                     )
                     continue
                 left = child.child_by_field_name("left")
@@ -826,8 +852,9 @@ class _Builder:
                     deps |= self.expression(
                         right, params, locals_, transfers, count
                     )
-                self._declare_name(
-                    name, deps, is_var, conditional, params, locals_
+                self._bind_target(
+                    name, deps, is_var, conditional, params, locals_,
+                    declare, span,
                 )
                 continue
             raise _Unsupported("binding_unavailable", span)
@@ -843,15 +870,33 @@ class _Builder:
         is_var,
         conditional,
         span,
+        declare=True,
     ) -> None:
+        if target.type in {"member_expression", "subscript_expression"}:
+            # `({a: o.f} = src)` — only legal in assignment
+            # destructuring; writes the member like `_member_store`.
+            if declare:
+                raise _Unsupported("binding_unavailable", span)
+            self._member_store(
+                target,
+                _scalar_of(fval),
+                params,
+                locals_,
+                transfers,
+                count,
+                conditional,
+            )
+            return
         if target.type == "identifier":
-            self._declare_name(
+            self._bind_target(
                 target.text.decode(),
                 _scalar_of(fval),
                 is_var,
                 conditional,
                 params,
                 locals_,
+                declare,
+                span,
             )
             return
         if target.type in {
@@ -867,13 +912,15 @@ class _Builder:
                 deps |= self.expression(
                     right, params, locals_, transfers, count
                 )
-            self._declare_name(
+            self._bind_target(
                 left.text.decode(),
                 deps,
                 is_var,
                 conditional,
                 params,
                 locals_,
+                declare,
+                span,
             )
             return
         if target.type in {"object_pattern", "array_pattern"}:
@@ -887,6 +934,7 @@ class _Builder:
                 is_var,
                 conditional,
                 span,
+                declare,
             )
             return
         raise _Unsupported("binding_unavailable", span)
@@ -1414,6 +1462,13 @@ class _Builder:
         self, node, params, locals_, transfers, count, deps,
         saw_return, conditional,
     ) -> None:
+        # `({a} = o)` wraps the assignment in a parenthesized
+        # expression at statement position — unwrap for dispatch.
+        while node.type == "parenthesized_expression":
+            exprs = _children(node)
+            if len(exprs) != 1:
+                raise _Unsupported("unsupported_statement", _span(node))
+            node = exprs[0]
         if node.type == "assignment_expression":
             self._assignment(node, params, locals_, transfers, count,
                              conditional, augmented=False)
@@ -1470,6 +1525,25 @@ class _Builder:
             self._member_store(
                 left, value, params, locals_, transfers, count,
                 conditional,
+            )
+            return
+        if left.type in {"object_pattern", "array_pattern"}:
+            # `({a} = o)` / `[x] = arr` — the slice-11 walk with
+            # store semantics: leaves write existing bindings via
+            # `_write_scope`, member targets via `_member_store`.
+            if augmented:
+                raise _Unsupported("unsupported_statement", _span(node))
+            self._destructure(
+                left,
+                value,
+                params,
+                locals_,
+                transfers,
+                count,
+                False,
+                conditional,
+                _span(left),
+                declare=False,
             )
             return
         raise _Unsupported("unsupported_statement", _span(node))

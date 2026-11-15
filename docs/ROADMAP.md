@@ -2733,6 +2733,20 @@ Boundaries: a parameter after `...rest` is unreachable and
 closes; rest combined with destructured formals
 (`f(...{a})`) closes on the non-identifier target.
 
+### C06 TypeScript assignment destructuring (slice 18)
+
+`({a, b} = o)` / `[x, y] = arr` — the slice-11 `_destructure`
+walk gains a `declare` flag: `False` routes leaves through
+`_write_scope`/`_store` (param writes shadow into the current
+scope, block saves restore correctly) and member targets
+(`{a: o.f} = src`) through `_member_store`. The statement
+dispatch unwraps `parenthesized_expression` first — `({a} =
+o)` needs the parens at statement position.
+
+Boundaries: `for ({a} of ...)` pattern loop bindings still
+close; augmented destructuring isn't valid JS and closes at
+parse.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

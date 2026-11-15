@@ -2368,3 +2368,76 @@ def test_rest_arrow_mid_params_closes():
     )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_expression"
+
+
+# --- slice 18: assignment destructuring
+
+
+def test_object_assign_destructure():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a: number; let b: number;"
+        " ({a, b} = {a: x, b: x + 1});"
+        " return a + b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_assign_destructure():
+    s = _fn(
+        "function f(x: number): number {"
+        " let p: number; let q: number;"
+        " [p, q] = [x, x + 1];"
+        " return p + q; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_assign_destructure_param():
+    # `x` rebinding to a dep-free literal leaves no param deps.
+    s = _fn(
+        "function f(x: number): number {"
+        " ({x} = {x: 5});"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_assign_destructure_param_dep():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " ({x} = {x: y});"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_assign_destructure_member_target():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: 0};"
+        " ({a: o.a} = {a: x});"
+        " return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_assign_destructure_unbound_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " ({a} = {a: x});"
+        " return a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_assign_destructure_augmented_closes():
+    # `({a} += ...)` isn't valid JS — the unit closes wholesale.
+    summaries = _summarize(
+        "function f(x: number): number {"
+        " let a: number;"
+        " ({a} += {a: x});"
+        " return a; }"
+    ).functions
+    assert all(s.name != "f" for s in summaries)
