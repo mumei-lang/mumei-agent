@@ -333,6 +333,7 @@ class AttemptDispatch:
             or current.state != self.run.record.state
             or current.events != self.run.record.events
             or current.attempt_number != self.run.record.attempt_number
+            or current.timeout_ms != self.run.record.timeout_ms
             or self.sequence.request_fingerprint
             != self.run.record.request_fingerprint
         ):

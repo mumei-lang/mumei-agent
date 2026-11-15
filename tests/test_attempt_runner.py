@@ -656,11 +656,18 @@ def test_dispatch_attempt_result_is_frozen_and_bound():
     dispatch = dispatch_attempt(ready_sequence(), argv("pass"))
     with pytest.raises(FrozenInstanceError):
         dispatch.run = dispatch.run
+    mismatched_timeout = AttemptRecord(
+        FINGERPRINT, 1, 20_000, dispatch.run.record.events
+    )
     for sequence, run in (
         (None, dispatch.run),
         (dispatch.sequence, None),
         (ready_sequence(timeout_ms=20_000), dispatch.run),
         (AttemptSequence("b" * 64, 10_000), dispatch.run),
+        (
+            AttemptSequence(FINGERPRINT, 20_000, (mismatched_timeout,)),
+            dispatch.run,
+        ),
     ):
         with pytest.raises(ValueError):
             AttemptDispatch(sequence, run)
