@@ -426,3 +426,41 @@ def test_block_assignment_to_outer_propagates():
 }"""
     s = _fn(src, "f")
     assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_nested_call_restores_caller_named_return():
+    src = """contract C {
+  function g(uint256 a) internal pure returns (uint256 out) {
+    out = a;
+    return;
+  }
+  function f(uint256 x) public pure returns (uint256 r) {
+    r = g(x);
+    return;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_overload_arity_resolution():
+    src = """contract C {
+  function g(uint256 a) public pure returns (uint256) { return a; }
+  function g(uint256 a, uint256 b) public pure returns (uint256) { return b; }
+  function f(uint256 x) public pure returns (uint256) { return g(x); }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+    r = _summarize(src)
+    names = {f.name for f in r.functions}
+    assert "C.g" in names and "C.g#2" in names
+
+
+def test_overload_two_arg_call():
+    src = """contract C {
+  function g(uint256 a) public pure returns (uint256) { return a; }
+  function g(uint256 a, uint256 b) public pure returns (uint256) { return b; }
+  function f(uint256 x, uint256 y) public pure returns (uint256) { return g(x, y); }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})

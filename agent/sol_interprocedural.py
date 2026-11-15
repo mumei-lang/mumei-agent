@@ -276,8 +276,11 @@ class _Builder:
             if fname is None:
                 continue
             key = f"{contract}.{fname.text.decode()}"
-            self.functions[key] = member
-            self.contracts[key] = contract
+            group = self._overload_groups.setdefault(key, [])
+            ukey = key if not group else f"{key}#{len(group)+1}"
+            group.append(ukey)
+            self.functions[ukey] = member
+            self.contracts[ukey] = contract
 
     # -- per-function summary ----------------------------------------
 
@@ -964,17 +967,19 @@ class _Builder:
             return actual_union
         # Same-contract resolution first — two contracts may
         # declare the same function name.
-        target = None
+        targets: list[str] = []
         cands = [getattr(self, "_current_contract", "")]
         cands += [
-            c for c in self.contracts.values() if c != cands[0]
+            c
+            for c in dict.fromkeys(self.contracts.values())
+            if c != cands[0]
         ]
         for cname in cands:
-            key = f"{cname}.{name}"
-            if key in self.functions:
-                target = key
+            base = f"{cname}.{name}"
+            if base in self._overload_groups:
+                targets = self._overload_groups[base]
                 break
-        if target is None:
+        if not targets:
             if void:
                 # Unknown callee whose result is discarded —
                 # record it opaquely rather than blocking the
@@ -984,19 +989,43 @@ class _Builder:
                 )
                 return frozenset()
             raise _Unsupported("call_unresolved", _span(node))
-        callee = self.summaries.get(target)
-        if callee is None:
-            if self._inline_depth >= MAX_INLINE_DEPTH:
-                raise _Unsupported("analysis_limit", _span(node))
-            self._inline_depth += 1
-            try:
-                callee = self._summarize(
-                    target, self.functions[target]
+        callees = []
+        for target in targets:
+            callee = self.summaries.get(target)
+            if callee is None:
+                if self._inline_depth >= MAX_INLINE_DEPTH:
+                    raise _Unsupported(
+                        "analysis_limit", _span(node)
+                    )
+                self._inline_depth += 1
+                prev_ret = getattr(self, "_ret_name", None)
+                prev_contract = getattr(
+                    self, "_current_contract", None
                 )
-            finally:
-                self._inline_depth -= 1
-            self.summaries[target] = callee
-        if not callee.available or callee.return_dependencies is None:
+                try:
+                    callee = self._summarize(
+                        target, self.functions[target]
+                    )
+                finally:
+                    self._ret_name = prev_ret
+                    self._current_contract = prev_contract
+                    self._inline_depth -= 1
+                self.summaries[target] = callee
+            callees.append(callee)
+        # Overloads: prefer callees whose arity matches the
+        # call site; union every usable candidate's deps.
+        usable = [
+            c
+            for c in callees
+            if c.available
+            and c.return_dependencies is not None
+            and len(c.params) == len(actual_t)
+        ] or [
+            c
+            for c in callees
+            if c.available and c.return_dependencies is not None
+        ]
+        if not usable:
             summary.calls.append(
                 SolCall(_span(node), name, actual_t, None)
             )
@@ -1005,9 +1034,10 @@ class _Builder:
             )
             raise _Unsupported("call_unresolved", _span(node))
         result = frozenset()
-        for idx in sorted(callee.return_dependencies):
-            if idx < len(actual_t):
-                result |= actual_t[idx]
+        for callee in usable:
+            for idx in sorted(callee.return_dependencies):
+                if idx < len(actual_t):
+                    result |= actual_t[idx]
         summary.calls.append(
             SolCall(_span(node), name, actual_t, result)
         )
