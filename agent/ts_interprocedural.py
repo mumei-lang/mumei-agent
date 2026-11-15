@@ -8152,18 +8152,20 @@ def main(args=None) -> None:
     print(json.dumps(live.to_dict(), sort_keys=True))
 
 
-def main_accept(args=None) -> None:
-    if args is None:
-        args = build_accept_parser().parse_args()
-    declared = _read_declared_manifest(args.manifest)
-    raw = _read_declared_source(args.source, ACCEPT_PROFILE)
-    live = summarize_typescript(
-        raw, resolver=_resolver_for(args), source_path=args.source
-    )
+def summary_accept_document(declared, live, function) -> dict:
+    """The ``mumei.ts-summary-accept/v1`` acceptance document.
+
+    Shared by ``ts-summaries-accept`` and the
+    ``ts_summaries_accept`` MCP tool so both emit the identical
+    decision: the strict whole-context gate (`context_match`), then
+    a declared-only function resolution that emits the freshly
+    derived record — never the declared one, so the manifest-forgery
+    channel is closed.
+    """
     report = {
         "schema_version": ACCEPT_PROFILE,
         "accepted": False,
-        "function": args.function,
+        "function": function,
         "context_match": declared.context_key == live.context_key,
     }
     if not report["context_match"]:
@@ -8173,7 +8175,7 @@ def main_accept(args=None) -> None:
         # identical for honest manifests, and removes the manifest-
         # forgery channel entirely.
         matches = [
-            f for f in live.functions if f.name == args.function
+            f for f in live.functions if f.name == function
         ]
         declared_names = {f.name for f in declared.functions}
         if not matches:
@@ -8188,7 +8190,20 @@ def main_accept(args=None) -> None:
         else:
             report["accepted"] = True
             report["summary"] = matches[0].to_dict()
-    _emit(report, 0)
+    return report
+
+
+def main_accept(args=None) -> None:
+    if args is None:
+        args = build_accept_parser().parse_args()
+    declared = _read_declared_manifest(args.manifest)
+    raw = _read_declared_source(args.source, ACCEPT_PROFILE)
+    live = summarize_typescript(
+        raw, resolver=_resolver_for(args), source_path=args.source
+    )
+    _emit(
+        summary_accept_document(declared, live, args.function), 0
+    )
 
 
 def _fs_resolver(source_path):

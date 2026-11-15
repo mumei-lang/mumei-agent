@@ -3392,6 +3392,22 @@ same `from_dict` restore as the check tools, and
 `ts_summaries_reuse` carries the `resolve_modules` opt-in.
 
 
+### C06 declared summary accept routes as MCP tools
+
+`ts_summaries_accept`, `rust_summaries_accept` and
+`sol_summaries_accept` expose the strict whole-context accept gate
+over MCP. Each module's decision is shared through
+`summary_accept_document(declared, live, function)`: `context_match`
+first — the strict gate — then a declared-only function resolution
+(`unknown_function` / `ambiguous_function` / `undeclared_function`)
+that emits the freshly derived record, never the declared one, so
+the manifest-forgery channel stays closed. The per-language name
+resolution is preserved exactly — Rust and Solidity keep the
+bare-member-name fallback while TypeScript requires the emitted
+name. The returned `accept` document is the acceptance decision;
+the summary inside remains a conservative report, not a proof.
+
+
 ### C06 declared summary MCP tool (go_summaries)
 
 The MCP surface exposes the produce route as `go_summaries(
