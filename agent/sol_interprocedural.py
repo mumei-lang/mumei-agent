@@ -318,7 +318,11 @@ class SolSummarySet:
 
 
 def _children(node):
-    return [c for c in node.children if c.is_named]
+    return [
+        c
+        for c in node.children
+        if c.is_named and c.type != "comment"
+    ]
 
 
 def _span(node) -> int:
@@ -849,14 +853,29 @@ class _Builder:
                 ),
                 None,
             )
-            self._placeholder.append(
-                lambda: self._run_body(
+            mparam_index = {
+                _scalar_param(p)[0]: i
+                for i, p in enumerate(mparams)
+            }
+
+            def _wrapped():
+                # `_;` — the wrapped body inherits the state
+                # slots the modifier wrote (function params are
+                # invisible to a modifier, so only state vars
+                # sync back).
+                for sv in self._state_vars_of(
+                    self._current_contract
+                ):
+                    if sv in mlocals and sv in locals_:
+                        locals_[sv] = mlocals[sv]
+                return self._run_body(
                     body, locals_, param_index, summary, rest
                 )
-            )
+
+            self._placeholder.append(_wrapped)
             try:
                 return self._block(
-                    mbody, mlocals, param_index, summary
+                    mbody, mlocals, mparam_index, summary
                 )
             finally:
                 self._placeholder.pop()
@@ -1347,6 +1366,24 @@ class _Builder:
                         locals_[name] = deps
                         if self._writes:
                             self._writes[-1].add(name)
+                        shadowed = (
+                            name in param_index
+                            or any(
+                                name in frame
+                                for frame in self._decls
+                            )
+                        )
+                        if (
+                            not shadowed
+                            and name
+                            in self._state_vars_of(
+                                getattr(
+                                    self, "_current_contract", ""
+                                )
+                            )
+                        ):
+                            summary.effects = "state_writes"
+                            self._effects_touched = True
                         continue
                     idents = (
                         [
@@ -1620,15 +1657,45 @@ class _Builder:
             return deps
         if t == "update_expression":
             deps = frozenset()
+            operand = None
             for c in _children(node):
-                if c.is_named:
-                    deps |= self._expr(
-                        c, locals_, param_index, summary
+                deps |= self._expr(
+                    c, locals_, param_index, summary
+                )
+                if c.type in {"expression", "identifier"}:
+                    inner = (
+                        _children(c)[0]
+                        if c.type == "expression"
+                        and len(_children(c)) == 1
+                        else c
                     )
+                    if inner.type == "identifier":
+                        operand = inner
+            if operand is not None:
+                oname = operand.text.decode()
+                if oname in locals_:
+                    if self._writes:
+                        self._writes[-1].add(oname)
+                    shadowed = (
+                        oname in param_index
+                        or any(
+                            oname in frame for frame in self._decls
+                        )
+                    )
+                    if (
+                        not shadowed
+                        and oname
+                        in self._state_vars_of(
+                            getattr(self, "_current_contract", "")
+                        )
+                    ):
+                        summary.effects = "state_writes"
+                        self._effects_touched = True
             return deps
         if t == "array_access":
             # Container read — the container itself is opaque
-            # (dep-free external), the index's deps flow.
+            # (dep-free external), the index's deps flow. A base
+            # that fails to analyze is a gap, not silence.
             base = node.child_by_field_name("base")
             index = node.child_by_field_name("index")
             deps = frozenset()
@@ -1641,23 +1708,73 @@ class _Builder:
                     deps |= self._expr(
                         base, locals_, param_index, summary
                     )
-                except _Unsupported:
-                    pass
+                except _Unsupported as exc:
+                    # An unresolvable CALL in the base is a gap
+                    # — an opaque container base (`m[k].f`,
+                    # `this.xs.n`) is dep-free by design.
+                    if exc.reason == "call_unresolved":
+                        raise
             return deps
         if t == "binary_expression":
+            named = _children(node)
+            op = (
+                node.children[1].text.decode()
+                if len(node.children) >= 3
+                else ""
+            )
+            if op in {"&&", "||"} and len(named) == 2:
+                # Short-circuit: the right side may not run —
+                # evaluate it on a copy and union its may-writes
+                # back, like a branch arm.
+                deps = self._expr(
+                    named[0], locals_, param_index, summary
+                )
+                inner = dict(locals_)
+                deps |= self._expr(
+                    named[1], inner, param_index, summary
+                )
+                for name, deps_ in inner.items():
+                    if deps_ != locals_.get(name):
+                        locals_[name] = (
+                            locals_.get(name, frozenset()) | deps_
+                        )
+                        if self._writes:
+                            self._writes[-1].add(name)
+                return deps
             deps = frozenset()
-            for c in _children(node):
-                if c.is_named:
-                    deps |= self._expr(
-                        c, locals_, param_index, summary
-                    )
-            return deps
-        if t == "ternary_expression":
-            deps = frozenset()
-            for c in _children(node):
+            for c in named:
                 deps |= self._expr(
                     c, locals_, param_index, summary
                 )
+            return deps
+        if t == "ternary_expression":
+            named = _children(node)
+            if len(named) != 3:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            deps = self._expr(
+                named[0], locals_, param_index, summary
+            )
+            arms = []
+            for arm in named[1:]:
+                inner = dict(locals_)
+                deps |= self._expr(
+                    arm, inner, param_index, summary
+                )
+                arms.append(inner)
+            for name in set().union(
+                *(set(a) for a in arms)
+            ):
+                merged = frozenset()
+                for a in arms:
+                    merged |= a.get(name, frozenset())
+                if merged != locals_.get(name):
+                    locals_[name] = (
+                        locals_.get(name, frozenset()) | merged
+                    )
+                    if self._writes:
+                        self._writes[-1].add(name)
             return deps
         if t == "call_expression":
             return self._call(node, locals_, param_index, summary)
@@ -1699,8 +1816,9 @@ class _Builder:
                     deps = self._expr(
                         obj, locals_, param_index, summary
                     )
-                except _Unsupported:
-                    pass
+                except _Unsupported as exc:
+                    if exc.reason == "call_unresolved":
+                        raise
             return deps
         if t in {
             "payable_conversion_expression",
@@ -1834,6 +1952,7 @@ class _Builder:
             if c.type == "call_argument"
         ]
         actual = []
+        named_args: dict[str, frozenset[int]] = {}
         for a in args:
             struct_args = [
                 c
@@ -1841,15 +1960,23 @@ class _Builder:
                 if c.type == "call_struct_argument"
             ]
             if struct_args:
-                # `{name: value, ...}` call options / struct
-                # literal fields — every value's deps union.
+                # `{name: value, ...}` named call args / struct
+                # literal fields — keep the field names so a
+                # resolved callee can map each to its param.
                 ndeps = frozenset()
                 for sa in struct_args:
                     v = sa.child_by_field_name("value")
-                    if v is not None:
-                        ndeps |= self._expr(
+                    fname = sa.child_by_field_name("name")
+                    vdeps = (
+                        self._expr(
                             v, locals_, param_index, summary
                         )
+                        if v is not None
+                        else frozenset()
+                    )
+                    if fname is not None:
+                        named_args[fname.text.decode()] = vdeps
+                    ndeps |= vdeps
                 actual.append(ndeps)
                 continue
             expr = next(
@@ -1905,6 +2032,28 @@ class _Builder:
                         self._effects_touched = prev_touch
                         self._inline_depth -= 1
                     self.summaries[ctor] = callee
+                if (
+                    not callee.available
+                    or callee.return_dependencies is None
+                ):
+                    # Unavailable constructor — the deployment
+                    # is a gap, not a crash: record it opaquely
+                    # and keep the arg deps flowing.
+                    summary.gaps.append(
+                        SolGap("call_unresolved", _span(node))
+                    )
+                    summary.calls.append(
+                        SolCall(
+                            _span(node),
+                            f"new {cname}",
+                            actual_t,
+                            None,
+                        )
+                    )
+                    if summary.effects != "state_writes":
+                        summary.effects = "unknown"
+                        self._effects_touched = True
+                    return actual_union
                 result_deps = (
                     actual_union | frozenset(
                         callee.return_dependencies
@@ -2032,6 +2181,22 @@ class _Builder:
             targets = self._lookup_fns(
                 current, name, skip_self=super_call
             )
+            if targets and not super_call:
+                # Dynamic dispatch: a virtual callee may resolve
+                # to any descendant override — union every
+                # override declared below the caller's contract.
+                descendants = [
+                    c
+                    for c in self._contract_names
+                    if c != current
+                    and current in self._hierarchy(c)
+                ]
+                for desc in descendants:
+                    for cand in self._overload_groups.get(
+                        f"{desc}.{name}", ()
+                    ):
+                        if cand not in targets:
+                            targets.append(cand)
         if not targets and ext_member is None:
             targets = list(self._free_fns.get(name, ()))
         if not targets and ext_member is None:
@@ -2168,19 +2333,40 @@ class _Builder:
                     self._inline_depth -= 1
                 self.summaries[target] = callee
             callees.append(callee)
-        # Overloads: prefer callees whose arity matches the
-        # call site; union every usable candidate's deps.
+        # Overloads: a candidate matches the call site by arity
+        # — or, for named arguments, by supplying every declared
+        # parameter name. An arity match that failed to analyze
+        # is a gap: falling back to a different-arity overload
+        # would report the wrong call as resolved.
+        if named_args and not any(
+            c.type == "call_argument" and not any(
+                cc.type == "call_struct_argument"
+                for cc in _children(c)
+            )
+            for c in args
+        ):
+            matched = [
+                c
+                for c in callees
+                if set(c.params) == set(named_args)
+            ]
+        else:
+            matched = [
+                c
+                for c in callees
+                if len(c.params) == len(actual_t)
+            ]
         usable = [
             c
-            for c in callees
-            if c.available
-            and c.return_dependencies is not None
-            and len(c.params) == len(actual_t)
-        ] or [
-            c
-            for c in callees
+            for c in matched
             if c.available and c.return_dependencies is not None
         ]
+        if not usable and not matched:
+            usable = [
+                c
+                for c in callees
+                if c.available and c.return_dependencies is not None
+            ]
         if not usable:
             summary.calls.append(
                 SolCall(_span(node), name, actual_t, None)
@@ -2192,8 +2378,12 @@ class _Builder:
         result = frozenset()
         for callee in usable:
             for idx in sorted(callee.return_dependencies):
-                if idx < len(actual_t):
-                    result |= actual_t[idx]
+                if idx < len(callee.params):
+                    pname = callee.params[idx]
+                    if pname in named_args:
+                        result |= named_args[pname]
+                    elif idx < len(actual_t):
+                        result |= actual_t[idx]
         for callee in usable:
             if callee.effects == "state_writes":
                 summary.effects = "state_writes"
@@ -2203,6 +2393,14 @@ class _Builder:
             ):
                 summary.effects = "unknown"
                 self._effects_touched = True
+            if callee.effects in {"state_writes", "unknown"}:
+                # The callee may write any state var — its arg
+                # deps may now live behind a state read.
+                for sv in self._state_vars_of(
+                    getattr(self, "_current_contract", "")
+                ):
+                    if sv in locals_:
+                        locals_[sv] = locals_[sv] | actual_union
         summary.calls.append(
             SolCall(_span(node), name, actual_t, result)
         )
@@ -2314,6 +2512,40 @@ def _emit(payload, code):
 
     print(json.dumps(payload, sort_keys=True))
     sys.exit(code)
+
+
+def _reject_overwrite(output, declared_paths, schema):
+    """`--output` may not overwrite a declared input — writing
+    the report would destroy the bytes the report describes."""
+    import os
+    from pathlib import Path
+
+    if output is None:
+        return
+    for declared in declared_paths:
+        try:
+            same = Path(output).resolve() == Path(declared).resolve()
+        except RuntimeError:
+            same = True
+        if not same:
+            try:
+                same = os.path.samefile(output, declared)
+            except OSError:
+                same = False
+        if same:
+            _emit(
+                {
+                    "schema_version": schema,
+                    "error": {
+                        "reason": "output_overwrites_source",
+                        "detail": (
+                            "declared output path would overwrite a "
+                            "declared input"
+                        ),
+                    },
+                },
+                2,
+            )
 
 
 def _read_declared_source(path, schema):
@@ -2495,10 +2727,16 @@ def main_accept(args=None) -> None:
                 if f.name.rsplit(".", 1)[-1].split("#", 1)[0]
                 == args.function
             ]
+        declared_names = {f.name for f in declared.functions}
         if not matches:
             report["reason"] = "unknown_function"
         elif len(matches) > 1:
             report["reason"] = "ambiguous_function"
+        elif matches[0].name not in declared_names:
+            # The strict gate admits a function the manifest
+            # actually declares — a context match alone must
+            # not accept an undeclared function.
+            report["reason"] = "undeclared_function"
         else:
             report["accepted"] = True
             report["summary"] = matches[0].to_dict()
@@ -2543,6 +2781,11 @@ def main_check(args=None) -> None:
 
     if args is None:
         args = build_check_parser().parse_args()
+    _reject_overwrite(
+        getattr(args, "output", None),
+        [args.manifest, args.source],
+        CHECK_PROFILE,
+    )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     live = summarize_solidity(raw)
@@ -2579,6 +2822,11 @@ def main_reuse(args=None) -> None:
 
     if args is None:
         args = build_reuse_parser().parse_args()
+    _reject_overwrite(
+        getattr(args, "output", None),
+        [args.manifest, args.source],
+        CHECK_PROFILE,
+    )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     live = summarize_solidity(raw)
@@ -2678,34 +2926,9 @@ def main_attempt(args=None) -> None:
 
     if args is None:
         args = build_attempt_parser().parse_args()
-    if args.output is not None:
-        try:
-            same = (
-                Path(args.output).resolve() == Path(args.source).resolve()
-            )
-        except RuntimeError:
-            same = True
-        if not same:
-            try:
-                import os
-
-                same = os.path.samefile(args.output, args.source)
-            except OSError:
-                same = False
-        if same:
-            _emit(
-                {
-                    "schema_version": ATTEMPT_REPORT_PROFILE,
-                    "error": {
-                        "reason": "output_overwrites_source",
-                        "detail": (
-                            "declared output path would overwrite a "
-                            "declared source"
-                        ),
-                    },
-                },
-                2,
-            )
+    _reject_overwrite(
+        args.output, [args.source], ATTEMPT_REPORT_PROFILE
+    )
     raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
     from agent.attempt_runner import dispatch_attempt
     from agent.verification_attempt import (

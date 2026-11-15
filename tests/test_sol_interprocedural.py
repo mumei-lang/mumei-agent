@@ -1980,3 +1980,240 @@ def test_attempt_route_skips_candidate_when_inputs_change(
     report = json.loads(capsys.readouterr().out)
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
+
+
+# --- Devin Review round on bf8c383b: regression tests ---
+
+
+def test_review_comment_in_body_ok():
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    // take the param
+    return a;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_named_args_map_by_param_name():
+    src = """contract C {
+  function g(uint256 a, uint256 b) public pure returns (uint256) {
+    return b;
+  }
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    return g({a: x, b: y});
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_review_arity_matched_unavailable_no_fallback():
+    src = """contract C {
+  function g(uint256 a) public pure returns (uint256) {
+    return a;
+  }
+  function g(uint256 a, uint256 b) public pure returns (uint256) {
+    assembly { let z := 0 }
+    return a;
+  }
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    return g(x, y);
+  }
+}"""
+    s = _fn(src, "f")
+    assert not s.available
+
+
+def test_review_state_deps_across_internal_call():
+    src = """contract C {
+  uint256 s;
+  function setter(uint256 a) public {
+    s = a;
+  }
+  function f(uint256 a) public returns (uint256) {
+    setter(a);
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review_modifier_state_sync():
+    src = """contract C {
+  uint256 s;
+  modifier m(uint256 a) {
+    s = a;
+    _;
+  }
+  function f(uint256 a) public m(a) returns (uint256) {
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review_modifier_param_not_shadowed_by_fn_param():
+    src = """contract C {
+  uint256 s;
+  modifier m() {
+    s = 1;
+    _;
+  }
+  function f(uint256 s_) public m() returns (uint256) {
+    return s_;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.effects == "state_writes"
+
+
+def test_review_short_circuit_preserves_maybe_deps():
+    src = """contract C {
+  function f(uint256 a, bool b) public returns (uint256) {
+    uint256 x = a;
+    bool ok = b && ((x = 0) == 0);
+    return x;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review_ternary_preserves_maybe_deps():
+    src = """contract C {
+  function f(uint256 a, bool b) public returns (uint256) {
+    uint256 x = a;
+    bool ok = b ? ((x = 0) == 0) : false;
+    return x;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review_expr_update_marks_state_write():
+    src = """contract C {
+  uint256 s;
+  function f(uint256 a) public returns (uint256) {
+    return s++;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.effects == "state_writes"
+
+
+def test_review_tuple_assignment_marks_state_write():
+    src = """contract C {
+  uint256 s;
+  function g(uint256 a) public pure returns (uint256, uint256) {
+    return (a, a);
+  }
+  function f(uint256 a) public returns (uint256) {
+    (s, s) = g(a);
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.effects == "state_writes"
+
+
+def test_review_failed_call_in_index_base_is_gap():
+    src = """contract C {
+  function g(uint256 a) public pure returns (uint256[] memory) {
+    uint256[] memory r;
+    assembly { mstore(r, 1) }
+    return r;
+  }
+  function f(uint256 a) public returns (uint256) {
+    return g(a)[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert not s.available
+
+
+def test_review_virtual_override_union():
+    src = """contract B {
+  function inner(uint256 a) public virtual pure returns (uint256) {
+    return 1;
+  }
+  function outer(uint256 a) public returns (uint256) {
+    return inner(a);
+  }
+}
+contract C is B {
+  function inner(uint256 a) public override pure returns (uint256) {
+    return a;
+  }
+}"""
+    s = _fn(src, "outer")
+    # C.outer inherits B.outer; its inner() call may dispatch to
+    # C's override — the union carries the param dep.
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review_output_cannot_overwrite_source(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        sol.main_check(_sol_route_args(src, manifest, output=src))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+    assert src.read_text() == _SOL_SRC
+
+
+def test_review_output_cannot_overwrite_manifest(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        sol.main_reuse(_sol_route_args(src, manifest, output=manifest))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+
+
+def test_review_accept_rejects_undeclared_function(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    doc = sol.summarize_solidity(_SOL_SRC).to_dict()
+    doc["functions"] = [f for f in doc["functions"] if f["name"] != "C.g"]
+    manifest.write_text(json.dumps(doc))
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "g"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "undeclared_function"
+
+
+def test_review_unsupported_ctor_is_gap_not_crash():
+    src = """contract D {
+  constructor(uint256 a) {
+    assembly { let z := a }
+  }
+}
+contract C {
+  function f(uint256 a) public returns (uint256) {
+    D d = new D(a);
+    return a;
+  }
+}"""
+    s = _fn(src, "f")
+    # The ctor is unsupported — a per-function gap, never a
+    # whole-report crash.
+    assert not s.available or s.gaps
+    whole = sol.summarize_solidity(src)
+    assert whole.functions
