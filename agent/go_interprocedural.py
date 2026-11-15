@@ -1004,9 +1004,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 break
             levels += 1
             inner = inner.child_by_field_name("operand")
+        member = self._imported_member_operand(inner)
+        if member is None:
+            return None
+        return member, levels
+
+    def _imported_member_operand(self, node: Any) -> PackageMember | None:
+        """The imported member a bare operand names — `lib.VM`, `VM`
+        under a dot import, or parentheses around either — or None."""
+        inner = node
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
         if inner is not None and inner.type == "selector_expression":
-            member = self._package_member(inner)
-        elif inner is not None and inner.type == "identifier":
+            return self._package_member(inner)
+        if inner is not None and inner.type == "identifier":
             ref = self.references.get(self.node_key(inner))
             member = (
                 self.members.get(ref.binding_id)
@@ -1018,11 +1032,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and member.name.encode("utf-8") != inner.text
             ):
                 member = None
-        else:
-            member = None
-        if member is None:
-            return None
-        return member, levels
+            return member
+        return None
 
     def _comma_ok_map_index(
         self, node: Any, width: int
@@ -2973,9 +2984,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if call.kind == "builtin":
                 # Only the pure builtins reachable in a scalar fragment
                 # are admitted — the result unions every argument's
-                # dependencies; `panic`, `len`, `cap`, `append` and the
-                # rest stay opaque (`len`/`cap` can only take values no
-                # supported binding can hold).
+                # dependencies; `panic`, `append` and the rest stay
+                # opaque. `len`/`cap` admit one extra shape: a single
+                # argument naming an imported container `var`
+                # (`len(lib.VA)`) reads external state like the member
+                # itself, so the result is dep-free — the call still
+                # records the imported transfer and pins the declared
+                # identity. Any other operand (`len(xs)` on a binding,
+                # `len(f())`, `len(lib.VM2["a"])`) stays opaque.
                 function_node = node.child_by_field_name("function")
                 while (
                     function_node is not None
@@ -2985,10 +3001,49 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         iter(function_node.named_children), None
                     )
                 name = function_node.text if function_node is not None else b""
-                if name not in {b"min", b"max"}:
+                if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
                 if not arguments:
                     raise _Unsupported("unsupported_expression", _span(node))
+                if name in {b"len", b"cap"}:
+                    if len(arguments) != 1:
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    member = self._imported_member_operand(arguments[0])
+                    if member is None or member.kind != "var":
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    fact = member.type
+                    if not (
+                        fact is not None
+                        and (
+                            fact.kind in {"slice", "array", "map"}
+                            or (
+                                fact.kind == "unsupported"
+                                and fact.basic_name == "string"
+                            )
+                        )
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    self._pin_member_type(member)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            member.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return frozenset()
                 deps = frozenset()
                 for arg in arguments:
                     deps |= self.expression(
