@@ -34,6 +34,11 @@ _SUBCOMMANDS = {
     "go-summaries-accept",
     "go-summaries-attempt",
     "summaries-plan",
+    "rust-summaries",
+    "rust-summaries-accept",
+    "rust-summaries-check",
+    "rust-summaries-reuse",
+    "rust-summaries-attempt",
 }
 
 
@@ -593,6 +598,92 @@ def main() -> None:
         go_summaries_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_attempt_main(args))
+    elif command == "rust-summaries":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_parser as rust_build_parser,
+            main as rust_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries",
+            description=(
+                "Emit opt-in Rust interprocedural dependency "
+                "summaries as JSON — a conservative report, not a "
+                "proof or verdict."
+            ),
+        )
+        rust_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_main(args)
+    elif command == "rust-summaries-accept":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_accept_parser as rust_accept_build_parser,
+            main_accept as rust_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-accept",
+            description=(
+                "Accept one function's declared Rust summary "
+                "under the strict whole-context gate."
+            ),
+        )
+        rust_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_accept_main(args)
+    elif command == "rust-summaries-check":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_check_parser as rust_check_build_parser,
+            main_check as rust_check_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-check",
+            description=(
+                "Check a declared Rust summary manifest "
+                "against the fresh derivation."
+            ),
+        )
+        rust_check_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_check_main(args)
+    elif command == "rust-summaries-reuse":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_reuse_parser as rust_reuse_build_parser,
+            main_reuse as rust_reuse_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-reuse",
+            description=(
+                "Emit a manifest reusing a declared manifest's "
+                "unchanged Rust summaries."
+            ),
+        )
+        rust_reuse_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_reuse_main(args)
+    elif command == "rust-summaries-attempt":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_attempt_parser as rust_attempt_build_parser,
+            main_attempt as rust_attempt_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-attempt",
+            description=(
+                "Run the rust-summaries produce route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        rust_attempt_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_attempt_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

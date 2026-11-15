@@ -9,12 +9,14 @@ from agent.adapter_probe import AdapterProbeHistory
 from agent.summaries_adapters import (
     SUMMARY_DERIVATION,
     go_summaries_adapter,
+    rust_summaries_adapter,
     plan_summary_route,
     summary_descriptors,
     summary_registry,
     summary_requirements,
 )
 from agent.go_interprocedural import PROFILE as GO_SUMMARY_PROFILE
+from agent.rust_interprocedural import PROFILE as RUST_SUMMARY_PROFILE
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
     AdapterRegistry,
@@ -124,8 +126,22 @@ def test_registry_holds_every_descriptor():
     )
     assert result.selected.adapter_id == "agent.go-summaries"
     assert [d.adapter_id for d in summary_descriptors()] == [
-        "agent.go-summaries"
+        "agent.go-summaries",
+        "agent.rust-summaries",
     ]
+
+
+def test_rust_summaries_descriptor_is_valid_and_in_process():
+    descriptor = rust_summaries_adapter()
+    assert descriptor.adapter_id == "agent.rust-summaries"
+    assert descriptor.methods == frozenset({SUMMARY_DERIVATION})
+    assert descriptor.profiles == frozenset({RUST_SUMMARY_PROFILE})
+    # In-process tree-sitter derivation declares no spawn permission —
+    # the probe_argv spawn belongs to the probe boundary itself.
+    assert descriptor.required_permissions == frozenset(
+        {"filesystem.read"}
+    )
+    assert descriptor.probe_argv is not None
 
 
 def test_plan_summary_route_probes_and_selects():
