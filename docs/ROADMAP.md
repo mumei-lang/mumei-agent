@@ -3231,6 +3231,23 @@ in the unit call table for its own summary. Module-scope
 `const g = (x) => {...}` binds a callable in `module_locals`
 and `g(y)` resolves through the bound-callee path.
 
+### C06 TypeScript annotation widening (slice 44)
+
+The return annotation loosens: a `x is T` type predicate (a
+runtime boolean) and the value-less `void`/`never`/`any`/
+`unknown`/`undefined`/`null` predefined types admit — recorded
+deps come from the actual `return` statements. Variable
+annotations are type-level and ignored entirely
+(`const o: {a: number} = {a: x}` evaluates the value —
+previously any non-scalar annotation closed the declarator).
+A `for...of`/`for...in` right side that isn't a composite
+(`Object.entries(o)`) binds the scalar's whole dep set for
+`of` and a dep-free key for `in`. Member stores reach a
+module-scope composite: `o.f = v` inside a function updates
+the shared `_Composite` (the copy-on-write result now lands
+in `module_locals` too, so an alias across scopes isn't
+dropped — a real store-loss fix).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

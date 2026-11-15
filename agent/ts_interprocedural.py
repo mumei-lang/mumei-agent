@@ -14,11 +14,18 @@ Admitted:
   optional (`x?`) and defaulted (`x = expr`) parameters admit like
   required ones and a default's calls still record; a missing
   scalar annotation, a rest or destructuring pattern, or a
-  non-scalar type closes the function.
+  non-scalar type closes the function. The return annotation is
+  looser: a `x is T` predicate (a runtime boolean) or a
+  value-less `void`/`never`/`any`/`unknown`/`undefined`/`null`
+  also admits — recorded deps come from the actual `return`s.
 * `let`/`const`/`var` declarations whose declarators bind one
   identifier to a supported expression or to nothing (`let x;`
-  binds `undefined` — no dependencies; an optional
-  `number`/`boolean` annotation is checked when present).
+  binds `undefined` — no dependencies; any annotation is
+  type-level and ignored — `const o: {a: number} = {a: x}`
+  evaluates the value). Member stores reach a module-scope
+  composite (`o.f = v` inside a function updates the shared
+  `_Composite`, and an alias across scopes gets the
+  copy-on-write result in both scopes).
   `using r = e` / `await using` declarations bind like `const`
   (the disposal protocol is dep-invisible; the grammar keeps an
   assignment-shaped node with `has_error`), and `debugger;` is a
@@ -154,7 +161,9 @@ Admitted:
   existing bindings via `_write_scope` and member targets
   (`{a: o.f} = src`) via `_member_store`, and `for` loop
   patterns `for (const {a} of rows)` — declared names land in
-  the loop scope, a bare pattern assigns.
+  the loop scope, a bare pattern assigns. A `for...of` right
+  side that isn't a composite (`Object.entries(o)`) binds the
+  scalar's whole dep set.
 * Tagged templates `tag`...${x}...`` — the tag resolves like a
   call: declared name → transfer, bound `_Callable` (name or
   member) → inline invoke. Actuals are the dep-free cooked
@@ -1176,7 +1185,7 @@ class _Builder:
         if params_node is None or body is None or body.type != "statement_block":
             raise _Unsupported("unsupported_signature", _span(node))
         is_async = any(c.type == "async" for c in node.children)
-        if ret is not None and not self._scalar_annotation(ret):
+        if ret is not None and not self._return_annotation(ret):
             inner = next(iter(_children(ret)), None)
             # `async f(): Promise<T>` — the promise resolves to its
             # value, so `Promise<number|boolean>` admits exactly
@@ -1317,12 +1326,34 @@ class _Builder:
     @staticmethod
     def _scalar_annotation(node) -> bool:
         """`node` is a `type_annotation` whose inner type is a scalar
-        `predefined_type` (`number`/`boolean`)."""
+        `predefined_type` (`number`/`boolean`). A `x is T` type
+        predicate is a runtime boolean — equally scalar."""
+        inner = next(iter(_children(node)), None)
+        if inner is None:
+            return False
+        if inner.type == "type_predicate":
+            return True
+        return (
+            inner.type == "predefined_type"
+            and inner.text in _SCALAR_TYPES
+        )
+
+    def _return_annotation(self, node) -> bool:
+        """`node` is an admissible return `type_annotation`: a scalar
+        annotation, a `x is T` predicate, or a value-less/loose
+        `predefined_type` (`void`/`never`/`any`/`unknown`/
+        `undefined`/`null`) — recorded deps come from the actual
+        `return` statements, so a looser annotation is still
+        dep-accurate."""
+        if self._scalar_annotation(node):
+            return True
         inner = next(iter(_children(node)), None)
         return (
             inner is not None
             and inner.type == "predefined_type"
-            and inner.text in _SCALAR_TYPES
+            and inner.text
+            in {b"void", b"never", b"any", b"unknown",
+                b"undefined", b"null"}
         )
 
     def _promise_scalar(self, tnode) -> bool:
@@ -1736,11 +1767,9 @@ class _Builder:
                 pname = decl.child_by_field_name("name")
                 if pname is None:
                     raise _Unsupported("binding_unavailable", _span(decl))
-                annotation = decl.child_by_field_name("type")
-                if annotation is not None and not self._scalar_annotation(
-                    annotation
-                ):
-                    raise _Unsupported("binding_unavailable", _span(decl))
+                # The annotation is type-level — `const o: {…} = v`
+                # evaluates `v` the same regardless, so any
+                # annotation admits.
                 value = decl.child_by_field_name("value")
                 if pname.type in {"object_pattern", "array_pattern"}:
                     if value is None:
@@ -1905,10 +1934,11 @@ class _Builder:
             return
         if kind == "for_in_statement":
             # `for (const k in o)` iterates a composite's fields — the
-            # key is an opaque string (dep-free); `for (const e of o)`
+            # key is an opaque string (dep-free); `for (const e of v)`
             # iterates values — the element binds the union of every
-            # field's deps (the model has no arrays, so composites are
-            # the only admitted right-hand side; anything else closes).
+            # field's deps, or the scalar's whole dep set when the
+            # right side isn't a composite (`Object.entries(o)`,
+            # `Object.keys(o)` — over-approximation: no arrays).
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
             kind_node = node.child_by_field_name("kind")
@@ -1930,12 +1960,14 @@ class _Builder:
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
             iterated = self._eval(right, params, locals_, transfers, count)
-            if not isinstance(iterated, _Composite):
-                raise _Unsupported("unsupported_statement", _span(node))
             scope = dict(locals_)
             if op.type == "in":
                 element = frozenset()
             else:
+                # `for (const e of v)` — a composite's element is
+                # the field union; a scalar iterated value (a call
+                # result like `Object.entries(o)`) binds its whole
+                # dep set, an over-approximation.
                 element = _scalar_of(iterated)
             is_var = kind_node is not None and kind_node.type == "var"
             for_saved: dict[str, object] = {}
@@ -2409,9 +2441,13 @@ class _Builder:
     def _write_scope(self, name, locals_, params):
         """The scope a store lands in: block first, then the function
         scope a `var` may have escaped into, then a parameter (stored
-        in the current scope as a shadow)."""
+        in the current scope as a shadow). A module-scope binding
+        (`const o = {}` at top level) receives member stores
+        directly — its `_Composite` is shared mutable state."""
         if name in locals_:
             return locals_
+        if name in self.module_locals:
+            return self.module_locals
         if name in params or name in self.var_names:
             # `var` assignments land in the current scope — the joins
             # carry them out to the function scope.
@@ -2949,6 +2985,13 @@ class _Builder:
         for name, val in locals_.items():
             if val is old:
                 locals_[name] = new
+        # Module scope is the other writable scope — a composite
+        # aliased across scopes (`let p = o` where `o` is module
+        # scope) needs the copy-on-write result in both, or the
+        # store is lost on the module side.
+        for name, val in self.module_locals.items():
+            if val is old:
+                self.module_locals[name] = new
 
     def expression(self, node, params, locals_, transfers, count):
         """Evaluate a node to scalar dependencies — a composite

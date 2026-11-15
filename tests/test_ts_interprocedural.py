@@ -930,12 +930,14 @@ def test_assignment_to_unbound_closes():
     assert s.gaps[0].reason == "binding_unavailable"
 
 
-def test_non_scalar_local_annotation_closes():
+def test_non_scalar_local_annotation_admits():
+    # `let a: string = "s"` — the annotation is type-level; the
+    # value's deps are what bind.
     s = _fn(
         "function f(x: number): number { let a: string = \"s\"; return x; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "binding_unavailable"
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
 
 
 # --- unit closures -----------------------------------------------------------
@@ -1633,13 +1635,15 @@ def test_for_of_binds_field_union():
     assert s.available and s.return_dependencies == frozenset({0, 1})
 
 
-def test_for_in_on_scalar_closes():
+def test_for_in_on_scalar_admits():
+    # `for (const k in x)` over a scalar — the key is a dep-free
+    # string; the body still runs in the over-approximation.
     s = _fn(
         "function f(x: number): number {"
         " for (const k in x) { x = 0; } return x; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
 
 
 def test_for_in_assignment_target_admits():
@@ -2922,12 +2926,15 @@ def test_module_unmodellable_closes_unit():
     assert s.gaps[0].reason == "unsupported_unit"
 
 
-def test_module_write_from_function_closes():
+def test_module_write_from_function_admits():
+    # `cfg.a = x` where `cfg` is a module-scope composite — the
+    # shared table receives the write.
     s = _fn(
         "const cfg = {a: 1};\n"
         "function f(x: number): number { cfg.a = x; return 0; }"
     )
-    assert not s.available
+    assert s.available
+    assert s.return_dependencies == frozenset()
 
 
 def test_local_shadows_module():
@@ -4230,5 +4237,61 @@ def test_module_callable_nested_capture():
         "const g = (x: number) => { function h() { return x; }"
         " return h(); }\n"
         "function f(y: number): number { return g(y); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 44: annotation/return widening, non-composite for-of --
+
+
+def test_type_predicate_return():
+    s = _fn(
+        "function f(x: number): x is number { return true; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_void_return():
+    s = _fn("function f(x: number): void { const a = x; }")
+    assert s.available
+
+
+def test_never_return():
+    s = _fn("function f(x: number): never { throw new Error(); }")
+    assert s.available
+
+
+def test_any_return_composite():
+    s = _fn(
+        "function f(x: number): any { const o = {a: x}; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_non_scalar_declarator_annotation():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o: {a: number} = {a: x}; return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_entries_for_of():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {a: x}; let s = 0;"
+        " for (const [k, v] of Object.entries(o)) { s = v; }"
+        " return s; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_module_composite_member_store():
+    # `o.f = v` inside a function writes the shared module-scope
+    # composite's field — later reads see the union.
+    s = _fn(
+        "const o: {[k: string]: number} = {};\n"
+        "function f(x: number): number { o[\"a\"] = x;"
+        " return o[\"a\"]; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
