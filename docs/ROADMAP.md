@@ -1658,10 +1658,15 @@ Builtin calls inside a conversion stay `unresolved_or_opaque_call`.
 
 Builtin calls classified `builtin` by the producer are admitted only
 for `min`/`max` — the pure builtins whose operands are scalars — and
-their result unions every argument's dependencies. Every other builtin
-(`panic`, `len`, `cap`, `append`, `make`, `new`, `complex`, `real`,
-`imag`, ...) stays `unresolved_or_opaque_call`; `len`/`cap` can only
-take values no supported binding can hold anyway.
+their result unions every argument's dependencies. `len`/`cap` admit
+one extra shape: a single argument naming an imported container `var`
+(`len(lib.VA)`, `cap(lib.VA)`, `len(lib.VS)` on a `string` var) reads
+external state like the member itself, so the result is dep-free —
+the call still records the imported transfer and pins the declared
+identity. Any other operand (`len(xs)` on a binding, `len(f())`,
+`len(lib.VM2["a"])` on an index read, `len(lib.VC)` on a channel)
+stays opaque, as does every other builtin (`panic`, `append`,
+`make`, `new`, `complex`, `real`, `imag`, ...).
 
 ### C07 compound and tuple assignments
 
