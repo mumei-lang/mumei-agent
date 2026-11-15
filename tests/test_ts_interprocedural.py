@@ -344,10 +344,10 @@ def test_sequence_in_for_increment_writes():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_destructured_parameter_closes():
+def test_destructured_parameter_admits():
+    # Slice 14: the pattern's sub-names union the slot's deps.
     s = _fn("function f({a}: {a: number}): number { return a; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_missing_return_type_closes():
@@ -2152,3 +2152,46 @@ def test_member_call_write_merges_back():
     )
     # `o` shares the instance — the body's store reaches it.
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+# --- slice 14: destructured formal parameters
+
+
+def test_object_param_destructure():
+    s = _fn(
+        "function f({a, b}, x: number): number { return a + b + x; }"
+    )
+    # Both sub-names see the slot's dep.
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+    assert s.parameters == ("{a, b}", "x")
+
+
+def test_object_param_destructure_renamed():
+    s = _fn(
+        "function f({a: c}: T, x: number): number { return c + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_array_param_destructure():
+    s = _fn(
+        "function f([p, q]: T, x: number): number { return p + q + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_destructured_param_call_record():
+    s = _fn(
+        "function g({a}: T): number { return a; }"
+        "function f(x: number): number { return g(x); }",
+        name="f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].arguments == (frozenset({0}),)
+
+
+def test_nested_destructured_param():
+    s = _fn(
+        "function f({a: {c}}: T): number { return c; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

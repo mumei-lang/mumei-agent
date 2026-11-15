@@ -2677,6 +2677,21 @@ Boundaries: no `this` binding — a body reading `this` closes;
 shorthand method definitions `{m(){}}` still close at the
 literal; `new` stays closed.
 
+### C06 TypeScript destructured formal parameters (slice 14)
+
+`f({a, b}: T, [x]: T, y)` admits at the signature gate: the
+pattern still occupies one scalar index in `parameters` (the
+pattern text is recorded for readability), and its sub-names
+bind at body start through the slice-11 `_destructure` walk —
+each sees the whole slot's dep set. Calls transfer one arg per
+index, so `f(obj)` feeds the whole object to every sub-name —
+sound over-approximation of the per-field precision the caller
+may actually have.
+
+Boundaries: rest `...args` formal parameters still close, as
+do pattern defaults `f({a} = d)` and non-identifier pattern
+targets beyond `_destructure`'s reach.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

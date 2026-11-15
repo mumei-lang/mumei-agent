@@ -112,6 +112,11 @@ Admitted:
   (`{f: v => v}`) — the member read resolves the callee and the
   body evaluates as with a name call. There is no `this`
   binding: a body that reads `this` closes inside.
+* Destructured formal parameters `f({a, b}, [x])` — the pattern
+  occupies one scalar index; its sub-names bind member reads of
+  the slot at body start (each sees the slot's whole dep set).
+  The summary records the pattern text (e.g. `{a, b}`) in
+  `parameters`.
 * Destructured declarations `const {a, b: c = d, ...rest} = o` /
   `const [x, y = d] = arr` — each sub-name binds the member read
   at its path (defaults union the default expression's deps, a
@@ -147,7 +152,7 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 `this`, shorthand method definitions (`{m(){}}`),
 generators, `async`/`await`, `any`/composite/missing parameter
-types, destructured formal parameters, `new` and
+types, rest formal parameters, `new` and
 generator/tagged-template function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
@@ -507,6 +512,7 @@ class _Builder:
         if ret is None or not self._scalar_annotation(ret):
             raise _Unsupported("unsupported_signature", _span(node))
         params: dict[str, int] = {}
+        destructured: list = []
         for param in _children(params_node):
             # `x?: number` and `x: number = 0` admit like a required
             # parameter — the index position is what the summary
@@ -515,6 +521,21 @@ class _Builder:
                 raise _Unsupported("unsupported_signature", _span(param))
             pattern = param.child_by_field_name("pattern")
             ptype = param.child_by_field_name("type")
+            if pattern is not None and pattern.type in {
+                "object_pattern",
+                "array_pattern",
+            }:
+                # `f({a, b}, [x])` — the slot still occupies one
+                # scalar index; the pattern's sub-names destructure
+                # it at body start (each sees the whole slot's deps).
+                pname = pattern.text.decode()
+                if pname in params:
+                    raise _Unsupported(
+                        "unsupported_signature", _span(param)
+                    )
+                params[pname] = len(params)
+                destructured.append((pattern, params[pname]))
+                continue
             if (
                 pattern is None
                 or pattern.type != "identifier"
@@ -545,6 +566,20 @@ class _Builder:
                 self.expression(
                     default, params, locals_, transfers, count
                 )
+        # Destructured parameters bind their sub-names to member
+        # reads of the slot — a scalar slot unions into every name.
+        for pat, idx in destructured:
+            self._destructure(
+                pat,
+                frozenset({idx}),
+                params,
+                locals_,
+                transfers,
+                count,
+                False,
+                False,
+                _span(pat),
+            )
         # Function declarations hoist to the enclosing function's
         # scope — pre-register every `function inner() {}` in the
         # body subtree so calls resolve wherever they appear.
