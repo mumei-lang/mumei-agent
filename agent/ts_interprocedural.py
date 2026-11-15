@@ -4364,11 +4364,19 @@ class _Builder:
                     if isinstance(old, _Composite) and isinstance(
                         aval, _Composite
                     ):
-                        # Merge in place — rebinding would lose
-                        # aliases (an outer caller holding the
-                        # same object through a wrapper's
-                        # parameter would miss the writes).
-                        _merge_into(old, aval)
+                        if aval is memo.get(id(old)):
+                            # In-place field writes on the shared
+                            # object — merging preserves identity
+                            # so every alias (an outer caller
+                            # holding the same object through a
+                            # wrapper's parameter) sees the writes.
+                            _merge_into(old, aval)
+                        else:
+                            # The name was rebound to a different
+                            # object — the old binding and every
+                            # alias keep their value; the name may
+                            # hold either object afterwards.
+                            locals_[name] = _merge_vals(old, aval)
                     elif isinstance(old, _Callable) and isinstance(
                         aval, _Callable
                     ):

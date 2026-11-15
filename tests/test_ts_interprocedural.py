@@ -6045,3 +6045,57 @@ def test_review7_aliased_names_keep_object_identity():
         "}"
     )
     assert frozenset({1}) <= s.return_dependencies
+
+
+def test_review8_alt_rebind_unions_instead_of_mutating():
+    # An alternate callee that REBINDS a shared name to a different
+    # object must union the two worlds, not mutate the old object in
+    # place: the name may hold either shape afterwards, and a class
+    # divergence collapses method resolution instead of resolving to
+    # the old class.
+    s = _fn(
+        "class A {"
+        "  v: number = 0;"
+        "  probe(a: number): number { return a }"
+        "}"
+        "class C {"
+        "  m(): number { return 0 }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let o = new A();"
+        "  o.v = y;"
+        "  let other = {w: x};"
+        "  let c = new C();"
+        "  c.m = () => { o = other; return 0 };"
+        "  if (x > 0) { delete c.m }"
+        "  c.m();"
+        "  return o.w"
+        "}"
+    )
+    assert frozenset({0}) <= s.return_dependencies
+
+
+def test_review8_alt_rebind_divergent_class_closes_call():
+    # After a rebind the name may be the old class instance OR the
+    # new object — a later method call must not resolve to only the
+    # original class, so the union collapses to the opaque shape.
+    s = _fn(
+        "class A {"
+        "  v: number = 0;"
+        "  probe(a: number): number { return a }"
+        "}"
+        "class C {"
+        "  m(): number { return 0 }"
+        "}"
+        "function f(x: number, y: number): number {"
+        "  let o = new A();"
+        "  o.v = y;"
+        "  let other = {w: x};"
+        "  let c = new C();"
+        "  c.m = () => { o = other; return 0 };"
+        "  if (x > 0) { delete c.m }"
+        "  c.m();"
+        "  return o.probe(y)"
+        "}"
+    )
+    assert not s.available
