@@ -2186,13 +2186,14 @@ def test_arrow_returned_carries_captured():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_calling_scalar_closes():
+def test_calling_scalar_dep_unions():
+    # A scalar callee isn't provably callable — the result
+    # over-approximates to the callee scalar plus the actuals.
     s = _fn(
         "function f(x: number): number {"
         " let g = x; return g(1); }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_local_shadows_function_decl():
@@ -2206,9 +2207,9 @@ def test_local_shadows_function_decl():
         "function f(x: number): number {"
         " let g = x; return g(1); }"
     ).functions if fn.name == "f")
-    # `g` bound to scalar x — the call can't reach the declaration.
-    assert not s_f.available
-    assert s_f.gaps[0].reason == "unsupported_expression"
+    # `g` bound to scalar x — the call dep-unions rather than
+    # reaching the declaration.
+    assert s_f.available and s_f.return_dependencies == frozenset({0})
 
 
 def test_arrow_no_return_is_dep_free():
@@ -2764,14 +2765,17 @@ def test_extends_field_init_inherited():
     assert s.available
 
 
-def test_extends_non_class_closes():
+def test_extends_non_class_admits():
+    # `extends o` on a non-class value — the parent chain ends
+    # but the class still builds (the expression's deps fold
+    # into the class's captured scalar).
     s = _fn(
         "function f(x: number): number {"
         " const o = {a: x};"
         " class D extends o { }"
         " return x; }"
     )
-    assert not s.available
+    assert s.available
 
 
 def test_extends_implements_admits():
@@ -5269,3 +5273,51 @@ def test_function_prototype_bind_rest_position():
         " return g.bind(null, 1, 2)(x); }"
     )
     assert s.available and s.return_dependencies == frozenset()
+
+
+def test_scalar_callee_join_dep_unions():
+    # `b ? g : h` joins two callables to a scalar — the call
+    # over-approximates to callee scalar + actuals.
+    s = _fn(
+        "function g(a) { return a; }"
+        " function h2(a) { return a + 1; }"
+        " function f(x: number, b: boolean): number {"
+        " let h = b ? g : h2; return h(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_non_callable_scalar_call_admits_union():
+    s = _fn(
+        "function f(x: number): number {"
+        " let n = 5; return n(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_extends_opaque_expression_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " class A extends Object { m() { return x; } }"
+        " return new A().m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_extends_parameter_admits():
+    s = _fn(
+        "function f(x: number, B): number {"
+        " class A extends B { m() { return x; } }"
+        " return new A().m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_extends_known_class_inherits():
+    s = _fn(
+        "class P { q() { return 1; } }"
+        " function f(x: number): number {"
+        " class A extends P { r() { return x; } }"
+        " return new A().r(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

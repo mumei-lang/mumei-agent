@@ -306,6 +306,11 @@ Admitted:
   with the partial application in its `bound` slot —
   invocations prepend the bound actuals and apply the
   bound `this` when the call supplies none.
+* A bound name that evaluates to a scalar isn't a hard close
+  at call sites — `b ? g : h` joins callables to their
+  captured union and the call dep-unions. `extends` on a
+  non-class value ends the parent chain; the heritage
+  expression's deps fold into the class's `captured`.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -3949,6 +3954,7 @@ class _Builder:
         factory call — either way the class's `captured` (every
         local's union) already covers the resulting deps."""
         parent = None
+        heritage_deps = frozenset()
         decorators: list = []
         for child in node.children:
             if child.type == "class_heritage":
@@ -3969,11 +3975,14 @@ class _Builder:
                     pval = self._eval(
                         expr, params, locals_, [], [0]
                     )
-                    if not isinstance(pval, _Class):
-                        raise _Unsupported(
-                            "unsupported_expression", _span(clause)
-                        )
-                    parent = pval
+                    if isinstance(pval, _Class):
+                        parent = pval
+                    else:
+                        # `extends Object`/an opaque expression —
+                        # the inherited shape is unknown, so the
+                        # parent chain ends but the expression's
+                        # deps still flow into the class value.
+                        heritage_deps |= _scalar_of(pval)
                 continue
             if not child.is_named and child.type == "declare":
                 # `declare class` — ambient, no runtime binding.
@@ -3985,6 +3994,7 @@ class _Builder:
         if body_node is None:
             raise _Unsupported("unsupported_expression", _span(node))
         captured = frozenset(params.values())
+        captured |= heritage_deps
         for val in locals_.values():
             captured |= _scalar_of(val)
         ctor = None
@@ -5735,10 +5745,12 @@ class _Builder:
                     )
                     return result_i
                 if not isinstance(raw, _Callable):
-                    if not optional_call:
-                        raise _Unsupported(
-                            "unsupported_expression", _span(node)
-                        )
+                    # Scalar callee — a joined callable
+                    # (`b ? g : h`), a value that isn't
+                    # provably callable: the result carries
+                    # the callee's scalar plus the actuals'
+                    # union (an over-approximation — the same
+                    # shape the optional-call path uses).
                     result_i = _scalar_of(raw)
                     for a in actual:
                         result_i |= a

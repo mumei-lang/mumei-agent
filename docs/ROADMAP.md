@@ -3419,6 +3419,20 @@ supplies none, while the bound scalars also fold into
 carries through `bind`, so a bound imported callee still
 invokes under its own module's scope.
 
+### C06 TypeScript scalar callees and opaque extends (slice 55)
+
+A bound name that evaluates to a scalar is no longer a hard
+close at call sites: `b ? g : h` joins two callables to their
+captured-deps union, and calling the result dep-unions
+(`h(x)` yields the callee scalar plus the actuals — the same
+over-approximation the optional-call path already used).
+`class A extends <non-class>` similarly ends the parent
+chain instead of closing the class: the heritage
+expression's scalar deps fold into the class's `captured`,
+so `extends Object`/`extends B` on an opaque parameter admit
+while `extends` on a known `_Class` keeps method
+inheritance unchanged.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
