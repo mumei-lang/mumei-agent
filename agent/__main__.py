@@ -28,6 +28,7 @@ _SUBCOMMANDS = {
     "harvest-tests",
     "observe-tests",
     "config",
+    "go-summaries",
 }
 
 
@@ -481,6 +482,23 @@ def main() -> None:
         build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(config_main(args))
+    elif command == "go-summaries":
+        import argparse
+        from agent.go_summaries import (
+            build_parser as go_summaries_build_parser,
+            main as go_summaries_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent go-summaries",
+            description=(
+                "Run a provisioned go-types helper on declared Go sources "
+                "and print the summary manifest JSON."
+            ),
+        )
+        go_summaries_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(go_summaries_main(args))
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
