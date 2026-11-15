@@ -4207,6 +4207,80 @@ def test_imported_method_on_indexed_receiver_stays_closed(go_types_helper):
     assert not result.available
 
 
+def _method_expr_lib():
+    return {
+        "lib": {
+            "m.go": (
+                "package lib\n"
+                "type W struct{ N int64 }\n"
+                "func (w W) WF(x int64) int64 { return x }\n"
+                "var VW W\nvar VW2 []W\n"
+            ),
+        }
+    }
+
+
+def _method_expr_snapshot(go_types_helper, files):
+    return load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, _method_expr_lib()),
+        files,
+        target_arch="amd64",
+    )
+
+
+def test_method_expr_composite_var_receiver_is_admitted(go_types_helper):
+    # `lib.W.WF(lib.VW, x)` — the receiver slot of a method
+    # expression holds a composite imported var: a dep-free external
+    # read like `lib.VW.WF(x)`, not a normal argument.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.W.WF(lib.VW, x) }\n"
+    }
+    snapshot = _method_expr_snapshot(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    vw = next(m for m in snapshot.imported_members if m.name == "VW")
+    transfers = [
+        t
+        for t in result.calls
+        if t.imported and t.arguments == () and t.target == vw.id
+    ]
+    assert transfers  # the `lib.VW` receiver read is on record
+
+
+def test_method_expr_scalar_var_receiver_stays_a_member_read(
+    go_types_helper,
+):
+    # `lib.T.M(lib.V, x)` — a scalar member in the receiver slot
+    # evaluates through the normal member read, dep-free either way.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.T.M(lib.V, x) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_indexed_receiver_stays_closed(go_types_helper):
+    # `lib.W.WF(lib.VW2[0], x)` — the receiver slot holds an index
+    # read, not a member name: stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.W.WF(lib.VW2[0], x) }\n"
+    }
+    snapshot = _method_expr_snapshot(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_method_on_const_receiver(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"

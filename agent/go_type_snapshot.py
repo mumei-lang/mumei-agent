@@ -265,6 +265,11 @@ class PackageCall:
     # named type of an imported unit: the consumer evaluates the receiver
     # expression too, so `recv.M(args)` unions the receiver's deps.
     method: bool = False
+    # `method_expr` marks a `direct_import` call recorded from a
+    # method expression `lib.T.M(recv, args)` — the leading argument
+    # is the receiver, so the consumer applies the receiver rules to
+    # it (a composite imported var is a dep-free external read).
+    method_expr: bool = False
     # `results` declares the result arity of a `direct_import` callee
     # when it is greater than one — the consumer needs it to admit the
     # tuple unpacking `a, b := lib.F(x)`. 0 means zero or one result.
@@ -884,6 +889,7 @@ def load_go_package_snapshot(
                     "target",
                     "kind",
                     "method",
+                    "method_expr",
                     "results",
                     "type_arg_type_ids",
                 }
@@ -900,6 +906,13 @@ def load_go_package_snapshot(
             # `method` only travels on an imported method call — a local
             # callee with a receiver never becomes `direct_import`.
             _require(not method or kind == "direct_import")
+            method_expr = _boolean(c.get("method_expr", False))
+            # `method_expr` likewise only travels on a `direct_import`
+            # record, and never beside `method` — a `recv.M(args)` call
+            # has a receiver node, not a leading receiver argument.
+            _require(
+                not method_expr or (kind == "direct_import" and not method)
+            )
             # `results` declares an imported callee's arity when it
             # exceeds one — a 0/1-result callee omits it, and no other
             # kind carries it.
@@ -950,6 +963,7 @@ def load_go_package_snapshot(
                     target,
                     kind,
                     method,
+                    method_expr,
                     results,
                     tuple(type_arg_ids),
                 )
