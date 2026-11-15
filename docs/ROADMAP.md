@@ -3339,6 +3339,18 @@ or an unexported name leaves the binding `_External` with
 unchanged call semantics, so summaries only gain
 precision, never lose soundness.
 
+### C06 TypeScript re-export resolution (slice 51)
+
+`export {a as b} from 'm'` resolves `m` and re-exports its
+binding under the alias, `export * as ns from 'm'` binds
+the whole export table as a `_Composite`, and `export *
+from 'm'` merges every named export (never `default`,
+matching the grammar). `export type {...}` exports no
+runtime binding — its names simply aren't exported, so an
+importer's binding stays `_External` with unchanged
+semantics. Re-export chains compose through the shared
+module cache and depth bound.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -4772,3 +4772,81 @@ def test_fs_resolver_cli(tmp_path, capsys):
     ]
     assert f_summary["available"] is True
     assert f_summary["return_dependencies"] == [0]
+
+
+# --- slice 51: `export ... from` re-export resolution -----------------------
+
+_RE_B = (
+    "export function g(a: number): number { return a + 1; }"
+    " export const K: number = 7;"
+    " export default function dd(a: number): number { return a; }"
+)
+
+
+def test_export_from_clause():
+    mods = {"./b": _RE_B, "./c": "export {g} from './b';"}
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './c';"
+            " function f(x: number): number { return g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_from_alias():
+    mods = {"./b": _RE_B, "./c": "export {g as g2} from './b';"}
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g2} from './c';"
+            " function f(x: number): number { return g2(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_star_as_namespace():
+    mods = {
+        "./b": _RE_B,
+        "./c": "export * as nsmod from './b';",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {nsmod} from './c';"
+            " function f(x: number): number { return nsmod.g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_star_reexports_named():
+    mods = {"./b": _RE_B, "./d": "export * from './b';"}
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './d';"
+            " function f(x: number): number { return g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_export_type_exports_nothing():
+    mods = {
+        "./b": _RE_B,
+        "./c": "export type {g} from './b';",
+    }
+    # `export type` exports no runtime binding — `g` is
+    # unexported by `./c`, so the import stays external and the
+    # call yields the actual union (same over-approximation).
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './c';"
+            " function f(x: number): number { return g(x); }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

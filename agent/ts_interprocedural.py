@@ -1170,10 +1170,23 @@ class _Builder:
         `export default <expr>` keeps the expression node for
         post-pass-2 evaluation; `export {a, b as c}` maps each
         exported alias to its local name; `export *` exports
-        nothing the model reads."""
+        nothing the model reads. `export type {...}` is
+        type-level and exports nothing at all."""
+        if any(
+            c.type == "type" and not c.is_named
+            for c in node.children
+        ):
+            return
         is_default = any(
             c.type == "default" and not c.is_named
             for c in node.children
+        )
+        has_from = any(
+            c.type == "from" and not c.is_named
+            for c in node.children
+        )
+        from_exports = (
+            self._resolve_module(node) if has_from else None
         )
         for inner in node.named_children:
             if inner.type == "export_clause":
@@ -1190,7 +1203,29 @@ class _Builder:
                             if len(ids) > 1
                             else local
                         )
-                        self.export_names[alias] = local
+                        if has_from:
+                            # `export {a as b} from 'm'` —
+                            # re-export the resolved module's
+                            # binding directly; an unexported
+                            # name exports nothing.
+                            if (
+                                from_exports is not None
+                                and local in from_exports
+                            ):
+                                self.exports[alias] = (
+                                    from_exports[local]
+                                )
+                        else:
+                            self.export_names[alias] = local
+                continue
+            if inner.type == "namespace_export":
+                # `export * as ns from 'm'` — the whole export
+                # table under one name.
+                nname = next(iter(_children(inner)), None)
+                if nname is not None and from_exports is not None:
+                    self.exports[nname.text.decode()] = (
+                        _Composite(dict(from_exports))
+                    )
                 continue
             name = inner.child_by_field_name("name")
             if is_default:
@@ -1209,6 +1244,19 @@ class _Builder:
                 self.export_names[name.text.decode()] = (
                     name.text.decode()
                 )
+        if (
+            has_from
+            and from_exports is not None
+            and not any(
+                c.type in {"export_clause", "namespace_export"}
+                for c in node.named_children
+            )
+        ):
+            # `export * from 'm'` — every named export re-exports
+            # (the module's `default` does not pass through `*`).
+            for ename, value in from_exports.items():
+                if ename != "default":
+                    self.exports.setdefault(ename, value)
 
     def _register_enum(self, node, scope_locals=None) -> None:
         """Bind `enum E { A, B = expr, ... }` as a `_Composite`
