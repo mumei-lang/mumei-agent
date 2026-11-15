@@ -2918,3 +2918,66 @@ def test_top_level_generator():
         "function f(x: number): number { return x; }"
     )
     assert s.available
+
+
+# --- slice 26: optional calls `?.()`
+
+
+def test_optional_call_scalar_callee():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {v: x};"
+        " const r = o.f?.(x);"
+        " return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_optional_call_unbound_member():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {};"
+        " const r = o?.f?.(x);"
+        " return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_optional_call_bound_callable():
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v;"
+        " const r = g?.(x);"
+        " return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "g"
+
+
+def test_optional_call_declared():
+    s = _fn(
+        "function g(v: number): number { return v; }\n"
+        "function f(x: number): number {"
+        " const r = g?.(x);"
+        " return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_plain_scalar_call_still_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {v: x};"
+        " return o.f(x); }"
+    )
+    assert not s.available
+
+
+def test_optional_subscript_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {v: x};"
+        " const r = o?.['f']?.(x);"
+        " return r; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

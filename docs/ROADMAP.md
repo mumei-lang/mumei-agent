@@ -2923,6 +2923,21 @@ iterator's result is dep-free, an over-approximation
 gap documented on the yield side, not an
 under-approximation of the producer's deps.
 
+### C06 TypeScript optional calls (slice 26)
+
+`f?.(x)`, `o?.f(x)`, `o.f?.(x)` and `o?.[k](x)` admit. A
+call-level `?.` token or an `optional_chain` inside the
+callee marks the call optional; a scalar (unmodellable)
+callee then yields the union of the actuals — treating a
+maybe-absent callee as run is the sound
+over-approximation (the call may not happen, but a call
+that does happen produces at least those deps). The
+result is recorded as a `TsCall` like any other transfer.
+
+A `_Callable` callee still takes the inline invoke path
+and an `_External` callee the arg-union transfer — the
+optional marker doesn't change their semantics.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

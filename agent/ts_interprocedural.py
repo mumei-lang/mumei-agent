@@ -205,6 +205,12 @@ Admitted:
   iterated values are the over-approximation), and `yield`'s
   sent-back value is dep-free. `yield_deps` isolate per callable
   the way frames do.
+* Optional calls — `f?.(x)` and optional-callee forms
+  `o?.f(x)`/`o.f?.(x)`/`o?.[k](x)`: a scalar (unmodellable)
+  callee yields the union of the actuals — treating a
+  maybe-absent callee as run is the sound
+  over-approximation. A `_Callable`/`_External` callee
+  takes the normal invoke/external path.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -338,6 +344,16 @@ def _span(node) -> TsSpan:
 
 def _children(node) -> list:
     return node.named_children
+
+
+def _has_optional_chain(node) -> bool:
+    """`node` or a descendant marks an optional step (`?.`,
+    `optional_chain`)."""
+    if node is None:
+        return False
+    if node.type in {"?.", "optional_chain"}:
+        return True
+    return any(_has_optional_chain(c) for c in node.children)
 
 
 class _Composite:
@@ -2986,6 +3002,15 @@ class _Builder:
             arguments = node.child_by_field_name("arguments")
             if function is None or arguments is None:
                 raise _Unsupported("unsupported_expression", _span(node))
+            # `f?.(x)` carries a `?.` marker between callee and
+            # arguments; `o?.f(x)`/`o?.[k](x)` carry an
+            # `optional_chain` inside the callee. On a scalar
+            # (unmodellable) callee an optional call evaluates to
+            # its args' dep union — treating a maybe-absent callee
+            # as run is the sound over-approximation.
+            optional_call = any(
+                c.type == "?." for c in node.children
+            ) or _has_optional_chain(function)
             if function.type in {
                 "member_expression",
                 "subscript_expression",
@@ -3013,9 +3038,22 @@ class _Builder:
                     )
                     return result_m
                 if not isinstance(raw, _Callable):
-                    raise _Unsupported(
-                        "unsupported_expression", _span(node)
+                    if not optional_call:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(node)
+                        )
+                    result_m = _scalar_of(raw)
+                    for a in actual_m:
+                        result_m |= a
+                    transfers.append(
+                        TsCall(
+                            _span(node),
+                            function.text.decode(),
+                            actual_m,
+                            result_m,
+                        )
                     )
+                    return result_m
                 # A `function`/shorthand method invoked through a
                 # member path receives `this` = the object; an
                 # arrow never does.
@@ -3128,9 +3166,19 @@ class _Builder:
                     )
                     return result_i
                 if not isinstance(raw, _Callable):
-                    raise _Unsupported(
-                        "unsupported_expression", _span(node)
+                    if not optional_call:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(node)
+                        )
+                    result_i = _scalar_of(raw)
+                    for a in actual:
+                        result_i |= a
+                    transfers.append(
+                        TsCall(
+                            _span(node), callee, actual, result_i
+                        )
                     )
+                    return result_i
                 result = self._invoke_callable(
                     raw,
                     actual,
