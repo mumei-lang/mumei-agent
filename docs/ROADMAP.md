@@ -2664,7 +2664,14 @@ driver never plans, reorders or retries on its own.
 Normalized attempt results stay inside `run_probe`: only
 availability/stamp/tool_version cross the boundary into observations,
 so probe stdout or exit detail cannot leak into a routing decision.
-Concurrency, retry policy and Evidence acceptance remain open.
+
+`observe_probes(..., max_parallel=N)` bounds how many probes run at
+once through a `ThreadPoolExecutor`. The shared `AttemptRunner` keeps
+no state between calls, so concurrent workers are safe; the returned
+tuple keeps request order regardless of completion order — observation
+`i` always answers request `i`. `max_parallel=1` is plain sequential
+execution and remains the default; non-positive or non-int bounds are
+static errors. Retry policy and Evidence acceptance remain open.
 
 ### C11 bounded probe-driven planning
 
@@ -2680,7 +2687,7 @@ plan and the new observations to chain further planning.
 
 The driver never authorizes, retries beyond `rounds`, or accepts
 Evidence — it only schedules and observes declared probes. C11 stays
-partial; concurrency across probes remains open.
+partial; history-driven retry scheduling remains open.
 
 ## Roadmap authority and vocabulary
 

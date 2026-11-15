@@ -2,6 +2,7 @@
 
 import sys
 import threading
+import time
 
 import pytest
 
@@ -378,6 +379,46 @@ def test_observe_probes_rejects_non_tuple():
 def test_observe_probes_rejects_bad_cancel_event():
     with pytest.raises(ValueError, match="cancellation"):
         observe_probes((), cancel_event=object())
+
+
+def test_observe_probes_rejects_bad_parallel_bound():
+    for bad in (0, -1, 1.5, True, "2"):
+        with pytest.raises(ValueError, match="parallelism bound"):
+            observe_probes((_req(),), max_parallel=bad)
+
+
+def test_observe_probes_parallel_preserves_request_order():
+    import dataclasses as _dc
+
+    slow = _dc.replace(
+        _req(
+            argv=(
+                sys.executable,
+                "-c",
+                "import time, sys; time.sleep(0.4); sys.exit(0)",
+            )
+        ),
+        adapter_id="slow.probe",
+    )
+    fast = _dc.replace(
+        _req(argv=(sys.executable, "-c", "import sys; sys.exit(2)")),
+        adapter_id="fast.probe",
+    )
+    start = time.monotonic()
+    obs = observe_probes((slow, fast), max_parallel=2)
+    elapsed = time.monotonic() - start
+    # Request order survives completion order: the slow probe
+    # answers first even though it finishes last.
+    assert [o.adapter_id for o in obs] == ["slow.probe", "fast.probe"]
+    assert [o.availability for o in obs] == ["available", "missing"]
+    # Two ~0.4s probes serially would take ~0.9s+ including spawn.
+    assert elapsed < 0.75
+
+
+def test_observe_probes_parallel_single_request():
+    obs = observe_probes((_req(),), max_parallel=4)
+    assert len(obs) == 1
+    assert obs[0].availability == "available"
 
 
 def test_observe_probes_feeds_replan():
