@@ -31,6 +31,7 @@ _SUBCOMMANDS = {
     "rust-summaries-accept",
     "rust-summaries-check",
     "rust-summaries-reuse",
+    "rust-summaries-attempt",
     "config",
 }
 
@@ -554,6 +555,23 @@ def main() -> None:
         rust_reuse_build_parser(parser)
         args = parser.parse_args(argv[1:])
         rust_reuse_main(args)
+    elif command == "rust-summaries-attempt":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_attempt_parser as rust_attempt_build_parser,
+            main_attempt as rust_attempt_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-attempt",
+            description=(
+                "Run the rust-summaries produce route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        rust_attempt_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_attempt_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

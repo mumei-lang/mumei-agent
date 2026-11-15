@@ -43,6 +43,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
 | `rust-summaries-reuse` | 2 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `rust-summaries-attempt` | 3 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -559,6 +560,25 @@ Re-derive the Rust summary set for one declared source and emit a manifest that 
 |---|---|---|---|---|
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-interprocedural/v0) to reuse unchanged summaries from. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+
+
+## `mumei-agent rust-summaries-attempt`
+
+Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 
 
 ## `mumei-agent mcp-server`
