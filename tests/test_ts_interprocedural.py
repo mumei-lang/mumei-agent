@@ -4,6 +4,7 @@ No compiler integration — sources are self-contained single units.
 """
 
 import json
+import os
 
 import pytest
 
@@ -6767,3 +6768,42 @@ def test_attempt_route_rejects_output_overwriting_source(
     out = json.loads(capsys.readouterr().out)
     assert out["error"]["reason"] == "output_overwrites_source"
     assert src.read_text() == _SRC_TWO
+
+
+def test_attempt_route_rejects_output_hardlink_to_source(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    link = tmp_path / "linked.ts"
+    os.link(src, link)
+    with pytest.raises(SystemExit) as exc:
+        ts.main_attempt(_attempt_args(src, output=link))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+    assert src.read_text() == _SRC_TWO
+
+
+def test_attempt_route_skips_candidate_when_inputs_change(
+    tmp_path, capsys, monkeypatch
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    from agent import attempt_runner
+
+    real_run = attempt_runner.AttemptRunner.run
+
+    def run_then_modify(self, request, argv, memory_bound_mb=None):
+        src.write_text(_SRC_TWO_CHANGED)
+        return real_run(
+            self, request, argv, memory_bound_mb=memory_bound_mb
+        )
+
+    monkeypatch.setattr(
+        attempt_runner.AttemptRunner, "run", run_then_modify
+    )
+    ts.main_attempt(_attempt_args(src))
+    report = json.loads(capsys.readouterr().out)
+    assert report["sequence"].get("selected_result") is None
+    assert "candidate" not in report
