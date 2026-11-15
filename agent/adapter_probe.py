@@ -69,6 +69,7 @@ from agent.attempt_runner import (
     AttemptRunner,
 )
 from agent.verification_attempt import (
+    AttemptCancelRequest,
     AttemptExecutionRequest,
     AttemptNormalizedResult,
 )
@@ -208,6 +209,20 @@ class AdapterProbeRequest:
             ),
             self.attempt_number,
             self.timeout_ms,
+        )
+
+    def cancel_request(self) -> AttemptCancelRequest:
+        """The declared cancel descriptor for this probe attempt.
+
+        Bound to the same fingerprint and attempt ordinal as
+        `execution_request()` — the descriptor only names which
+        running record a host proposes to stop; it never signals a
+        process, confirms delivery or proves a stop.
+        """
+        execution = self.execution_request()
+        return AttemptCancelRequest(
+            execution.request_fingerprint,
+            execution.attempt_number,
         )
 
 

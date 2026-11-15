@@ -2666,6 +2666,16 @@ availability/stamp/tool_version cross the boundary into observations,
 so probe stdout or exit detail cannot leak into a routing decision.
 Concurrency, retry policy and Evidence acceptance remain open.
 
+### C11 declared probe cancellation
+
+`AdapterProbeRequest.cancel_request()` returns the declared
+`AttemptCancelRequest` bound to the same fingerprint and attempt
+ordinal as `execution_request()`. The descriptor only names which
+running probe record a host proposes to stop — it never signals a
+process, confirms delivery or proves a stop; dispatch and stop
+observation remain host duties. C11 stays partial; Evidence
+acceptance remains open.
+
 ### C11 bounded probe outcome history
 
 `agent.adapter_probe.AdapterProbeHistory` is a frozen record of probe

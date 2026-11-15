@@ -411,6 +411,18 @@ def test_observe_probes_missing_keeps_excluded():
     assert registry.plan(_route(), policy, obs).selected is None
 
 
+def test_probe_cancel_request_binds_fingerprint():
+    req = _req(attempt_number=2)
+    cancel = req.cancel_request()
+    ex = req.execution_request()
+    assert cancel.request_fingerprint == ex.request_fingerprint
+    assert cancel.attempt_number == 2
+    assert (
+        cancel.to_dict()["schema_version"]
+        == "mumei.verifier-attempt-cancel/v1"
+    )
+
+
 def test_probe_history_records_outcomes():
     req = _req()
     hist = AdapterProbeHistory.start(req)
