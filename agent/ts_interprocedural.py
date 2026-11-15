@@ -977,7 +977,10 @@ class _Builder:
                 )
             except _Unsupported as u:
                 raise _Unsupported(
-                    "unsupported_expression", u.span
+                    "unsupported_expression"
+                    if u.reason == "unsupported_statement"
+                    else u.reason,
+                    u.span,
                 ) from u
             left = node.child_by_field_name("left")
             return self._read_name(left, params, locals_, _span(left))
