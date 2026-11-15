@@ -912,6 +912,19 @@ def test_review2_param_write_marks_state_writes():
     assert s.effects == "state_writes"
 
 
+def test_review3_inferred_receiver_type_resolves_method():
+    # `let mut q = p` has no annotation — q must inherit p's
+    # declared type so `q.update(x)` resolves the impl method and
+    # its param_writes project onto q's slot.
+    s = _fn(
+        """struct P { v: u64 }
+impl P { fn update(&mut self, x: u64) { self.v = x; } }
+fn f(p: P, x: u64) -> u64 { let mut q = p; q.update(x); q.v }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
 def test_review2_opaque_mut_ref_arg_gains_deps():
     s = _fn(
         """extern "C" { fn ext(p: &mut u64, x: u64); }

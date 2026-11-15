@@ -581,6 +581,13 @@ class _Builder:
                     "unsupported_statement", _span(st)
                 )
             ltype = _type_name(st.child_by_field_name("type"))
+            if ltype is None and val is not None:
+                # `let q = p` / `let q = &mut p` — no annotation:
+                # inherit the source binding's type so `q.m()`
+                # still resolves the impl's method.
+                root = _arg_root(val)
+                if root is not None and self._type_envs:
+                    ltype = self._type_envs[-1].get(root)
             for bname in bound:
                 locals_[bname] = deps
                 if self._writes:
