@@ -4911,12 +4911,12 @@ def test_imported_field_member_deref_read_dot_import(go_types_helper):
     assert result.available and result.effects == "unknown"
 
 
-def test_imported_field_member_deref_unnamed_pointee_stays_closed(
+def test_imported_field_member_deref_unnamed_pointee_is_admitted(
     go_types_helper,
 ):
     # `*lib.VS3.PU` — the field member's pointee is `int64`
-    # (unnamed): no identity classifies the read's result, so it
-    # stays closed like `*lib.PU` does.
+    # (unnamed): it classifies by `pointee_kind` like `*lib.PU`, so
+    # the read admits dep-free and still records the transfer.
     lib = {
         "lib": {
             "s.go": "package lib\ntype S3 struct{ PU *int64 }\nvar VS3 S3\n",
@@ -4934,7 +4934,8 @@ def test_imported_field_member_deref_unnamed_pointee_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
 
 
 def test_imported_pointer_var_deref_read_flags_stale_dependents(

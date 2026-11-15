@@ -2019,8 +2019,8 @@ through a pointer-typed *field* member resolves the same way:
 `*lib.VS2.P` resolves the field like a field read, classifies the
 result through the field member's `*T` fact, and pins the base
 member's identity beside the pointee's — a field whose pointee
-carries no identity (`*lib.VS3.PU` on `PU *int64`) stays closed
-like `*lib.PU`. A bound
+carries no identity (`*lib.VS3.PU` on `PU *int64`) classifies by
+`pointee_kind` exactly like `*lib.PU`. A bound
 pointer dereferences the same way: `*t` on a parameter or local
 whose declared `*T` names the pointee admits, records its own
 imported transfer against the pointee identity (the binding's read
