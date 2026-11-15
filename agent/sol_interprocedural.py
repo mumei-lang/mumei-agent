@@ -184,6 +184,8 @@ class _Builder:
         for top in _children(root):
             if top.type == "contract_declaration":
                 self._register_contract(top)
+        if len(self.functions) > MAX_FUNCTIONS:
+            raise _Unsupported("analysis_limit", 0)
         summaries = []
         for name, fn_node in self.functions.items():
             try:
@@ -274,6 +276,17 @@ class _Builder:
                     )
                 ],
             )
+        ret = fn_node.child_by_field_name("return_type")
+        ret_name = None
+        if ret is not None:
+            rparam = next(
+                (c for c in _children(ret) if c.type == "parameter"),
+                None,
+            )
+            if rparam is not None:
+                rn = rparam.child_by_field_name("name")
+                if rn is not None:
+                    ret_name = rn.text.decode()
         body = fn_node.child_by_field_name("body") or next(
             (c for c in _children(fn_node) if c.type == "function_body"),
             None,
@@ -285,9 +298,15 @@ class _Builder:
             False,
             None,
         )
+        self._current_contract = self.contracts[key]
         locals_: dict[str, frozenset[int]] = {
             n: frozenset({i}) for n, i in param_index.items()
         }
+        if ret_name is not None and ret_name not in locals_:
+            # Named result (`returns (uint256 r)`) — a writable
+            # local slot a bare `return` reads back.
+            locals_[ret_name] = frozenset()
+        self._ret_name = ret_name
         try:
             rets = self._block(
                 body, locals_, param_index, summary
@@ -341,7 +360,9 @@ class _Builder:
                 None,
             )
             if expr is None:
-                return frozenset()
+                return locals_.get(
+                    getattr(self, "_ret_name", ""), frozenset()
+                )
             return self._expr(expr, locals_, param_index, summary)
         if t == "variable_declaration_statement":
             decl = next(
@@ -590,11 +611,14 @@ class _Builder:
                 SolCall(_span(node), name, actual_t, None)
             )
             return frozenset()
-        contract = next(
-            iter(self.contracts.values()), None
-        )
+        # Same-contract resolution first — two contracts may
+        # declare the same function name.
         target = None
-        for cname in {contract, *self.contracts.values()}:
+        cands = [getattr(self, "_current_contract", "")]
+        cands += [
+            c for c in self.contracts.values() if c != cands[0]
+        ]
+        for cname in cands:
             key = f"{cname}.{name}"
             if key in self.functions:
                 target = key

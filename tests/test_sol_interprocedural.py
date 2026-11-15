@@ -197,3 +197,28 @@ def test_context_key_stable_and_source_bound():
     s3 = _summarize(CONTRACT.replace("add", "sum"))
     assert s1.context_key == s2.context_key != s3.context_key
     assert s1.profile == "mumei.sol-interprocedural/v1"
+
+
+def test_named_return_slot():
+    src = """contract C {
+  function f(uint256 x) public pure returns (uint256 r) {
+    r = x + 1;
+    return;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_caller_contract_preferred_for_same_name():
+    src = """contract A {
+  function g(uint256 a) public pure returns (uint256) { return a; }
+}
+contract B {
+  function g(uint256 a, uint256 b) public pure returns (uint256) { return b; }
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    return g(x, y);
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})
