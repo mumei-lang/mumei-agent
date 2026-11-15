@@ -2734,7 +2734,10 @@ def verify_recheck(
     wiring as the `verify-recheck` CLI route. The declared budget must
     match the producer's explicit budget, and `recheck` is claimed only
     for uniquely-mapped exit codes (0 `consistent`, 3 `inconclusive`);
-    mid-run drift reports `inputs_changed` with no claimed outcome.
+    mid-run drift reports `inputs_changed` with no claimed outcome. A
+    `consistent` recheck reports `discharged_checks` —
+    `freshness` and `semantic_correspondence` — with the remaining
+    checks in `checks_not_performed`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
