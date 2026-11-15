@@ -39,6 +39,8 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harvest-tests` | 3 | Deterministically harvest observations from Python and Rust tests. |
 | `observe-tests` | 5 | Check harvested Python and Rust test observations against Mumei atoms. |
 | `config` | 2 | Show effective settings and where each value comes from |
+| `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -490,6 +492,35 @@ Show effective settings and where each value comes from
 |---|---|---|---|---|
 | `--json` | — | no | — | Output JSON. |
 | `--all` | — | no | — | Include default values. |
+
+
+## `mumei-agent rust-summaries`
+
+Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+
+## `mumei-agent rust-summaries-accept`
+
+Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-interprocedural/v0) to accept from. |
+| `--function` | `<<NAME>>` | yes | — | Function whose summary to accept — the emitted name or a bare member name when it is unambiguous. Accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
 
 
 ## `mumei-agent mcp-server`

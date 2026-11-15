@@ -27,6 +27,8 @@ _SUBCOMMANDS = {
     "cross-validate",
     "harvest-tests",
     "observe-tests",
+    "rust-summaries",
+    "rust-summaries-accept",
     "config",
 }
 
@@ -481,6 +483,41 @@ def main() -> None:
         build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(config_main(args))
+    elif command == "rust-summaries":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_parser as rust_build_parser,
+            main as rust_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries",
+            description=(
+                "Emit opt-in Rust interprocedural dependency "
+                "summaries as JSON — a conservative report, not a "
+                "proof or verdict."
+            ),
+        )
+        rust_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_main(args)
+    elif command == "rust-summaries-accept":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_accept_parser as rust_accept_build_parser,
+            main_accept as rust_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-accept",
+            description=(
+                "Accept one function's declared Rust summary "
+                "under the strict whole-context gate."
+            ),
+        )
+        rust_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_accept_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

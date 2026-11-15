@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import agent.rust_interprocedural as rust
 from agent.rust_interprocedural import (
     PROFILE,
     RustSummarySet,
@@ -533,3 +534,104 @@ def test_manifest_restoration_rejects_wrong_types():
     bad = dict(good, functions=[fn])
     with pytest.raises(ValueError, match="malformed"):
         RustSummarySet.from_dict(bad)
+
+
+# --- slice 9: rust-summaries / rust-summaries-accept routes -------------------
+
+def _rust_args(source, manifest=None, function=None):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest) if manifest else None,
+            "function": function,
+        },
+    )()
+
+
+_RS_SRC = (
+    "fn f(x: u64) -> u64 { g(x) }"
+    "fn g(v: u64) -> u64 { v + 1 }"
+)
+
+
+def test_summaries_route_emits_json(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    rust.main(_rust_args(src))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.rust-interprocedural/v0"
+    assert out["functions"][0]["name"] == "f"
+
+
+def test_accept_route_accepts_a_surviving_function(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(summarize_rust(_RS_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        rust.main_accept(_rust_args(src, manifest, "f"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.rust-summary-accept/v1"
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "f"
+
+
+def test_accept_route_refuses_a_changed_context(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(summarize_rust(_RS_SRC + "//x").to_dict())
+    )
+    with pytest.raises(SystemExit):
+        rust.main_accept(_rust_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "context_mismatch"
+
+
+def test_accept_route_refuses_an_unknown_function(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(summarize_rust(_RS_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit):
+        rust.main_accept(_rust_args(src, manifest, "absent"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "unknown_function"
+
+
+def test_accept_route_emits_the_live_record_not_the_forged_one(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    forged = summarize_rust(_RS_SRC).to_dict()
+    forged["functions"][0]["return_dependencies"] = [1, 2, 3]
+    manifest.write_text(json.dumps(forged))
+    with pytest.raises(SystemExit):
+        rust.main_accept(_rust_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["return_dependencies"] == [0]
+
+
+def test_accept_route_rejects_a_malformed_manifest(tmp_path, capsys):
+    src = tmp_path / "a.rs"
+    src.write_text(_RS_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text('{"schema_version": "mumei.other/v1"}')
+    with pytest.raises(SystemExit) as exc:
+        rust.main_accept(_rust_args(src, manifest, "f"))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "manifest_malformed"

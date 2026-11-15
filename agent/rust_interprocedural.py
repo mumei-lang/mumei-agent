@@ -1324,3 +1324,223 @@ def summarize_rust(source) -> RustSummarySet:
     if len(source) > MAX_SOURCE_BYTES:
         raise _Unsupported("analysis_limit", 0)
     return _Builder(source).build()
+
+
+# Opt-in CLI routes — `python -m agent rust-summaries <file>` prints
+# the summary set as deterministic JSON on stdout, and
+# `python -m agent rust-summaries-accept <file> --manifest <PATH>
+# --function <NAME>` accepts one function's declared summary under
+# the strict whole-context gate (context key match + the function
+# still present in the fresh derivation; `<NAME>` matches the
+# emitted name or a bare member name when unambiguous). These change
+# no default audit/CLI/MCP route: the analysis stays a conservative
+# dependency report, not a proof, verdict or trust gate, and a host
+# must invoke the subcommands explicitly. Inputs are bounded — an
+# oversized source or manifest is an error, never a silently
+# truncated analysis.
+ACCEPT_PROFILE = "mumei.rust-summary-accept/v1"
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+
+
+def build_parser(parser=None):
+    import argparse
+
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries",
+            description=(
+                "Emit opt-in Rust interprocedural dependency "
+                "summaries as JSON — a conservative report, not a "
+                "proof or verdict."
+            ),
+        )
+    parser.add_argument(
+        "source",
+        help="Path to a single Rust source file (at most 64 KiB).",
+    )
+    return parser
+
+
+def build_accept_parser(parser=None):
+    """Parser for ``rust-summaries-accept``: the produce route's
+    declared inputs plus ``--manifest`` and ``--function`` naming the
+    declared manifest and the function whose summary is accepted."""
+    parser = build_parser(parser)
+    parser.description = (
+        "Re-derive the Rust summary set for one declared source "
+        "and accept one function's summary under the strict "
+        "whole-context gate."
+    )
+    parser.add_argument(
+        "--manifest",
+        required=True,
+        metavar="<PATH>",
+        help=(
+            "Summary manifest (mumei.rust-interprocedural/v0) "
+            "to accept from."
+        ),
+    )
+    parser.add_argument(
+        "--function",
+        required=True,
+        metavar="<NAME>",
+        help=(
+            "Function whose summary to accept — the emitted name "
+            "or a bare member name when it is unambiguous. Accepted "
+            "only when the manifest's context key still matches the "
+            "fresh derivation and the function survives in it."
+        ),
+    )
+    return parser
+
+
+def _emit(payload, code):
+    import json
+    import sys
+
+    print(json.dumps(payload, sort_keys=True))
+    sys.exit(code)
+
+
+def _read_declared_source(path, schema):
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        _emit(
+            {
+                "schema_version": schema,
+                "error": {
+                    "reason": "source_unreadable",
+                    "detail": exc.strerror or str(exc),
+                },
+            },
+            2,
+        )
+    if len(raw) > MAX_SOURCE_BYTES:
+        _emit(
+            {
+                "schema_version": schema,
+                "error": {
+                    "reason": "source_too_large",
+                    "limit_bytes": MAX_SOURCE_BYTES,
+                },
+            },
+            2,
+        )
+    return raw
+
+
+def _read_declared_manifest(path):
+    import json
+
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read(MAX_MANIFEST_BYTES + 1)
+    except OSError as exc:
+        _emit(
+            {
+                "schema_version": ACCEPT_PROFILE,
+                "error": {
+                    "reason": "manifest_unreadable",
+                    "detail": exc.strerror or str(exc),
+                },
+            },
+            2,
+        )
+    if len(blob) > MAX_MANIFEST_BYTES:
+        _emit(
+            {
+                "schema_version": ACCEPT_PROFILE,
+                "error": {
+                    "reason": "manifest_too_large",
+                    "limit_bytes": MAX_MANIFEST_BYTES,
+                },
+            },
+            2,
+        )
+    try:
+        return RustSummarySet.from_dict(json.loads(blob))
+    except (TypeError, UnicodeDecodeError):
+        _emit(
+            {
+                "schema_version": ACCEPT_PROFILE,
+                "error": {
+                    "reason": "manifest_malformed",
+                    "detail": "declared summary manifest is malformed",
+                },
+            },
+            2,
+        )
+    except ValueError as exc:
+        _emit(
+            {
+                "schema_version": ACCEPT_PROFILE,
+                "error": {
+                    "reason": "manifest_malformed",
+                    "detail": str(exc),
+                },
+            },
+            2,
+        )
+
+
+def _summarize_declared(raw, schema):
+    try:
+        return summarize_rust(raw)
+    except _Unsupported as exc:
+        _emit(
+            {
+                "schema_version": schema,
+                "error": {"reason": exc.reason},
+            },
+            2,
+        )
+
+
+def main(args=None) -> None:
+    import json
+
+    if args is None:
+        args = build_parser().parse_args()
+    raw = _read_declared_source(args.source, PROFILE)
+    print(
+        json.dumps(
+            _summarize_declared(raw, PROFILE).to_dict(), sort_keys=True
+        )
+    )
+
+
+def main_accept(args=None) -> None:
+    if args is None:
+        args = build_accept_parser().parse_args()
+    declared = _read_declared_manifest(args.manifest)
+    raw = _read_declared_source(args.source, ACCEPT_PROFILE)
+    live = _summarize_declared(raw, ACCEPT_PROFILE)
+    report = {
+        "schema_version": ACCEPT_PROFILE,
+        "accepted": False,
+        "function": args.function,
+        "context_match": declared.context_key == live.context_key,
+    }
+    if not report["context_match"]:
+        report["reason"] = "context_mismatch"
+    else:
+        # Emit the freshly derived record, never the declared one —
+        # identical for honest manifests, and removes the manifest-
+        # forgery channel entirely. A bare member name must resolve
+        # to exactly one function.
+        matches = [
+            f
+            for f in live.functions
+            if f.name == args.function
+            or f.name.rsplit(".", 1)[-1] == args.function
+        ]
+        if not matches:
+            report["reason"] = "unknown_function"
+        elif len(matches) > 1:
+            report["reason"] = "ambiguous_function"
+        else:
+            report["accepted"] = True
+            report["summary"] = matches[0].to_dict()
+    _emit(report, 0)
