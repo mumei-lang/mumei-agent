@@ -535,7 +535,9 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
     derivation — the same monolithic check `for_function` enforces —
     and the named binding survives in the fresh report. The weaker
     identity partition never authorizes: a single changed byte anywhere
-    in the unit refuses the summary outright.
+    in the unit refuses the summary outright. The accepted record is
+    the fresh derivation's — the manifest's records are never trusted,
+    only its context key and binding identities.
     """
     if args is None:
         args = build_accept_parser().parse_args()
@@ -545,12 +547,12 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
         live = _summarize(sources, report, args.target_arch)
         context_match = restored.context_key == live.context_key
         by_id = {f.binding_id: f for f in restored.functions}
-        live_ids = {f.binding_id for f in live.functions}
+        live_by_id = {f.binding_id: f for f in live.functions}
         entry = by_id.get(args.binding)
         accepted = (
             context_match
             and entry is not None
-            and entry.binding_id in live_ids
+            and entry.binding_id in live_by_id
         )
         report_dict: dict[str, object] = {
             "schema_version": ACCEPT_PROFILE,
@@ -560,10 +562,13 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
         }
         if not context_match:
             report_dict["reason"] = "context_mismatch"
-        elif entry is None or entry.binding_id not in live_ids:
+        elif entry is None or entry.binding_id not in live_by_id:
             report_dict["reason"] = "unknown_binding"
         if accepted:
-            report_dict["summary"] = entry.to_dict()
+            # The strict gate checks the manifest's context key, not its
+            # records: emit the freshly derived summary — identical for
+            # an honest manifest, immune to a tampered declared record.
+            report_dict["summary"] = live_by_id[entry.binding_id].to_dict()
         document = (
             json.dumps(report_dict, indent=2, sort_keys=True) + "\n"
         )

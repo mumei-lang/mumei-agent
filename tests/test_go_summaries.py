@@ -758,6 +758,31 @@ def test_accept_fails_closed_on_context_mismatch(tmp_path, capsys):
     assert "summary" not in report
 
 
+def test_accept_emits_the_live_record_not_a_tampered_declared_one(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    manifest = json.loads(manifest_path.read_text())
+    live_record = dict(manifest["functions"][0])
+    binding = live_record["binding_id"]
+    # Tamper the declared record while keeping the true context key:
+    # accept must not echo the forged field back.
+    manifest["functions"][0]["key"] = "forged"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_accept(
+        capsys,
+        _accept_args(
+            helper, manifest_path, source, extra=["--binding", binding]
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["accepted"] is True
+    assert report["summary"] == live_record
+
+
 def test_accept_rejects_an_unknown_binding(tmp_path, capsys):
     helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
     source = _write_source(tmp_path, "main.go", SOURCE)
