@@ -2748,6 +2748,18 @@ in-process; no audit/CLI/MCP route changes.
   x`) bind the name to the RHS deps like a scalar slot — an
   approximation that keeps calls and effects flowing.
 
+### C06 Solidity struct literals / call options / break (slice 14)
+
+- `S(a, b)` / `S({x: a})` — struct declarations register in
+  `_struct_names`; a literal records an opaque `new S` call
+  and binds the name to every field's deps. Named-argument
+  call options (`f{value: x}(...)`, `S({x: a})`) unwrap via
+  `struct_expression`/`call_struct_argument`, their values
+  joining the args.
+- `break`/`continue` are no-ops in the single-pass may-analysis:
+  the statement following them stays reachable on the
+  not-taken path, so skipping it would under-approximate.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

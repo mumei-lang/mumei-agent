@@ -199,6 +199,7 @@ class _Builder:
         self._contract_names: set[str] = set()
         self._usings: dict[str, list[str]] = {}
         self._free_fns: dict[str, list[str]] = {}
+        self._struct_names: set[str] = set()
         self._all_state_vars: dict[str, set[str]] = {}
 
     # -- unit scan ----------------------------------------------------
@@ -219,6 +220,17 @@ class _Builder:
                 "library_declaration",
             }:
                 self._register_contract(top)
+            elif top.type == "struct_declaration":
+                sname = top.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(top)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if sname is not None:
+                    self._struct_names.add(sname.text.decode())
             elif top.type == "function_definition":
                 fname = top.child_by_field_name("name") or next(
                     (
@@ -314,6 +326,18 @@ class _Builder:
         )
         if body is None:
             return
+        for c in _children(body):
+            if c.type == "struct_declaration":
+                sname = c.child_by_field_name("name") or next(
+                    (
+                        cc
+                        for cc in _children(c)
+                        if cc.type == "identifier"
+                    ),
+                    None,
+                )
+                if sname is not None:
+                    self._struct_names.add(sname.text.decode())
         for c in _children(node):
             if c.type == "inheritance_specifier":
                 anc = c.child_by_field_name("ancestor")
@@ -931,6 +955,10 @@ class _Builder:
                 cond, update, body, locals_, param_index,
                 summary, init=init,
             )
+        if t in {"break_statement", "continue_statement"}:
+            # May-analysis: a break/continue may not be taken,
+            # so following statements stay reachable — no-op.
+            return None
         if t == "revert_statement":
             err = next(
                 (c for c in _children(st) if c.type == "expression"),
@@ -1466,6 +1494,28 @@ class _Builder:
             and len(_children(fn_expr)) == 1
         ):
             fn_expr = _children(fn_expr)[0]
+        opt_deps = frozenset()
+        if (
+            fn_expr is not None
+            and fn_expr.type == "struct_expression"
+        ):
+            # `f{value: x, gas: y}(...)` — call options wrap the
+            # callee; option values' deps join the args.
+            callee_expr = fn_expr.child_by_field_name("type")
+            for sf in _children(fn_expr):
+                if sf.type == "struct_field_assignment":
+                    v = sf.child_by_field_name("value")
+                    if v is not None:
+                        opt_deps |= self._expr(
+                            v, locals_, param_index, summary
+                        )
+            if (
+                callee_expr is not None
+                and callee_expr.type == "expression"
+                and len(_children(callee_expr)) == 1
+            ):
+                callee_expr = _children(callee_expr)[0]
+            fn_expr = callee_expr
         if (
             fn_expr is not None
             and fn_expr.type == "member_expression"
@@ -1535,6 +1585,23 @@ class _Builder:
         ]
         actual = []
         for a in args:
+            struct_args = [
+                c
+                for c in _children(a)
+                if c.type == "call_struct_argument"
+            ]
+            if struct_args:
+                # `{name: value, ...}` call options / struct
+                # literal fields — every value's deps union.
+                ndeps = frozenset()
+                for sa in struct_args:
+                    v = sa.child_by_field_name("value")
+                    if v is not None:
+                        ndeps |= self._expr(
+                            v, locals_, param_index, summary
+                        )
+                actual.append(ndeps)
+                continue
             expr = next(
                 (c for c in _children(a) if c.type == "expression"),
                 a if a.type == "expression" else None,
@@ -1546,6 +1613,8 @@ class _Builder:
             actual.append(
                 self._expr(expr, locals_, param_index, summary)
             )
+        if opt_deps:
+            actual.append(opt_deps)
         actual_t = tuple(actual)
         actual_union = frozenset()
         for a in actual:
@@ -1717,6 +1786,17 @@ class _Builder:
                 if base in self._overload_groups:
                     targets = self._overload_groups[base]
                     break
+        if not targets and name in self._struct_names:
+            # `S(a, b)` / `S({x: a})` — a struct literal is a
+            # value construction, not a call: the result slot
+            # carries every field's deps.
+            summary.calls.append(
+                SolCall(
+                    _span(node), f"new {name}", actual_t,
+                    actual_union,
+                )
+            )
+            return actual_union
         if not targets and name in self._contract_names:
             # `IERC20(token)` — a contract cast; the wrapped
             # expression's deps flow through.

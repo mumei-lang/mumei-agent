@@ -1158,3 +1158,56 @@ contract C {
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice14_struct_literal_binds_fields():
+    s = _fn(
+        """contract C { struct S { uint x; uint y; }
+    function f(uint a) public returns (uint) {
+        S memory s = S(a, 2);
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice14_struct_literal_named_fields():
+    s = _fn(
+        """contract C { struct S { uint x; uint y; }
+    function f(uint a) public returns (uint) {
+        S memory s = S({x: a, y: 0});
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice14_call_options_flow():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        ext.g{value: a}();
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "unknown"
+
+
+def test_slice14_break_continue_noop():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        uint s = 0;
+        for (uint i = 0; i < a; i++) { if (i > 5) break; s = i; }
+        return s;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
