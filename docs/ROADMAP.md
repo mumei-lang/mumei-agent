@@ -3305,6 +3305,19 @@ they run once at import, so their calls and writes reach
 the unit. `o!.a = v` admits too — `non_null_expression`
 unwraps in the member-target walk.
 
+### C06 TypeScript JSON surface and opt-in CLI (slice 49)
+
+`TsSummarySet.to_dict()` (plus `to_dict` on every record type)
+serializes the summary deterministically — sorted dependency
+lists, `null` for an unavailable result — and a new opt-in
+subcommand `python -m agent ts-summaries <file>` prints it on
+stdout. This changes no default audit/CLI/MCP route: a host
+must invoke the subcommand explicitly, the report is a
+conservative dependency analysis, not a proof, verdict or
+trust gate, and input is bounded (64 KiB — an oversized or
+unreadable source exits 2 with a structured error, never a
+silently truncated analysis).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

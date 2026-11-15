@@ -3,6 +3,8 @@
 No compiler integration — sources are self-contained single units.
 """
 
+import json
+
 import pytest
 
 pytest.importorskip("tree_sitter_typescript")
@@ -4546,3 +4548,51 @@ def test_non_null_base_write_admits():
         " const o = {a: 0}; o!.a = x; return o.a; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 49: JSON surface + opt-in CLI route ------------------
+
+
+def test_summary_set_to_dict_shape():
+    s = ts.summarize_typescript(
+        "function g(a: number): number { return a; }"
+        " function f(x: number): number { return g(x); }"
+    )
+    d = s.to_dict()
+    assert d["profile"] == "mumei.ts-interprocedural/v1"
+    assert len(d["context_key"]) == 64
+    (f_summary,) = [
+        fn for fn in d["functions"] if fn["name"] == "f"
+    ]
+    assert f_summary["available"] is True
+    assert f_summary["return_dependencies"] == [0]
+    assert f_summary["calls"][0]["callee"] == "g"
+    assert f_summary["calls"][0]["arguments"] == [[0]]
+
+
+def test_to_dict_unavailable_is_null():
+    s = ts.summarize_typescript(
+        "function f(x: number): number { return missing(x); }"
+    )
+    d = s.to_dict()
+    assert d["functions"][0]["return_dependencies"] is None
+    assert d["functions"][0]["gaps"][0]["reason"] == "call_unresolved"
+
+
+def test_cli_route_emits_json(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(
+        "function f(x: number): number { return x; }"
+    )
+    ts.main(type("A", (), {"source": str(src)})())
+    out = json.loads(capsys.readouterr().out)
+    assert out["profile"] == "mumei.ts-interprocedural/v1"
+    assert out["functions"][0]["return_dependencies"] == [0]
+
+
+def test_cli_route_missing_file(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        ts.main(type("A", (), {"source": str(tmp_path / "none.ts")})())
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "source_unreadable"

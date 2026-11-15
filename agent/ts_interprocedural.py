@@ -549,6 +549,9 @@ class TsSpan:
     start: int
     end: int
 
+    def to_dict(self) -> dict:
+        return {"start": self.start, "end": self.end}
+
 
 @dataclass(frozen=True)
 class TsGap:
@@ -557,6 +560,12 @@ class TsGap:
     reason: str
     span: TsSpan
     callee: str = ""
+
+    def to_dict(self) -> dict:
+        out = {"reason": self.reason, "span": self.span.to_dict()}
+        if self.callee:
+            out["callee"] = self.callee
+        return out
 
 
 @dataclass(frozen=True)
@@ -568,6 +577,14 @@ class TsCall:
     callee: str
     arguments: tuple[frozenset[int], ...]
     result: frozenset[int]
+
+    def to_dict(self) -> dict:
+        return {
+            "span": self.span.to_dict(),
+            "callee": self.callee,
+            "arguments": [sorted(a) for a in self.arguments],
+            "result": sorted(self.result),
+        }
 
 
 @dataclass(frozen=True)
@@ -586,12 +603,35 @@ class TsFunctionSummary:
     pinned: tuple[str, ...] = ()
     effects: str = "none_in_supported_fragment"
 
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "available": self.available,
+            "parameters": list(self.parameters),
+            "return_dependencies": (
+                None
+                if self.return_dependencies is None
+                else sorted(self.return_dependencies)
+            ),
+            "calls": [c.to_dict() for c in self.calls],
+            "gaps": [g.to_dict() for g in self.gaps],
+            "pinned": list(self.pinned),
+            "effects": self.effects,
+        }
+
 
 @dataclass(frozen=True)
 class TsSummarySet:
     context_key: str
     functions: tuple[TsFunctionSummary, ...]
     profile: str = PROFILE
+
+    def to_dict(self) -> dict:
+        return {
+            "profile": self.profile,
+            "context_key": self.context_key,
+            "functions": [f.to_dict() for f in self.functions],
+        }
 
 
 class _Unsupported(Exception):
@@ -4991,4 +5031,78 @@ def summarize_typescript(source: "str | bytes") -> TsSummarySet:
     return TsSummarySet(
         hashlib.sha256(raw).hexdigest(),
         builder.summarize_all(),
+    )
+
+
+# Opt-in CLI route — `python -m agent ts-summaries <file>` prints the
+# summary set as deterministic JSON on stdout. This changes no default
+# audit/CLI/MCP route: the analysis stays a conservative dependency
+# report, not a proof, verdict or trust gate, and a host must invoke
+# the subcommand explicitly. Input is bounded — an oversized source is
+# an error, never a silently truncated analysis.
+MAX_SOURCE_BYTES = 64 * 1024
+
+
+def build_parser(parser=None):
+    import argparse
+
+    if parser is None:
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries",
+            description=(
+                "Emit opt-in TypeScript interprocedural dependency "
+                "summaries as JSON — a conservative report, not a "
+                "proof or verdict."
+            ),
+        )
+    parser.add_argument(
+        "source",
+        help="Path to a single TypeScript/JavaScript source file "
+        "(at most 64 KiB).",
+    )
+    return parser
+
+
+def main(args=None) -> None:
+    import json
+    import sys
+
+    if args is None:
+        args = build_parser().parse_args()
+    try:
+        with open(args.source, "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        print(
+            json.dumps(
+                {
+                    "profile": PROFILE,
+                    "error": {
+                        "reason": "source_unreadable",
+                        "detail": exc.strerror or str(exc),
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        sys.exit(2)
+    if len(raw) > MAX_SOURCE_BYTES:
+        print(
+            json.dumps(
+                {
+                    "profile": PROFILE,
+                    "error": {
+                        "reason": "source_too_large",
+                        "limit_bytes": MAX_SOURCE_BYTES,
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        sys.exit(2)
+    print(
+        json.dumps(
+            summarize_typescript(raw).to_dict(),
+            sort_keys=True,
+        )
     )

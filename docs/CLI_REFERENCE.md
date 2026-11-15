@@ -29,6 +29,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
 | `validate-spec-to-code` | 8 | Detect missing implementation constraints and report the spec constraint to code line relationship. |
+| `ts-summaries` | 0 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `validate-code-to-spec` | 8 | Detect spec drift by comparing changed code to specs. |
 | `verify-conformance` | 8 | Return structured JSON for natural-language spec to code conformance. |
 | `verify-traceability` | 8 | Return structured JSON for bidirectional spec/code traceability. |
@@ -305,6 +306,17 @@ Detect missing implementation constraints and report the spec constraint to code
 | `--format` | `{human, json, markdown}` | no | markdown | Output format (default: markdown). |
 | `--no-llm` | — | no | — | Skip LLM contract inference. |
 | `--no-mumei` | — | no | — | Skip mumei verify. |
+
+
+## `mumei-agent ts-summaries`
+
+Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single TypeScript/JavaScript source file (at most 64 KiB). |
 
 
 ## `mumei-agent validate-code-to-spec`

@@ -21,6 +21,7 @@ _SUBCOMMANDS = {
     "verify-conformance",
     "verify-traceability",
     "self-correct",
+    "ts-summaries",
     "mcp-server",
     "check-spec-health",
     "migrate-suggest",
@@ -245,6 +246,21 @@ def main() -> None:
         build_validate_spec_to_code_parser(parser)
         args = parser.parse_args(argv[1:])
         main_validate_spec_to_code(args)
+    elif command == "ts-summaries":
+        import argparse
+        from agent.ts_interprocedural import build_parser as ts_build_parser, main as ts_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries",
+            description=(
+                "Emit opt-in TypeScript interprocedural dependency "
+                "summaries as JSON — a conservative report, not a "
+                "proof or verdict."
+            ),
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
     elif command == "validate-code-to-spec":
         import argparse
         from agent.cross_validation import (
