@@ -182,6 +182,26 @@ class _Builder:
                     continue
                 self.functions[name.text.decode()] = top
                 continue
+            if top.type == "mod_item":
+                decls = top.child_by_field_name("body")
+                mname = top.child_by_field_name("name")
+                if decls is None or mname is None:
+                    continue
+                mtext = mname.text.decode()
+                for item in _children(decls):
+                    if item.type != "function_item":
+                        continue
+                    fname = item.child_by_field_name("name")
+                    if fname is None:
+                        continue
+                    base = fname.text.decode()
+                    ukey = f"{mtext}.{base}"
+                    n = 1
+                    while ukey in self.functions:
+                        n += 1
+                        ukey = f"{mtext}.{base}#{n}"
+                    self.functions[ukey] = item
+                continue
             if top.type in {"const_item", "static_item"}:
                 gname = top.child_by_field_name("name")
                 if gname is not None:

@@ -405,3 +405,12 @@ def test_slice6_loop_break_value():
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice7_mod_scoped_call():
+    s = _fn(
+        """mod inner { pub fn h(a: u64) -> u64 { a + 1 } }
+fn f(x: u64) -> u64 { inner::h(x) }""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
