@@ -473,7 +473,6 @@ can't evaluate closes the whole unit (`unsupported_unit`) —
 top-level statements (`console.log(x)`, `init()`,
 module-scope `if`/`for`) evaluate in source order in pass 2,
 so an unmodelled one still closes;
-`extends` on a non-class value,
 `eval`, `with`, and `new` on a non-class/non-function
 ctor stay
 closed (`unsupported_signature` / `unsupported_statement` /
