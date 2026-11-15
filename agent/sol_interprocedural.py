@@ -1588,6 +1588,13 @@ class _Builder:
         if t == "identifier":
             name = node.text.decode()
             if name not in locals_:
+                if name in self._all_state_vars_of(
+                    getattr(self, "_current_contract", "")
+                ):
+                    # A non-scalar state var (`arr`, `m`) is an
+                    # opaque container — dep-free external read,
+                    # not a binding failure.
+                    return frozenset()
                 raise _Unsupported(
                     "binding_unavailable", _span(node)
                 )
@@ -1704,16 +1711,12 @@ class _Builder:
                     index, locals_, param_index, summary
                 )
             if base is not None:
-                try:
-                    deps |= self._expr(
-                        base, locals_, param_index, summary
-                    )
-                except _Unsupported as exc:
-                    # An unresolvable CALL in the base is a gap
-                    # — an opaque container base (`m[k].f`,
-                    # `this.xs.n`) is dep-free by design.
-                    if exc.reason == "call_unresolved":
-                        raise
+                # Any failure analysing the base propagates as
+                # a real gap — silently dropping it would lose
+                # deps and still mark the summary available.
+                deps |= self._expr(
+                    base, locals_, param_index, summary
+                )
             return deps
         if t == "binary_expression":
             named = _children(node)
@@ -1796,11 +1799,12 @@ class _Builder:
                 len(idents) == 2
                 and idents[0].text == b"this"
                 and idents[1].text.decode()
-                in self._state_vars_of(
+                in self._all_state_vars_of(
                     getattr(self, "_current_contract", "")
                 )
             ):
-                # `this.s` — state var read through `this`.
+                # `this.s` — state var read through `this`
+                # (non-scalar containers read dep-free too).
                 return locals_.get(
                     idents[1].text.decode(), frozenset()
                 )
@@ -1812,13 +1816,11 @@ class _Builder:
             obj = node.child_by_field_name("object")
             deps = frozenset()
             if obj is not None:
-                try:
-                    deps = self._expr(
-                        obj, locals_, param_index, summary
-                    )
-                except _Unsupported as exc:
-                    if exc.reason == "call_unresolved":
-                        raise
+                # A base that fails to analyse propagates as a
+                # gap, the same as an unresolvable call.
+                deps = self._expr(
+                    obj, locals_, param_index, summary
+                )
             return deps
         if t in {
             "payable_conversion_expression",

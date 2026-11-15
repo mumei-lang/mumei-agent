@@ -2217,3 +2217,21 @@ contract C {
     assert not s.available or s.gaps
     whole = sol.summarize_solidity(src)
     assert whole.functions
+
+
+
+def test_review_base_failure_reasons_all_propagate_as_gap():
+    src = """contract C {
+  function g(uint256 a) public pure returns (uint256) {
+    return a;
+  }
+  function f(uint256 a) public returns (uint256) {
+    return g(undeclared)[0];
+  }
+}"""
+    s = _fn(src, "f")
+    # Only `call_unresolved` used to propagate — a binding
+    # failure inside the index base was silently dep-free and
+    # still marked available.
+    assert not s.available
+    assert any(g.reason == "binding_unavailable" for g in s.gaps)
