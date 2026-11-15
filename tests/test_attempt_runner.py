@@ -259,6 +259,56 @@ def test_run_result_rejects_invalid_metadata():
         result.complete = False
 
 
+def test_feed_bytes_reach_child_stdin():
+    result = AttemptRunner().run(
+        request(),
+        argv("import sys; print(len(sys.stdin.buffer.read()))"),
+        feed_bytes=b"x" * 4096,
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout.strip() == b"4096"
+
+
+def test_feed_rejects_non_bytes_and_oversize():
+    runner = AttemptRunner()
+    with pytest.raises(ValueError):
+        runner.run(request(), argv("pass"), feed_bytes="nope")
+    with pytest.raises(ValueError):
+        runner.run(
+            request(),
+            argv("pass"),
+            feed_bytes=b"x" * (attempt_runner.MAX_FEED_BYTES + 1),
+        )
+
+
+def test_feed_stdin_stop_event_bounds_a_full_pipe():
+    """A descendant holding stdin's read end open without reading can
+    leave the write side blocked on a full pipe; the stop event must
+    still bound the feeder."""
+    import fcntl
+    import types
+
+    read_fd, write_fd = os.pipe()
+    if hasattr(fcntl, "F_SETPIPE_SZ"):
+        fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, 4096)
+    os.write(write_fd, b"z" * 4096)
+    proc = types.SimpleNamespace(stdin=os.fdopen(write_fd, "wb"))
+    stop = threading.Event()
+    feeder = threading.Thread(
+        target=attempt_runner._feed_stdin,
+        args=(proc, b"y" * attempt_runner.MAX_FEED_BYTES, stop),
+        daemon=True,
+    )
+    feeder.start()
+    time.sleep(0.2)
+    assert feeder.is_alive()
+    stop.set()
+    feeder.join(5)
+    assert not feeder.is_alive()
+    os.close(read_fd)
+
+
 def test_run_results_feed_sequence_reconciliation():
     runner = AttemptRunner()
     req = request()

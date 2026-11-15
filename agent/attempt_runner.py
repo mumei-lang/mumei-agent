@@ -11,6 +11,7 @@ truncation happened, not that the producer stopped writing.
 
 import hashlib
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -72,22 +73,43 @@ MAX_MEMORY_BOUND_MB = 1_048_576
 MAX_FEED_BYTES = 65_536
 
 
-def _feed_stdin(process: subprocess.Popen, data: bytes) -> None:
+def _feed_stdin(
+    process: subprocess.Popen, data: bytes, stop: threading.Event
+) -> None:
     """Write `data` to the child's stdin then close it.
 
-    Runs on a daemon thread: a bounded write (<= MAX_FEED_BYTES) fits
-    the pipe buffer or drains as the child reads; a child that exits
-    early or never reads surfaces `BrokenPipeError`/EPIPE, which is
-    simply the observed run outcome — feeding never blocks the poll
-    loop or changes the terminal record."""
+    Runs on a daemon thread writing in non-blocking chunks: a
+    bounded write (<= MAX_FEED_BYTES) fits the pipe buffer or drains
+    as the child reads; a child that exits early or never reads
+    surfaces `BrokenPipeError`/EPIPE — simply the observed run
+    outcome. `stop` (set once the run is terminal) bounds the worst
+    case: a descendant that inherits the read end but never reads
+    leaves the pipe full forever, and without the event the blocked
+    write would linger past the join timeout."""
+    fd = process.stdin.fileno()
     try:
-        process.stdin.write(data)
-        process.stdin.close()
-    except (BrokenPipeError, OSError, ValueError):
+        os.set_blocking(fd, False)
+    except OSError:
+        pass
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view) and not stop.is_set():
         try:
-            process.stdin.close()
+            _, writable, _ = select.select([], [fd], [], POLL_SECONDS)
         except (OSError, ValueError):
-            pass
+            break
+        if not writable:
+            continue
+        try:
+            offset += os.write(fd, view[offset:])
+        except BlockingIOError:
+            continue
+        except (BrokenPipeError, OSError, ValueError):
+            break
+    try:
+        process.stdin.close()
+    except (OSError, ValueError):
+        pass
 
 
 def _memory_bound_preexec(bound_mb: int):
@@ -368,11 +390,12 @@ class AttemptRunner:
                 b"",
                 True,
             )
+        feed_stop = threading.Event()
         feeder = None
         if feed_bytes is not None:
             feeder = threading.Thread(
                 target=_feed_stdin,
-                args=(process, feed_bytes),
+                args=(process, feed_bytes, feed_stop),
                 daemon=True,
             )
             feeder.start()
@@ -424,6 +447,7 @@ class AttemptRunner:
                 pass
         collector.join(COLLECTOR_JOIN_SECONDS)
         if feeder is not None:
+            feed_stop.set()
             feeder.join(COLLECTOR_JOIN_SECONDS)
         for event in events:
             record = record.record(event)

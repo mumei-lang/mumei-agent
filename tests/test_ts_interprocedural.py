@@ -6795,7 +6795,8 @@ def test_attempt_route_skips_candidate_when_inputs_change(
     real_run = attempt_runner.AttemptRunner.run
 
     def run_then_modify(
-        self, request, argv, memory_bound_mb=None, cancel_event=None
+        self, request, argv, memory_bound_mb=None, cancel_event=None,
+        feed_bytes=None,
     ):
         src.write_text(_SRC_TWO_CHANGED)
         return real_run(
@@ -6804,6 +6805,7 @@ def test_attempt_route_skips_candidate_when_inputs_change(
             argv,
             memory_bound_mb=memory_bound_mb,
             cancel_event=cancel_event,
+            feed_bytes=feed_bytes,
         )
 
     monkeypatch.setattr(

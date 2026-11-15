@@ -98,19 +98,23 @@ def _check_request(args: argparse.Namespace) -> None:
                 continue
 
 
-def _attempt_fingerprint(args: argparse.Namespace) -> str:
+def _attempt_fingerprint(
+    args: argparse.Namespace, evidence_bytes: bytes
+) -> str:
     """Bind the request's declared inputs into one request identity.
 
-    The fingerprint covers the Core executable's bytes and the saved
-    record's bytes — what the check invocation consumes. The record's
-    own labels/paths are never read.
+    The fingerprint covers the Core executable's bytes and the record
+    bytes actually fed to the check — hashing the fed bytes rather
+    than re-reading the file keeps a mutation between the feed read
+    and the fingerprint from silently binding content the check
+    never saw. The record's own labels/paths are never read.
     """
     request = {
         "schema_version": CHECK_REQUEST_PROFILE,
         "core": _file_sha256(args.core),
         "evidence": {
             "path": args.evidence,
-            "sha256": _file_sha256(args.evidence),
+            "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
         },
     }
     return hashlib.sha256(
@@ -201,7 +205,7 @@ def run_check(args: argparse.Namespace) -> dict:
     _check_request(args)
 
     evidence_bytes = Path(args.evidence).read_bytes()
-    fingerprint = _attempt_fingerprint(args)
+    fingerprint = _attempt_fingerprint(args, evidence_bytes)
     argv = (args.core, "evidence", "check", "--stdin", "--json")
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
@@ -214,7 +218,12 @@ def run_check(args: argparse.Namespace) -> dict:
         feed_bytes=evidence_bytes,
     )
     try:
-        inputs_changed = _attempt_fingerprint(args) != fingerprint
+        inputs_changed = (
+            _attempt_fingerprint(
+                args, Path(args.evidence).read_bytes()
+            )
+            != fingerprint
+        )
     except OSError:
         inputs_changed = True
     record = dispatch.run.record
