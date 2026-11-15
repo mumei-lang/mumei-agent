@@ -1072,6 +1072,11 @@ class AttemptNormalizedResult:
             raise ValueError(
                 "normalized result record has unknown or missing keys"
             )
+        if ("exit_code" in data) != (data.get("outcome") == "exited"):
+            raise ValueError(
+                "normalized result record carries exit_code only for"
+                " exited outcomes"
+            )
         stdout = data["stdout"]
         if (
             type(stdout) is not dict

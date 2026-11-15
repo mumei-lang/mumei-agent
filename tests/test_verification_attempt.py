@@ -4047,3 +4047,17 @@ def test_cancel_request_from_dict_rejects_malformed():
     data["extra"] = 1
     with pytest.raises(ValueError):
         AttemptCancelRequest.from_dict(data)
+
+
+def test_normalized_result_from_dict_rejects_null_exit_code_on_non_exited():
+    data = normalized_result(outcome="failed", exit_code=None).to_dict()
+    data["exit_code"] = None
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
+
+
+def test_normalized_result_from_dict_requires_exit_code_on_exited():
+    data = normalized_result().to_dict()
+    del data["exit_code"]
+    with pytest.raises(ValueError):
+        AttemptNormalizedResult.from_dict(data)
