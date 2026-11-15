@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 
 from agent.verification_attempt import (
+    MAX_COUNTER,
     MAX_STDOUT_BYTES,
     AttemptEvent,
     AttemptExecutionRequest,
@@ -345,20 +346,31 @@ def dispatch_attempt(
     runner: "AttemptRunner | None" = None,
     cancel_event: "threading.Event | None" = None,
     memory_bound_mb: int | None = None,
+    report_stamp: int | None = None,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
 
     `next_dispatch` must yield a request — nothing reserved, an attempt in
     flight or a terminal current record is a static error, not a run.
     `runner` defaults to a fresh `AttemptRunner`; the returned dispatch's
-    sequence has the run's terminal record reconciled in. Reconciling does
-    not select a result, capture an `AttemptOutput` or publish — those stay
-    explicit host steps.
+    sequence has the run's terminal record reconciled in. A stamped
+    sequence requires `report_stamp` — it is checked before spawn so a
+    missing, malformed or non-fresh stamp fails statically instead of
+    losing an observed run. Reconciling does not select a result, capture
+    an `AttemptOutput` or publish — those stay explicit host steps.
     """
     if type(sequence) is not AttemptSequence:
         raise ValueError("attempt dispatch requires an attempt sequence")
     if runner is not None and type(runner) is not AttemptRunner:
         raise ValueError("attempt dispatch requires an attempt runner")
+    if report_stamp is not None and (
+        type(report_stamp) is not int or not 1 <= report_stamp <= MAX_COUNTER
+    ):
+        raise ValueError("invalid attempt report stamp")
+    if sequence.report_stamp is not None and (
+        report_stamp is None or report_stamp <= sequence.report_stamp
+    ):
+        raise ValueError("attempt dispatch requires a fresh report stamp")
     request = sequence.next_dispatch()
     if request is None:
         raise ValueError("attempt dispatch requires a ready attempt")
@@ -368,4 +380,6 @@ def dispatch_attempt(
         cancel_event=cancel_event,
         memory_bound_mb=memory_bound_mb,
     )
-    return AttemptDispatch(sequence.reconcile_report(run.record), run)
+    return AttemptDispatch(
+        sequence.reconcile_report(run.record, report_stamp), run
+    )

@@ -664,3 +664,43 @@ def test_dispatch_attempt_result_is_frozen_and_bound():
     ):
         with pytest.raises(ValueError):
             AttemptDispatch(sequence, run)
+
+
+def stamped_sequence(stamp=1, timeout_ms=10_000):
+    return AttemptSequence(
+        FINGERPRINT,
+        timeout_ms,
+        (AttemptRecord(FINGERPRINT, 1, timeout_ms),),
+        report_stamp=stamp,
+    )
+
+
+def test_dispatch_attempt_forwards_a_fresh_report_stamp():
+    dispatch = dispatch_attempt(
+        stamped_sequence(3), argv("pass"), report_stamp=4
+    )
+    assert dispatch.sequence.report_stamp == 4
+    assert dispatch.sequence.current.state == "exited"
+
+
+def test_dispatch_attempt_adopts_the_first_report_stamp():
+    dispatch = dispatch_attempt(
+        ready_sequence(), argv("pass"), report_stamp=7
+    )
+    assert dispatch.sequence.report_stamp == 7
+
+
+@pytest.mark.parametrize("stamp", [None, 0, 2, 5])
+def test_dispatch_attempt_rejects_missing_or_stale_stamps(stamp):
+    sequence = stamped_sequence(5)
+    with pytest.raises(
+        ValueError, match="report stamp"
+    ):
+        dispatch_attempt(sequence, argv("pass"), report_stamp=stamp)
+    assert sequence.current is not None and sequence.current.state == "ready"
+
+
+@pytest.mark.parametrize("stamp", [-1, 0, 1.5, True, "7"])
+def test_dispatch_attempt_rejects_malformed_stamps(stamp):
+    with pytest.raises(ValueError, match="^invalid attempt report stamp$"):
+        dispatch_attempt(ready_sequence(), argv("pass"), report_stamp=stamp)
