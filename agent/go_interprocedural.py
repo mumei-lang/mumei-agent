@@ -3077,8 +3077,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 "unresolved_or_opaque_call", _span(node)
                             )
                         member, levels = resolved
+                        # `_index_member` counts the levels *below*
+                        # the outermost index — the element `len`
+                        # reads sits one `elem` deeper still, so the
+                        # whole chain descends `levels + 1` facts.
                         fact = member.type
-                        for _ in range(levels):
+                        for _ in range(levels + 1):
                             fact = (
                                 fact.elem if fact is not None else None
                             )
@@ -3086,10 +3090,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             operand.child_by_field_name("index")
                         ]
                         inner = operand.child_by_field_name("operand")
-                        while (
-                            inner is not None
-                            and inner.type == "index_expression"
-                        ):
+                        while True:
+                            while (
+                                inner is not None
+                                and inner.type
+                                == "parenthesized_expression"
+                            ):
+                                inner = next(
+                                    (
+                                        c
+                                        for c in inner.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if (
+                                inner is None
+                                or inner.type != "index_expression"
+                            ):
+                                break
                             indexes.append(
                                 inner.child_by_field_name("index")
                             )

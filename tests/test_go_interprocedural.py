@@ -8496,6 +8496,56 @@ def test_imported_len_of_map_element_is_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_imported_len_of_parenthesized_chain_carries_inner_index_deps(
+    go_types_helper,
+):
+    # `len((lib.V3[i])[j])` — parentheses inside the chain must not
+    # hide the inner index's dependencies.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar V3 [][][]int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i, j int64) int64 { return int64(len((lib.V3[i])[j])) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_imported_len_of_channel_element_stays_closed(go_types_helper):
+    # `len(lib.VC2[i])` — `len` on a channel is valid Go, but the
+    # element's kind is not a modelled container: stays opaque.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar VC2 []chan int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return int64(len(lib.VC2[0])) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_len_of_call_result_stays_closed(
     go_types_helper,
 ):
