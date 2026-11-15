@@ -7,7 +7,9 @@ never against a live compiler.
 import hashlib
 import json
 import os
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,34 @@ import pytest
 from agent.go_summaries import build_parser, main
 from agent.go_type_snapshot import PACKAGE_PROFILE, TARGETS
 from tests.test_go_type_snapshot import SOURCE, schema_fixture
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="session")
+def real_go_types(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip(
+            "Optional Go compiler integration requires Go 1.26+ (mandatory in CI)"
+        )
+    binary = tmp_path_factory.mktemp("go-types") / "go-types"
+    env = {
+        **os.environ,
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "GOSUMDB": "off",
+        "GOWORK": "off",
+    }
+    subprocess.run(
+        [go, "build", "-o", str(binary), "."],
+        cwd=ROOT / "tools/go-types",
+        env=env,
+        capture_output=True,
+        check=True,
+        timeout=120,
+    )
+    return binary
 
 
 def _write_helper(tmp_path: Path, payload: bytes | None, *, fail: str = "") -> Path:
@@ -268,3 +298,46 @@ def test_target_arch_choices_cover_every_declared_target():
     parser = build_parser()
     action = next(a for a in parser._actions if a.dest == "target_arch")
     assert set(action.choices) == set(TARGETS)
+
+
+def test_real_helper_round_trip(tmp_path, capsys, real_go_types):
+    """The route speaks the helper's real wire contract, not only a stub's."""
+    source = _write_source(
+        tmp_path,
+        "main.go",
+        "package p\n"
+        "func F(x int64) int64 { return x }\n"
+        "func G(y int64) int64 { return F(y) }\n",
+    )
+    code, out, err = _run(capsys, _args(real_go_types, source))
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    assert manifest["schema_version"] == "mumei.go-scalar-parameter-deps/v1"
+    assert len(manifest["functions"]) == 2
+    # The G -> F call edge must survive the route end-to-end: a transfer
+    # whose result depends on the actual would be invisible to a
+    # function-count-only assertion.
+    calls = [
+        call
+        for entry in manifest["functions"]
+        for call in entry["calls"]
+    ]
+    assert calls and any(call["result"] for call in calls)
+
+
+def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
+    files = {
+        "a.go": "package p\nfunc F(x int64) int64 { return x }\n",
+        "b.go": "package p\nfunc G(y int64) int64 { return F(y) }\n",
+    }
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    code, out, err = _run(capsys, _args(real_go_types, *paths))
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    assert len(manifest["functions"]) == 2
+    calls = [
+        call
+        for entry in manifest["functions"]
+        for call in entry["calls"]
+    ]
+    assert calls and any(call["result"] for call in calls)
