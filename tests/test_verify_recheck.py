@@ -89,6 +89,16 @@ def test_consistent_recheck_selects_diagnostic(tmp_path, capsys):
     )
     assert "evidence_check" not in report
     assert "acceptance" not in report
+    assert report["discharged_checks"] == [
+        "freshness",
+        "semantic_correspondence",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "file_identity",
+        "producer_authenticity",
+    ]
 
 
 def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
@@ -112,6 +122,7 @@ def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
     report = json.loads(out)
     assert report["inputs_changed"] is True
     assert "recheck" not in report
+    assert "discharged_checks" not in report
     assert "candidate" not in report
     assert report["sequence"].get("selected_result") is None
 
@@ -128,6 +139,7 @@ def test_exit_one_publishes_lineage_without_claimed_outcome(
     assert code == 0
     report = json.loads(out)
     assert "recheck" not in report
+    assert "discharged_checks" not in report
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
     assert report["normalized"]["exit_code"] == 1
@@ -140,6 +152,7 @@ def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert report["recheck"] == "inconclusive"
+    assert "discharged_checks" not in report
     assert report["sequence"].get("selected_result") is None
     assert report["normalized"]["exit_code"] == 3
 

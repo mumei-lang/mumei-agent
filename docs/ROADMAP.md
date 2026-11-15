@@ -630,6 +630,16 @@ so it is claimed only through the lineage's `exit_code`. Mid-run input
 drift suppresses selection and any claimed outcome, reported as
 `inputs_changed`. No evidence_check runs: the recheck diagnostic is
 not verification-evidence-shaped — its exit code IS the verdict.
+A `consistent` outcome discharges two of the six semantic checks at
+representation level: the record still binds the declared source
+bytes' fresh same-profile verdict, so it is current (`freshness`) and
+its claims still correspond to the source's verified semantics
+(`semantic_correspondence`) — reported in `discharged_checks`, with
+`checks_not_performed` naming the rest (`claim_truth` — consistency
+is not a truth receipt — plus `file_identity`,
+`producer_authenticity` and `artifact_semantics`, the first two
+discharged by their own declared routes). A non-consistent run
+discharges nothing.
 C02 stays partial.
 
 ### C02/C10 declared native-recheck route (native-recheck)
