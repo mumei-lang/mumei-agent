@@ -2443,6 +2443,92 @@ def evidence_identity_check(evidence_path: str, source_path: str) -> str:
 
 
 @mcp.tool()
+def evidence_producer_check(
+    evidence_path: str,
+    tool: str,
+    adapter_id: str,
+    tool_version: str = "",
+    adapter_version: str = "",
+) -> str:
+    """Compare a stored Evidence record's provenance to declared
+    producer expectations.
+
+    Reads the declared `mumei.verification-evidence/v1` record's
+    `provenance` block under the same 64 KiB bounded read and strict
+    v1 shape as the CLI `evidence-producer-check` route, then emits
+    the `mumei.evidence-producer-identity/v1` descriptor —
+    `identity` is `"match"` when every declared expectation equals
+    the record's field, `"mismatch"` otherwise, with `mismatched`
+    naming the compared fields that differed.
+
+    Args:
+        evidence_path: Path to the declared evidence record JSON.
+        tool: Expected `provenance.tool.name`.
+        adapter_id: Expected `provenance.adapter.id`.
+        tool_version: Expected `provenance.tool.version` — empty
+            means not compared.
+        adapter_version: Expected `provenance.adapter.version` —
+            empty means not compared.
+
+    Returns:
+        JSON with `identity` — the descriptor — on success, or
+        `error` on a declared failure. This is a
+        representation-level producer pinning only: a match
+        discharges producer_authenticity, never claim truth, file
+        identity, freshness or correspondence (each stays named in
+        the descriptor's `checks_not_performed`).
+    """
+    try:
+        from agent.evidence_producer import compute_producer_descriptor
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    if (
+        not isinstance(evidence_path, str)
+        or not evidence_path
+        or "\n" in evidence_path
+    ):
+        return _err("evidence_path must be a nonempty single-line path")
+    for name, value in (("tool", tool), ("adapter_id", adapter_id)):
+        if not isinstance(value, str) or not value or "\n" in value:
+            return _err(f"{name} must be a nonempty single-line value")
+    for name, value in (
+        ("tool_version", tool_version),
+        ("adapter_version", adapter_version),
+    ):
+        if not isinstance(value, str) or "\n" in value:
+            return _err(f"{name} must be a single-line value")
+
+    def _redact_paths(text: str) -> str:
+        # Failure text goes to a model: declared checkout-local
+        # paths stay out of it — basenames only.
+        if evidence_path:
+            base = os.path.basename(evidence_path) or "<path>"
+            try:
+                text = text.replace(
+                    str(Path(evidence_path).resolve()), base
+                )
+            except (OSError, RuntimeError):
+                pass
+            text = text.replace(evidence_path, base)
+        return text
+
+    expectations = {
+        "tool.name": tool,
+        "tool.version": tool_version or None,
+        "adapter.id": adapter_id,
+        "adapter.version": adapter_version or None,
+    }
+    try:
+        descriptor = compute_producer_descriptor(
+            evidence_path, expectations
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_paths(str(exc)))
+    return _ok({"identity": descriptor})
+
+
+@mcp.tool()
 def evidence_compare(evidence_a_path: str, evidence_b_path: str) -> str:
     """Compare two declared Evidence records' claim surfaces.
 

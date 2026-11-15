@@ -48,6 +48,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check` | 5 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
+| `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
@@ -663,6 +664,22 @@ Check a declared evidence record's source binding against a declared source file
 |---|---|---|---|---|
 | `--evidence` | `<PATH>` | yes | — | Declared verification-evidence record (mumei.verification-evidence/v1 JSON). |
 | `--source` | `<PATH>` | yes | — | Declared source file the record is checked against. |
+| `--output` | `<PATH>` | no | — | Write the identity descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent evidence-producer-check`
+
+Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--evidence` | `<PATH>` | yes | — | Declared verification-evidence record (mumei.verification-evidence/v1 JSON). |
+| `--tool` | `<NAME>` | yes | — | Declared expected `provenance.tool.name`. |
+| `--adapter` | `<ID>` | yes | — | Declared expected `provenance.adapter.id`. |
+| `--tool-version` | `<VERSION>` | no | — | Declared expected `provenance.tool.version` — when omitted the version is not compared. |
+| `--adapter-version` | `<VERSION>` | no | — | Declared expected `provenance.adapter.version` — when omitted the version is not compared. |
 | `--output` | `<PATH>` | no | — | Write the identity descriptor to PATH instead of stdout. |
 
 
