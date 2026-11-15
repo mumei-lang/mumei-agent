@@ -2704,18 +2704,26 @@ Evidence acceptance remains open.
 ### C11 bounded probe-driven planning
 
 `agent.adapter_probe.plan_with_probes(registry, request, policy,
-observations, stamp=..., rounds=1)` runs the observe → re-plan loop:
-`plan()`, `probe_requests_for`, `observe_probes`, then `plan()` again
-with the accumulated observations — incrementing the stamp each round
-so the registry's freshness check accepts them. `rounds` is bounded by
-`MAX_PLAN_ROUNDS` (4); the loop stops early when a candidate is
-selected or a scheduling round emits no requests. The result,
-`AdapterProbePlan(plan, observations)`, hands the caller the final
-plan and the new observations to chain further planning.
+observations, stamp=..., rounds=1, max_parallel=1, histories=...,
+max_attempts=...)` runs the observe → re-plan loop: `plan()`,
+`probe_retry_requests`, `_run_probe_batch` (the same sequential /
+bounded-parallel execution `observe_probes` uses), then `plan()`
+again with the accumulated observations — incrementing the stamp each
+round so the registry's freshness check accepts them. `rounds` is
+bounded by `MAX_PLAN_ROUNDS` (4); the loop stops early when a
+candidate is selected or a scheduling round emits no requests.
+`histories` carries per-adapter `AdapterProbeHistory` records: each
+round's requests are scheduled through `probe_retry_requests`, so an
+adapter's `attempt_number` advances with its recorded history and the
+adapter is skipped once `max_attempts` is reached; every observed
+outcome is appended to the adapter's history. The result,
+`AdapterProbePlan(plan, observations, histories)`, hands the caller
+the final plan, the new observations, and the updated histories to
+chain further planning.
 
-The driver never authorizes, retries beyond `rounds`, or accepts
-Evidence — it only schedules and observes declared probes. C11 stays
-partial; history-driven retry scheduling remains open.
+The driver never authorizes, retries beyond `max_attempts`, or
+accepts Evidence — it only schedules and observes declared probes.
+C11 stays partial; Evidence acceptance remains open.
 
 ### C11 history-bounded probe retry scheduling
 
