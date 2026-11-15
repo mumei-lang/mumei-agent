@@ -442,6 +442,11 @@ class TestNativeAttemptTool:
             f'    printf %s "{n}-bytes" > "$out/{n}"'
             for n in (names if complete else names[:-1])
         )
+        py = (
+            "import hashlib,sys;"
+            'print(hashlib.sha256(open(sys.argv[1],"rb").read())'
+            ".hexdigest())"
+        )
         core = tmp_path / "mumei-stub"
         core.write_text(
             "#!/bin/sh\n"
@@ -450,7 +455,7 @@ class TestNativeAttemptTool:
             "    mkdir -p \"$out\"\n"
             f"{members}\n"
             '    printf "Build ID: %s\\n" '
-            '"$(sha256sum "$out/native-bundle.json" | cut -c1-64)"\n'
+            f'"$(python3 -c \'{py}\' "$out/native-bundle.json")"\n'
             f"    exit {build_exit}\n"
             "fi\n"
             "exit 2\n"

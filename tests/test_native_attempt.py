@@ -34,9 +34,16 @@ def _write_core(tmp_path: Path, build_exit: int = 0,
         for name in (BUNDLE_MEMBERS if complete else BUNDLE_MEMBERS[:-1])
     )
     if build_id is None:
+        # python3: required by the test suite on every POSIX host
+        # (sha256sum is absent on macOS).
+        py = (
+            "import hashlib,sys;"
+            'print(hashlib.sha256(open(sys.argv[1],"rb").read())'
+            ".hexdigest())"
+        )
         id_line = (
-            '    printf "Build ID: %s\\n" '
-            '"$(sha256sum "$out/native-bundle.json" | cut -c1-64)"\n'
+            f"    printf \"Build ID: %s\\n\" "
+            f'"$(python3 -c \'{py}\' "$out/native-bundle.json")"\n'
         )
     else:
         id_line = f'    printf "Build ID: {build_id}\\n"\n'
