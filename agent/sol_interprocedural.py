@@ -1726,6 +1726,12 @@ class _Builder:
                     _span(node), name, actual_t, actual_union
                 )
             )
+            if name in {"selfdestruct", "suicide"}:
+                # Destroys the contract's storage — beyond
+                # state_writes, keep it as unknown.
+                if summary.effects != "state_writes":
+                    summary.effects = "unknown"
+                    self._effects_touched = True
             return actual_union
         # Hierarchy-aware resolution: the caller's contract and
         # its ancestors first (`super.x` skips the caller), then

@@ -1214,3 +1214,26 @@ def test_slice14_break_continue_noop():
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice15_selfdestruct_marks_unknown():
+    s = _fn(
+        """contract C {
+    function f(uint a) public { selfdestruct(payable(msg.sender)); }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "unknown"
+
+
+def test_slice15_env_builtins_flow():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        uint x = addmod(a, 1, blockhash(a));
+        return x;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

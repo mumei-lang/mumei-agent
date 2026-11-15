@@ -2760,6 +2760,13 @@ in-process; no audit/CLI/MCP route changes.
   the statement following them stays reachable on the
   not-taken path, so skipping it would under-approximate.
 
+### C06 Solidity destructive builtins (slice 15)
+
+- `selfdestruct`/`suicide` mark `effects = "unknown"` — the
+  call destroys storage beyond a plain write. Other env
+  builtins (`blockhash`, `addmod`, `mulmod`, `gasleft`,
+  `type()`) already return their args' deps.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
