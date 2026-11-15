@@ -46,6 +46,7 @@ from agent.verification_planner import (
     RuntimeObservation,
     _label,
     _positive,
+    _version,
 )
 
 PROBE_SCHEMA = "mumei.verifier-adapter-probe/v1"
@@ -75,7 +76,9 @@ class AdapterProbeRequest:
     the declared convention in the module docstring. `stamp` is the
     host-declared monotonic observation stamp the registry's replay
     detection consumes. `attempt_number` only binds the execution record;
-    hosts own its uniqueness per fingerprint.
+    hosts own its uniqueness per fingerprint. `tool_version` is a
+    host-declared claim echoed into the observation — the probe itself
+    never parses the command's output for it.
     """
 
     adapter_id: str
@@ -84,6 +87,7 @@ class AdapterProbeRequest:
     stamp: int
     attempt_number: int = 1
     memory_bound_mb: int | None = None
+    tool_version: str | None = None
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -113,6 +117,8 @@ class AdapterProbeRequest:
             or not 1 <= self.memory_bound_mb <= MAX_MEMORY_BOUND_MB
         ):
             raise ValueError("invalid adapter probe memory bound")
+        if self.tool_version is not None:
+            _version(self.tool_version)
 
     def execution_request(self) -> AttemptExecutionRequest:
         """The attempt-binding descriptor for `AttemptRunner.run`."""
@@ -144,6 +150,7 @@ class AdapterProbeOutcome:
                 "adapter_id": self.observation.adapter_id,
                 "availability": self.observation.availability,
                 "stamp": self.observation.stamp,
+                "tool_version": self.observation.tool_version,
             },
             "result": self.result.to_dict(),
         }
@@ -187,6 +194,7 @@ def run_probe(
     observation = RuntimeObservation(
         request.adapter_id,
         availability=_map_outcome(result),
+        tool_version=request.tool_version,
         stamp=request.stamp,
     )
     return AdapterProbeOutcome(observation, result)

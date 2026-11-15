@@ -133,3 +133,42 @@ def test_cancel_event_passthrough():
     ev = threading.Event()
     out = run_probe(_req(), cancel_event=ev)
     assert out.observation.availability == "available"
+
+
+def test_declared_tool_version_reaches_observation():
+    out = run_probe(_req(tool_version="4.0.0"))
+    assert out.observation.tool_version == "4.0.0"
+
+
+def test_tool_version_validation():
+    with pytest.raises(ValueError):
+        _req(tool_version="not a version!")
+    with pytest.raises(ValueError):
+        _req(tool_version=7)
+
+
+def test_plan_selects_adapter_after_successful_probe():
+    from agent.verification_planner import (
+        AdapterDescriptor,
+        AdapterRegistry,
+        PlannerPolicy,
+        RouteRequirements,
+    )
+
+    registry = AdapterRegistry()
+    registry.register(
+        AdapterDescriptor(
+            "zendingsol.host.lean_scaffold",
+            "0.1.0",
+            frozenset({"zendingsol.host.lean_scaffold/v0"}),
+            frozenset({"deductive_proof"}),
+        )
+    )
+    request = RouteRequirements(
+        "zendingsol.host.lean_scaffold/v0",
+        "deductive_proof",
+        frozenset(),
+    )
+    out = run_probe(_req(tool_version="4.0.0"))
+    plan = registry.plan(request, PlannerPolicy(), (out.observation,))
+    assert plan.selected is not None
