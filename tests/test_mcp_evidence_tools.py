@@ -381,3 +381,53 @@ class TestNativeRecheckTool:
             mcp_server.native_recheck(str(core), str(bundle), str(src), "zz" * 32)
         )
         assert out["status"] == "error"
+
+
+class TestEvidenceCompareTool:
+    def _evidence(self, sha: str, spec_id: str = "source.postcondition") -> str:
+        return json.dumps({
+            "schema_version": "mumei.verification-evidence/v1",
+            "subject": {"id": "mumei_source", "kind": "mumei_source",
+                        "sha256": sha},
+            "specification": {"id": spec_id, "sha256": "0" * 64},
+        })
+
+    def test_claims_match(self, tmp_path):
+        body = self._evidence(_sha256("atom x"))
+        a = tmp_path / "a.json"; a.write_text(body)
+        b = tmp_path / "b.json"; b.write_text(body)
+        out = json.loads(mcp_server.evidence_compare(str(a), str(b)))
+        assert out["status"] == "ok"
+        c = out["comparison"]
+        assert c["schema_version"] == "mumei.evidence-comparison/v1"
+        assert c["claims_match"] is True
+
+    def test_claims_mismatch(self, tmp_path):
+        a = tmp_path / "a.json"; a.write_text(self._evidence(_sha256("x")))
+        b = tmp_path / "b.json"; b.write_text(self._evidence(_sha256("y")))
+        out = json.loads(mcp_server.evidence_compare(str(a), str(b)))
+        assert out["status"] == "ok"
+        assert out["comparison"]["subject_match"] is False
+        assert out["comparison"]["claims_match"] is False
+
+    def test_empty_and_multiline_paths(self, tmp_path):
+        b = tmp_path / "b.json"; b.write_text(self._evidence(_sha256("x")))
+        for bad in ("", "x\ny"):
+            out = json.loads(mcp_server.evidence_compare(bad, str(b)))
+            assert out["status"] == "error"
+            out = json.loads(mcp_server.evidence_compare(str(b), bad))
+            assert out["status"] == "error"
+
+    def test_error_redacts_declared_paths(self, tmp_path):
+        a = tmp_path / "missing-a.json"
+        b = tmp_path / "b.json"; b.write_text(self._evidence(_sha256("x")))
+        out = json.loads(mcp_server.evidence_compare(str(a), str(b)))
+        assert out["status"] == "error"
+        assert str(a) not in out["error"]
+        assert str(b) not in out["error"]
+
+    def test_malformed_record_is_error(self, tmp_path):
+        a = tmp_path / "a.json"; a.write_text("not json")
+        b = tmp_path / "b.json"; b.write_text(self._evidence(_sha256("x")))
+        out = json.loads(mcp_server.evidence_compare(str(a), str(b)))
+        assert out["status"] == "error"

@@ -2106,6 +2106,53 @@ def evidence_identity_check(evidence_path: str, source_path: str) -> str:
 
 
 @mcp.tool()
+def evidence_compare(evidence_a_path: str, evidence_b_path: str) -> str:
+    """Compare two declared Evidence records' claim surfaces.
+
+    Reads two declared `mumei.verification-evidence/v1` records under
+    the same 64 KiB bounded read and strict shape checks as the CLI
+    `evidence-compare` route, then emits the
+    `mumei.evidence-comparison/v1` descriptor — `subject_match`,
+    `specification_match` and `claims_match` (both must hold).
+
+    Args:
+        evidence_a_path: Path to the first declared evidence record JSON.
+        evidence_b_path: Path to the second declared evidence record JSON.
+
+    Returns:
+        JSON with `comparison` — the descriptor — on success, or
+        `error` on a declared failure. Representation-level only: a
+        match means the records carry the same claims, never that the
+        claims are true, fresh or authentic (the full
+        `checks_not_performed` vocabulary stays named in the
+        descriptor).
+    """
+    try:
+        from agent.evidence_compare import compute_comparison_descriptor
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("evidence_a_path", evidence_a_path),
+        ("evidence_b_path", evidence_b_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+
+    try:
+        descriptor = compute_comparison_descriptor(
+            evidence_a_path, evidence_b_path
+        )
+    except (OSError, ValueError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [evidence_a_path, evidence_b_path]
+            )
+        )
+    return _ok({"comparison": descriptor})
+
+
+@mcp.tool()
 def evidence_check_accept(sequence_json: str, check_json: str) -> str:
     """Evaluate a stored evidence-check record against a sequence.
 

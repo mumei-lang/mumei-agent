@@ -734,6 +734,13 @@ means the two records carry the same claims, never that the claims
 are true, current or authentic: the full six-entry
 `checks_not_performed` vocabulary stays named. C02 stays partial.
 
+The route is also reachable as the `evidence_compare` MCP tool: it
+validates both declared paths, calls
+`compute_comparison_descriptor` in-process and returns
+`{status, comparison}`; declared failures surface as `_err` with
+checkout-local paths basename-redacted, like the other consume
+tools.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
