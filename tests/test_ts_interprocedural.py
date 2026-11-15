@@ -343,22 +343,84 @@ def test_try_catch_closes():
     assert s.gaps[0].reason == "unsupported_statement"
 
 
-def test_switch_closes():
+def test_switch_admits():
     s = _fn(
         "function f(x: number): number {"
         " switch (x) { case 1: return 1; default: return 0; } }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.available and s.return_dependencies == frozenset()
 
 
-def test_do_while_closes():
+def test_switch_case_bodies_are_may_writes():
+    # Entry to a clause is conditional, so `y = x` inside `case 1`
+    # is a may-write: the result still depends on `x`.
+    s = _fn(
+        "function f(x: number, b: number): number {"
+        " let y: number = 0;"
+        " switch (b) { case 1: y = x; break; default: y = 0; }"
+        " return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_switch_fallthrough_flows():
+    # `case 1` falls into `case 2` — the shared scope carries `y`'s
+    # write forward.
+    s = _fn(
+        "function f(x: number): number {"
+        " let y: number = 0;"
+        " switch (x) { case 1: y = x; case 2: return y; default: return 0; } }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_switch_case_value_deps():
+    # A non-literal `case` value evaluates like any expression —
+    # including its calls — while `y`'s may-write stays dep-free.
+    s = _fn(
+        "function f(x: number, b: number): number {"
+        " let y: number = 0;"
+        " switch (x) { case b: y = 1; break; default: break; }"
+        " return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_break_in_switch_does_not_break_the_loop():
+    # The `break` targets the switch's own frame — the loop still
+    # iterates to the fixed point, so `a`'s write joins.
+    s = _fn(
+        "function f(x: number): number {"
+        " let a: number = 0; let i: number = 0;"
+        " while (i < x) {"
+        "  switch (i) { case 0: break; default: break; }"
+        "  a = a + x; i++;"
+        " }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_continue_inside_switch_targets_the_loop():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a: number = 0; let i: number = 0;"
+        " while (i < x) {"
+        "  i++;"
+        "  switch (i) { case 0: continue; default: break; }"
+        "  a = a + x;"
+        " }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_do_while_admits():
     s = _fn(
         "function f(x: number): number {"
         " let a = x; do { a--; } while (a > 0); return a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_for_of_closes():
@@ -422,12 +484,19 @@ def test_string_literal_closes():
     assert not s.available
 
 
-def test_ternary_closes():
+def test_ternary_admits():
     s = _fn(
         "function f(x: number, b: boolean): number { return b ? x : 0; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_ternary_unions_all_operands():
+    s = _fn(
+        "function f(x: number, y: number, b: boolean): number {"
+        " return b ? x : y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1, 2})
 
 
 def test_arrow_function_value_closes():

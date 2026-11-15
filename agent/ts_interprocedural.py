@@ -33,9 +33,16 @@ Admitted:
 * `if`/`else` (each branch evaluated over a scope copy and joined by
   union — a conditional store keeps both the new deps and the value
   the skipped path would have left),
-  `while` and classic `for (init; cond; incr)` loops (bodies iterate
-  to a dependency fixed point — a join, never an unroll; trip counts
-  are not modelled), and unlabelled `break`/`continue` inside a loop.
+  `while`, `do`/`while` and classic `for (init; cond; incr)` loops
+  (bodies iterate to a dependency fixed point — a join, never an
+  unroll; trip counts are not modelled — a `do`/`while`'s run-once
+  guarantee is invisible to that join and shares the `while` shape),
+  `switch`/`case`/`default` (clauses processed in source order in a
+  shared scope — every clause body is a may-write since entry is
+  conditional, and a `break` ends only the paths that entered at an
+  earlier clause), and unlabelled `break`/`continue` inside a loop —
+  a `break` inside a `switch` targets the switch's own frame while a
+  `continue` skips it and still targets the enclosing loop.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only. The result conservatively depends on
   every evaluated argument and records a `TsCall` transfer; the callee
@@ -47,8 +54,8 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 objects/member access, `this`, arrow-function values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new`, `try`/`throw`, `switch`, `do`/`while`,
-`for`-`in`/`of`, ternaries, labels and `sequence_expression` stay
+spread, destructuring, `new`, `try`/`throw`,
+`for`-`in`/`of`, labels and `sequence_expression` stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -507,10 +514,80 @@ class _Builder:
                 self.block_stack.pop()
             self._join(locals_, scope, params, self.var_names)
             return
+        if kind == "switch_statement":
+            value = node.child_by_field_name("value")
+            body = node.child_by_field_name("body")
+            if value is None or body is None:
+                raise _Unsupported("unsupported_statement", _span(node))
+            self.expression(value, params, locals_, transfers, count)
+            # Fallthrough: a `break` only ends paths that entered at an
+            # earlier clause — each clause can still be entered
+            # directly, so every body is processed as a may-write in a
+            # shared scope (a clause with no statements simply adds
+            # nothing before the next).
+            frame = {
+                "exited": False, "broke": False,
+                "broke_always": False, "switch": True,
+            }
+            self.frames.append(frame)
+            try:
+                scope = dict(locals_)
+                for clause in _children(body):
+                    if clause.type not in {"switch_case", "switch_default"}:
+                        raise _Unsupported(
+                            "unsupported_statement", _span(clause)
+                        )
+                    if clause.type == "switch_case":
+                        case_value = clause.child_by_field_name("value")
+                        if case_value is None:
+                            raise _Unsupported(
+                                "unsupported_statement", _span(clause)
+                            )
+                        self.expression(
+                            case_value, params, scope, transfers, count
+                        )
+                    frame["exited"] = False
+                    self._sequence(
+                        [
+                            c
+                            for i, c in enumerate(clause.children)
+                            if clause.field_name_for_child(i) == "body"
+                        ],
+                        params, scope, transfers, count, deps,
+                        saw_return, True,
+                    )
+                self._join(locals_, scope, params, self.var_names)
+            finally:
+                self.frames.pop()
+            return
+        if kind == "do_statement":
+            body = node.child_by_field_name("body")
+            condition = node.child_by_field_name("condition")
+            if body is None or condition is None:
+                raise _Unsupported("unsupported_statement", _span(node))
+            # The body runs at least once — a distinction the
+            # union-joined fixed point does not model, so it shares
+            # the `while` loop shape.
+            self._loop(
+                body, None, condition, params, locals_, transfers, count,
+                deps, saw_return, conditional, node,
+            )
+            return
         if kind in {"break_statement", "continue_statement"}:
             if node.named_children:
                 raise _Unsupported("unsupported_statement", _span(node))
-            frame = self.frames[-1] if self.frames else None
+            if kind == "continue_statement":
+                # A `continue` inside a `switch` targets the enclosing
+                # loop, never the switch itself — skip switch frames.
+                frame = next(
+                    (
+                        f for f in reversed(self.frames)
+                        if not f.get("switch")
+                    ),
+                    None,
+                )
+            else:
+                frame = self.frames[-1] if self.frames else None
             if frame is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             frame["exited"] = True
@@ -778,6 +855,21 @@ class _Builder:
             if argument is None or argument.type != "identifier":
                 raise _Unsupported("unsupported_expression", _span(node))
             return self._read_name(argument, params, locals_, _span(argument))
+        if kind == "ternary_expression":
+            condition = node.child_by_field_name("condition")
+            consequence = node.child_by_field_name("consequence")
+            alternative = node.child_by_field_name("alternative")
+            if (
+                condition is None
+                or consequence is None
+                or alternative is None
+            ):
+                raise _Unsupported("unsupported_expression", _span(node))
+            return (
+                self.expression(condition, params, locals_, transfers, count)
+                | self.expression(consequence, params, locals_, transfers, count)
+                | self.expression(alternative, params, locals_, transfers, count)
+            )
         raise _Unsupported("unsupported_expression", _span(node))
 
 

@@ -2419,13 +2419,37 @@ ternary, `await`, template strings, sequences and any other node;
 
 Boundaries: there is no type checker, no module resolution and no
 imported-member model — every cross-unit reference closes; labels,
-`switch`, `try`, `throw`, `do`/`while`, `for..of`/`for..in`, nested
+`try`, `throw`, `for..of`/`for..in`, nested
 function declarations, classes and `this` close with
 `unsupported_statement`/`unsupported_expression`. Later slices can
 open units (import/export wiring), member calls, arrow values and
 composite parameter types along the same line the Go slices opened:
 declare the new fact kinds on the record, gate admission on them, and
 keep every unlisted shape closed.
+
+### C06 TypeScript control-flow widening (slice 1)
+
+The same scalar fragment admits `switch`/`case`/`default`,
+`do`/`while` and ternary expressions. A `switch` evaluates the
+discriminant for its calls, then processes each `switch_case` /
+`switch_default` clause's statements in source order inside a shared
+scope — fallthrough is just the next clause seeing the previous
+one's stores, and every clause body is a may-write because entry to
+it is conditional (a `case` with no statements adds nothing before
+the next). The `case` value evaluates like any expression, so its
+calls still record. A `break` inside a `switch` targets the
+switch's own frame — only the paths that entered at an earlier
+clause end — while a `continue` skips switch frames and still
+targets the enclosing loop; a `break` outside any frame still
+closes. `do`/`while` shares the `while` fixed-point shape: the
+run-once guarantee is invisible to the union join. A ternary unions
+the condition's and both arms' dependencies.
+
+Boundaries: labels and labelled `break`/`continue` still close, as
+do `for`/`of` and `for`/`in` (they iterate composite values) and
+`try`/`throw`; the arithmetic boundary is unchanged — `/`, `%`,
+`**`, shifts and `??` still close (JS division is floating-point,
+matching the Go fragment's admitted operators).
 
 ## Roadmap authority and vocabulary
 
