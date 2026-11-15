@@ -2619,6 +2619,26 @@ Boundaries: object method/getter/setter members still close,
 and a composite spread's non-positional fields collapse the
 array literal.
 
+### C06 TypeScript destructured declarations (slice 11)
+
+`const {a, b: c = d, ...rest} = o` and `const [x, y = d] = arr`
+bind each sub-name to the member read at its path: a missing
+field is `undefined` (dep-free), a default `= d` unions the
+default's deps, a `...rest` binding over-approximates to the
+whole union (remaining fields aren't enumerable), and nested
+patterns descend. Destructuring a scalar binds every sub-name
+to the whole dep union — over-approximation, never a gap.
+Positions count elisions: `[p, , q]` binds `q` to element 2
+because the hole is invisible among named children — the
+pattern's full child list is walked to count comma slots.
+`var` destructuring is function-scoped like any `var`.
+
+Boundaries: composite sub-values still bind as scalars (the
+member-path rule — no field-level aliases), assignment
+destructuring `({a} = o)` stays closed, and destructured
+formal parameters need a composite-parameter model — still
+closed at the signature gate.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

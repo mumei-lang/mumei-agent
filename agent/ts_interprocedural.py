@@ -96,6 +96,14 @@ Admitted:
   loop while `var` escapes, and a bare identifier target binds as
   a may-write (the loop may not run). Any other right-hand side
   or a non-identifier left closes.
+* Destructured declarations `const {a, b: c = d, ...rest} = o` /
+  `const [x, y = d] = arr` — each sub-name binds the member read
+  at its path (defaults union the default expression's deps, a
+  `...rest` binding over-approximates to the whole union, a
+  nested pattern descends); a scalar source binds every sub-name
+  to the whole dep union, and a composite member binds as a
+  scalar (member-path rule). Positions count holes — `[p, , q]`
+  binds `q` to element 2.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -570,6 +578,219 @@ class _Builder:
                 value = frozenset({params[name]}) | _scalar_of(value)
         locals_[name] = value
 
+    def _declare_name(
+        self, name, value, is_var, conditional, params, locals_
+    ) -> None:
+        """Bind a declared name honouring `var`'s function scope and
+        let/const block-scope restore."""
+        if is_var:
+            # `var` is function-scoped: it lands in the current
+            # scope and the joins carry the name outward — writing
+            # the function scope directly would bypass a loop's
+            # fixed-point join and lose the zero-trip path's
+            # dependencies.
+            self.var_names.add(name)
+            self._store(locals_, params, name, value, conditional)
+        else:
+            if self.block_stack:
+                saved = self.block_stack[-1]
+                if name not in saved:
+                    saved[name] = locals_.get(name)
+            self._store(locals_, params, name, value, conditional)
+
+    def _destructure(
+        self,
+        pattern,
+        value,
+        params,
+        locals_,
+        transfers,
+        count,
+        is_var,
+        conditional,
+        span,
+    ) -> None:
+        """`const {a, b: c = d, ...rest} = o` / `const [x, y] = arr` —
+        each sub-name binds the member read at its path; a scalar
+        source or a `...rest` binding over-approximates to the whole
+        union. A composite member binds as a scalar (member-path
+        rule — sub-object writes can't diverge)."""
+        positions: dict[int, int] = {}
+        if pattern.type == "array_pattern":
+            # A hole (`[a, , b]`) emits no named child — walk ALL
+            # children: an empty slot is a comma seen while an
+            # element is expected.
+            pos = 0
+            expecting = True
+            for c in pattern.children:
+                if c.type in {"[", "]"}:
+                    continue
+                if c.type == ",":
+                    if expecting:
+                        pos += 1
+                    else:
+                        expecting = True
+                    continue
+                positions[c.id] = pos
+                pos += 1
+                expecting = False
+        for child in _children(pattern):
+            if child.type == "rest_pattern":
+                inner = next(iter(_children(child)), None)
+                if inner is None or inner.type != "identifier":
+                    raise _Unsupported("binding_unavailable", span)
+                # The remaining fields are unknowable — the whole
+                # union over-approximates.
+                self._declare_name(
+                    inner.text.decode(),
+                    _scalar_of(value),
+                    is_var,
+                    conditional,
+                    params,
+                    locals_,
+                )
+                continue
+            if child.type == "pair_pattern":
+                if pattern.type != "object_pattern":
+                    raise _Unsupported("binding_unavailable", span)
+                key = child.child_by_field_name("key")
+                target = child.child_by_field_name("value")
+                if key is None or target is None or key.type not in {
+                    "property_identifier",
+                    "string",
+                    "number",
+                }:
+                    raise _Unsupported("binding_unavailable", span)
+                kname = (
+                    key.text.decode().strip("\"'")
+                    if key.type == "string"
+                    else key.text.decode()
+                )
+                fval = self._pattern_read(value, kname)
+                self._destructure_target(
+                    target, fval, params, locals_, transfers, count,
+                    is_var, conditional, span,
+                )
+                continue
+            if pattern.type == "array_pattern":
+                key = str(positions[child.id])
+                self._destructure_target(
+                    child,
+                    self._pattern_read(value, key),
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    is_var,
+                    conditional,
+                    span,
+                )
+                continue
+            if child.type in {
+                "shorthand_property_identifier",
+                "shorthand_property_identifier_pattern",
+                "object_assignment_pattern",
+            }:
+                if child.type in {
+                    "shorthand_property_identifier",
+                    "shorthand_property_identifier_pattern",
+                }:
+                    name = child.text.decode()
+                    self._declare_name(
+                        name,
+                        _scalar_of(self._pattern_read(value, name)),
+                        is_var,
+                        conditional,
+                        params,
+                        locals_,
+                    )
+                    continue
+                left = child.child_by_field_name("left")
+                right = child.child_by_field_name("right")
+                if left is None or left.type not in {
+                    "identifier",
+                    "shorthand_property_identifier_pattern",
+                }:
+                    raise _Unsupported("binding_unavailable", span)
+                name = left.text.decode()
+                deps = _scalar_of(self._pattern_read(value, name))
+                if right is not None:
+                    deps |= self.expression(
+                        right, params, locals_, transfers, count
+                    )
+                self._declare_name(
+                    name, deps, is_var, conditional, params, locals_
+                )
+                continue
+            raise _Unsupported("binding_unavailable", span)
+
+    def _destructure_target(
+        self,
+        target,
+        fval,
+        params,
+        locals_,
+        transfers,
+        count,
+        is_var,
+        conditional,
+        span,
+    ) -> None:
+        if target.type == "identifier":
+            self._declare_name(
+                target.text.decode(),
+                _scalar_of(fval),
+                is_var,
+                conditional,
+                params,
+                locals_,
+            )
+            return
+        if target.type in {
+            "assignment_pattern",
+            "object_assignment_pattern",
+        }:
+            left = target.child_by_field_name("left")
+            right = target.child_by_field_name("right")
+            if left is None or left.type != "identifier":
+                raise _Unsupported("binding_unavailable", span)
+            deps = _scalar_of(fval)
+            if right is not None:
+                deps |= self.expression(
+                    right, params, locals_, transfers, count
+                )
+            self._declare_name(
+                left.text.decode(),
+                deps,
+                is_var,
+                conditional,
+                params,
+                locals_,
+            )
+            return
+        if target.type in {"object_pattern", "array_pattern"}:
+            self._destructure(
+                target,
+                fval,
+                params,
+                locals_,
+                transfers,
+                count,
+                is_var,
+                conditional,
+                span,
+            )
+            return
+        raise _Unsupported("binding_unavailable", span)
+
+    @staticmethod
+    def _pattern_read(value, key):
+        """Field `key` of a destructured composite — a scalar source
+        over-approximates every sub-name to the whole union."""
+        if isinstance(value, _Composite):
+            return value.fields.get(key, frozenset())
+        return value
+
     def statement(
         self,
         node,
@@ -628,7 +849,7 @@ class _Builder:
                 raise _Unsupported("unsupported_statement", _span(node))
             for decl in declarators:
                 pname = decl.child_by_field_name("name")
-                if pname is None or pname.type != "identifier":
+                if pname is None:
                     raise _Unsupported("binding_unavailable", _span(decl))
                 annotation = decl.child_by_field_name("type")
                 if annotation is not None and not self._scalar_annotation(
@@ -636,6 +857,28 @@ class _Builder:
                 ):
                     raise _Unsupported("binding_unavailable", _span(decl))
                 value = decl.child_by_field_name("value")
+                if pname.type in {"object_pattern", "array_pattern"}:
+                    if value is None:
+                        raise _Unsupported(
+                            "binding_unavailable", _span(decl)
+                        )
+                    val_v = self._eval(
+                        value, params, locals_, transfers, count
+                    )
+                    self._destructure(
+                        pname,
+                        val_v,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        is_var,
+                        conditional,
+                        _span(decl),
+                    )
+                    continue
+                if pname.type != "identifier":
+                    raise _Unsupported("binding_unavailable", _span(decl))
                 deps_v = (
                     self._bindable(
                         value,
@@ -647,25 +890,14 @@ class _Builder:
                     # `let x;` binds `undefined` — no dependencies.
                     else frozenset()
                 )
-                name = pname.text.decode()
-                if is_var:
-                    # `var` is function-scoped: it lands in the
-                    # current scope and the joins carry the name
-                    # outward — writing the function scope directly
-                    # would bypass a loop's fixed-point join and lose
-                    # the zero-trip path's dependencies.
-                    self.var_names.add(name)
-                    self._store(
-                        locals_, params, name, deps_v, conditional
-                    )
-                else:
-                    if self.block_stack:
-                        saved = self.block_stack[-1]
-                        if name not in saved:
-                            saved[name] = locals_.get(name)
-                    self._store(
-                        locals_, params, name, deps_v, conditional
-                    )
+                self._declare_name(
+                    pname.text.decode(),
+                    deps_v,
+                    is_var,
+                    conditional,
+                    params,
+                    locals_,
+                )
             return
         if kind == "function_declaration":
             # Already registered by the hoisting pass — a declaration

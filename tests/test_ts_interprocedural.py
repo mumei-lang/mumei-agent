@@ -1861,3 +1861,110 @@ def test_non_null_passthrough():
         "function f(x: number): number { return x!; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 11: destructured declarations
+
+
+def test_object_destructure_shorthand():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x, b: 1 }; let { a } = o; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_destructure_renamed():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x }; let { a: c } = o; return c; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_destructure_default():
+    s = _fn(
+        "function f(x: number, d: number): number {"
+        " let o = { b: 1 }; let { a = d } = o; return a; }"
+    )
+    # Missing field → {} plus default dep.
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_object_destructure_pair_default():
+    s = _fn(
+        "function f(x: number, d: number): number {"
+        " let o = { a: x }; let { a: c = d } = o; return c; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_object_destructure_rest():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x, b: 1 }; let { a, ...rest } = o; return rest; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_destructure_nested():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: { c: x } }; let { a: { c } } = o; return c; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_destructure_of_scalar_over_approximates():
+    s = _fn(
+        "function f(x: number): number {"
+        " let { a } = x; return a; }"
+    )
+    # Scalar source — sub-name unions the whole dep set.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_destructure():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [x, 1]; let [p, q] = a; return p + q; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_destructure_hole_positions():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = [x, y]; let [p, , q] = a; return p + q; }"
+    )
+    # Hole is not a named child — q must still bind a[2] (missing → {}).
+    s2 = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = [1, x, y]; let [p, , q] = a; return p + q; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s2.available and s2.return_dependencies == frozenset({1})
+
+
+def test_array_destructure_default_and_nested():
+    s = _fn(
+        "function f(x: number, d: number): number {"
+        " let a = [[x]]; let [[p], q = d] = a; return p + q; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_var_destructure_is_function_scoped():
+    s = _fn(
+        "function f(x: number, c: boolean): number {"
+        " if (c) { var { a } = { a: x }; } return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_destructure_member_call_value_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let { a } = o.m(); return a; }"
+    )
+    assert not s.available
