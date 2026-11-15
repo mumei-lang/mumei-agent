@@ -2841,6 +2841,29 @@ audit/CLI/MCP route is added; TS/Solidity/Rust adapter summary sets
 keep their own shapes. C06 stays partially delivered — the manifest
 is the first declared output surface a consumable route can bind.
 
+### C06 declared summary manifest route (go-summaries)
+
+`python -m agent go-summaries` is the first consumable route over the
+summary manifests: it runs a provisioned `tools/go-types` helper on
+explicitly declared sources, validates the report through the
+fail-closed snapshot reader and emits the
+`mumei.go-scalar-parameter-deps/v1` manifest from
+`GoSummarySet.to_dict()` on stdout (or `--output`). One `--source`
+selects the single-file profile; repeated `--source` selects the
+package profile, declaring each file under its basename (duplicates
+are a static error). `--target-arch` names the `gc` target the report
+is validated against and `--timeout` bounds the helper spawn.
+
+The route stays inside the declared boundary: it never discovers
+projects, resolves imports or chooses tools — the operator provisions
+the binary (`--go-types`) and supplies every byte the helper reads.
+A nonzero exit, any stderr or a non-`ok` report status fails closed
+before parsing, and the emitted manifest remains declared data — a
+reader still recomputes derived properties and reuse still goes
+through `for_function`/`stale_dependents`. No audit, MCP or planner
+route is wired yet, no imports are supplied, and Evidence
+normalization/acceptance stays open.
+
 
 ### C11 declared availability probes
 
