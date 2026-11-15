@@ -2981,3 +2981,58 @@ def test_optional_subscript_call():
         " return r; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 27: private `#` members and `static {}` blocks
+
+
+def test_private_field():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { #p = 1; m(v: number) { return this.#p + v; } }"
+        " const c = new C();"
+        " return c.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_private_method():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { #m(v: number) { return v; }"
+        " m(v: number) { return this.#m(v); } }"
+        " const c = new C();"
+        " return c.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_private_field_init_sees_this():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { #p = x; get(v: number) { return this.#p; } }"
+        " const c = new C();"
+        " return c.get(x); }"
+    )
+    assert s.available
+
+
+def test_static_block():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { static { C.s = 1; } static m(v: number) { return v; } }"
+        " return C.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_static_block_deps_captured():
+    s = _fn(
+        "function f(x: number): number {"
+        " const y = x;"
+        " class C { static { const t = y + 1; C.s = t; }"
+        " m(v: number) { return v; } }"
+        " const c = new C();"
+        " return c.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

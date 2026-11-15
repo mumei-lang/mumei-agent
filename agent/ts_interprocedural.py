@@ -164,9 +164,12 @@ Admitted:
   shadow) — `super(args)` in a ctor runs the parent
   constructor on the same `this`, `super.m(x)` calls through
   the parent prototype; `implements` is type-level and
-  admits silently. Getters/setters, computed names,
-  `abstract`/`declare`/`readonly` and decorated members
-  close; `*m()` generator methods admit like `function*`.
+  admits silently. Getters/setters, computed names and
+  `abstract`/`declare`/`readonly`/`decorated` members close;
+  `*m()` generator methods admit like `function*`, private
+  `#` members behave like named fields/methods keyed `#`,
+  and `static {}` blocks evaluate once into the class's
+  captured set.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -2185,6 +2188,12 @@ class _Builder:
         if target is None:
             raise _Unsupported("binding_unavailable", _span(node))
         old = target.get(base)
+        if isinstance(old, _Class) and len(path) == 1:
+            # `C.s = v` — a static write updates the shared class
+            # table; `C` aliases see it. A deeper path would need
+            # a composite static we don't descend.
+            old.statics[path[0]] = _scalar_of(value)
+            return
         if not isinstance(old, _Composite):
             raise _Unsupported("unsupported_expression", _span(node))
         if isinstance(value, _Composite):
@@ -2393,9 +2402,12 @@ class _Builder:
     def _class_value(self, node, params, locals_):
         """`class C { f = e; m(v){...} }` — a `_Class` whose methods
         are `_Callable`s (`is_method`) sharing the class body's
-        capture. `extends`/`implements`, getters/setters,
-        generators, computed names and `abstract`/decorated
-        members all close."""
+        capture. Private `#` members behave like named ones keyed
+        by their `#` text; `static { ... }` blocks evaluate once
+        at class build with `C` bound to the class itself, their
+        deps joining `captured` (static writes update the shared
+        `statics` table). `extends`/`implements`, getters/setters,
+        computed names and `abstract`/decorated members all close."""
         parent = None
         for child in node.children:
             if child.type == "class_heritage":
@@ -2439,6 +2451,7 @@ class _Builder:
         methods: dict = {}
         statics: dict = {}
         field_inits: dict = {}
+        static_blocks: list = []
         for member in _children(body_node):
             if member.type == "method_definition":
                 markers = {
@@ -2449,7 +2462,10 @@ class _Builder:
                         "unsupported_expression", _span(member)
                     )
                 mname = member.child_by_field_name("name")
-                if mname is None or mname.type != "property_identifier":
+                if mname is None or mname.type not in {
+                    "property_identifier",
+                    "private_property_identifier",
+                }:
                     raise _Unsupported(
                         "unsupported_expression", _span(member)
                     )
@@ -2483,7 +2499,10 @@ class _Builder:
                         "unsupported_expression", _span(member)
                     )
                 fname = member.child_by_field_name("name")
-                if fname is None or fname.type != "property_identifier":
+                if fname is None or fname.type not in {
+                    "property_identifier",
+                    "private_property_identifier",
+                }:
                     raise _Unsupported(
                         "unsupported_expression", _span(member)
                     )
@@ -2502,8 +2521,61 @@ class _Builder:
                 else:
                     field_inits[fname.text.decode()] = None
                 continue
+            if member.type == "class_static_block":
+                # Evaluated after the tables are built — a block
+                # may reference `C` itself.
+                static_blocks.append(member)
+                continue
             # index signatures, decorators, ambient members.
             raise _Unsupported("unsupported_expression", _span(member))
+        for member in static_blocks:
+            # `static { ... }` runs once at class evaluation —
+            # the deps it computes join the class's captured
+            # set; its writes stay inside a scope copy (the
+            # model doesn't track static writes). `C` resolves
+            # to the class being built.
+            inner_node = next(iter(_children(member)), None)
+            if inner_node is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(member)
+                )
+            block_locals = dict(locals_)
+            cname = node.child_by_field_name("name")
+            if cname is not None:
+                block_locals[cname.text.decode()] = _Class(
+                    ctor, methods, statics, field_inits, captured,
+                    parent,
+                )
+            block_deps = [frozenset()]
+            block_saw = [False]
+            saved_frames, self.frames = self.frames, []
+            saved_thrown, self.thrown = self.thrown, [False]
+            saved_block, self.block_stack = self.block_stack, []
+            saved_var, self.var_names = self.var_names, set()
+            saved_flocals, self.function_locals = (
+                self.function_locals,
+                block_locals,
+            )
+            try:
+                self._sequence(
+                    _children(inner_node),
+                    params,
+                    block_locals,
+                    [],
+                    [0],
+                    block_deps,
+                    block_saw,
+                    False,
+                )
+            finally:
+                self.frames = saved_frames
+                self.thrown = saved_thrown
+                self.block_stack = saved_block
+                self.var_names = saved_var
+                self.function_locals = saved_flocals
+            captured |= block_deps[0]
+            for v in block_locals.values():
+                captured |= _scalar_of(v)
         all_deps = captured
         for s in statics.values():
             all_deps |= _scalar_of(s)

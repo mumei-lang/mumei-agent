@@ -2938,6 +2938,27 @@ A `_Callable` callee still takes the inline invoke path
 and an `_External` callee the arg-union transfer — the
 optional marker doesn't change their semantics.
 
+### C06 TypeScript private members and static blocks (slice 27)
+
+`#p`/`#m()` private members admit — they behave like
+named fields/methods keyed by their `#` text (the name
+itself can't collide with an outer binding, and access
+outside the class is a compile error the model doesn't
+need to police).
+
+`static { ... }` blocks evaluate once when the `_Class`
+is built, after the member tables exist: `C` resolves to
+the class under construction, statement deps union into
+the class's `captured` set, and `C.s = v` writes update
+the shared `statics` table (`_member_store` accepts a
+single-step `_Class` target). Locals stay in a scope
+copy — the model doesn't track static-block writes into
+enclosing bindings, so nothing leaks silently.
+
+Boundaries: a deeper static path (`C.s.f = v`) still
+closes — it needs a composite static the model doesn't
+descend.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
