@@ -181,6 +181,7 @@ class _Builder:
         self.summaries: dict[str, SolFunctionSummary] = {}
         self._inline_depth = 0
         self._writes: list[set[str]] = []
+        self._state_vars: dict[str, set[str]] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -235,6 +236,31 @@ class _Builder:
         if body is None:
             return
         for member in _children(body):
+            if member.type == "state_variable_declaration":
+                tnode = next(
+                    (
+                        c
+                        for c in _children(member)
+                        if c.type == "type_name"
+                    ),
+                    None,
+                )
+                vname = next(
+                    (
+                        c
+                        for c in _children(member)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if (
+                    vname is not None
+                    and _scalar_type(tnode)
+                ):
+                    self._state_vars.setdefault(
+                        contract, set()
+                    ).add(vname.text.decode())
+                continue
             if member.type != "function_definition":
                 continue
             fname = member.child_by_field_name("name") or next(
@@ -314,6 +340,13 @@ class _Builder:
         locals_: dict[str, frozenset[int]] = {
             n: frozenset({i}) for n, i in param_index.items()
         }
+        # Scalar state variables read as dep-free external
+        # values; writes still flow through the slot and set
+        # `effects`.
+        for sv in self._state_vars.get(
+            self.contracts[key], ()
+        ):
+            locals_.setdefault(sv, frozenset())
         if ret_name is not None and ret_name not in locals_:
             # Named result (`returns (uint256 r)`) — a writable
             # local slot a bare `return` reads back.
@@ -334,7 +367,8 @@ class _Builder:
             return summary
         summary.return_dependencies = rets
         summary.available = True
-        summary.effects = "none_in_supported_fragment"
+        if summary.effects == "unknown":
+            summary.effects = "none_in_supported_fragment"
         return summary
 
     # -- statements ---------------------------------------------------
@@ -503,12 +537,9 @@ class _Builder:
                         ),
                         None,
                     )
-            if init is not None:
-                self._statement(
-                    init, locals_, param_index, summary
-                )
             return self._loop(
-                cond, update, body, locals_, param_index, summary
+                cond, update, body, locals_, param_index,
+                summary, init=init,
             )
         if t == "revert_statement":
             err = next(
@@ -569,7 +600,8 @@ class _Builder:
         raise _Unsupported("unsupported_statement", _span(st))
 
     def _loop(
-        self, cond, update, body, locals_, param_index, summary
+        self, cond, update, body, locals_, param_index, summary,
+        init=None,
     ) -> frozenset[int] | None:
         """One body pass over a copy of locals, then a
         may-write union merge back, e.g. `s += i` inside a loop
@@ -579,6 +611,10 @@ class _Builder:
         inner = dict(locals_)
         self._writes.append(set())
         try:
+            if init is not None:
+                self._statement(
+                    init, inner, param_index, summary
+                )
             ret = None
             if body is not None:
                 ret = self._block(
@@ -592,8 +628,10 @@ class _Builder:
             touched = self._writes.pop()
         merged = frozenset()
         if cond is not None:
+            # Loop-init names (`i`) live in `inner`, not the
+            # outer scope.
             merged |= self._expr(
-                cond, locals_, param_index, summary
+                cond, inner, param_index, summary
             )
         for name in list(locals_):
             deps = inner.get(name, frozenset())
@@ -620,6 +658,28 @@ class _Builder:
                 else left
             )
             if (
+                lident is not None
+                and lident.type == "member_expression"
+            ):
+                # `this.s = v` — member write to a state var.
+                idents = [
+                    c
+                    for c in _children(lident)
+                    if c.type == "identifier"
+                ]
+                if (
+                    len(idents) == 2
+                    and idents[0].text == b"this"
+                    and idents[1].text.decode()
+                    in self._state_vars.get(
+                        getattr(self, "_current_contract", ""),
+                        (),
+                    )
+                ):
+                    lident = idents[1]
+                else:
+                    lident = None
+            if (
                 lident is None
                 or lident.type != "identifier"
                 or lident.text.decode() not in locals_
@@ -636,6 +696,10 @@ class _Builder:
             locals_[lident.text.decode()] = deps
             if self._writes:
                 self._writes[-1].add(lident.text.decode())
+            if lident.text.decode() in self._state_vars.get(
+                getattr(self, "_current_contract", ""), ()
+            ):
+                summary.effects = "state_writes"
             return deps
         if expr.type == "update_expression":
             target = expr.child_by_field_name("argument")
@@ -656,6 +720,10 @@ class _Builder:
                 )
             if self._writes:
                 self._writes[-1].add(tident.text.decode())
+            if tident.text.decode() in self._state_vars.get(
+                getattr(self, "_current_contract", ""), ()
+            ):
+                summary.effects = "state_writes"
             return locals_[tident.text.decode()]
         if expr.type == "call_expression":
             return self._call(
@@ -727,10 +795,12 @@ class _Builder:
         if t == "call_expression":
             return self._call(node, locals_, param_index, summary)
         if t == "member_expression":
-            bident = next(
-                (c for c in _children(node) if c.type == "identifier"),
-                None,
-            )
+            idents = [
+                c
+                for c in _children(node)
+                if c.type == "identifier"
+            ]
+            bident = idents[0] if idents else None
             if (
                 bident is not None
                 and bident.text.decode() in _OPAQUE_GLOBALS
@@ -738,6 +808,18 @@ class _Builder:
                 # msg./block./tx./abi. — external environment
                 # values with no dependency content.
                 return frozenset()
+            if (
+                len(idents) == 2
+                and idents[0].text == b"this"
+                and idents[1].text.decode()
+                in self._state_vars.get(
+                    getattr(self, "_current_contract", ""), ()
+                )
+            ):
+                # `this.s` — state var read through `this`.
+                return locals_.get(
+                    idents[1].text.decode(), frozenset()
+                )
             raise _Unsupported(
                 "binding_unavailable", _span(node)
             )

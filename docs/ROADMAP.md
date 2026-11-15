@@ -2610,6 +2610,19 @@ in-process; no audit/CLI/MCP route changes.
   `abi.decode` member calls compose the same way (encoded
   output carries every argument's deps).
 
+### C06 Solidity state variables (slice 3)
+
+- Scalar state variables (`uint256 s`, `address owner`, fixed
+  `bytesN`) seed dep-free slots; reads (`s`, `this.s`) carry no
+  deps while writes (`s = x`, `this.s = x`, `s += x`) flow
+  through the slot and mark the summary `effects =
+  "state_writes"`. Non-scalar state vars stay closed.
+- `for` init/condition/update now evaluate inside the loop's
+  inner scope so `for (uint256 i = 0; ...)` doesn't leak `i`
+  into the outer binding table; the may-write merge also covers
+  slots whose dep set didn't change (a `s += i` with a
+  dep-free `i` still records the condition's deps).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

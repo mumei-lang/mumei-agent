@@ -120,19 +120,6 @@ def test_require_builtin_call():
     assert s.calls[0].callee == "require"
 
 
-def test_state_var_read_closes():
-    src = """contract C {
-  uint256 public count;
-  function f(uint256 x) public pure returns (uint256) {
-    return count + x;
-  }
-}"""
-    s = _fn(src, "f")
-    assert not s.available
-    assert s.return_dependencies is None
-    assert s.gaps and s.gaps[0].reason == "binding_unavailable"
-
-
 def test_member_call_closes():
     src = """contract C {
   function f(uint256 x) public pure returns (uint256) {
@@ -190,9 +177,8 @@ def test_no_return_closes():
 
 def test_unavailable_callee_blocks_caller():
     src = """contract C {
-  uint256 public count;
   function bad(uint256 a) public pure returns (uint256) {
-    return count + a;
+    return ext(a);
   }
   function f(uint256 x) public pure returns (uint256) {
     return bad(x);
@@ -357,3 +343,51 @@ def test_keccak_and_abi_encode_carry_deps():
         c.callee in {"keccak256", "abi.encodePacked"}
         for c in s.calls
     )
+
+
+def test_state_var_read_is_dep_free():
+    src = """contract C {
+  uint256 s;
+  function f(uint256 x) public view returns (uint256) {
+    return s + 0;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_state_var_write_flows_and_sets_effects():
+    src = """contract C {
+  uint256 s;
+  function f(uint256 x) public returns (uint256) {
+    s = x + 1;
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.effects == "state_writes"
+
+
+def test_this_state_member_write():
+    src = """contract C {
+  uint256 s;
+  function f(uint256 x) public returns (uint256) {
+    this.s = x;
+    return this.s;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.effects == "state_writes"
+
+
+def test_non_scalar_state_var_still_closes():
+    src = """contract C {
+  uint256[] xs;
+  function f(uint256 x) public view returns (uint256) {
+    return xs[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert not s.available
