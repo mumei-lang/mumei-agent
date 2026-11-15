@@ -2566,9 +2566,23 @@ identifier target binds as a may-write since the loop may run
 zero times. `break`/`continue` and labels behave exactly as in
 other loops — the iteration reuses the `_loop` fixed point.
 
-Boundaries: `for..of` over arrays stays closed (array literals
-aren't modelled yet), destructuring or member-expression left
-sides close, and `for..in` on a scalar closes.
+Boundaries: destructuring or member-expression left sides close,
+and `for..in`/`for..of` on a scalar closes.
+
+### C06 TypeScript array literals (slice 8)
+
+Array literals become composites with positional keys: `a[0]`
+reads field `"0"` precisely, a dynamic `a[i]` unions every
+element plus the index's deps, `a[i] = e` writes a literal index
+field, and `a.length` reads a missing field (`undefined` — no
+deps). Nested `array`/`object` literals keep their structure;
+any other composite element collapses to its leaf deps like an
+object field value, so `[o]` never aliases `o` at field level.
+`for..of`/`for..in` over arrays work through the slice-7 rules.
+
+Boundaries: array spread stays closed, destructuring
+(`const [a] = arr`) closes at the declarator, and mutating
+methods (`a.push`) close as member calls.
 
 ## Roadmap authority and vocabulary
 

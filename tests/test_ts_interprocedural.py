@@ -567,14 +567,13 @@ def test_do_while_admits():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_for_of_on_array_literal_closes():
-    # `[1]` is an `array` node — array literals are not yet modelled.
+def test_for_of_on_array_literal_admits():
+    # `[1]` is a composite of one dep-free element — `v` binds {}.
     s = _fn(
         "function f(x: number): number {"
         " let a = 0; for (const v of [1]) { a = v; } return a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset()
 
 
 def test_for_in_on_empty_object_admits():
@@ -1596,3 +1595,98 @@ def test_for_in_break_admits():
         " return x; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 8: array literals ----------------------------------------------
+
+
+def test_array_literal_index_read():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = [x, y]; return a[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_dynamic_index_unions():
+    s = _fn(
+        "function f(x: number, y: number, i: number): number {"
+        " let a = [x, y]; return a[i]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_array_index_write_admits():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = [x]; a[0] = y; return a[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_array_index_write_keeps_siblings():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = [x, x]; a[0] = y; return a[1]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_length_read_dep_free():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [x]; return a.length; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_array_alias_write_propagates():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = [x]; let b = a; b[0] = y; return a[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_for_of_over_array_admits():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let s2 = 0; let a = [x, y];"
+        " for (const e of a) { s2 = e; }"
+        " return s2; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_array_of_objects_member_chain():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [{f: x}]; return a[0].f; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_array_index_chain():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [[x]]; return a[0][0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_array_element_alias_collapses():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = {f: x}; let a = [o]; a[0].f = y; return a[0]; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_array_spread_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [x]; let b = [...a]; return b[0]; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"

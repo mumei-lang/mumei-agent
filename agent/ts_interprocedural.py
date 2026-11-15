@@ -81,6 +81,14 @@ Admitted:
   `o.f = o2` member stores, `{o}` shorthand), so no sub-object
   alias can diverge. Spread/method/computed-key object members
   and member access on a scalar or unbound base stay closed.
+* Array literals `[e0, e1]` bound to a name — a `_Composite` with
+  positional keys: `a[0]`/`a["0"]` reads field `"0"` precisely,
+  `a[i]` unions every element plus the index's deps, `a[i] = e`
+  writes a literal index field, and `a.length` reads a missing
+  field (`undefined` — no deps). Nested array/object literals
+  keep their structure; any other composite element collapses
+  like an object field value. `for..of` iterates elements,
+  `for..in` iterates keys — both through the composite rules.
 * `for (const k in o)` / `for (const e of o)` over a composite —
   `in` binds the key as an opaque dep-free string (a `o[k]` read
   inside still unions every field), `of` binds the union of every
@@ -1240,6 +1248,7 @@ class _Builder:
         collapses to its leaf deps."""
         if isinstance(value, _Composite) and node.type not in {
             "object",
+            "array",
             "identifier",
         }:
             return _scalar_of(value)
@@ -1301,6 +1310,8 @@ class _Builder:
                 # index evaluates for both.
                 if index.type == "string":
                     path.append(index.text.decode().strip("\"'"))
+                elif index.type == "number":
+                    path.append(index.text.decode())
                 else:
                     index_deps |= self.expression(
                         index, params, locals_, transfers, count
@@ -1435,6 +1446,27 @@ class _Builder:
                         "unsupported_expression", _span(child)
                     )
             return _Composite(fields)
+        if kind == "array":
+            # `[e0, e1]` — a composite with positional keys; `a[0]`
+            # reads field "0", a dynamic `a[i]` unions the elements,
+            # and `a.length` reads a missing field (dep-free).
+            afields: dict = {}
+            for i, child in enumerate(_children(node)):
+                if child.type == "spread_element":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(child)
+                    )
+                fdeps = self._eval(
+                    child, params, locals_, transfers, count
+                )
+                if isinstance(fdeps, _Composite) and child.type not in {
+                    "object",
+                    "array",
+                }:
+                    # `[o]` aliases `o` at field level — collapse.
+                    fdeps = _scalar_of(fdeps)
+                afields[str(i)] = fdeps
+            return _Composite(afields)
         if kind in {"member_expression", "subscript_expression"}:
             return self._member_read(
                 node, params, locals_, transfers, count
