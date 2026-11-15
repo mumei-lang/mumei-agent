@@ -2853,6 +2853,10 @@ selects the single-file profile; repeated `--source` selects the
 package profile, declaring each file under its basename (duplicates
 are a static error). `--target-arch` names the `gc` target the report
 is validated against and `--timeout` bounds the helper spawn.
+`--import <IMPORT_PATH>=<FILE>` declares one file of an importable
+package unit (repeatable per file and path; requires a multi-file
+`--source` unit) — the helper resolves imports only through the
+declared map, never disk, network or the toolchain.
 
 The route stays inside the declared boundary: it never discovers
 projects, resolves imports or chooses tools — the operator provisions
@@ -2861,8 +2865,7 @@ A nonzero exit, any stderr or a non-`ok` report status fails closed
 before parsing, and the emitted manifest remains declared data — a
 reader still recomputes derived properties and reuse still goes
 through `for_function`/`stale_dependents`. No audit, MCP or planner
-route is wired yet, no imports are supplied, and Evidence
-normalization/acceptance stays open.
+route is wired yet, and Evidence normalization/acceptance stays open.
 
 
 ### C11 declared availability probes
