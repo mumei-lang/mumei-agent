@@ -6351,3 +6351,144 @@ def test_context_key_covers_resolved_module_bytes():
     sc = ts.summarize_typescript(src, resolver=resolver_none)
     sd = ts.summarize_typescript(src)
     assert sc.context_key == sd.context_key
+
+
+# --- slice 67: ts-summaries-accept (strict whole-context acceptance) ----------
+
+def _accept_args(source, manifest, function, resolve=False):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest),
+            "function": function,
+            "resolve_modules": resolve,
+        },
+    )()
+
+
+def test_accept_route_accepts_a_surviving_function(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(
+        "function f(x: number): number { return g(x); }"
+        "function g(v: number): number { return v + 1; }"
+    )
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(src.read_bytes()).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_accept(_accept_args(src, manifest, "f"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.ts-summary-accept/v1"
+    assert out["accepted"] is True
+    assert out["context_match"] is True
+    assert out["function"] == "f"
+    assert out["summary"]["name"] == "f"
+    assert out["summary"]["return_dependencies"] == [0]
+
+
+def test_accept_route_refuses_a_changed_context(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            ts.summarize_typescript(
+                b"function f(x: number): number { return x + 0; }"
+            ).to_dict()
+        )
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_accept(_accept_args(src, manifest, "f"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["context_match"] is False
+    assert out["reason"] == "context_mismatch"
+    assert "summary" not in out
+
+
+def test_accept_route_refuses_an_unknown_function(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(src.read_bytes()).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_accept(_accept_args(src, manifest, "absent"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["context_match"] is True
+    assert out["reason"] == "unknown_function"
+    assert "summary" not in out
+
+
+def test_accept_route_emits_the_live_record_not_the_forged_one(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    manifest = tmp_path / "m.json"
+    forged = ts.summarize_typescript(src.read_bytes()).to_dict()
+    forged["functions"][0]["return_dependencies"] = [1, 2, 3]
+    manifest.write_text(json.dumps(forged))
+    with pytest.raises(SystemExit):
+        ts.main_accept(_accept_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["return_dependencies"] == [0]
+
+
+def test_accept_route_rejects_a_malformed_manifest(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    manifest = tmp_path / "m.json"
+    manifest.write_text('{"schema_version": "mumei.other/v1"}')
+    with pytest.raises(SystemExit) as exc:
+        ts.main_accept(_accept_args(src, manifest, "f"))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "manifest_malformed"
+
+
+def test_accept_route_matches_context_across_resolved_modules(
+    tmp_path, capsys
+):
+    mod = tmp_path / "b.ts"
+    mod.write_text(
+        "export function h(a: number): number { return a + 1; }"
+    )
+    src = tmp_path / "a.ts"
+    src.write_text(
+        "import { h } from './b';"
+        " function f(x: number): number { return h(x); }"
+    )
+    resolver = ts._fs_resolver(str(src))
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            ts.summarize_typescript(
+                src.read_bytes(), resolver=resolver
+            ).to_dict()
+        )
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_accept(_accept_args(src, manifest, "f", resolve=True))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    # A resolved module's bytes changing flips the context key even
+    # though the primary source is byte-identical.
+    mod.write_text(
+        "export function h(a: number): number { return a + 2; }"
+    )
+    with pytest.raises(SystemExit):
+        ts.main_accept(_accept_args(src, manifest, "f", resolve=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "context_mismatch"

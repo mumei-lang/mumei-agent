@@ -22,6 +22,7 @@ _SUBCOMMANDS = {
     "verify-traceability",
     "self-correct",
     "ts-summaries",
+    "ts-summaries-accept",
     "mcp-server",
     "check-spec-health",
     "migrate-suggest",
@@ -261,6 +262,23 @@ def main() -> None:
         ts_build_parser(parser)
         args = parser.parse_args(argv[1:])
         ts_main(args)
+    elif command == "ts-summaries-accept":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_accept_parser as ts_accept_build_parser,
+            main_accept as ts_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-accept",
+            description=(
+                "Accept one function's declared TypeScript summary "
+                "under the strict whole-context gate."
+            ),
+        )
+        ts_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_accept_main(args)
     elif command == "validate-code-to-spec":
         import argparse
         from agent.cross_validation import (
