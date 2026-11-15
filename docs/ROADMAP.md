@@ -3343,6 +3343,23 @@ only: the tool returns `plan`, `observations` and `histories` and a
 selected adapter is still not an accepted manifest.
 
 
+### C06 declared summary produce routes as MCP tools
+
+`ts_summaries`, `rust_summaries` and `sol_summaries` expose the three
+in-process produce routes over MCP: each tool validates the declared
+`source_path`, reads the source under the same byte bound as the CLI
+route (64 KiB for TypeScript and Rust, 256 KiB for Solidity) and
+returns the emitted `mumei.<lang>-scalar-parameter-deps/v1` manifest
+as `manifest`. `ts_summaries` takes the `resolve_modules` opt-in —
+the same relative-specifier filesystem resolver as the CLI flag —
+while `rust_summaries` and `sol_summaries` match their routes' fixed
+declaration surface. Declared failures (unreadable source, oversize,
+an analysis limit) surface as `error` with the declared path
+basename-redacted; nothing spawns and no manifest is accepted. The
+`go_summaries` tool already covered the helper-backed route — the
+family's produce surface is now uniformly reachable over MCP.
+
+
 ### C06 declared summary MCP tool (go_summaries)
 
 The MCP surface exposes the produce route as `go_summaries(

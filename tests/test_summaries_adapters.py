@@ -407,3 +407,66 @@ def test_mcp_summaries_plan_reports_malformed_histories(tmp_path):
         )
     )
     assert out["status"] == "error"
+
+
+def test_mcp_ts_summaries_emits_manifest(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+
+    src = tmp_path / "f.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    out = json.loads(mcp_server.ts_summaries(str(src)))
+    assert out["status"] == "ok"
+    assert out["manifest"]["schema_version"] == (
+        "mumei.ts-scalar-parameter-deps/v1"
+    )
+    assert out["manifest"]["functions"][0]["name"] == "f"
+
+
+def test_mcp_rust_summaries_emits_manifest(tmp_path):
+    from agent import mcp_server
+
+    src = tmp_path / "f.rs"
+    src.write_text("fn f(x: u64) -> u64 { x }")
+    out = json.loads(mcp_server.rust_summaries(str(src)))
+    assert out["status"] == "ok"
+    assert out["manifest"]["schema_version"] == (
+        "mumei.rust-scalar-parameter-deps/v1"
+    )
+
+
+def test_mcp_sol_summaries_emits_manifest(tmp_path):
+    from agent import mcp_server
+
+    src = tmp_path / "c.sol"
+    src.write_text(
+        "contract C { function f(uint x) public returns (uint) "
+        "{ return x; } }"
+    )
+    out = json.loads(mcp_server.sol_summaries(str(src)))
+    assert out["status"] == "ok"
+    assert out["manifest"]["schema_version"] == (
+        "mumei.sol-scalar-parameter-deps/v1"
+    )
+
+
+@pytest.mark.parametrize("tool", ["ts_summaries", "rust_summaries", "sol_summaries"])
+def test_mcp_summaries_tools_validate_source_path(tmp_path, tool):
+    from agent import mcp_server
+
+    fn = getattr(mcp_server, tool)
+    assert json.loads(fn(""))["status"] == "error"
+    assert json.loads(fn("a\nb"))["status"] == "error"
+    assert json.loads(fn(str(tmp_path / "missing.src")))["status"] == "error"
+
+
+@pytest.mark.parametrize("tool", ["ts_summaries", "rust_summaries"])
+def test_mcp_summaries_tools_reject_oversize(tmp_path, tool):
+    pytest.importorskip("tree_sitter_typescript") if tool == "ts_summaries" else None
+    from agent import mcp_server
+
+    big = tmp_path / "big.src"
+    big.write_bytes(b"x" * (64 * 1024 + 1))
+    out = json.loads(getattr(mcp_server, tool)(str(big)))
+    assert out["status"] == "error"
+    assert str(big) not in out["error"]

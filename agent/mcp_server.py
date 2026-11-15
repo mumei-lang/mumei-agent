@@ -2626,6 +2626,164 @@ def summaries_plan(
 
 
 @mcp.tool()
+def ts_summaries(source_path: str, resolve_modules: bool = False) -> str:
+    """Emit a declared TypeScript dependency summary manifest (C06/C07).
+
+    The same wiring as the `ts-summaries` CLI route: one declared
+    source file is read under the 64 KiB bound and summarized
+    in-process — no helper binary, nothing resolved unless the caller
+    opts in. A summary is a conservative report, not a proof or
+    verdict.
+
+    Args:
+        source_path: Absolute path to the declared
+            TypeScript/JavaScript source file (at most 64 KiB).
+        resolve_modules: Opt-in filesystem resolution of relative
+            `./`/`../` import specifiers under the source file's
+            directory (each resolved file under the same bound;
+            unresolvable names stay external).
+
+    Returns:
+        JSON with `manifest` — the
+        `mumei.ts-scalar-parameter-deps/v1` document — on success, or
+        `error` on a declared failure.
+    """
+    try:
+        from agent.ts_interprocedural import (
+            MAX_SOURCE_BYTES,
+            _fs_resolver,
+            summarize_typescript,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    if not _valid_declared_path(source_path):
+        return _err("source_path must be a nonempty single-line path")
+    try:
+        with open(source_path, "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [source_path])
+        )
+    if len(raw) > MAX_SOURCE_BYTES:
+        return _err(
+            f"source_path exceeds the {MAX_SOURCE_BYTES}-byte "
+            "declared bound"
+        )
+    try:
+        live = summarize_typescript(
+            raw,
+            resolver=(
+                _fs_resolver(source_path) if resolve_modules else None
+            ),
+            source_path=source_path,
+        )
+    except Exception as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [source_path])
+        )
+    return _ok({"manifest": live.to_dict()})
+
+
+@mcp.tool()
+def rust_summaries(source_path: str) -> str:
+    """Emit a declared Rust dependency summary manifest (C06/C07).
+
+    The same wiring as the `rust-summaries` CLI route: one declared
+    source file is read under the 64 KiB bound and summarized
+    in-process. A summary is a conservative report, not a proof or
+    verdict.
+
+    Args:
+        source_path: Absolute path to the declared Rust source file
+            (at most 64 KiB).
+
+    Returns:
+        JSON with `manifest` — the
+        `mumei.rust-scalar-parameter-deps/v1` document — on success,
+        or `error` on a declared failure.
+    """
+    try:
+        from agent.rust_interprocedural import (
+            MAX_SOURCE_BYTES,
+            _Unsupported,
+            summarize_rust,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    if not _valid_declared_path(source_path):
+        return _err("source_path must be a nonempty single-line path")
+    try:
+        with open(source_path, "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [source_path])
+        )
+    if len(raw) > MAX_SOURCE_BYTES:
+        return _err(
+            f"source_path exceeds the {MAX_SOURCE_BYTES}-byte "
+            "declared bound"
+        )
+    try:
+        live = summarize_rust(raw)
+    except _Unsupported as exc:
+        return _err(f"analysis limit: {exc.reason}")
+    return _ok({"manifest": live.to_dict()})
+
+
+@mcp.tool()
+def sol_summaries(source_path: str) -> str:
+    """Emit a declared Solidity dependency summary manifest (C06/C07).
+
+    The same wiring as the `sol-summaries` CLI route: one declared
+    source file is read under the 256 KiB bound and summarized
+    in-process. A summary is a conservative report, not a proof or
+    verdict.
+
+    Args:
+        source_path: Absolute path to the declared Solidity source
+            file (at most 256 KiB).
+
+    Returns:
+        JSON with `manifest` — the
+        `mumei.sol-scalar-parameter-deps/v1` document — on success,
+        or `error` on a declared failure.
+    """
+    try:
+        from agent.sol_interprocedural import (
+            MAX_SOURCE_BYTES,
+            summarize_solidity,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    if not _valid_declared_path(source_path):
+        return _err("source_path must be a nonempty single-line path")
+    try:
+        with open(source_path, "rb") as handle:
+            raw = handle.read(MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [source_path])
+        )
+    if len(raw) > MAX_SOURCE_BYTES:
+        return _err(
+            f"source_path exceeds the {MAX_SOURCE_BYTES}-byte "
+            "declared bound"
+        )
+    try:
+        live = summarize_solidity(raw)
+    except Exception as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [source_path])
+        )
+    return _ok({"manifest": live.to_dict()})
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 

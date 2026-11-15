@@ -78,6 +78,9 @@ Exported tools:
 | `native_recheck(core_path, bundle_dir, source_path, expected_build_id, attempt_timeout_ms=30000)` | Run `native-bundle recheck-llvm` as one declared attempt (same wiring as `native-recheck`) and return `mumei.native-recheck-report/v1` |
 | `native_attempt(core_path, source_path, bundle_dir, attempt_timeout_ms=60000)` | Run `native-bundle build` as one declared attempt (same wiring as `native-attempt`) and return `mumei.native-attempt-report/v1` — `build_id` + `candidate` only when the produced bundle holds the full declared member set |
 | `summaries_plan(profile, stamp, tool_version='', histories_path='', rounds=1, max_parallel=1)` | Plan the summary route for a declared profile through the C11 probe boundary (same wiring as `summaries-plan`) and return the `mumei.summaries-plan/v1` document — a selected adapter is a routing decision, not an accepted manifest |
+| `ts_summaries(source_path, resolve_modules=false)` | Emit the `mumei.ts-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `ts-summaries`); optional relative-import resolution — a conservative report, not a proof |
+| `rust_summaries(source_path)` | Emit the `mumei.rust-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `rust-summaries`) — a conservative report, not a proof |
+| `sol_summaries(source_path)` | Emit the `mumei.sol-scalar-parameter-deps/v1` manifest for one declared source under the 256 KiB bound (same wiring as `sol-summaries`) — a conservative report, not a proof |
 | `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
@@ -152,6 +155,9 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `native_recheck` | `core_path: str, bundle_dir: str, source_path: str, expected_build_id: str, attempt_timeout_ms: int = 30000` | `report` |
 | `native_attempt` | `core_path: str, source_path: str, bundle_dir: str, attempt_timeout_ms: int = 60000` | `report` |
 | `summaries_plan` | `profile: str, stamp: int, tool_version: str = '', histories_path: str = '', rounds: int = 1, max_parallel: int = 1` | `plan`, `observations`, `histories` |
+| `ts_summaries` | `source_path: str, resolve_modules: bool = False` | `manifest` |
+| `rust_summaries` | `source_path: str` | `manifest` |
+| `sol_summaries` | `source_path: str` | `manifest` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
 | `suggest_mm_migration` | `code_file: str, language: str, issues_json: str = '[]'` | `migration_hints` |
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |
