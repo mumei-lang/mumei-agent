@@ -2578,6 +2578,24 @@ loops, multiple/unnamed results, structs/arrays/mappings and
 modifiers stay closed (`SolGap` records why). Opt-in and
 in-process; no audit/CLI/MCP route changes.
 
+### C06 Solidity globals, conversions and member dispatch (slice 1)
+
+- Scalar set widened to `address`, `address payable` and fixed
+  `bytes1`..`bytes32` (dynamic `bytes`/`string` stay closed).
+- `emit Event(args)` and `revert Err(args)` record opaque calls
+  with their argument dep sets.
+- `payable(x)`, `T(x)` casts and conversions pass the inner
+  argument's deps through.
+- `msg.*`/`block.*`/`tx.*`/`abi.*` member reads are dep-free
+  external values (no `binding_unavailable`).
+- `this.f(args)` resolves as a same-contract member call; a call
+  whose result is discarded (`void` position) to an unknown
+  callee records an opaque call instead of closing the summary.
+- `returns (T r)` named results bind `r` as a writable local a
+  bare `return` reads back; same-name functions in sibling
+  contracts prefer the caller's contract.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

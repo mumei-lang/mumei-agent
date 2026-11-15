@@ -222,3 +222,73 @@ contract B {
 }"""
     s = _fn(src, "f")
     assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_emit_records_opaque_call():
+    src = """contract C {
+  event Send(address a);
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    emit Send(msg.sender);
+    return y;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})
+    assert any(c.callee == "Send" for c in s.calls)
+
+
+def test_opaque_globals_are_dep_free():
+    src = """contract C {
+  function f(uint256 x) public view returns (uint256) {
+    uint256 t = uint256(uint160(msg.sender));
+    return t;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_payable_conversion():
+    src = """contract C {
+  function f(address to, uint256 x) public pure returns (uint256) {
+    address payable p = payable(to);
+    return x;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_this_member_call_composes():
+    src = """contract C {
+  function g(uint256 a) internal pure returns (uint256) { return a; }
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    return this.g(x) + y;
+  }
+}"""
+    s = _fn(src, "f")
+    # this.g is external-positioned but composes identically
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_void_unknown_call_is_opaque_not_closed():
+    src = """contract C {
+  error Bad(uint256 code);
+  function f(uint256 x, uint256 y) public pure returns (uint256) {
+    if (x > 0) { revert Bad(y); }
+    return x;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_unknown_call_result_position_closes():
+    src = """contract C {
+  function f(uint256 x) public pure returns (uint256) {
+    return ext(x);
+  }
+}"""
+    s = _fn(src, "f")
+    assert not s.available
+    assert any(g.reason == "call_unresolved" for g in s.gaps)

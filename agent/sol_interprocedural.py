@@ -62,9 +62,15 @@ _AUGMENTED_OPS = {
     "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
 }
 _BUILTIN_VOID_CALLS = {"require", "assert", "revert"}
+_OPAQUE_GLOBALS = {"msg", "block", "tx", "abi"}
+import re as _re
+
+
 _SCALAR_PRIMITIVE = (
     lambda t: t.startswith("uint") or t.startswith("int")
     or t == "bool"
+    or t in {"address", "address payable"}
+    or bool(_re.fullmatch(r"bytes([1-9]|[12][0-9]|3[0-2])", t))
 )
 
 
@@ -438,6 +444,56 @@ class _Builder:
             if right_ret is not None:
                 ret = right_ret if ret is None else ret | right_ret
             return ret
+        if t == "revert_statement":
+            err = next(
+                (c for c in _children(st) if c.type == "expression"),
+                None,
+            )
+            actual = tuple(
+                self._expr(
+                    next(
+                        (cc for cc in _children(a) if cc.type == "expression"),
+                        a,
+                    ),
+                    locals_, param_index, summary,
+                )
+                for a in _children(st)
+                if a.type == "call_argument"
+            )
+            summary.calls.append(
+                SolCall(
+                    _span(st),
+                    err.text.decode() if err is not None else "revert",
+                    actual,
+                    None,
+                )
+            )
+            return None
+        if t == "emit_statement":
+            ev = next(
+                (c for c in _children(st) if c.type == "expression"),
+                None,
+            )
+            actual = tuple(
+                self._expr(
+                    next(
+                        (cc for cc in _children(a) if cc.type == "expression"),
+                        a,
+                    ),
+                    locals_, param_index, summary,
+                )
+                for a in _children(st)
+                if a.type == "call_argument"
+            )
+            summary.calls.append(
+                SolCall(
+                    _span(st),
+                    ev.text.decode() if ev is not None else None,
+                    actual,
+                    None,
+                )
+            )
+            return None
         if t == "block_statement":
             return self._block(st, locals_, param_index, summary)
         raise _Unsupported("unsupported_statement", _span(st))
@@ -494,6 +550,10 @@ class _Builder:
                     "unsupported_statement", _span(expr)
                 )
             return locals_[tident.text.decode()]
+        if expr.type == "call_expression":
+            return self._call(
+                expr, locals_, param_index, summary, void=True
+            )
         return self._expr(expr, locals_, param_index, summary)
 
     # -- expressions --------------------------------------------------
@@ -559,6 +619,41 @@ class _Builder:
             return deps
         if t == "call_expression":
             return self._call(node, locals_, param_index, summary)
+        if t == "member_expression":
+            bident = next(
+                (c for c in _children(node) if c.type == "identifier"),
+                None,
+            )
+            if (
+                bident is not None
+                and bident.text.decode() in _OPAQUE_GLOBALS
+            ):
+                # msg./block./tx./abi. — external environment
+                # values with no dependency content.
+                return frozenset()
+            raise _Unsupported(
+                "binding_unavailable", _span(node)
+            )
+        if t in {
+            "payable_conversion_expression",
+            "type_conversion_expression",
+            "type_cast_expression",
+        }:
+            deps = frozenset()
+            for a in _children(node):
+                if a.type == "call_argument":
+                    expr = next(
+                        (
+                            c
+                            for c in _children(a)
+                            if c.type == "expression"
+                        ),
+                        a,
+                    )
+                    deps |= self._expr(
+                        expr, locals_, param_index, summary
+                    )
+            return deps
         if t in {
             "assignment_expression",
             "augmented_assignment_expression",
@@ -569,7 +664,7 @@ class _Builder:
         raise _Unsupported("unsupported_expression", _span(node))
 
     def _call(
-        self, node, locals_, param_index, summary
+        self, node, locals_, param_index, summary, void=False
     ) -> frozenset[int]:
         fn_expr = node.child_by_field_name("function")
         if (
@@ -578,6 +673,20 @@ class _Builder:
             and len(_children(fn_expr)) == 1
         ):
             fn_expr = _children(fn_expr)[0]
+        if (
+            fn_expr is not None
+            and fn_expr.type == "member_expression"
+        ):
+            # `this.f(...)` — same-contract member dispatch.
+            idents = [
+                c for c in _children(fn_expr)
+                if c.type == "identifier"
+            ]
+            if (
+                len(idents) == 2
+                and idents[0].text == b"this"
+            ):
+                fn_expr = idents[1]
         args = [
             c
             for c in _children(node)
@@ -604,6 +713,11 @@ class _Builder:
             fn_expr is None
             or fn_expr.type != "identifier"
         ):
+            if void:
+                summary.calls.append(
+                    SolCall(_span(node), None, actual_t, None)
+                )
+                return frozenset()
             raise _Unsupported("call_unresolved", _span(node))
         name = fn_expr.text.decode()
         if name in _BUILTIN_VOID_CALLS:
@@ -624,6 +738,14 @@ class _Builder:
                 target = key
                 break
         if target is None:
+            if void:
+                # Unknown callee whose result is discarded —
+                # record it opaquely rather than blocking the
+                # whole summary (e.g. `revert MyError(x)`).
+                summary.calls.append(
+                    SolCall(_span(node), name, actual_t, None)
+                )
+                return frozenset()
             raise _Unsupported("call_unresolved", _span(node))
         callee = self.summaries.get(target)
         if callee is None:
