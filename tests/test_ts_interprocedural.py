@@ -270,22 +270,78 @@ def test_non_scalar_parameter_closes():
         assert s.gaps[0].reason == "unsupported_signature"
 
 
-def test_optional_parameter_closes():
-    s = _fn("function f(x?: number): number { return 1; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+def test_optional_parameter_admits():
+    s = _fn("function f(x?: number): number { return x; }")
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_default_parameter_closes():
+def test_default_parameter_admits():
     s = _fn("function f(x: number = 3): number { return x; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_default_parameter_records_calls():
+    s = _fn(
+        "function g(x: number): number { return x; }"
+        "function f(x: number = g(1)): number { return x; }"
+    )
+    assert s.available and len(s.calls) == 1
+    assert s.calls[0].callee == "g"
 
 
 def test_rest_parameter_closes():
     s = _fn("function f(...xs: number[]): number { return 0; }")
     assert not s.available
     assert s.gaps[0].reason == "unsupported_signature"
+
+
+def test_uninitialized_let_binds_no_deps():
+    s = _fn(
+        "function f(x: number): number { let a; a = x; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_uninitialized_let_read_is_dep_free():
+    s = _fn(
+        "function f(x: number): number { let a; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_assignment_in_expression_writes():
+    s = _fn(
+        "function f(x: number): number { let a = 0; let b = (a = x);"
+        " return a + b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_assignment_in_expression_is_a_may_write():
+    # `a = 1` on the RHS of `||` may not run — `a`'s deps keep the
+    # parameter through the may-write union.
+    s = _fn(
+        "function f(x: number): number { let a = x;"
+        " let b = (a > 0) || (a = 1); return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_sequence_expression_unions_operands():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = (x, y); return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_sequence_in_for_increment_writes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = 0; let b = 0;"
+        " for (let i = 0; i < 3; i++, b = x) { a = b; } return b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_destructured_parameter_closes():
@@ -410,6 +466,14 @@ def test_throw_expression_records_calls():
         "function f(x: number): number { throw g(x); }"
     )
     assert s.available and len(s.calls) == 1
+
+
+def test_chained_assignment_writes_both():
+    s = _fn(
+        "function f(x: number): number { let a = 0; let b = 0;"
+        " a = b = x; return a + b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_switch_admits():
@@ -661,28 +725,12 @@ def test_assignment_to_unbound_closes():
     assert s.gaps[0].reason == "binding_unavailable"
 
 
-def test_uninitialized_let_closes():
-    s = _fn(
-        "function f(x: number): number { let a; a = x; return a; }"
-    )
-    assert not s.available
-    assert s.gaps[0].reason == "binding_unavailable"
-
-
 def test_non_scalar_local_annotation_closes():
     s = _fn(
         "function f(x: number): number { let a: string = \"s\"; return x; }"
     )
     assert not s.available
     assert s.gaps[0].reason == "binding_unavailable"
-
-
-def test_sequence_expression_closes():
-    s = _fn(
-        "function f(x: number): number { return (x, 0); }"
-    )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
 
 
 # --- unit closures -----------------------------------------------------------

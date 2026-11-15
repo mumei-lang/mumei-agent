@@ -10,12 +10,15 @@ declared gap — never a silently wrong summary.
 Admitted:
 
 * `number`/`boolean`-annotated parameters on a top-level
-  `function name(...) : number|boolean { ... }` declaration — a
-  parameter with no scalar annotation, a default value, a rest or
-  destructuring pattern, or an optional marker closes the function.
+  `function name(...) : number|boolean { ... }` declaration —
+  optional (`x?`) and defaulted (`x = expr`) parameters admit like
+  required ones and a default's calls still record; a missing
+  scalar annotation, a rest or destructuring pattern, or a
+  non-scalar type closes the function.
 * `let`/`const`/`var` declarations whose declarators bind one
-  identifier to a supported expression (an optional `number`/`boolean`
-  annotation is checked when present).
+  identifier to a supported expression or to nothing (`let x;`
+  binds `undefined` — no dependencies; an optional
+  `number`/`boolean` annotation is checked when present).
 * Scalar literals (`number`, `true`, `false`), identifier reads of
   bound parameters/locals, parentheses, pure unary (`!`, `-`, `+`,
   `~`) and binary operators (`+`, `-`, `*`, comparisons, `==`/`===`/
@@ -48,6 +51,12 @@ Admitted:
   until a `catch` consumes the thrown flag; `finally` always runs —
   the catch parameter is left unbound, so a body that reads it
   closes).
+* Expressions also admit `a = b`/`a op= b` used as a
+  sub-expression (writes like the statement form, always as a
+  may-write since e.g. a `||`/`?:` arm may not run, and yields the
+  assigned dependencies) and `sequence_expression` (the comma
+  operator — operands evaluate left to right, the union is the
+  result).
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only. The result conservatively depends on
   every evaluated argument and records a `TsCall` transfer; the callee
@@ -59,8 +68,7 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 objects/member access, `this`, arrow-function values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new`, `for`-`in`/`of`, labels and
-`sequence_expression` stay
+spread, destructuring, `new`, `for`-`in`/`of` and labels stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -272,7 +280,10 @@ class _Builder:
             raise _Unsupported("unsupported_signature", _span(node))
         params: dict[str, int] = {}
         for param in _children(params_node):
-            if param.type != "required_parameter":
+            # `x?: number` and `x: number = 0` admit like a required
+            # parameter — the index position is what the summary
+            # records; an omitted argument is the caller's concern.
+            if param.type not in {"required_parameter", "optional_parameter"}:
                 raise _Unsupported("unsupported_signature", _span(param))
             pattern = param.child_by_field_name("pattern")
             ptype = param.child_by_field_name("type")
@@ -281,7 +292,6 @@ class _Builder:
                 or pattern.type != "identifier"
                 or ptype is None
                 or not self._scalar_annotation(ptype)
-                or param.child_by_field_name("value") is not None
             ):
                 raise _Unsupported("unsupported_signature", _span(param))
             pname = pattern.text.decode()
@@ -297,6 +307,15 @@ class _Builder:
         transfers: list[TsCall] = []
         count = [0]
         deps = [frozenset()]
+        # A default value evaluates only on a missing argument, but its
+        # calls still belong to this function's behavior — evaluate it
+        # for transfers with no local scope yet.
+        for param in _children(params_node):
+            default = param.child_by_field_name("value")
+            if default is not None:
+                self.expression(
+                    default, params, locals_, transfers, count
+                )
         saw_return = [False]
         self._sequence(
             _children(body), params, locals_, transfers, count, deps,
@@ -422,11 +441,13 @@ class _Builder:
                 ):
                     raise _Unsupported("binding_unavailable", _span(decl))
                 value = decl.child_by_field_name("value")
-                if value is None:
-                    # `let x;` binds `undefined` — outside the fragment.
-                    raise _Unsupported("binding_unavailable", _span(decl))
-                deps_v = self.expression(
-                    value, params, locals_, transfers, count
+                deps_v = (
+                    self.expression(
+                        value, params, locals_, transfers, count
+                    )
+                    if value is not None
+                    # `let x;` binds `undefined` — no dependencies.
+                    else frozenset()
                 )
                 name = pname.text.decode()
                 if is_var:
@@ -942,6 +963,33 @@ class _Builder:
             if argument is None or argument.type != "identifier":
                 raise _Unsupported("unsupported_expression", _span(node))
             return self._read_name(argument, params, locals_, _span(argument))
+        if kind in {
+            "assignment_expression",
+            "augmented_assignment_expression",
+        }:
+            # An assignment inside an expression writes like the
+            # statement form and yields the assigned dependencies.
+            # Stores inside an expression are always may-writes.
+            try:
+                self._assignment(
+                    node, params, locals_, transfers, count, True,
+                    augmented=kind == "augmented_assignment_expression",
+                )
+            except _Unsupported as u:
+                raise _Unsupported(
+                    "unsupported_expression", u.span
+                ) from u
+            left = node.child_by_field_name("left")
+            return self._read_name(left, params, locals_, _span(left))
+        if kind == "sequence_expression":
+            # The comma operator: each operand evaluates for its
+            # writes/calls; the whole value is the union of the deps.
+            result = frozenset()
+            for child in _children(node):
+                result |= self.expression(
+                    child, params, locals_, transfers, count
+                )
+            return result
         if kind == "ternary_expression":
             condition = node.child_by_field_name("condition")
             consequence = node.child_by_field_name("consequence")

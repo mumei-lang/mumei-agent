@@ -2471,6 +2471,25 @@ not a type — thrown *values* carry no dependency information, so the
 analysis does not compose catch-param flows (reading the parameter
 closes instead).
 
+### C06 TypeScript surface widening (slice 3)
+
+The same scalar fragment admits `x?: T` and `x: T = expr` parameters
+(an optional or defaulted parameter still occupies its index — an
+omitted argument is the caller's concern, and a default's calls
+record like body calls), `let`/`var`/`const` declarators without an
+initializer (`let x;` binds `undefined` — no dependencies),
+`assignment_expression` and `augmented_assignment_expression` used as
+a sub-expression (the write lands like the statement form but always
+as a may-write — a `||`/`&&`/`?:` arm may not run — and the
+expression yields the assigned dependencies, so `a = b = x` writes
+both names) and `sequence_expression` (the comma operator — operands
+evaluate left to right in the same scope and the union is the
+result, which is what makes `for (…; …; i++, b = x)` work).
+
+Boundaries: rest and destructured parameters still close, as do
+labels and `for`/`of`/`for`/`in`; a write to a name that is not
+bound anywhere still closes with `binding_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
