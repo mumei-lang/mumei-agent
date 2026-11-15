@@ -3111,6 +3111,22 @@ functions become callable fields (`N.g(x)` invokes through
 the member path). Tagged templates already modeled as calls
 with the strings array plus each substitution.
 
+### C06 TypeScript scalar-callee fallback + meta expressions (slice 36)
+
+The expression-callee fallback now covers every non-`_Callable`
+value, not just optional calls: a scalar callee — including a
+collapsed callable such as `(x > 0 ? g : h)` or `g(x)()` —
+admits with the same bound as `f?.()` (callee deps + actuals'
+union + `TsCall`), so `g(x)()` no longer closes. Comma
+sequences `(a, b, c)` evaluate every operand; a scalar result
+unions the deps (unchanged over-approximation) while a
+composite/callable last operand keeps its shape, so `(o, f)(x)`
+invokes `f`. `import('m')` is an opaque callee (actuals' union
++ `TsCall` named `import`), and `import.meta`/`new.target`
+`meta_property` reads are dependency-free. The earlier slice-35
+boundary ("a scalar callee still closes") is superseded —
+scalar callee is now uniformly over-approximated, never a gap.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -3582,13 +3582,54 @@ def test_parenthesized_callee():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_call_result_callee_closes():
-    # `g(x)()` — the call result is a scalar, not callable.
+def test_call_result_callee_unions():
+    # `g(x)()` — the call result is a scalar; the callee is
+    # uncallable, so the fallback unions the scalar callee's deps
+    # with the actuals (the same bound optional calls use).
     s = _fn(
         "function f(x: number): number {"
         " const g = (v: number) => v; return g(x)(); }"
     )
-    assert not s.available
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_conditional_callee_unions():
+    # `(x > 0 ? g : h)(x)` — the ternary collapses the callables to
+    # their captured deps; the call admits via the scalar fallback.
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v;"
+        " const h = (v: number) => v + 1;"
+        " return (x > 0 ? g : h)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_sequence_last_callable_invokes():
+    # `(o, f)(x)` — a non-scalar sequence result keeps its shape.
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number) => v;"
+        " const o = {a: x}; return (o, g)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_dynamic_import_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " const m = import('m'); return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.callee == "import" for c in s.calls)
+
+
+def test_meta_property_dep_free():
+    s = _fn(
+        "function f(x: number): number {"
+        " return import.meta.url; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
 
 
 def test_parenthesized_member_base():

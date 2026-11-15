@@ -256,11 +256,22 @@ Admitted:
 * Expression callees — `(() => x)()`, `(g)(x)`, `f?.()`: a
   non-identifier callee evaluates to a value; a `_Callable`
   invokes inline, an `_External` yields the actuals' union,
-  and the optional-call fallback covers scalar callees.
-  Parenthesized expressions preserve their value (no eager
-  flatten) so `(() => x)()` and `(o).f` keep their shape.
-  Tagged templates (`tag`..${x}..``) call the tag with the
-  strings array plus each substitution.
+  and any other value (a scalar — including a collapsed
+  callable like `(x > 0 ? g : h)`) takes the same
+  over-approximation the optional-call fallback uses: the
+  callee's deps plus the actuals' union, with a `TsCall`
+  recorded. Parenthesized expressions preserve their value
+  (no eager flatten) so `(() => x)()` and `(o).f` keep
+  their shape. Tagged templates (`tag`..${x}..``) call the
+  tag with the strings array plus each substitution.
+* Comma sequences, dynamic imports, and meta properties —
+  `(a, b, c)` evaluates every operand for its writes/calls;
+  a scalar result over-approximates to the union, while a
+  composite/callable last operand keeps its shape so `(o,
+  f)(x)` invokes `f`. `import('m')` treats the module
+  promise as an opaque callee (actuals' union + `TsCall`),
+  and `import.meta`/`new.target` `meta_property` reads are
+  dependency-free.
 * `namespace N { ... }` — binds a `_Composite` in module
   scope: member declarators evaluate in order into a scope
   that sees module bindings, exported `function` members
@@ -3467,6 +3478,34 @@ class _Builder:
             # composite must keep its shape for `(() => x)()`
             # and `(o).f` to work; callers flatten as needed.
             return self._eval(exprs[0], params, locals_, transfers, count)
+        if kind == "sequence_expression":
+            # The comma operator: each operand evaluates for its
+            # writes/calls. A scalar result over-approximates to
+            # the union of every operand's deps; a composite or
+            # callable keeps the LAST element's shape so
+            # `(o, f)(x)` can still invoke `f`.
+            exprs = _children(node)
+            if not exprs:
+                raise _Unsupported("unsupported_expression", _span(node))
+            last = self._eval(
+                exprs[-1], params, locals_, transfers, count
+            )
+            if not isinstance(last, frozenset):
+                for child in exprs[:-1]:
+                    self.expression(
+                        child, params, locals_, transfers, count
+                    )
+                return last
+            result = last
+            for child in exprs[:-1]:
+                result |= self.expression(
+                    child, params, locals_, transfers, count
+                )
+            return result
+        if kind == "meta_property":
+            # `import.meta`, `new.target` — meta reads carry no
+            # dependencies in this model.
+            return frozenset()
         if kind == "await_expression":
             # `await` yields the operand's value — for the dep model
             # that's a pass-through. `for await (...)` iterates the
@@ -3854,12 +3893,29 @@ class _Builder:
                     )
                 )
                 return _scalar_of(inst)
+            if function.type == "import":
+                # `import('m')` — a dynamic import promise; the
+                # callee is opaque, so it yields the actuals'
+                # union like an `_External` call.
+                actual_i = self._call_actuals(
+                    arguments, params, locals_, transfers, count, node
+                )
+                result_i = frozenset()
+                for a in actual_i:
+                    result_i |= a
+                transfers.append(
+                    TsCall(_span(node), "import", actual_i, result_i)
+                )
+                return result_i
             if function.type != "identifier":
-                # `(() => x)()`, `(g)(x)`, `f()()` — the callee
-                # is an expression: evaluate it. A `_Callable`
-                # invokes inline, an `_External` yields the
-                # actuals' union, anything else closes (or takes
-                # the optional-call over-approximation).
+                # `(() => x)()`, `(g)(x)`, `(x > 0 ? g : h)(x)` —
+                # the callee is an expression: evaluate it. A
+                # `_Callable` invokes inline; an `_External`
+                # yields the actuals' union; anything else is a
+                # scalar (possibly a collapsed callable, e.g. a
+                # conditional pick) whose captured deps plus the
+                # actuals' union over-approximate the result —
+                # the same bound the optional-call fallback uses.
                 actual_e = self._call_actuals(
                     arguments, params, locals_, transfers, count, node
                 )
@@ -3885,13 +3941,7 @@ class _Builder:
                         )
                     )
                     return result_e
-                result_e = _scalar_of(raw)
-                if isinstance(raw, _External):
-                    result_e = frozenset()
-                elif not optional_call:
-                    raise _Unsupported(
-                        "unsupported_expression", _span(node)
-                    )
+                result_e = frozenset() if isinstance(raw, _External) else _scalar_of(raw)
                 for a in actual_e:
                     result_e |= a
                 transfers.append(
@@ -4003,15 +4053,6 @@ class _Builder:
             return _scalar_of(
                 self._eval(left, params, locals_, transfers, count)
             )
-        if kind == "sequence_expression":
-            # The comma operator: each operand evaluates for its
-            # writes/calls; the whole value is the union of the deps.
-            result = frozenset()
-            for child in _children(node):
-                result |= self.expression(
-                    child, params, locals_, transfers, count
-                )
-            return result
         if kind == "ternary_expression":
             condition = node.child_by_field_name("condition")
             consequence = node.child_by_field_name("consequence")
