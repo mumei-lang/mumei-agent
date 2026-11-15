@@ -5073,3 +5073,80 @@ def test_external_as_argument_yields_union():
         ).functions if fn.name == "f"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_this_write_reaches_caller():
+    # `a.set(x); a.get()` — `this.v = a` inside `set` mutates
+    # the receiver; `a.get()` reads it back.
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "class A {"
+            " v: number;"
+            " set(a: number){ this.v = a; }"
+            " get(){ return this.v; } }"
+            " function f(x: number): number {"
+            " let a = new A(); a.set(x); return a.get(); }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_this_write_reaches_caller_alias():
+    # `b = a` shares the instance — the `this.v` write inside
+    # `a.set` reaches `b` too (JS reference semantics).
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "class A {"
+            " v: number;"
+            " set(a: number){ this.v = a; } }"
+            " function f(x: number): number {"
+            " let a = new A(); let b = a;"
+            " a.set(x); return b.v; }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_opaque_call_may_writes_composite_arg():
+    # `h(o, x)` on a DEP-UNION callee (declared function not
+    # inlined) may write any field of `o` — every field takes
+    # the call's dep union as a may-write.
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function h(o, y: number){ o.a = y; }"
+            " function f(x: number): number {"
+            " let o = {a: 1}; h(o, x); return o.a; }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_external_call_may_writes_composite_arg():
+    mods = {"./x": "export function e(o, x){ o.a = x; }"}
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {e} from './x';"
+            " function f(x: number): number {"
+            " let o = {a: 1}; e(o, x); return o.a; }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    # The resolved callee's body runs under ITS builder — the
+    # `o.a = x` write mutates the shared composite in place.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_loop_member_write_snapshot_preserved():
+    # The fixed point's pre-write snapshot must survive: a
+    # member write in a loop body may not execute, so `o.a`
+    # keeps the join {x, y} — in-place mutation is only for
+    # objects shared with an unseen scope.
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "function f(x: number, y: number, n: number): number {"
+            " let o = {a: x};"
+            " for (let i = 0; i < n; i++) { o.a = y; }"
+            " return o.a; }"
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})

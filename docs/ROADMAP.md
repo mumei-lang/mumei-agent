@@ -3386,7 +3386,17 @@ non-scalar actual (`_Callable`/`_Composite`/`_Class`/
 invokes the real callback and `h(o){ return o.a }` reads
 the passed composite's fields. Scalar actuals keep dep
 binding unchanged — an opt-in channel, no semantics change
-where it is unused.
+where it is unused. Writes through a receiver propagate
+back: a member store on a composite shared with an unseen
+scope (a `this` receiver, a composite actual) mutates its
+field table in place (`_aliased_objs`), so
+`a.set(x); a.get()` and `b = a; a.set(x); b.v` see the
+write; scope-local composites (loop-join artifacts) keep
+copy-on-write so the fixed point's pre-write snapshot
+survives. An opaque call — a declared function's dep-union
+result, `_External`, `import()` — may write any field of
+a composite actual, so every field takes the call's dep
+union as a may-write (`_opaque_call_writes`).
 
 ## Roadmap authority and vocabulary
 

@@ -286,6 +286,15 @@ Admitted:
   actual (`_Callable`/`_Composite`/`_Class`/`_External`)
   to the parameter, so `h(g)`/`h({a: x})`/`new A(g)` let
   the callee body call `c(x)` or read `o.a` precisely.
+  Member writes on a composite SHARED with an unseen
+  scope — a `this` receiver or a composite actual —
+  mutate its field table in place (`_aliased_objs`), so
+  `a.set(x); a.get()` propagates; scope-local composites
+  keep copy-on-write (the loop fixed point's pre-write
+  snapshot must survive). An opaque call (declared
+  function's dep-union, `_External`, `import()`) may
+  write any field of a composite actual — every field
+  takes the call's dep union (`_opaque_call_writes`).
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -979,6 +988,14 @@ class _Builder:
         self.classes: dict[str, object] = {}
         self._class_cache: dict[str, object] = {}
         self._fn_cache: dict[str, object] = {}
+        # `_Composite` objects shared with an UNSEEN scope — a
+        # `this` receiver or a composite actual bound to a
+        # parameter. A member write on one mutates its field
+        # table in place (the caller's `a` when `this.f = v`
+        # ran inside `a.set(...)`); objects local to a scope
+        # (e.g. a loop-join artifact) must keep copy-on-write
+        # so the fixed-point's pre-write snapshot survives.
+        self._aliased_objs: set = set()
         # Optional module resolver: maps an import specifier to
         # source text (None = no resolver / unresolvable — the
         # names stay `_External`, the existing over-approximation).
@@ -3418,6 +3435,11 @@ class _Builder:
         if not isinstance(old, _Composite):
             raise _Unsupported("unsupported_expression", _span(node))
         new = _composite_delete(old, path, _span(node))
+        if old in self._aliased_objs:
+            # Shared with an unseen scope — mutate in place so
+            # the delete reaches it.
+            old.fields.clear()
+            old.fields.update(new.fields)
         for name, val in locals_.items():
             if val is old:
                 locals_[name] = new
@@ -3563,6 +3585,9 @@ class _Builder:
                     )
                 klass = klass.parent
             new = _composite_dyn_set(old, path, value, _span(node))
+            if old in self._aliased_objs:
+                old.fields.clear()
+                old.fields.update(new.fields)
             for name, val in locals_.items():
                 if val is old:
                     locals_[name] = new
@@ -3600,6 +3625,16 @@ class _Builder:
         new = _composite_set(
             old, path, value, conditional, _span(node)
         )
+        if old in self._aliased_objs:
+            # Shared with an UNSEEN scope (the caller's receiver
+            # `a` when `this.f = v` ran inside `a.set(...)`, or
+            # a composite passed as an argument): mutating its
+            # field table propagates the write where rebinding
+            # can't reach. Objects local to this scope keep
+            # copy-on-write — a loop-join artifact doubles as
+            # the fixed point's pre-write snapshot.
+            old.fields.clear()
+            old.fields.update(new.fields)
         # Every binding IN THIS SCOPE sharing the instance is an
         # alias — the write reaches all of them. Only `locals_` is
         # scanned: eagerly rewriting the enclosing scope would
@@ -3745,16 +3780,23 @@ class _Builder:
                 span,
                 this_val=this_val,
                 construct=construct,
+                actual_values=actual_values,
             )
         inner = dict(locals_)
         if this_val is not None:
             inner["this"] = this_val
+            if isinstance(this_val, _Composite):
+                # `this` IS the caller's object — field writes
+                # must reach it (see `_member_store`).
+                self._aliased_objs.add(this_val)
         for i, pname in enumerate(cval.params):
             aval = (
                 actual_values[i]
                 if actual_values is not None and i < len(actual_values)
                 else None
             )
+            if isinstance(aval, _Composite):
+                self._aliased_objs.add(aval)
             if i == cval.rest:
                 # `...rest` collects every remaining argument —
                 # dep-wise the union of them all.
@@ -4454,6 +4496,25 @@ class _Builder:
             actuals.append(add(arg))
         return tuple(actuals)
 
+    @staticmethod
+    def _opaque_call_writes(values, deps):
+        """`e(o, x)` through an opaque callee — a declared
+        function's dep-union call, an `_External`, a dynamic
+        `import()`. The callee may write ANY field of a
+        composite actual (its body isn't modelled here), so
+        every field takes the call's dep union as a may-write;
+        a composite/callable field collapses, which is the
+        sound over-approximation."""
+        if not deps or not values:
+            return
+        for val in values:
+            if not isinstance(val, _Composite):
+                continue
+            for key in list(val.fields):
+                val.fields[key] = _merge_vals(
+                    val.fields[key], deps
+                )
+
     def _collection_call(
         self,
         prop,
@@ -5099,6 +5160,7 @@ class _Builder:
                 result_n = frozenset()
                 for a in actual_n:
                     result_n |= a
+                self._opaque_call_writes(vals_n, result_n)
                 transfers.append(
                     TsCall(
                         _span(node),
@@ -5179,6 +5241,7 @@ class _Builder:
                     result_m = frozenset()
                     for a in actual_m:
                         result_m |= a
+                    self._opaque_call_writes(vals_m, result_m)
                     transfers.append(
                         TsCall(
                             _span(node),
@@ -5232,6 +5295,7 @@ class _Builder:
                         result_m = base_val2
                         for a in actual_m:
                             result_m |= a
+                        self._opaque_call_writes(vals_m, result_m)
                         transfers.append(
                             TsCall(
                                 _span(node),
@@ -5291,6 +5355,7 @@ class _Builder:
                     result_m = _scalar_of(raw)
                     for a in actual_m:
                         result_m |= a
+                    self._opaque_call_writes(vals_m, result_m)
                     transfers.append(
                         TsCall(
                             _span(node),
@@ -5392,12 +5457,20 @@ class _Builder:
                 # `import('m')` — a dynamic import promise; the
                 # callee is opaque, so it yields the actuals'
                 # union like an `_External` call.
+                vals_i: list = []
                 actual_i = self._call_actuals(
-                    arguments, params, locals_, transfers, count, node
+                    arguments,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    node,
+                    values_out=vals_i,
                 )
                 result_i = frozenset()
                 for a in actual_i:
                     result_i |= a
+                self._opaque_call_writes(vals_i, result_i)
                 transfers.append(
                     TsCall(_span(node), "import", actual_i, result_i)
                 )
@@ -5447,6 +5520,7 @@ class _Builder:
                 result_e = frozenset() if isinstance(raw, _External) else _scalar_of(raw)
                 for a in actual_e:
                     result_e |= a
+                self._opaque_call_writes(vals_e, result_e)
                 transfers.append(
                     TsCall(
                         _span(node),
@@ -5504,6 +5578,7 @@ class _Builder:
                     result_i = frozenset()
                     for a in actual:
                         result_i |= a
+                    self._opaque_call_writes(vals, result_i)
                     transfers.append(
                         TsCall(
                             _span(node), callee, actual, result_i
@@ -5518,6 +5593,7 @@ class _Builder:
                     result_i = _scalar_of(raw)
                     for a in actual:
                         result_i |= a
+                    self._opaque_call_writes(vals, result_i)
                     transfers.append(
                         TsCall(
                             _span(node), callee, actual, result_i
@@ -5539,6 +5615,7 @@ class _Builder:
                 )
                 return result
             result = frozenset().union(*actual) if actual else frozenset()
+            self._opaque_call_writes(vals, result)
             transfers.append(
                 TsCall(_span(node), callee, actual, result)
             )
