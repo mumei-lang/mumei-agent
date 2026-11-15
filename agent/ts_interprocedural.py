@@ -846,6 +846,32 @@ def _scalar_of(value) -> frozenset[int]:
     return value
 
 
+def _callee_name(node):
+    """Callee label for a `TsCall` — identifier/member paths
+    only. Any non-identifier segment (a string-literal key in
+    `o["..."]`, a computed property, a call-expression callee)
+    renders as `?` so literal text inside the callee expression
+    can never reach the JSON output."""
+    if node is None:
+        return "?"
+    if node.type == "identifier":
+        return node.text.decode()
+    if node.type == "parenthesized_expression":
+        inner = next(iter(_children(node)), None)
+        return _callee_name(inner)
+    if node.type == "member_expression":
+        obj = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        base = _callee_name(obj)
+        if prop is not None and prop.type == "property_identifier":
+            return f"{base}.{prop.text.decode()}"
+        return f"{base}[?]"
+    if node.type == "subscript_expression":
+        obj = node.child_by_field_name("object")
+        return f"{_callee_name(obj)}[?]"
+    return "?"
+
+
 def _merge_vals(old, new):
     """Join two values: scalar|scalar unions, composite|composite
     merges field-wise, and a shape mismatch collapses the composite
@@ -1159,6 +1185,11 @@ class _Builder:
         # require path reads this precise table instead.
         self._cjs_fields = _Composite({})
         self._cjs_whole = None
+        # `module.exports = v` (or a bare `exports = v`)
+        # detaches the `exports` alias from the live export
+        # object — subsequent `exports.x` writes land on the
+        # old object and never reach `module.exports`.
+        self._cjs_exports_detached = False
         self.module_locals.setdefault(
             "module", _Composite({"exports": _cjs_table})
         )
@@ -1678,10 +1709,28 @@ class _Builder:
         value = self._eval(
             right, {}, self.module_locals, [], count
         )
-        if not path:
-            self._cjs_whole = value
-        else:
+        if base == "module":
+            if not path:
+                # `module.exports = v` — the whole table
+                # rebinds: earlier `exports.*` writes die with
+                # the old object, and the `exports` name
+                # detaches (it still aliases that object).
+                self._cjs_whole = value
+                self._cjs_fields = _Composite({})
+                self._cjs_exports_detached = True
+                return True
             self._cjs_fields.fields[path[0]] = value
+            return True
+        if self._cjs_exports_detached:
+            # `exports` still names the detached object — its
+            # writes never reach `module.exports`.
+            return True
+        if not path:
+            # `exports = v` rebinds the local alias only —
+            # `module.exports` itself is untouched.
+            self._cjs_exports_detached = True
+            return True
+        self._cjs_fields.fields[path[0]] = value
         return True
 
     def _register_nested_functions(self, node, params, locals_) -> None:
@@ -3400,7 +3449,7 @@ class _Builder:
                         transfers.append(
                             TsCall(
                                 _span(node),
-                                node.text.decode(),
+                                _callee_name(node),
                                 (),
                                 result,
                             )
@@ -3432,7 +3481,10 @@ class _Builder:
                         return result
                     if key in val.klass.methods:
                         return val.klass.methods[key]
-                return frozenset()
+                # An opaque call may have ADDED fields the
+                # table never named — `"*"` carries their deps
+                # (still dep-free when no opaque call ran).
+                return val.fields.get("*", frozenset())
             val = val.fields[key]
         return val
 
@@ -3542,7 +3594,7 @@ class _Builder:
                     this_val=old,
                 )
                 transfers.append(
-                    TsCall(_span(node), node.text.decode(), (vdeps,), result)
+                    TsCall(_span(node), _callee_name(node), (vdeps,), result)
                 )
             return
         if isinstance(old, _Class) and len(path) == 1:
@@ -3599,7 +3651,7 @@ class _Builder:
                     transfers.append(
                         TsCall(
                             _span(node),
-                            node.text.decode(),
+                            _callee_name(node),
                             (vdeps,),
                             result,
                         )
@@ -3817,6 +3869,12 @@ class _Builder:
                 )
             if this_val is None and bthis is not None:
                 this_val = bthis
+        # `this`/composite-actual marks last only for THIS call —
+        # in-place mutation propagates the callee's writes, but a
+        # mark that outlived the call would let a later caller-side
+        # conditional write corrupt the pre-branch snapshot.
+        saved_aliased = self._aliased_objs
+        self._aliased_objs = set(saved_aliased)
         inner = dict(locals_)
         if this_val is not None:
             inner["this"] = this_val
@@ -3915,6 +3973,7 @@ class _Builder:
             self.block_stack = saved_block
             self.var_names = saved_var
             self.function_locals = saved_flocals
+            self._aliased_objs = saved_aliased
         if construct:
             # `new f()` — the value is the evolved `this`, not
             # the body's return.
@@ -4544,7 +4603,10 @@ class _Builder:
         composite actual (its body isn't modelled here), so
         every field takes the call's dep union as a may-write;
         a composite/callable field collapses, which is the
-        sound over-approximation."""
+        sound over-approximation. The callee may also ADD
+        fields the table doesn't have — `"*"` records the
+        deps of every never-named write so a later read of
+        a missing key still carries them."""
         if not deps or not values:
             return
         for val in values:
@@ -4554,6 +4616,7 @@ class _Builder:
                 val.fields[key] = _merge_vals(
                     val.fields[key], deps
                 )
+            val.fields["*"] = val.fields.get("*", frozenset()) | deps
 
     def _funproto_call(
         self,
@@ -4668,7 +4731,7 @@ class _Builder:
         with `elem` bound to its first parameter."""
         span = _span(node)
         callee = (
-            obj_node.text.decode() + "." + prop
+            _callee_name(obj_node) + "." + prop
             if obj_node is not None
             else prop
         )
@@ -5072,20 +5135,16 @@ class _Builder:
             exprs = _children(node)
             if not exprs:
                 raise _Unsupported("unsupported_expression", _span(node))
-            last = self._eval(
-                exprs[-1], params, locals_, transfers, count
-            )
+            vals = [
+                self._eval(child, params, locals_, transfers, count)
+                for child in exprs
+            ]
+            last = vals[-1]
             if not isinstance(last, frozenset):
-                for child in exprs[:-1]:
-                    self.expression(
-                        child, params, locals_, transfers, count
-                    )
                 return last
             result = last
-            for child in exprs[:-1]:
-                result |= self.expression(
-                    child, params, locals_, transfers, count
-                )
+            for val in vals[:-1]:
+                result |= _scalar_of(val)
             return result
         if kind == "meta_property":
             # `import.meta`, `new.target` — meta reads carry no
@@ -5286,7 +5345,7 @@ class _Builder:
                 transfers.append(
                     TsCall(
                         _span(node),
-                        "new " + ctor_node.text.decode(),
+                        "new " + _callee_name(ctor_node),
                         actual_n,
                         _scalar_of(result_n),
                     )
@@ -5303,7 +5362,7 @@ class _Builder:
                 transfers.append(
                     TsCall(
                         _span(node),
-                        "new " + ctor_node.text.decode(),
+                        "new " + _callee_name(ctor_node),
                         actual_n,
                         result_n,
                     )
@@ -5327,7 +5386,7 @@ class _Builder:
                 transfers.append(
                     TsCall(
                         _span(node),
-                        "new " + ctor_node.text.decode(),
+                        "new " + _callee_name(ctor_node),
                         actual_n,
                         _scalar_of(result_n),
                     )
@@ -5384,7 +5443,7 @@ class _Builder:
                     transfers.append(
                         TsCall(
                             _span(node),
-                            function.text.decode(),
+                            _callee_name(function),
                             actual_m,
                             result_m,
                         )
@@ -5438,7 +5497,7 @@ class _Builder:
                         transfers.append(
                             TsCall(
                                 _span(node),
-                                function.text.decode(),
+                                _callee_name(function),
                                 actual_m,
                                 result_m,
                             )
@@ -5462,7 +5521,7 @@ class _Builder:
                             transfers,
                             count,
                             node,
-                            function.text.decode(),
+                            _callee_name(function),
                         )
                     if (
                         isinstance(base_val2, _Composite)
@@ -5501,7 +5560,7 @@ class _Builder:
                         transfers.append(
                             TsCall(
                                 _span(node),
-                                function.text.decode(),
+                                _callee_name(function),
                                 actual_m,
                                 result_m,
                             )
@@ -5518,7 +5577,7 @@ class _Builder:
                     transfers.append(
                         TsCall(
                             _span(node),
-                            function.text.decode(),
+                            _callee_name(function),
                             actual_m,
                             result_m,
                         )
@@ -5560,7 +5619,7 @@ class _Builder:
                 transfers.append(
                     TsCall(
                         _span(node),
-                        function.text.decode(),
+                        _callee_name(function),
                         actual_m,
                         result,
                     )
@@ -5670,7 +5729,7 @@ class _Builder:
                     transfers.append(
                         TsCall(
                             _span(node),
-                            function.text.decode(),
+                            _callee_name(function),
                             actual_e,
                             result_e,
                         )
@@ -5683,13 +5742,13 @@ class _Builder:
                 transfers.append(
                     TsCall(
                         _span(node),
-                        function.text.decode(),
+                        _callee_name(function),
                         actual_e,
                         result_e,
                     )
                 )
                 return result_e
-            callee = function.text.decode()
+            callee = _callee_name(function)
             bound = (
                 callee in locals_
                 or callee in self.function_locals

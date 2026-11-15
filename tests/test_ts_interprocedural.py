@@ -5321,3 +5321,84 @@ def test_extends_known_class_inherits():
         " return new A().r(); }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_sequence_expression_evaluates_left_to_right():
+    # `(h = () => y, h)` — the last operand reads `h` AFTER the
+    # assignment, so the new arrow (captured {x,y}) is invoked.
+    s = _fn(
+        "function g(a) { return a; }"
+        " function f(x: number, y: number) {"
+        " let h = g; return (h = () => y, h)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_invoke_alias_mark_does_not_leak():
+    # `h(o)` marks `o` only during the call — a later caller-side
+    # conditional write keeps the pre-branch may-write union.
+    s = _fn(
+        "function h(o) { o.a = 2; }"
+        " function f(x: number, y: number, b: boolean) {"
+        " let o = {a: x}; h(o); if (b) { o.a = y; } return o.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_call_may_add_fields():
+    # A dep-union (uninlined) callee may ADD fields — a read of
+    # a field the call site never wrote still carries the
+    # call's dep union via the `"*"` marker.
+    s = _fn(
+        "function e(o) { o.new = 1; }"
+        " function f(x: number) {"
+        " let o = {a: x}; e(o); return o.new; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_commonjs_whole_rebind_detaches_earlier_fields():
+    mods = {
+        "./m": "exports.g = function(a) { return a; };"
+        " module.exports = {h: function(a) { return a + 1; }};",
+    }
+    s = ts.summarize_typescript(
+        "import {g, h} from './m';"
+        " function f(x: number) { return h(x); }",
+        resolver=lambda spec: mods.get(spec),
+    )
+    f = next(fn for fn in s.functions if fn.name == "f")
+    assert f.available and f.return_dependencies == frozenset({0})
+
+
+def test_commonjs_field_write_after_whole_rebind_lands():
+    mods = {
+        "./m": "module.exports = {h: function(a) { return a; }};"
+        " module.exports.g = function(a) { return a + 1; };",
+    }
+    s = ts.summarize_typescript(
+        "import {h, g} from './m';"
+        " function f(x: number) { return g(x); }",
+        resolver=lambda spec: mods.get(spec),
+    )
+    f = next(fn for fn in s.functions if fn.name == "f")
+    assert f.available and f.return_dependencies == frozenset({0})
+
+
+def test_commonjs_exports_alias_detaches_after_rebind():
+    mods = {
+        "./m": "module.exports = {h: function(a) { return a; }};"
+        " exports.g = function(a) { return a + 1; };",
+    }
+    b = ts._Builder(ts._syntax(mods["./m"].encode()))
+    assert sorted(b.cjs_exports.fields) == ["h"]
+
+
+def test_callee_label_scrubs_literal_keys():
+    # `o["secret-value"](x)` — the literal key must not reach
+    # the call record's callee label.
+    s = _fn(
+        'function f(x: number) {'
+        ' let o = {}; o["secret-value"](x); return x; }'
+    )
+    assert s.calls and s.calls[0].callee == "o[?]"
