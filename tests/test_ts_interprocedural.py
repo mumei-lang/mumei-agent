@@ -3166,3 +3166,119 @@ def test_promise_all():
         " return x; }"
     )
     assert s.available
+
+
+# --- slice 30: container built-in methods
+
+
+def test_map_arrow():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " const b = a.map(v => v + 1);"
+        " return b[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "a.map"
+
+
+def test_map_bound_callable():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " const cb = (v: number) => v;"
+        " const b = a.map(cb);"
+        " return b[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_forEach_records_calls():
+    s = _fn(
+        "function g(v: number): number { return v; }\n"
+        "function f(x: number): number {"
+        " const a = [x];"
+        " a.forEach(v => g(v));"
+        " return x; }"
+    )
+    assert s.available and len(s.calls) == 2
+
+
+def test_reduce_accumulator():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " return a.reduce((acc, v) => acc + v, 0); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_some_includes_join():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " const b = a.some(v => v > 0) || a.includes(x) || a.join();"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_push_grows_elements():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const a = [x];"
+        " a.push(y);"
+        " const i = x;"
+        " return a[i]; }"
+    )
+    # A dynamic index unions every field — the pushed `y` too.
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_push_alias_sees_write():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const a = [x];"
+        " const b = a;"
+        " a.push(y);"
+        " const i = x;"
+        " return b[i]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_pop_returns_element():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " return a.pop(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_user_map_field_still_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {map: x};"
+        " return o.map(); }"
+    )
+    assert not s.available
+
+
+def test_find_returns_element():
+    s = _fn(
+        "function f(x: number): number {"
+        " const a = [x];"
+        " return a.find(v => v > 0); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice_concat():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " const a = [x];"
+        " const b = a.slice().concat([y]);"
+        " return b[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})

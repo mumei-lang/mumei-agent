@@ -224,6 +224,19 @@ Admitted:
   external, calls and `new` yield the actuals' union, and a
   local binding or import shadows the global via the normal
   lookup order.
+* Container built-ins — `a.map/filter/forEach/find/some/every/
+  reduce/join/includes/push/pop/at/slice/concat/sort/keys/...`
+  on a `_Composite` receiver (`_COLLECTION_METHODS`): `elem` is
+  the union of every leaf dep; a function-literal or bound
+  callable first arg invokes with every formal bound to
+  `elem ∪ actuals` (positions can't be correlated — map's
+  `(v,i,arr)` vs reduce's `(acc,v)`). `map`/`filter`/`slice`/
+  `concat`/`flat`/`sort`/`keys`/etc. return a fresh
+  `_Composite` (bindable via `call_expression`), scalars
+  return the elem/actual union, `forEach` is dep-free, and
+  `push`/`unshift` copy-on-write a grown instance onto every
+  same-scope alias like `_member_store`. A user field named
+  `map` still shadows the built-in.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -342,6 +355,42 @@ _GLOBALS = {
     "structuredClone",
     "Promise",
     "undefined",
+}
+
+
+# Array/object methods modelled on a `_Composite` receiver —
+# only reached when the composite has no such field (a scalar
+# user field named `map` still closes).
+_COLLECTION_METHODS = {
+    "map",
+    "flatMap",
+    "filter",
+    "forEach",
+    "find",
+    "findIndex",
+    "some",
+    "every",
+    "reduce",
+    "reduceRight",
+    "join",
+    "includes",
+    "indexOf",
+    "lastIndexOf",
+    "at",
+    "slice",
+    "concat",
+    "flat",
+    "sort",
+    "reverse",
+    "fill",
+    "push",
+    "unshift",
+    "pop",
+    "shift",
+    "keys",
+    "values",
+    "entries",
+    "toString",
 }
 
 
@@ -2048,16 +2097,24 @@ class _Builder:
 
     @staticmethod
     def _bindable(node, value):
-        """A composite may only bind via an object literal or a
+        """A composite may only bind via an object literal, a
         whole-name alias (`p = o` shares the instance — writes
-        propagate to every holder). A member-path result bound to a
-        name would let writes through either side diverge, so it
-        collapses to its leaf deps. A callable binds via its literal
-        or a name alias; anything else (a member path, a call
-        result) collapses to the captured deps."""
+        propagate to every holder), `new`, or a call result (a
+        fresh shape — e.g. `a.map(...)` — can't alias anything
+        else). A member-path result bound to a name would let
+        writes through either side diverge, so it collapses to its
+        leaf deps. A callable binds via its literal or a name
+        alias; anything else (a member path, a call result)
+        collapses to the captured deps."""
         if isinstance(value, _Composite) and (
             node.type
-            not in {"object", "array", "identifier", "new_expression"}
+            not in {
+                "object",
+                "array",
+                "identifier",
+                "new_expression",
+                "call_expression",
+            }
         ):
             return _scalar_of(value)
         if isinstance(value, _Callable) and (
@@ -2778,6 +2835,157 @@ class _Builder:
             )
         return tuple(actuals)
 
+    def _collection_call(
+        self,
+        prop,
+        base_val,
+        obj_node,
+        actual,
+        arguments,
+        params,
+        locals_,
+        transfers,
+        count,
+        node,
+    ):
+        """`a.map(cb)` / `a.push(x)` / `a.join(s)` — built-in
+        container methods on a `_Composite`. `elem` is the union
+        of every leaf dep (the model doesn't correlate indexes);
+        a function-literal or bound-callable first arg invokes
+        with `elem` bound to its first parameter."""
+        span = _span(node)
+        callee = (
+            obj_node.text.decode() + "." + prop
+            if obj_node is not None
+            else prop
+        )
+        elem = _scalar_of(base_val)
+        # Evaluate the callback raw — `actual` already holds its
+        # scalarized deps; invoke it on the element union when a
+        # callable is bound.
+        cb_node = next(iter(_children(arguments)), None)
+        cb_result = None
+        # Every callback formal binds `elem | actuals` —
+        # map's (v, i, arr) and reduce's (acc, v) differ in
+        # position, and the model can't correlate them, so
+        # each parameter takes the union (over-approximation).
+        cb_actual = elem
+        for a in actual:
+            cb_actual |= a
+        if cb_node is not None and cb_node.type in {
+            "arrow_function",
+            "function_expression",
+            "generator_function",
+        }:
+            cval = self._callable_value(
+                cb_node,
+                params,
+                locals_,
+                is_method=cb_node.type != "arrow_function",
+            )
+            cb_result = _scalar_of(
+                self._invoke_callable(
+                    cval,
+                    tuple(cb_actual for _ in cval.params),
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    span,
+                )
+            )
+        elif cb_node is not None and cb_node.type == "identifier":
+            raw_cb = self._lookup(
+                cb_node.text.decode(), params, locals_,
+                _span(cb_node),
+            )
+            if isinstance(raw_cb, _Callable):
+                cb_result = _scalar_of(
+                    self._invoke_callable(
+                        raw_cb,
+                        tuple(cb_actual for _ in raw_cb.params),
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        span,
+                    )
+                )
+        actual_union = frozenset()
+        for a in actual:
+            actual_union |= a
+
+        def record(result):
+            transfers.append(
+                TsCall(span, callee, actual, _scalar_of(result))
+            )
+            return result
+
+        if prop == "forEach":
+            # Undefined result — the callback's effects are the
+            # transfers it recorded.
+            return record(frozenset())
+        if prop in {"push", "unshift"}:
+            # Mutating append — copy-on-write like `_member_store`:
+            # rebind every same-scope alias to the grown instance.
+            tbase, tpath, _ = self._member_target(
+                obj_node, params, locals_, transfers, count
+            )
+            if tpath and any(k is None for k in tpath):
+                raise _Unsupported("unsupported_expression", span)
+            target = self._write_scope(tbase, locals_, params)
+            if target is None:
+                raise _Unsupported("binding_unavailable", span)
+            old = target.get(tbase)
+            if not isinstance(old, _Composite):
+                raise _Unsupported("unsupported_expression", span)
+            added = dict(old.fields)
+            next_idx = 0
+            for k in added:
+                if k.isdigit() and int(k) >= next_idx:
+                    next_idx = int(k) + 1
+            added[str(next_idx)] = actual_union
+            new = _composite_set(
+                old, tpath + [str(next_idx)], actual_union, True,
+                span,
+            ) if tpath else _Composite(added, klass=old.klass)
+            for name, val in locals_.items():
+                if val is old:
+                    locals_[name] = new
+            return record(actual_union)
+        if prop in {"map", "flatMap"}:
+            result = cb_result if cb_result is not None else elem
+            return record(_Composite({str(0): result}))
+        if prop == "filter":
+            return record(
+                _Composite({str(0): elem | (cb_result or frozenset())})
+            )
+        if prop in {
+            "slice",
+            "concat",
+            "flat",
+            "sort",
+            "reverse",
+            "fill",
+        }:
+            return record(
+                _Composite({str(0): elem | actual_union})
+            )
+        if prop in {"keys", "values", "entries"}:
+            return record(_Composite({str(0): elem}))
+        if prop in {"pop", "shift", "at", "find"}:
+            # The removed/found element over-approximates to the
+            # whole element union.
+            return record(elem | (cb_result or frozenset()))
+        # some/every/findIndex/includes/indexOf/lastIndexOf/join/
+        # reduce/reduceRight/toString — a scalar over the elements
+        # and actuals (reduce adds the callback's accumulated
+        # deps through `cb_result`).
+        result = elem | actual_union
+        if cb_result is not None:
+            result |= cb_result
+        return record(result)
+
     def _eval(self, node, params, locals_, transfers, count):
         """Evaluate a node to its raw value: a scalar dependency set
         or a `_Composite` for object shapes."""
@@ -3191,9 +3399,15 @@ class _Builder:
                 actual_m = self._call_actuals(
                     arguments, params, locals_, transfers, count, node
                 )
-                raw = self._member_read(
-                    function, params, locals_, transfers, count
-                )
+                try:
+                    raw = self._member_read(
+                        function, params, locals_, transfers, count
+                    )
+                except _Unsupported:
+                    # A call-expression base (`a.slice().concat`)
+                    # has no member path — let the builtin/optional
+                    # fallbacks below decide before closing.
+                    raw = frozenset()
                 if isinstance(raw, _External):
                     result_m = frozenset()
                     for a in actual_m:
@@ -3208,6 +3422,39 @@ class _Builder:
                     )
                     return result_m
                 if not isinstance(raw, _Callable):
+                    prop_node = function.child_by_field_name("property")
+                    prop = (
+                        prop_node.text.decode()
+                        if prop_node is not None
+                        and prop_node.type == "property_identifier"
+                        else None
+                    )
+                    obj_node2 = function.child_by_field_name("object")
+                    base_val2 = (
+                        self._eval(
+                            obj_node2, params, locals_, transfers,
+                            count,
+                        )
+                        if obj_node2 is not None
+                        else None
+                    )
+                    if (
+                        isinstance(base_val2, _Composite)
+                        and prop in _COLLECTION_METHODS
+                        and prop not in base_val2.fields
+                    ):
+                        return self._collection_call(
+                            prop,
+                            base_val2,
+                            obj_node2,
+                            actual_m,
+                            arguments,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            node,
+                        )
                     if not optional_call:
                         raise _Unsupported(
                             "unsupported_expression", _span(node)

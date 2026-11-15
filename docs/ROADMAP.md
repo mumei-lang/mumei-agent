@@ -2997,6 +2997,36 @@ Boundaries: an unlisted name still closes
 (`binding_unavailable`) — the table is deliberately
 enumerated, not "any identifier is external".
 
+### C06 TypeScript container built-ins (slice 30)
+
+`a.map(cb)`, `a.filter(cb)`, `a.forEach(cb)`, `a.find`,
+`a.some/every`, `a.reduce`, `a.join`, `a.includes`,
+`a.push/pop/shift/unshift`, `a.slice/concat/flat/sort/
+reverse/fill`, `a.keys/values/entries`, `a.at`,
+`a.indexOf/toString` admit on a `_Composite` receiver
+(`_COLLECTION_METHODS`, only when the composite has no
+such field — a scalar `o.map` user field still closes).
+
+`elem` is the union of every leaf dep (indexes aren't
+correlated). A function-literal or bound-callable first
+argument invokes with every formal bound to
+`elem ∪ actuals` — `map`'s `(v, i, arr)` and `reduce`'s
+`(acc, v)` can't be positionally matched, so each gets
+the union. `map`/`flatMap` return a fresh composite of
+the callback result, `filter`/`slice`/`concat`/etc. a
+composite of `elem ∪ actuals`, scalar methods the union,
+`forEach` dep-free, and `push`/`unshift` rebind a grown
+instance onto every same-scope alias (copy-on-write,
+mirroring `_member_store`). Call results bind as
+composites — `const b = a.map(...)` keeps `b`'s shape.
+
+A call-expression base reaches the builtin fallback:
+`a.slice().concat(y)` chains.
+
+Boundaries: methods not in the table still close, and
+`pop`/`shift` keep every field — the surviving elements
+are the over-approximation.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
