@@ -392,10 +392,13 @@ diagnostic and `"cancelled"` when the host's cancel event was observed.
 The check now distinguishes failure kinds: `CoreCheckFailed` (a
 `ValueError` subclass) marks a real check failure, while request-shape
 errors stay plain `ValueError`, so a malformed request is never recorded
-as a checked-and-failed representation. Static errors — an unselected
-sequence, a foreign/stale output binding or a malformed request —
-propagate and record nothing; the candidate and output binding are
-validated before any spawn.
+as a checked-and-failed representation. `output` must be the selected
+result itself — its manifest fingerprint must equal the candidate's, so
+checking different bytes under the same attempt record cannot mislabel
+the declaration. Static errors — an unselected sequence, a
+foreign/stale output binding, an unselected output or a malformed
+request — propagate and record nothing; the candidate, output binding
+and selection are validated before any spawn.
 
 ```python
 check = record_evidence_check(

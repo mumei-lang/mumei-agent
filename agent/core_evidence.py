@@ -123,9 +123,14 @@ def record_evidence_check(
     produces: `\"valid\"` when Core returned the known v1 diagnostic,
     `\"failed\"` when the check produced no accepted diagnostic and
     `\"cancelled\"` when the host's cancel event was observed. Static
-    errors — an unselected sequence, a foreign/stale output binding or a
-    malformed request — propagate as `ValueError` and record nothing;
-    only a real check outcome becomes a record.
+    errors — an unselected sequence, a foreign/stale output binding, an
+    output that is not the selected result or a malformed request —
+    propagate as `ValueError` and record nothing; only a real check
+    outcome becomes a record.
+
+    `output` must be the selected result itself: the record names the
+    candidate's fingerprint, so checking different bytes under the same
+    attempt record would mislabel the declaration.
 
     Recording stays a host declaration, not acceptance, and the record
     carries no bytes: `"valid"` means representation-valid only.
@@ -134,6 +139,8 @@ def record_evidence_check(
         raise ValueError("unsupported Core representation check request")
     candidate = sequence.evidence_candidate()
     sequence.check_output_binding(output)
+    if output.to_dict()["output_fingerprint"] != candidate.output_fingerprint:
+        raise ValueError("evidence check output is not the selected result")
     try:
         check_evidence_representation(
             output,

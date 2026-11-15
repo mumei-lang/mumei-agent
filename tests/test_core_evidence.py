@@ -982,6 +982,30 @@ def test_record_evidence_check_rejects_unbound_output_before_spawn(
         )
 
 
+def test_record_evidence_check_rejects_unselected_output_before_spawn(
+    executable, monkeypatch
+):
+    output = snapshot()
+    sequence = selected(output)
+    unchecked = AttemptOutput(
+        output.attempt, b"different", hashlib.sha256(b"different").hexdigest()
+    )
+    monkeypatch.setattr(
+        core_evidence.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("spawned"),
+    )
+    with pytest.raises(
+        ValueError, match="^evidence check output is not the selected result$"
+    ):
+        core_evidence.record_evidence_check(
+            sequence,
+            unchecked,
+            core_executable=executable(report_script()),
+            timeout_ms=100,
+        )
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
