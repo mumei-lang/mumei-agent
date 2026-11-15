@@ -1438,8 +1438,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `*lib.VS2.P` — a pointer-typed *field* member:
                 # resolve it like a field read and classify by the
                 # field member's fact, pinning the base member's
-                # identity beside the field's — the same staleness
-                # cover the write side's `*lib.VS2.P = v` uses.
+                # identity beside the field's so redeclaring either
+                # flags the summary.
                 pair = self._imported_field_read(inner)
                 if pair is not None and pair[1].type.kind == "pointer":
                     base, field_member = pair
