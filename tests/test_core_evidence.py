@@ -1142,3 +1142,28 @@ def test_evaluate_requires_a_selected_result():
     check = other.evidence_check(other.evidence_candidate(), "valid")
     with pytest.raises(ValueError):
         evaluate_evidence_check(sequence, check)
+
+
+def test_evidence_candidate_round_trip():
+    from agent.verification_attempt import AttemptEvidenceCandidate
+
+    sequence, _ = _selected()
+    candidate = sequence.evidence_candidate()
+    assert (
+        AttemptEvidenceCandidate.from_dict(candidate.to_dict())
+        == candidate
+    )
+
+
+def test_evidence_candidate_rejects_malformed():
+    from agent.verification_attempt import AttemptEvidenceCandidate
+
+    sequence, _ = _selected()
+    data = sequence.evidence_candidate().to_dict()
+    data["attempt_number"] = "1"
+    with pytest.raises(ValueError):
+        AttemptEvidenceCandidate.from_dict(data)
+    data = sequence.evidence_candidate().to_dict()
+    data["extra"] = 1
+    with pytest.raises(ValueError):
+        AttemptEvidenceCandidate.from_dict(data)

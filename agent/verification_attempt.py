@@ -813,6 +813,39 @@ class AttemptEvidenceCandidate:
             "output_fingerprint": self.output_fingerprint,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptEvidenceCandidate":
+        """Rebuild a declared handoff descriptor; the constructor
+        re-validates it.
+
+        The descriptor is a host declaration: restoration re-checks the
+        exact key set and schema, then the constructor re-checks every
+        invariant. A foreign schema, unknown keys or malformed members
+        are static errors — the value still carries no bytes and grants
+        no authority."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version")
+            != "mumei.verifier-evidence-candidate/v1"
+        ):
+            raise ValueError(
+                "evidence candidate requires its declared record schema"
+            )
+        required = {
+            "request_fingerprint",
+            "attempt_number",
+            "output_fingerprint",
+        }
+        if set(data) != required | {"schema_version"}:
+            raise ValueError(
+                "evidence candidate record has unknown or missing keys"
+            )
+        return cls(
+            data["request_fingerprint"],
+            data["attempt_number"],
+            data["output_fingerprint"],
+        )
+
 
 @dataclass(frozen=True)
 class AttemptEvidenceCheck:

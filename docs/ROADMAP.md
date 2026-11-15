@@ -534,6 +534,10 @@ the exact key set and `mumei.verifier-evidence-check/v1` schema are
 required, then the constructor re-checks every invariant — a foreign
 schema, unknown keys or malformed members are static errors, and the
 record still carries no bytes and asserts no acceptance.
+`AttemptEvidenceCandidate.from_dict(data)` restores the handoff
+descriptor under the same discipline (`mumei.verifier-evidence-candidate/v1`),
+so a stored candidate and its check record both survive a declared
+round trip.
 
 `agent.core_evidence.evaluate_evidence_check(sequence, check)` normalizes
 a declared record into an acceptance descriptor
