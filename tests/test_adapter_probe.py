@@ -610,6 +610,9 @@ def test_probe_retry_emits_next_ordinal():
     )
     assert len(reqs) == 1
     assert reqs[0].attempt_number == 2
+    # Each retry is a fresh declared request — the stamp advances
+    # so the registry's replay detection accepts the new claim.
+    assert reqs[0].stamp == 2
 
 
 def test_probe_retry_stops_at_bound():
@@ -618,11 +621,10 @@ def test_probe_retry_stops_at_bound():
         registry, _route(), PlannerPolicy(), stamp=1
     )[0]
     hist = AdapterProbeHistory.start(req)
+    import dataclasses as _dc
+
     for n in range(1, MAX_PROBE_HISTORY + 1):
-        req_n = AdapterProbeRequest(
-            req.adapter_id, req.argv, req.timeout_ms, req.stamp,
-            attempt_number=n,
-        )
+        req_n = _dc.replace(req, attempt_number=n)
         hist = hist.record(req_n, run_probe(req_n))
     assert (
         probe_retry_requests(
@@ -662,3 +664,39 @@ def test_probe_retry_validation():
             _registry(), _route(), PlannerPolicy(), (),
             histories=[AdapterProbeHistory.start(_req())], stamp=1,
         )
+
+
+def test_probe_retry_replaces_observation_in_plan(tmp_path):
+    """A retry keeps the stamp; its observation REPLACES the earlier
+    attempt's for that adapter (never appended beside it)."""
+    flag = tmp_path / "ready"
+    argv = (
+        sys.executable,
+        "-c",
+        f"import os,sys;sys.exit(0 if os.path.exists({str(flag)!r}) else 1)",
+    )
+    registry = _registry(probe_argv=list(argv))
+    policy = PlannerPolicy()
+    req = probe_requests_for(registry, _route(), policy, stamp=1)[0]
+    miss = run_probe(req)
+    assert miss.observation.availability == "missing"
+    hist = AdapterProbeHistory.start(req).record(req, miss)
+    retries = probe_retry_requests(
+        registry,
+        _route(),
+        policy,
+        (miss.observation,),
+        (hist,),
+        stamp=1,
+        tool_version="4.0.0",
+    )
+    assert [r.attempt_number for r in retries] == [2]
+    flag.touch()
+    ok = run_probe(retries[0])
+    assert ok.observation.availability == "available"
+    # Replace, not append — a single latest observation plans cleanly.
+    plan = registry.plan(_route(), policy, (ok.observation,))
+    assert plan.selected is not None
+    assert (
+        plan.selected.adapter_id == "zendingsol.host.lean_scaffold"
+    )

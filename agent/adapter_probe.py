@@ -89,7 +89,11 @@ PROBE_SCHEMA = "mumei.verifier-adapter-probe/v1"
 
 
 def _probe_fingerprint(
-    adapter_id: str, argv: tuple[str, ...], stamp: int
+    adapter_id: str,
+    argv: tuple[str, ...],
+    stamp: int,
+    timeout_ms: int,
+    memory_bound_mb: int | None,
 ) -> str:
     payload = json.dumps(
         {
@@ -97,6 +101,30 @@ def _probe_fingerprint(
             "adapter_id": adapter_id,
             "argv": list(argv),
             "stamp": stamp,
+            "timeout_ms": timeout_ms,
+            "memory_bound_mb": memory_bound_mb,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _command_fingerprint(
+    adapter_id: str,
+    argv: tuple[str, ...],
+    timeout_ms: int,
+    memory_bound_mb: int | None,
+) -> str:
+    """The probe command identity — request identity minus the stamp,
+    so attempts at different observation stamps share one history."""
+    payload = json.dumps(
+        {
+            "schema_version": PROBE_SCHEMA,
+            "adapter_id": adapter_id,
+            "argv": list(argv),
+            "timeout_ms": timeout_ms,
+            "memory_bound_mb": memory_bound_mb,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -156,11 +184,27 @@ class AdapterProbeRequest:
         if self.tool_version is not None:
             _version(self.tool_version)
 
+    def command_fingerprint(self) -> str:
+        """The probe command identity: adapter, argv and declared
+        budgets — everything `execution_request()` binds except the
+        observation stamp, so retries at fresh stamps stay in one
+        `AdapterProbeHistory`."""
+        return _command_fingerprint(
+            self.adapter_id,
+            self.argv,
+            self.timeout_ms,
+            self.memory_bound_mb,
+        )
+
     def execution_request(self) -> AttemptExecutionRequest:
         """The attempt-binding descriptor for `AttemptRunner.run`."""
         return AttemptExecutionRequest(
             _probe_fingerprint(
-                self.adapter_id, self.argv, self.stamp
+                self.adapter_id,
+                self.argv,
+                self.stamp,
+                self.timeout_ms,
+                self.memory_bound_mb,
             ),
             self.attempt_number,
             self.timeout_ms,
@@ -366,23 +410,27 @@ MAX_PROBE_HISTORY = 8
 
 @dataclass(frozen=True)
 class AdapterProbeHistory:
-    """Bounded record of probe outcomes for one declared request.
+    """Bounded record of probe outcomes for one declared probe command.
 
-    Every entry must bind the same request fingerprint, and each
-    `record()` call appends the next ordinal — a replayed, reordered
-    or foreign outcome fails statically instead of contaminating the
-    history. This is replay evidence only: it says nothing about
-    adapter health, authorizes nothing, and never retries.
+    The history binds the command fingerprint — adapter id, argv and
+    declared budgets — so attempts at different observation stamps
+    accumulate in one record. `record()` re-derives that fingerprint
+    from each new request, requires the outcome to bind the request's
+    own execution fingerprint, and appends the next ordinal — a
+    replayed, reordered or foreign outcome fails statically instead of
+    contaminating the history. This is replay evidence only: it says
+    nothing about adapter health, authorizes nothing, and never
+    retries.
     """
 
     adapter_id: str
-    request_fingerprint: str
+    command_fingerprint: str
     outcomes: tuple[AttemptNormalizedResult, ...] = ()
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
-        if type(self.request_fingerprint) is not str or not re.fullmatch(
-            r"[0-9a-f]{64}", self.request_fingerprint
+        if type(self.command_fingerprint) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.command_fingerprint
         ):
             raise ValueError("invalid probe history fingerprint")
         if (
@@ -394,13 +442,19 @@ class AdapterProbeHistory:
             )
         ):
             raise ValueError("probe history requires bounded results")
+        # Direct construction validates ordinals; the outcome-to-request
+        # binding itself is only checkable against a presented request,
+        # which `record()` enforces.
+        for i, o in enumerate(self.outcomes):
+            if o.attempt_number != i + 1:
+                raise ValueError("probe history attempt ordinal mismatch")
 
     @classmethod
     def start(cls, request: "AdapterProbeRequest") -> "AdapterProbeHistory":
-        """Bind a history to a declared probe request's fingerprint."""
+        """Bind a history to a declared probe command's fingerprint."""
         if type(request) is not AdapterProbeRequest:
             raise ValueError("probe history requires a probe request")
-        return cls(request.adapter_id, request.execution_request().request_fingerprint)
+        return cls(request.adapter_id, request.command_fingerprint())
 
     @property
     def attempt_count(self) -> int:
@@ -417,16 +471,14 @@ class AdapterProbeHistory:
             raise ValueError("probe history requires a probe request")
         if request.adapter_id != self.adapter_id:
             raise ValueError("probe history adapter mismatch")
-        if (
-            request.execution_request().request_fingerprint
-            != self.request_fingerprint
-        ):
+        if request.command_fingerprint() != self.command_fingerprint:
             raise ValueError("probe history fingerprint mismatch")
         if type(outcome) is not AdapterProbeOutcome:
             raise ValueError("probe history requires a probe outcome")
         result = outcome.result
         if (
-            result.request_fingerprint != self.request_fingerprint
+            result.request_fingerprint
+            != request.execution_request().request_fingerprint
             or result.attempt_number != request.attempt_number
         ):
             raise ValueError("probe history outcome does not match request")
@@ -436,7 +488,7 @@ class AdapterProbeHistory:
             raise ValueError("probe history attempt bound reached")
         return AdapterProbeHistory(
             self.adapter_id,
-            self.request_fingerprint,
+            self.command_fingerprint,
             self.outcomes + (result,),
         )
 
@@ -551,6 +603,13 @@ def probe_retry_requests(
     changed argv or stamp — fails statically: stale evidence must
     not silently authorize another attempt.
 
+    A retry is a NEW declared request: the emitted stamp advances by
+    the recorded attempt count, so the superseding observation reads
+    as fresh to the registry's replay detection (a same-stamp changed
+    claim would be a conflict, and the registry never forgets one).
+    The history binds the probe COMMAND — adapter, argv and budgets —
+    not the stamp, so attempts across stamps stay in one record.
+
     Scheduling stays declarative: this runs nothing, never invents
     a candidate the observation rules did not exclude, and retries
     only inside the declared bound. Concurrency and Evidence
@@ -584,14 +643,15 @@ def probe_retry_requests(
         if hist is None:
             out.append(req)
             continue
-        if (
-            hist.request_fingerprint
-            != req.execution_request().request_fingerprint
-        ):
+        if hist.command_fingerprint != req.command_fingerprint():
             raise ValueError("probe retry history fingerprint mismatch")
         if hist.attempt_count >= max_attempts:
             continue
         out.append(
-            replace(req, attempt_number=hist.attempt_count + 1)
+            replace(
+                req,
+                attempt_number=hist.attempt_count + 1,
+                stamp=stamp + hist.attempt_count,
+            )
         )
     return tuple(out)
