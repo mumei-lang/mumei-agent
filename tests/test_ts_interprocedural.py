@@ -3352,3 +3352,55 @@ def test_member_write_call_base_closes():
         " return x; }"
     )
     assert not s.available
+
+
+# --- slice 32: type-only declarations + enums -------------------------------
+
+
+def test_interface_is_noop():
+    s = _fn(
+        "interface I { a: number }"
+        " function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_type_alias_is_noop():
+    s = _fn(
+        "type T = { a: number };"
+        " function f(x: number): number { return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_enum_member_read_dep_free():
+    s = _fn(
+        "enum E { A, B }"
+        " function f(x: number): number { return E.A; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_enum_member_initializer():
+    s = _fn(
+        "const k = 1 + 2; enum E { A = k }"
+        " function f(x: number): number { return E.A; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_export_and_const_enum():
+    s = _fn(
+        "export enum E { A = 1 } const enum F { G = 2 }"
+        " function f(x: number): number { return E.A + F.G; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_declare_still_closes():
+    s = _fn(
+        "declare function g(): void;"
+        " function f(x: number): number { return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_unit"

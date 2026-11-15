@@ -246,6 +246,13 @@ Admitted:
   which record a `TsCall` and yield `base ∪ actuals` like an
   `_External` callee. Member stores on a computed base still
   close (no binding to rebind). Regex literals are dep-free.
+* Type-only declarations — `interface I {...}` and `type T =
+  {...}` at top level are skipped wholesale (they evaluate to
+  nothing); `declare`/ambient declarations still close. `enum
+  E { A, B = expr }` (and `const enum`, `export enum`) binds a
+  `_Composite` in module scope: bare members are dep-free and an
+  initializer contributes its own deps, so `E.A` reads as a
+  field.
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -308,6 +315,13 @@ _TOP_LEVEL = {
     "lexical_declaration",
     "variable_declaration",
     "generator_function_declaration",
+    # Type-only declarations (`interface I {...}`, `type T =
+    # {...}`) evaluate to nothing — they're skipped wholesale
+    # rather than closing the unit. `declare`/ambient forms stay
+    # closed (they'd claim runtime bindings with no body).
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
 }
 
 # Well-known platform/library globals read as `_External` — reads
@@ -725,11 +739,13 @@ class _Builder:
                         if inner.type in {
                             "lexical_declaration",
                             "variable_declaration",
+                            "enum_declaration",
                         }:
                             declarators.append(inner)
                 if child.type in {
                     "lexical_declaration",
                     "variable_declaration",
+                    "enum_declaration",
                 }:
                     declarators.append(child)
             else:
@@ -762,16 +778,19 @@ class _Builder:
         mcount = [0]
         for node in declarators:
             try:
-                self.statement(
-                    node,
-                    {},
-                    self.module_locals,
-                    [],
-                    mcount,
-                    [frozenset()],
-                    [False],
-                    False,
-                )
+                if node.type == "enum_declaration":
+                    self._register_enum(node)
+                else:
+                    self.statement(
+                        node,
+                        {},
+                        self.module_locals,
+                        [],
+                        mcount,
+                        [frozenset()],
+                        [False],
+                        False,
+                    )
             except _Unsupported:
                 if self.unit_gap is None:
                     self.unit_gap = TsGap(
@@ -779,6 +798,40 @@ class _Builder:
                     )
                 break
         self.function_locals = saved_flocals
+
+    def _register_enum(self, node) -> None:
+        """Bind `enum E { A, B = expr, ... }` as a `_Composite`
+        in module scope. Member values are numbers/strings, so a
+        bare member is dep-free and an `enum_assignment` carries
+        its initializer's deps — no correlation or increment
+        tracking is needed."""
+        name = node.child_by_field_name("name")
+        if name is None:
+            raise _Unsupported("unsupported_unit", _span(node))
+        fields: dict = {}
+        body = next(
+            (c for c in node.children if c.type == "enum_body"),
+            None,
+        )
+        for member in _children(body or node):
+            if member.type == "property_identifier":
+                fields[member.text.decode()] = frozenset()
+            elif member.type == "enum_assignment":
+                kids = [c for c in member.children if c.is_named]
+                if len(kids) < 1:
+                    continue
+                mname = kids[0].text.decode()
+                if len(kids) == 2:
+                    fields[mname] = self.expression(
+                        kids[1],
+                        {},
+                        self.module_locals,
+                        [],
+                        [0],
+                    )
+                else:
+                    fields[mname] = frozenset()
+        self.module_locals[name.text.decode()] = _Composite(fields)
 
     def _register_import(self, node) -> None:
         """`import {a, b as c} from 'm'` / `import * as ns` /

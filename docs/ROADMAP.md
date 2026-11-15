@@ -3047,6 +3047,20 @@ Boundaries: member *stores* on a computed base still close
 field read off a scalar collapses to the scalar's deps (a
 `g.name`-style read over-approximates).
 
+### C06 TypeScript type-level declarations (slice 32)
+
+`interface I { ... }` and `type T = ...` at top level are
+skipped wholesale — type syntax evaluates to nothing, so
+skipping admits units that only differ in type surface.
+`declare`/ambient declarations still close (they'd claim
+runtime bindings with no body).
+
+`enum E { A, B = expr }` — plus `const enum` and `export
+enum` — binds a `_Composite` in module scope: bare members
+are dep-free and an `enum_assignment` carries its
+initializer's deps. `E.A` reads as a plain field, so enum
+members flow like object fields.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
