@@ -7663,9 +7663,11 @@ def test_imported_member_inc_flags_stale_dependents(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
-def test_bound_base_field_inc_stays_closed(go_types_helper):
-    # `t.N++` on a bound pointer param — resolves to no imported
-    # member; the bound-base gate stays closed.
+def test_bound_base_field_inc_is_admitted(go_types_helper):
+    # `t.F++` on a bound pointer param — mutates the pointee's caller
+    # memory like `t.F = v`: the mutation records on the pointee's
+    # identity and `effects` reports `unknown`, while the base
+    # binding's deps carry on (the stored value is the field's own).
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S) int64 { t.F++\n\treturn 0 }\n"
@@ -7674,7 +7676,40 @@ def test_bound_base_field_inc_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize("op", ["++", "--"])
+def test_bound_base_field_inc_dec_variants(go_types_helper, op):
+    # `t.N++` / `t.N--` on `*lib.S2` — and the explicit-deref
+    # `(*t).N++` spelling — route through the same bound-field gate.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        f"func F(t *lib.S2) int64 {{ t.N{op}\n\t(*t).N{op}\n\treturn 0 }}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_bound_base_field_inc_preserves_base_deps(go_types_helper):
+    # `t.F++; return *t` — the increment is provenance-preserving
+    # like `(*p)++`: the external mutation does not inject deps, so
+    # `*t` still yields the same dep-free external read.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S, x int64) int64 { t.F++\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_imported_deref_inc_is_admitted(go_types_helper):
