@@ -318,6 +318,34 @@ verifier, dependency or default audit/CLI/MCP route is added. C11 stays
 partial; Core meaning and acceptance, C12's demand gate and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 
+### C11 declared-dispatch execution driver
+
+`agent.attempt_runner.dispatch_attempt(sequence, argv, *, runner=None,
+cancel_event=None, memory_bound_mb=None)` runs the sequence's
+outstanding dispatch end-to-end: `next_dispatch()` must yield a request
+(nothing reserved, an attempt in flight or a terminal current record is
+a static error, never a run), `AttemptRunner.run` executes it under the
+declared timeout and the terminal record is reconciled back into the
+sequence. The returned `AttemptDispatch(sequence, run)` pairs the
+reconciled sequence with the observed run — its own validation requires
+the sequence's current record to carry the run's binding and events.
+
+```python
+from agent.attempt_runner import dispatch_attempt
+
+dispatch = dispatch_attempt(sequence, ("/path/to/tool", "--check"))
+assert dispatch.sequence.current.events == dispatch.run.record.events
+```
+
+The driver adds no new authority: it composes the declared dispatch
+boundary with the same single-spawn runner, performing no scheduling,
+ordering, result selection, output snapshot or publication — the host
+still calls `select_result`, builds `AttemptOutput` and publishes
+through `AttemptSequenceStore`. C11 stays partial; Evidence
+normalization/acceptance remains open, and C12's demand gate plus
+existing assurance/Lean/native/LLVM/deferred-WASM policies are
+unchanged.
+
 ### C11 evidence-candidate handoff descriptors
 
 `AttemptSequence.evidence_candidate()` returns an `AttemptEvidenceCandidate`

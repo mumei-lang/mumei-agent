@@ -23,6 +23,7 @@ from agent.verification_attempt import (
     AttemptExecutionRequest,
     AttemptNormalizedResult,
     AttemptRecord,
+    AttemptSequence,
 )
 
 try:  # POSIX-only; a declared memory bound is unavailable elsewhere.
@@ -303,3 +304,68 @@ class AttemptRunner:
         for event in events:
             record = record.record(event)
         return AttemptRunResult(record, collector.data, not collector.truncated)
+
+
+@dataclass(frozen=True)
+class AttemptDispatch:
+    """One dispatch observed end-to-end; not a result selection or Evidence.
+
+    `sequence` is the sequence reconciled with the run's terminal record;
+    `run` is the observed run itself — terminal record, bounded stdout and
+    the `complete` collection claim. Nothing here selects a canonical
+    result, binds an `AttemptOutput` snapshot or publishes lineage: the
+    host still calls `select_result`, builds `AttemptOutput` and publishes
+    through `AttemptSequenceStore`.
+    """
+
+    sequence: AttemptSequence
+    run: AttemptRunResult
+
+    def __post_init__(self) -> None:
+        if type(self.sequence) is not AttemptSequence:
+            raise ValueError("attempt dispatch requires an attempt sequence")
+        if type(self.run) is not AttemptRunResult:
+            raise ValueError("attempt dispatch requires a run result")
+        current = self.sequence.current
+        if (
+            current is None
+            or current.state != self.run.record.state
+            or current.events != self.run.record.events
+            or current.attempt_number != self.run.record.attempt_number
+            or self.sequence.request_fingerprint
+            != self.run.record.request_fingerprint
+        ):
+            raise ValueError("attempt dispatch does not match the sequence")
+
+
+def dispatch_attempt(
+    sequence: AttemptSequence,
+    argv: tuple[str, ...],
+    *,
+    runner: "AttemptRunner | None" = None,
+    cancel_event: "threading.Event | None" = None,
+    memory_bound_mb: int | None = None,
+) -> AttemptDispatch:
+    """Run the sequence's outstanding dispatch and reconcile the observation.
+
+    `next_dispatch` must yield a request — nothing reserved, an attempt in
+    flight or a terminal current record is a static error, not a run.
+    `runner` defaults to a fresh `AttemptRunner`; the returned dispatch's
+    sequence has the run's terminal record reconciled in. Reconciling does
+    not select a result, capture an `AttemptOutput` or publish — those stay
+    explicit host steps.
+    """
+    if type(sequence) is not AttemptSequence:
+        raise ValueError("attempt dispatch requires an attempt sequence")
+    if runner is not None and type(runner) is not AttemptRunner:
+        raise ValueError("attempt dispatch requires an attempt runner")
+    request = sequence.next_dispatch()
+    if request is None:
+        raise ValueError("attempt dispatch requires a ready attempt")
+    run = (runner or AttemptRunner()).run(
+        request,
+        argv,
+        cancel_event=cancel_event,
+        memory_bound_mb=memory_bound_mb,
+    )
+    return AttemptDispatch(sequence.reconcile_report(run.record), run)

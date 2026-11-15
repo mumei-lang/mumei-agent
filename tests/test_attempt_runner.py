@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -9,13 +10,19 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from agent.attempt_runner import AttemptRunner, AttemptRunResult
+from agent.attempt_runner import (
+    AttemptDispatch,
+    AttemptRunner,
+    AttemptRunResult,
+    dispatch_attempt,
+)
 from agent.verification_attempt import (
     MAX_STDOUT_BYTES,
     AttemptEvent,
     AttemptExecutionRequest,
     AttemptOutput,
     AttemptRecord,
+    AttemptSequence,
 )
 
 FINGERPRINT = "a" * 64
@@ -511,3 +518,149 @@ def test_memory_bound_spawn_thread_safe(monkeypatch):
     assert runner_mod.memory_bound_spawn_thread_safe()
     monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
     assert not runner_mod.memory_bound_spawn_thread_safe()
+
+
+def ready_sequence(timeout_ms=10_000):
+    return AttemptSequence(
+        FINGERPRINT, timeout_ms, (AttemptRecord(FINGERPRINT, 1, timeout_ms),)
+    )
+
+
+def test_dispatch_attempt_runs_and_reconciles_the_ready_attempt():
+    sequence = ready_sequence()
+    before = sequence.to_dict()
+    dispatch = dispatch_attempt(sequence, argv("import sys; sys.exit(9)"))
+    assert dispatch.run.record.state == "exited"
+    assert dispatch.run.record.events[-1].exit_code == 9
+    current = dispatch.sequence.current
+    assert current.state == "exited"
+    assert current.events == dispatch.run.record.events
+    assert current.attempt_number == 1
+    assert sequence.to_dict() == before
+
+
+def test_dispatch_attempt_binds_the_request_fingerprint_and_ordinal():
+    sequence = ready_sequence()
+    dispatch = dispatch_attempt(sequence, argv("pass"))
+    assert dispatch.run.record.request_fingerprint == FINGERPRINT
+    assert dispatch.sequence.request_fingerprint == FINGERPRINT
+    assert dispatch.sequence.current is not sequence.current
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        AttemptSequence(FINGERPRINT, 10_000),
+        AttemptSequence(
+            FINGERPRINT,
+            10_000,
+            (
+                AttemptRecord(
+                    FINGERPRINT,
+                    1,
+                    10_000,
+                    (AttemptEvent("started", 0),),
+                ),
+            ),
+        ),
+        AttemptSequence(
+            FINGERPRINT,
+            10_000,
+            (
+                AttemptRecord(
+                    FINGERPRINT,
+                    1,
+                    10_000,
+                    (
+                        AttemptEvent("started", 0),
+                        AttemptEvent("exited", 1, 0),
+                    ),
+                ),
+            ),
+        ),
+    ],
+    ids=["empty", "in-flight", "terminal"],
+)
+def test_dispatch_attempt_rejects_nothing_dispatchable(sequence):
+    with pytest.raises(
+        ValueError, match="^attempt dispatch requires a ready attempt$"
+    ):
+        dispatch_attempt(sequence, argv("pass"))
+
+
+@pytest.mark.parametrize("bad", [None, "x", 1, AttemptRecord(FINGERPRINT, 1, 10)])
+def test_dispatch_attempt_rejects_foreign_sequences(bad):
+    with pytest.raises(
+        ValueError, match="^attempt dispatch requires an attempt sequence$"
+    ):
+        dispatch_attempt(bad, argv("pass"))
+
+
+@pytest.mark.parametrize(
+    "bad_runner", [None.__class__, "x", 1, object(), AttemptRunner]
+)
+def test_dispatch_attempt_rejects_foreign_runners(bad_runner):
+    with pytest.raises(
+        ValueError, match="^attempt dispatch requires an attempt runner$"
+    ):
+        dispatch_attempt(ready_sequence(), argv("pass"), runner=bad_runner)
+
+
+def test_dispatch_attempt_propagates_run_validation():
+    with pytest.raises(
+        ValueError, match="^attempt run requires a nonempty immutable argv$"
+    ):
+        dispatch_attempt(ready_sequence(), ("echo", 1))
+
+
+def test_dispatch_attempt_reports_spawn_failure_as_failed():
+    dispatch = dispatch_attempt(
+        ready_sequence(), ("/FAKE_PRIVATE_missing_executable_9f31",)
+    )
+    assert dispatch.run.record.state == "failed"
+    assert dispatch.sequence.current.state == "failed"
+    assert dispatch.run.stdout == b""
+
+
+def test_dispatch_attempt_honors_cancellation(monkeypatch):
+    event = threading.Event()
+    launch = subprocess.Popen
+
+    def launch_then_cancel(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        event.set()
+        return process
+
+    monkeypatch.setattr(
+        "agent.attempt_runner.subprocess.Popen", launch_then_cancel
+    )
+    dispatch = dispatch_attempt(
+        ready_sequence(),
+        argv("import time; time.sleep(60)"),
+        cancel_event=event,
+    )
+    assert dispatch.run.record.state in {"exited", "cancelled"}
+    assert dispatch.sequence.current.events == dispatch.run.record.events
+
+
+def test_dispatch_attempt_forwards_memory_bound_validation():
+    with pytest.raises(
+        ValueError, match="^invalid attempt run memory bound$"
+    ):
+        dispatch_attempt(
+            ready_sequence(), argv("pass"), memory_bound_mb=0
+        )
+
+
+def test_dispatch_attempt_result_is_frozen_and_bound():
+    dispatch = dispatch_attempt(ready_sequence(), argv("pass"))
+    with pytest.raises(FrozenInstanceError):
+        dispatch.run = dispatch.run
+    for sequence, run in (
+        (None, dispatch.run),
+        (dispatch.sequence, None),
+        (ready_sequence(timeout_ms=20_000), dispatch.run),
+        (AttemptSequence("b" * 64, 10_000), dispatch.run),
+    ):
+        with pytest.raises(ValueError):
+            AttemptDispatch(sequence, run)
