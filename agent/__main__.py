@@ -27,6 +27,8 @@ _SUBCOMMANDS = {
     "cross-validate",
     "harvest-tests",
     "observe-tests",
+    "sol-summaries",
+    "sol-summaries-accept",
     "config",
 }
 
@@ -481,6 +483,41 @@ def main() -> None:
         build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(config_main(args))
+    elif command == "sol-summaries":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_parser as sol_build_parser,
+            main as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries",
+            description=(
+                "Emit opt-in Solidity interprocedural dependency "
+                "summaries as JSON — a conservative report, not a "
+                "proof or verdict."
+            ),
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
+    elif command == "sol-summaries-accept":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_accept_parser as sol_accept_build_parser,
+            main_accept as sol_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-accept",
+            description=(
+                "Accept one function's declared Solidity summary "
+                "under the strict whole-context gate."
+            ),
+        )
+        sol_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_accept_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

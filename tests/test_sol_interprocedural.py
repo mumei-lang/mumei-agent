@@ -1531,3 +1531,151 @@ def test_manifest_restoration_rejects_wrong_types():
     bad = dict(good, functions=[fn])
     with pytest.raises(ValueError, match="malformed"):
         sol.SolSummarySet.from_dict(bad)
+
+
+# --- slice 17: sol-summaries / sol-summaries-accept routes --------------------
+
+def _sol_args(source, manifest=None, function=None):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest) if manifest else None,
+            "function": function,
+        },
+    )()
+
+
+_SOL_SRC = (
+    "contract C { uint s;"
+    " function f(uint x) public returns (uint) { return g(x); }"
+    " function g(uint v) public returns (uint) { return v + 1; } }"
+)
+
+
+def test_summaries_route_emits_json(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    sol.main(_sol_args(src))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.sol-interprocedural/v1"
+    assert out["functions"][0]["name"] == "C.f"
+
+
+def test_accept_route_accepts_a_surviving_function(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        sol.main_accept(_sol_args(src, manifest, "f"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.sol-summary-accept/v1"
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "C.f"
+
+
+def test_accept_route_accepts_a_qualified_function_name(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "C.g"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "C.g"
+    assert out["summary"]["contract"] == "C"
+
+
+def test_accept_route_refuses_a_changed_context(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            sol.summarize_solidity(_SOL_SRC + "//x").to_dict()
+        )
+    )
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "context_mismatch"
+    assert "summary" not in out
+
+
+def test_accept_route_refuses_an_unknown_function(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "absent"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "unknown_function"
+
+
+def test_accept_route_emits_the_live_record_not_the_forged_one(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    forged = sol.summarize_solidity(_SOL_SRC).to_dict()
+    forged["functions"][0]["return_dependencies"] = [1, 2, 3]
+    manifest.write_text(json.dumps(forged))
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["return_dependencies"] == [0]
+
+
+def test_accept_route_rejects_a_malformed_manifest(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text('{"schema_version": "mumei.other/v1"}')
+    with pytest.raises(SystemExit) as exc:
+        sol.main_accept(_sol_args(src, manifest, "f"))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "manifest_malformed"
+
+
+def test_accept_route_refuses_an_ambiguous_bare_name(tmp_path, capsys):
+    two = (
+        "contract A { function f(uint x) public returns (uint)"
+        " { return x; } }"
+        "contract B { function f(uint x) public returns (uint)"
+        " { return x; } }"
+    )
+    src = tmp_path / "a.sol"
+    src.write_text(two)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(two).to_dict())
+    )
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "ambiguous_function"
+    # The qualified name still resolves.
+    with pytest.raises(SystemExit):
+        sol.main_accept(_sol_args(src, manifest, "B.f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "B.f"
