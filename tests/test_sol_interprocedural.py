@@ -2290,3 +2290,28 @@ def test_review_modifier_sync_skips_shadowed_state_name():
     # modifier's `s = 7` slot back must not clobber the
     # parameter's deps.
     assert s.return_dependencies == frozenset({0})
+
+
+
+def test_review_block_scoped_state_slot_propagates():
+    src = """contract C {
+  uint256[] public arr;
+  function f(uint256 a) public returns (uint256) {
+    { arr.push(a); }
+    return arr[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review_loop_scoped_state_slot_propagates():
+    src = """contract C {
+  uint256[] public arr;
+  function f(uint256 a, uint256 n) public returns (uint256) {
+    for (uint256 i = 0; i < n; i++) { arr.push(a); }
+    return arr[0];
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.return_dependencies == frozenset({0, 1})

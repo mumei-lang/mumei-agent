@@ -1251,8 +1251,17 @@ class _Builder:
                 )
             finally:
                 decls = self._decls.pop()
+            # A state slot first written inside the block
+            # propagates back too; only block-local decls stay
+            # scoped.
+            svars = self._all_state_vars_of(
+                self._current_contract
+            )
             for name in list(inner):
-                if name in locals_ and name not in decls:
+                if (
+                    name not in decls
+                    and (name in locals_ or name in svars)
+                ):
                     locals_[name] = inner[name]
             return ret
         raise _Unsupported("unsupported_statement", _span(st))
@@ -1304,10 +1313,17 @@ class _Builder:
             # Loop-init decls (`for (uint i = 0; ...)`)
             # stay scoped to the loop.
             self._decls.pop()
-        for name in list(locals_):
+        # A state slot first written inside the loop joins
+        # the merge too — `name not in locals_` is not a
+        # reason to drop it.
+        svars = self._all_state_vars_of(self._current_contract)
+        for name in set(inner) | set(locals_):
+            if name not in locals_ and name not in svars:
+                continue
+            prior = locals_.get(name, frozenset())
             deps = inner.get(name, frozenset())
-            if deps != locals_[name] or name in touched:
-                locals_[name] = locals_[name] | deps | merged
+            if deps != prior or name in touched:
+                locals_[name] = prior | deps | merged
                 # An inner loop's may-write is the parent's
                 # may-write too — record it in the frame an
                 # enclosing loop reads at merge-back.
