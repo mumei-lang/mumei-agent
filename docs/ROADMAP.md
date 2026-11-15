@@ -3145,6 +3145,21 @@ latent crash fixed: class-eval sites (`extends`, `static`
 field inits, decorators) passed a `dict` for `transfers` —
 any call inside them appended to it; now a discarded list.
 
+### C06 TypeScript nested namespaces + static accessors (slice 38)
+
+`namespace A { namespace B { ... } }` recurses — the inner
+`internal_module` binds a nested `_Composite` whose members see
+the outer scope, so `A.B.g(x)` invokes through the member path.
+`static get p`/`static set p` collect into `sgetters`/`ssetters`
+on `_Class` (inherited like `statics`): `C.p` reads invoke the
+getter with `this` = the class object, `C.p = v` invokes the
+setter unless an own `static p` data field shadows it — the
+same shadowing rule instances use. `C.s = v` / `C.p = v` on a
+module-scope class name now reach the `_Class` value at all:
+`_member_store` falls back to `_lookup` for `self.classes`
+bases (the binding is immutable, the statics table mutable) —
+a write path that previously closed `binding_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

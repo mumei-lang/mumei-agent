@@ -3505,13 +3505,64 @@ def test_object_literal_getter_closes():
     assert not s.available
 
 
-def test_static_getter_closes():
+def test_static_getter_admits():
     s = _fn(
         "function f(x: number): number {"
         " class C { static get p() { return 1; } }"
         " return C.p; }"
     )
-    assert not s.available
+    assert s.available and s.return_dependencies == frozenset()
+    assert any(c.callee == "p" for c in s.calls)
+
+
+def test_static_setter_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { static set p(v: number) {} }"
+        " C.p = x; return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.callee == "p" and c.arguments == (frozenset({0}),) for c in s.calls)
+
+
+def test_static_field_write_module_scope():
+    # `C.s = v` on a module-scope class name — statics update in
+    # place; the binding itself is immutable.
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { static s: number = 0; }"
+        " C.s = x; return C.s; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_static_data_field_shadows_setter():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { static p: number = 0;"
+        " static set p(v: number) {} }"
+        " C.p = x; return C.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert not any(c.callee == "p" for c in s.calls)
+
+
+def test_nested_namespace_admits():
+    s = _fn(
+        "namespace A { export namespace B {"
+        " export function g(x: number): number { return x; } } }"
+        " function f(x: number): number { return A.B.g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_inherited_static_getter():
+    s = _fn(
+        "class B { static get p(): number { return 1; } }"
+        " class C extends B {}"
+        " function f(x: number): number { return C.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
 
 
 # --- slice 34: async functions + empty for slots ----------------------------

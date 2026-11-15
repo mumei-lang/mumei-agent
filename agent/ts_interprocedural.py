@@ -163,9 +163,14 @@ Admitted:
   shadow) — `super(args)` in a ctor runs the parent
   constructor on the same `this`, `super.m(x)` calls through
   the parent prototype; `implements` is type-level and
-  admits silently. Computed member names, `static`
-  accessors, and `abstract`/`declare`/`readonly` members
-  close;
+  admits silently. Computed member names and
+  `abstract`/`declare`/`readonly` members close;
+  `static get/set p` collect into `sgetters`/`ssetters` —
+  `C.p` reads invoke the getter like a no-arg method on
+  the class object, `C.p = v` invokes the setter unless an
+  own `static p` data field shadows it, and `C.s = v` on a
+  module-scope class name updates the shared `statics`
+  table;
   `*m()` generator methods admit like `function*`, private
   `#` members behave like named fields/methods keyed `#`,
   and `static {}` blocks evaluate once into the class's
@@ -278,10 +283,11 @@ Admitted:
   dependency-free.
 * `namespace N { ... }` — binds a `_Composite` in module
   scope: member declarators evaluate in order into a scope
-  that sees module bindings, exported `function` members
-  become callable fields (`N.g(x)` invokes through the
-  member-call path). `enum`/`class`/nested-namespace members
-  close the unit.
+  that sees the enclosing bindings, exported `function`
+  members become callable fields (`N.g(x)` invokes through
+  the member-call path), and a nested `internal_module`
+  recurses (`A.B.g(x)`). `enum`/`class` members close the
+  unit.
 * `async` — `async function f(...): Promise<T>` admits when
   `T` is `number`/`boolean` (nested `Promise<Promise<T>>`
   unwraps the same way); `await` passes the operand's deps
@@ -609,12 +615,13 @@ class _Class:
 
     __slots__ = (
         "ctor", "methods", "statics", "field_inits", "captured",
-        "parent", "getters", "setters",
+        "parent", "getters", "setters", "sgetters", "ssetters",
     )
 
     def __init__(
         self, ctor, methods, statics, field_inits, captured,
         parent=None, getters=None, setters=None,
+        sgetters=None, ssetters=None,
     ):
         self.ctor = ctor
         self.methods = methods
@@ -624,6 +631,8 @@ class _Class:
         self.parent = parent
         self.getters = getters if getters is not None else {}
         self.setters = setters if setters is not None else {}
+        self.sgetters = sgetters if sgetters is not None else {}
+        self.ssetters = ssetters if ssetters is not None else {}
 
 
 def _scalar_of(value) -> frozenset[int]:
@@ -892,14 +901,16 @@ class _Builder:
                     fields[mname] = frozenset()
         self.module_locals[name.text.decode()] = _Composite(fields)
 
-    def _register_namespace(self, node) -> None:
+    def _register_namespace(self, node, scope_locals=None):
         """`namespace N { export const v = e; export function
         g() {} }` — binds `N` to a `_Composite` of its member
-        bindings in module scope: declarators evaluate in order
-        into a namespace scope that sees outer module bindings,
-        and exported functions become callable fields (`N.g()`
-        invokes through the member-call path). Anything else
-        closes the whole unit."""
+        bindings in module scope (or `scope_locals` when nested
+        inside another namespace): declarators evaluate in order
+        into a namespace scope that sees the enclosing bindings,
+        exported functions become callable fields (`N.g()`
+        invokes through the member-call path), and an inner
+        `internal_module` recurses so `A.B.g(x)` works.
+        Anything else closes the whole unit."""
         name = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
         if body is None:
@@ -909,7 +920,10 @@ class _Builder:
             )
         if name is None or body is None:
             raise _Unsupported("unsupported_unit", _span(node))
-        ns_locals = dict(self.module_locals)
+        parent_scope = (
+            self.module_locals if scope_locals is None else scope_locals
+        )
+        ns_locals = dict(parent_scope)
         fields: dict = {}
         for member in _children(body):
             decl = member
@@ -944,9 +958,19 @@ class _Builder:
                 cval = self._callable_value(decl, {}, ns_locals)
                 fields[fname.text.decode()] = cval
                 ns_locals[fname.text.decode()] = cval
+            elif decl.type == "internal_module":
+                # `namespace A { namespace B { ... } }` — the
+                # inner namespace's members see the outer
+                # scope; it binds a nested `_Composite` field.
+                iname, icomp = self._register_namespace(
+                    decl, ns_locals
+                )
+                fields[iname] = icomp
             else:
                 raise _Unsupported("unsupported_unit", _span(member))
-        self.module_locals[name.text.decode()] = _Composite(fields)
+        comp = _Composite(fields)
+        parent_scope[name.text.decode()] = comp
+        return name.text.decode(), comp
 
     def _register_import(self, node) -> None:
         """`import {a, b as c} from 'm'` / `import * as ns` /
@@ -2490,6 +2514,23 @@ class _Builder:
                 # class object itself.
                 if key is None:
                     return _scalar_of(val) | index_deps
+                if key in val.sgetters and key not in val.statics:
+                    # `C.p` invokes `static get p()` like a
+                    # no-arg method on the class object.
+                    result = self._invoke_callable(
+                        val.sgetters[key],
+                        (),
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        _span(node),
+                        this_val=val,
+                    )
+                    transfers.append(
+                        TsCall(_span(node), key, (), result)
+                    )
+                    return result
                 if key in val.statics:
                     val = val.statics[key]
                 elif key in val.methods:
@@ -2571,9 +2612,39 @@ class _Builder:
             raise _Unsupported("unsupported_expression", _span(node))
         target = self._write_scope(base, locals_, params)
         if target is None:
-            raise _Unsupported("binding_unavailable", _span(node))
-        old = target.get(base)
+            if base in self.classes:
+                # `C.s = v` / `C.p = v` on a class name — the
+                # binding is immutable but the `_Class` value is
+                # mutable (statics table, static setters).
+                old = self._lookup(
+                    base, params, locals_, _span(node)
+                )
+            else:
+                raise _Unsupported("binding_unavailable", _span(node))
+        else:
+            old = target.get(base)
         if isinstance(old, _Class) and len(path) == 1:
+            if (
+                path[0] in old.ssetters
+                and path[0] not in old.statics
+            ):
+                # `C.p = v` invokes `static set p(v)` — an own
+                # static data field shadows the accessor.
+                actual = _scalar_of(value)
+                result = self._invoke_callable(
+                    old.ssetters[path[0]],
+                    (actual,),
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    this_val=old,
+                )
+                transfers.append(
+                    TsCall(_span(node), path[0], (actual,), result)
+                )
+                return
             # `C.s = v` — a static write updates the shared class
             # table; `C` aliases see it. A deeper path would need
             # a composite static we don't descend.
@@ -2824,8 +2895,10 @@ class _Builder:
         `statics` table). Instance `get`/`set` accessors collect
         into `getters`/`setters` — invoked on member read/store
         like a no-arg/one-arg method. `extends`/`implements`,
-        static accessors, computed names and `abstract`/ambient
-        members all close. Decorators evaluate after `captured`
+        computed names and `abstract`/ambient members all close —
+        `static get/set` accessors collect into
+        `sgetters`/`ssetters` like their instance siblings.
+        Decorators evaluate after `captured`
         is known: `@dec` is the call `dec(C)` and `@dec(y)` a
         factory call — either way the class's `captured` (every
         local's union) already covers the resulting deps."""
@@ -2876,6 +2949,8 @@ class _Builder:
         field_inits: dict = {}
         getters: dict = {}
         setters: dict = {}
+        sgetters: dict = {}
+        ssetters: dict = {}
         static_blocks: list = []
         for member in _children(body_node):
             if member.type == "method_definition":
@@ -2906,10 +2981,13 @@ class _Builder:
                 )
                 if markers & {"get", "set"}:
                     if "static" in markers:
-                        raise _Unsupported(
-                            "unsupported_expression", _span(member)
-                        )
-                    if "get" in markers:
+                        # `static get/set p` — the class-object
+                        # analog of an instance accessor.
+                        if "get" in markers:
+                            sgetters[key] = mval
+                        else:
+                            ssetters[key] = mval
+                    elif "get" in markers:
                         getters[key] = mval
                     else:
                         setters[key] = mval
@@ -3031,6 +3109,12 @@ class _Builder:
             istatics = dict(parent.statics)
             istatics.update(statics)
             statics = istatics
+            isgetters = dict(parent.sgetters)
+            isgetters.update(sgetters)
+            sgetters = isgetters
+            issetters = dict(parent.ssetters)
+            issetters.update(ssetters)
+            ssetters = issetters
             ifields = dict(parent.field_inits)
             ifields.update(field_inits)
             field_inits = ifields
@@ -3047,7 +3131,7 @@ class _Builder:
             all_deps |= parent.captured
         return _Class(
             ctor, methods, statics, field_inits, all_deps, parent,
-            getters, setters,
+            getters, setters, sgetters, ssetters,
         )
 
     def _eval_decorator(self, node, params, locals_, captured):
