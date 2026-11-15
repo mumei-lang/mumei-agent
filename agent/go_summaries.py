@@ -731,65 +731,85 @@ def main_attempt(args: argparse.Namespace | None = None) -> int:
         args = build_attempt_parser().parse_args()
     try:
         _check_output_path(args, _declared_paths(args))
-        from agent.attempt_runner import dispatch_attempt
-        from agent.verification_attempt import (
-            AttemptSequence,
-            AttemptSequenceStore,
-        )
-
-        fingerprint = _attempt_fingerprint(args)
-        argv = (
-            sys.executable,
-            "-m",
-            "agent",
-            "go-summaries",
-            "--go-types",
-            args.go_types,
-            "--target-arch",
-            args.target_arch,
-            "--timeout",
-            str(args.timeout),
-        ) + tuple(
-            arg
-            for path in args.source
-            for arg in ("--source", path)
-        ) + tuple(
-            arg
-            for spec in args.imports
-            for arg in ("--import", spec)
-        )
-        sequence = AttemptSequence(fingerprint, args.attempt_timeout)
-        store = AttemptSequenceStore()
-        store.publish(sequence)
-        current = store.current
-        dispatch = dispatch_attempt(
-            current.begin_attempt(),
-            argv,
-            memory_bound_mb=args.memory_bound_mb,
-        )
-        try:
-            inputs_changed = _attempt_fingerprint(args) != fingerprint
-        except OSError:
-            inputs_changed = True
-        if dispatch.run.record.state == "exited" and not inputs_changed:
-            updated = dispatch.sequence.select_result(
-                dispatch.captured_output()
-            )
-        else:
-            updated = dispatch.sequence
-        published = store.compare_and_set(current, updated)
-        report: dict[str, object] = {
-            "schema_version": ATTEMPT_REPORT_PROFILE,
-            "sequence": published.to_dict(),
-            "normalized": dispatch.run.normalized().to_dict(),
-        }
-        if published.selected_result is not None:
-            report["candidate"] = (
-                published.evidence_candidate().to_dict()
-            )
+        report = run_attempt(args)
         document = json.dumps(report, indent=2, sort_keys=True) + "\n"
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"go-summaries-attempt: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0
+
+
+def run_attempt(args: argparse.Namespace) -> dict:
+    """Run the produce route as one declared attempt → report dict.
+
+    Shared by ``go-summaries-attempt`` and the
+    ``go_summaries_attempt`` MCP tool so both run the identical C11
+    lifecycle: a fresh ``AttemptSequence`` keyed to the request
+    fingerprint (the helper binary's bytes plus every declared input
+    file's bytes), one reserved attempt observed by
+    ``dispatch_attempt`` under ``args.attempt_timeout``, reconcile
+    and compare-and-set publication — an ``exited`` run's captured
+    stdout becomes the selected result only when every declared
+    input byte is unchanged after the observed run. Returns the
+    ``mumei.go-summaries-attempt-report/v1`` document; raises
+    ``SnapshotError``/``OSError``/``UnicodeDecodeError``/``ValueError``
+    on a declared failure.
+    """
+    from agent.attempt_runner import dispatch_attempt
+    from agent.verification_attempt import (
+        AttemptSequence,
+        AttemptSequenceStore,
+    )
+
+    fingerprint = _attempt_fingerprint(args)
+    argv = (
+        sys.executable,
+        "-m",
+        "agent",
+        "go-summaries",
+        "--go-types",
+        args.go_types,
+        "--target-arch",
+        args.target_arch,
+        "--timeout",
+        str(args.timeout),
+    ) + tuple(
+        arg
+        for path in args.source
+        for arg in ("--source", path)
+    ) + tuple(
+        arg
+        for spec in args.imports
+        for arg in ("--import", spec)
+    )
+    sequence = AttemptSequence(fingerprint, args.attempt_timeout)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    current = store.current
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        memory_bound_mb=args.memory_bound_mb,
+    )
+    try:
+        inputs_changed = _attempt_fingerprint(args) != fingerprint
+    except OSError:
+        inputs_changed = True
+    if dispatch.run.record.state == "exited" and not inputs_changed:
+        updated = dispatch.sequence.select_result(
+            dispatch.captured_output()
+        )
+    else:
+        updated = dispatch.sequence
+    published = store.compare_and_set(current, updated)
+    report: dict[str, object] = {
+        "schema_version": ATTEMPT_REPORT_PROFILE,
+        "sequence": published.to_dict(),
+        "normalized": dispatch.run.normalized().to_dict(),
+    }
+    if published.selected_result is not None:
+        report["candidate"] = (
+            published.evidence_candidate().to_dict()
+        )
+    return report

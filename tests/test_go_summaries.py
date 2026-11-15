@@ -1128,3 +1128,65 @@ def test_mcp_tool_error_survives_circular_symlink(tmp_path):
         mcp_server.go_summaries(_json.dumps([str(src)]), str(loop))
     )
     assert "error" in out
+
+
+def test_mcp_attempt_tool_selects_exited_run(tmp_path):
+    """The MCP attempt tool runs the same declared lifecycle."""
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, _json.dumps(schema_fixture()).encode())
+    out = _json.loads(
+        mcp_server.go_summaries_attempt(
+            _json.dumps([str(src)]), str(helper), 30000
+        )
+    )
+    assert "report" in out
+    report = out["report"]
+    assert (
+        report["schema_version"]
+        == "mumei.go-summaries-attempt-report/v1"
+    )
+    assert report["normalized"]["outcome"] == "exited"
+    assert report["normalized"]["exit_code"] == 0
+    assert "candidate" in report
+    assert report["sequence"]["selected_result"] is not None
+
+
+def test_mcp_attempt_tool_validates_declared_args(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    helper = _write_helper(tmp_path, b"{}")
+    src_json = _json.dumps([str(src)])
+    fn = mcp_server.go_summaries_attempt
+    assert "error" in _json.loads(fn("", str(helper), 30000))
+    assert "error" in _json.loads(fn("a\nb", str(helper), 30000))
+    assert "error" in _json.loads(fn("not json", str(helper), 30000))
+    assert "error" in _json.loads(fn(src_json, str(helper), 0))
+    assert "error" in _json.loads(fn(src_json, str(helper), -1))
+    assert "error" in _json.loads(
+        fn(src_json, str(helper), 30000, timeout_s=0)
+    )
+    assert "error" in _json.loads(
+        fn(src_json, str(helper), 30000, memory_bound_mb=-1)
+    )
+
+
+def test_mcp_attempt_tool_error_redacts_declared_paths(tmp_path):
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    missing = tmp_path / "no-such-binary"
+    out = _json.loads(
+        mcp_server.go_summaries_attempt(
+            _json.dumps([str(src)]), str(missing), 30000
+        )
+    )
+    assert "error" in out
+    assert str(missing) not in out["error"]
+    assert str(src) not in out["error"]
+    assert str(tmp_path) not in out["error"]

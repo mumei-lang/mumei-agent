@@ -1951,6 +1951,55 @@ def audit_code(
             return {"success": False, "errors": [f"audit_code failed: {exc}"]}
         return asdict(result)
 
+def _go_summaries_declared_args(
+    source_files: str, imports_json: str, max_imports: int
+) -> tuple[list[str], list[str]]:
+    """Parse the declared source/import arguments shared by the
+    ``go_summaries`` and ``go_summaries_attempt`` tools.
+
+    Returns ``(paths, specs)`` — the declared source paths and the
+    ``import_path=file`` spec strings — or raises ``ValueError``
+    with the same messages the tools emitted inline.
+    """
+    try:
+        paths = json.loads(source_files)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"failed to parse source_files: {exc}")
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or any(not isinstance(p, str) or not p for p in paths)
+    ):
+        raise ValueError(
+            "source_files must be a nonempty JSON array of paths"
+        )
+
+    try:
+        imports_doc = json.loads(imports_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"failed to parse imports_json: {exc}")
+    if not isinstance(imports_doc, dict):
+        raise ValueError("imports_json must be a JSON object")
+    specs: list[str] = []
+    for import_path, files in imports_doc.items():
+        if not isinstance(import_path, str) or not import_path:
+            raise ValueError(
+                "imports_json keys must be nonempty import paths"
+            )
+        files_list = files if isinstance(files, list) else [files]
+        for f in files_list:
+            if not isinstance(f, str) or not f:
+                raise ValueError(
+                    "imports_json values must be paths or arrays of paths"
+                )
+            specs.append(f"{import_path}={f}")
+    if len(imports_doc) > max_imports:
+        raise ValueError(
+            f"imports_json declares more than {max_imports} units"
+        )
+    return paths, specs
+
+
 @mcp.tool()
 def go_summaries(
     source_files: str,
@@ -1990,35 +2039,11 @@ def go_summaries(
         return _err(f"failed to import agent modules: {exc}")
 
     try:
-        paths = json.loads(source_files)
-    except json.JSONDecodeError as exc:
-        return _err(f"failed to parse source_files: {exc}")
-    if (
-        not isinstance(paths, list)
-        or not paths
-        or any(not isinstance(p, str) or not p for p in paths)
-    ):
-        return _err("source_files must be a nonempty JSON array of paths")
-
-    try:
-        imports_doc = json.loads(imports_json)
-    except json.JSONDecodeError as exc:
-        return _err(f"failed to parse imports_json: {exc}")
-    if not isinstance(imports_doc, dict):
-        return _err("imports_json must be a JSON object")
-    specs: list[str] = []
-    for import_path, files in imports_doc.items():
-        if not isinstance(import_path, str) or not import_path:
-            return _err("imports_json keys must be nonempty import paths")
-        files_list = files if isinstance(files, list) else [files]
-        for f in files_list:
-            if not isinstance(f, str) or not f:
-                return _err(
-                    "imports_json values must be paths or arrays of paths"
-                )
-            specs.append(f"{import_path}={f}")
-    if len(imports_doc) > MAX_IMPORTS:
-        return _err(f"imports_json declares more than {MAX_IMPORTS} units")
+        paths, specs = _go_summaries_declared_args(
+            source_files, imports_json, MAX_IMPORTS
+        )
+    except ValueError as exc:
+        return _err(str(exc))
 
     def _redact_paths(text: str) -> str:
         # Failure text goes to a model: declared checkout-local
@@ -2051,6 +2076,97 @@ def go_summaries(
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         return _err(_redact_paths(str(exc)))
     return _ok({"manifest": summary.to_dict()})
+
+
+@mcp.tool()
+def go_summaries_attempt(
+    source_files: str,
+    go_types: str,
+    attempt_timeout_ms: int,
+    target_arch: str = "amd64",
+    imports_json: str = "{}",
+    timeout_s: int = 30,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the go-summaries produce route as one declared attempt.
+
+    The same wiring as `go-summaries-attempt`: the produce route
+    spawns through the C11 dispatch lifecycle — an `exited` run's
+    captured stdout becomes the selected result only when every
+    declared input byte (helper binary plus every source/import
+    file) is unchanged after the observed run. The returned report
+    is the canonical lineage — not an accepted manifest.
+
+    Args:
+        source_files: JSON array of Go source file paths — same
+            declared shape as `go_summaries`.
+        go_types: Path to the provisioned go-types helper binary.
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        target_arch: `gc` target the report is validated against
+            (amd64, 386 or arm64).
+        imports_json: JSON object mapping an import path to a file or
+            an array of files of that importable unit.
+        timeout_s: Bound on the inner helper spawn, in seconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.go-summaries-attempt-report/v1` document — or `error`
+        on a declared failure.
+    """
+    try:
+        from argparse import Namespace
+
+        from agent.go_summaries import MAX_IMPORTS, run_attempt
+        from agent.go_type_snapshot import SnapshotError
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    declared_paths = [go_types]
+    if not _valid_declared_path(go_types):
+        return _err("go_types must be a nonempty single-line path")
+    try:
+        paths, specs = _go_summaries_declared_args(
+            source_files, imports_json, MAX_IMPORTS
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    declared_paths.extend(paths)
+    declared_paths.extend(s.split("=", 1)[1] for s in specs)
+    if (
+        not isinstance(attempt_timeout_ms, int)
+        or isinstance(attempt_timeout_ms, bool)
+        or attempt_timeout_ms <= 0
+    ):
+        return _err("attempt_timeout_ms must be a positive integer")
+    if (
+        not isinstance(timeout_s, int)
+        or isinstance(timeout_s, bool)
+        or timeout_s <= 0
+    ):
+        return _err("timeout_s must be a positive integer")
+    mb = memory_bound_mb or None
+    if mb is not None and (
+        not isinstance(mb, int) or isinstance(mb, bool) or mb <= 0
+    ):
+        return _err(
+            "memory_bound_mb must be a positive integer when set"
+        )
+    args = Namespace(
+        source=paths,
+        go_types=go_types,
+        target_arch=target_arch,
+        timeout=timeout_s,
+        imports=specs,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=mb,
+    )
+    try:
+        report = run_attempt(args)
+    except (SnapshotError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"report": report})
 
 
 @mcp.tool()
