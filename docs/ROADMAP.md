@@ -675,6 +675,26 @@ no Core and no fresh query — it is the byte-level staleness
 companion of `verify-recheck`, which discharges freshness by
 re-running the source query. C02 stays partial.
 
+### C02 declared evidence routes as MCP tools
+
+The MCP server exposes the two spawn-free consume routes so a model can
+drive them without a shell: `evidence_identity_check(evidence_path,
+source_path)` returns the `mumei.evidence-file-identity/v1` descriptor
+via `compute_identity_descriptor` — the same strict subject shape and
+64 KiB bounded reads as the CLI route — and
+`evidence_check_accept(sequence_json, check_json)` restores the two
+declared documents from inline JSON (bounded to the route's 1 MiB
+snapshot limit before parsing) and returns
+`mumei.evidence-check-acceptance/v1` through
+`evaluate_evidence_check`. Both tools keep the CLI contract verbatim:
+a malformed or oversized declared input is a `status: "error"`, never
+a mismatch/reject answer, and `checks_not_performed` stays verbatim.
+Failure text is model-facing, so declared checkout-local paths are
+redacted to basenames before returning; the inline-JSON accept tool
+needs no redaction because it performs no file reads at all. Neither
+tool spawns, queries Core or decides truth — a `"valid"` acceptance
+still means Core's representation check passed at record time only.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

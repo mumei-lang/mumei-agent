@@ -2053,6 +2053,114 @@ def go_summaries(
 
 
 @mcp.tool()
+def evidence_identity_check(evidence_path: str, source_path: str) -> str:
+    """Compare a stored Evidence record's bound source digest to a file.
+
+    Reads the declared `mumei.verification-evidence/v1` record and the
+    declared source file under the same 64 KiB bounded read as the CLI
+    route, then emits the `mumei.evidence-file-identity/v1` descriptor —
+    `identity` is `"match"` when the record's `subject.sha256` equals the
+    current source bytes' digest, `"mismatch"` otherwise.
+
+    Args:
+        evidence_path: Path to the declared evidence record JSON.
+        source_path: Path to the source file the record is checked
+            against.
+
+    Returns:
+        JSON with `identity` — the descriptor — on success, or `error`
+        on a declared failure. This is a representation-level byte
+        comparison only: a match discharges file_identity, never claim
+        truth, freshness, authenticity or correspondence (each stays
+        named in the descriptor's `checks_not_performed`).
+    """
+    try:
+        from agent.evidence_identity import compute_identity_descriptor
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (("evidence_path", evidence_path), ("source_path", source_path)):
+        if not isinstance(path, str) or not path or "\n" in path:
+            return _err(f"{name} must be a nonempty single-line path")
+
+    def _redact_paths(text: str) -> str:
+        # Failure text goes to a model: declared checkout-local
+        # paths stay out of it — basenames only.
+        for p in (evidence_path, source_path):
+            if not p:
+                continue
+            base = os.path.basename(p) or "<path>"
+            try:
+                text = text.replace(str(Path(p).resolve()), base)
+            except (OSError, RuntimeError):
+                pass
+            text = text.replace(p, base)
+        return text
+
+    try:
+        descriptor = compute_identity_descriptor(evidence_path, source_path)
+    except (OSError, ValueError) as exc:
+        return _err(_redact_paths(str(exc)))
+    return _ok({"identity": descriptor})
+
+
+@mcp.tool()
+def evidence_check_accept(sequence_json: str, check_json: str) -> str:
+    """Evaluate a stored evidence-check record against a sequence.
+
+    Restores the declared `mumei.verifier-attempt-sequence/v1` snapshot
+    and `mumei.verifier-evidence-check/v1` record from inline JSON, then
+    emits `mumei.evidence-check-acceptance/v1` — `accepted` holds only
+    when the record binds the sequence's CURRENT evidence candidate AND
+    its outcome is `"valid"`. Reads no files, spawns nothing and runs no
+    Core check.
+
+    Args:
+        sequence_json: The attempt-sequence snapshot document as a JSON
+            string (at most 1 MiB).
+        check_json: The evidence-check record document as a JSON string
+            (at most 1 MiB).
+
+    Returns:
+        JSON with `acceptance` — the descriptor — on success, or `error`
+        on a declared failure. Representation-level acceptance only: a
+        stale or foreign record always yields `accepted: false` and the
+        six semantic checks stay named in `checks_not_performed`.
+    """
+    try:
+        from agent.core_evidence import evaluate_evidence_check
+        from agent.evidence_check import MAX_SNAPSHOT_BYTES
+        from agent.verification_attempt import (
+            AttemptEvidenceCheck,
+            AttemptSequence,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    documents: dict[str, dict] = {}
+    for name, text in (("sequence_json", sequence_json), ("check_json", check_json)):
+        if not isinstance(text, str) or not text:
+            return _err(f"{name} must be a nonempty JSON string")
+        if len(text.encode("utf-8")) > MAX_SNAPSHOT_BYTES:
+            return _err(f"{name} exceeds the bounded document limit")
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return _err(f"{name} is not valid JSON: {exc}")
+        if type(value) is not dict:
+            return _err(f"{name} must decode to a JSON object")
+        documents[name] = value
+
+    try:
+        sequence = AttemptSequence.from_dict(documents["sequence_json"])
+        check = AttemptEvidenceCheck.from_dict(documents["check_json"])
+        acceptance = evaluate_evidence_check(sequence, check)
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok({"acceptance": acceptance})
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 
