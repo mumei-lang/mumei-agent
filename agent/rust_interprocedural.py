@@ -13,6 +13,7 @@ fragment stays closed (gap recorded).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass, field
 
@@ -274,6 +275,40 @@ def _is_mut_ref(node):
     )
 
 
+def _is_mut_ref_type(tnode):
+    """A `&mut T` parameter type — a slot the callee may write through."""
+    return (
+        tnode is not None
+        and tnode.type == "reference_type"
+        and any(c.type == "mutable_specifier" for c in _children(tnode))
+    )
+
+
+def _ref_inner(node):
+    """`&e`/`&mut e` → the inner expression node; else None."""
+    if node is None or node.type != "reference_expression":
+        return None
+    return next(
+        (
+            c
+            for c in _children(node)
+            if c.type not in _TYPE_NAMES
+            and c.type != "mutable_specifier"
+        ),
+        None,
+    )
+
+
+def _unparen(node):
+    """`(e)` — parentheses are transparent: unwrap to the inner
+    expression so `(p)`/`&mut (p)`/`&mut (*p)` behave exactly like
+    their unwrapped forms."""
+    while node is not None and node.type == "parenthesized_expression":
+        kids = [c for c in _children(node)]
+        node = kids[0] if len(kids) == 1 else None
+    return node
+
+
 def _arg_root(node):
     """Innermost identifier under reference/member/index
     wrappers — the slot a `&mut` argument writes through."""
@@ -368,6 +403,13 @@ class _Builder:
         self.mut_globals: set = set()
         self._in_progress: set = set()
         self._type_envs: list = []
+        self._mut_ref_params: list = []
+        self._block_decls: list = []
+        # Per-scope `name -> deps` of outer bindings captured at the
+        # point a `let` first shadows them: assignments before the
+        # shadow reach the outer binding, so block exit restores this
+        # value — not the block-entry snapshot.
+        self._shadow_vals: list = []
 
     # -- unit scan -------------------------------------------------
 
@@ -467,6 +509,7 @@ class _Builder:
         self._in_progress.add(name)
         self._writes.append(set())
         self._decls.append(set())
+        self._mut_ref_params.append(set())
         types: dict = {}
         self._type_envs.append(types)
         try:
@@ -483,6 +526,12 @@ class _Builder:
                         locals_["self"] = frozenset({idx})
                         if self_type is not None:
                             types["self"] = self_type
+                        if (
+                            p.text.decode()
+                            .replace(" ", "")
+                            .startswith("&mut")
+                        ):
+                            self._mut_ref_params[-1].add("self")
                         idx += 1
                         continue
                     if p.type not in ("parameter", "variadic_parameter"):
@@ -499,6 +548,10 @@ class _Builder:
                         locals_[pname] = frozenset({idx})
                         if ptype is not None:
                             types[pname] = ptype
+                        if _is_mut_ref_type(
+                            p.child_by_field_name("type")
+                        ):
+                            self._mut_ref_params[-1].add(pname)
                     elif pat is not None:
                         # Destructured `(a, b)` / `S { x }` patterns —
                         # bind each identifier inside to the dep index.
@@ -544,21 +597,67 @@ class _Builder:
             return summary
         finally:
             self._type_envs.pop()
+            self._mut_ref_params.pop()
             self._writes.pop()
             self._decls.pop()
             self._in_progress.discard(name)
 
     # -- statements -------------------------------------------------
 
+    @contextlib.contextmanager
+    def _scope(self, locals_, param_index):
+        """A lexical scope — `let` bindings die with the block.
+
+        `param_index`, the current type env and the `&mut`-alias set
+        are only ever written by `let`, so they restore wholesale;
+        `locals_` is also written by assignments to outer names, so
+        only names a `let` bound inside get their old entry back —
+        and a shadowed name restores the value it held at the shadow
+        point, since writes before the `let` reached the outer
+        binding.
+        """
+        self._block_decls.append(set())
+        self._shadow_vals.append({})
+        prev_index = dict(param_index)
+        prev_types = (
+            dict(self._type_envs[-1]) if self._type_envs else {}
+        )
+        prev_muts = (
+            set(self._mut_ref_params[-1])
+            if self._mut_ref_params else set()
+        )
+        prev_locals = dict(locals_)
+        try:
+            yield
+        finally:
+            bound = self._block_decls.pop()
+            shadowed = self._shadow_vals.pop()
+            param_index.clear()
+            param_index.update(prev_index)
+            if self._type_envs:
+                self._type_envs[-1].clear()
+                self._type_envs[-1].update(prev_types)
+            if self._mut_ref_params:
+                self._mut_ref_params[-1].clear()
+                self._mut_ref_params[-1].update(prev_muts)
+            for name in bound:
+                if name in shadowed:
+                    locals_[name] = shadowed[name]
+                elif name in prev_locals:
+                    locals_[name] = prev_locals[name]
+                else:
+                    locals_.pop(name, None)
+
     def _block(self, block, locals_, param_index, summary):
         ret = None
-        for st in _children(block):
-            self.count[0] += 1
-            if self.count[0] > MAX_NODES:
-                raise _Unsupported("analysis_limit", _span(st))
-            r = self._statement(st, locals_, param_index, summary)
-            if r is not None:
-                ret = r if ret is None else ret | r
+        with self._scope(locals_, param_index):
+            for st in _children(block):
+                self.count[0] += 1
+                if self.count[0] > MAX_NODES:
+                    raise _Unsupported("analysis_limit", _span(st))
+                r = self._statement(st, locals_, param_index, summary)
+                if r is not None:
+                    ret = r if ret is None else ret | r
         # A block's trailing bare expression is its value —
         # handled inside _statement's expression arm.
         return ret
@@ -581,14 +680,80 @@ class _Builder:
                     "unsupported_statement", _span(st)
                 )
             ltype = _type_name(st.child_by_field_name("type"))
-            if ltype is None and val is not None:
+            type_root = None
+            write_root = None
+            # Type inheritance and slot aliasing only make sense for
+            # a plain `let q = ...` binding: a `&mut q`/`(a, b)`
+            # pattern copies or destructures the value, so the bound
+            # name neither carries `p`'s type nor shares `p`'s slot.
+            # `let ref mut q = p` is the exception that still
+            # aliases: `q` binds `&mut p`, so writes through `q`
+            # reach `p`'s storage exactly like the move case.
+            ref_mut_binding = (
+                pat.type == "ref_pattern"
+                and any(
+                    c.type == "mut_pattern"
+                    for c in _children(pat)
+                )
+            )
+            if val is not None and ref_mut_binding:
+                vsrc = _unparen(val)
+                write_root = (
+                    _arg_root(vsrc)
+                    if vsrc is not None
+                    else None
+                )
+            if val is not None and pat.type == "identifier":
                 # `let q = p` / `let q = &mut p` — no annotation:
                 # inherit the source binding's type so `q.m()`
-                # still resolves the impl's method.
-                root = _arg_root(val)
-                if root is not None and self._type_envs:
-                    ltype = self._type_envs[-1].get(root)
+                # still resolves the impl's method. A field/index
+                # read (`let q = p.v`) binds the field's own type —
+                # inheriting `p`'s would resolve the wrong impl, so
+                # only transparent identifier/reference vals count.
+                vsrc = _unparen(val)
+                if vsrc is not None and vsrc.type in {
+                    "identifier",
+                    "self",
+                }:
+                    type_root = vsrc.text.decode()
+                    # A moved `&mut` param: writes via `q` reach `p`.
+                    write_root = type_root
+                elif (
+                    vsrc is not None
+                    and vsrc.type == "reference_expression"
+                ):
+                    inner = _unparen(_ref_inner(vsrc))
+                    if (
+                        inner is not None
+                        and inner.type in {"identifier", "self"}
+                    ):
+                        type_root = inner.text.decode()
+                    elif _is_mut_ref(vsrc) and inner is not None:
+                        # `let q = &mut *p` / `let q = &mut p.v` —
+                        # writes through `q` reach `p`'s pointee.
+                        write_root = _arg_root(inner)
+                if (
+                    type_root is not None
+                    and ltype is None
+                    and self._type_envs
+                ):
+                    ltype = self._type_envs[-1].get(type_root)
+            mut_params = (
+                self._mut_ref_params[-1]
+                if self._mut_ref_params
+                else frozenset()
+            )
             for bname in bound:
+                if (
+                    self._block_decls
+                    and bname not in self._block_decls[-1]
+                    and bname in locals_
+                ):
+                    # First shadow of a live binding in this scope —
+                    # capture the value the outer binding holds now;
+                    # block exit restores it, not the block-entry
+                    # snapshot.
+                    self._shadow_vals[-1][bname] = locals_[bname]
                 locals_[bname] = deps
                 if self._writes:
                     self._writes[-1].add(bname)
@@ -596,6 +761,19 @@ class _Builder:
                     self._decls[-1].add(bname)
                 if ltype is not None and self._type_envs:
                     self._type_envs[-1][bname] = ltype
+                if self._block_decls:
+                    self._block_decls[-1].add(bname)
+                if (
+                    write_root is not None
+                    and write_root in mut_params
+                    and write_root in param_index
+                ):
+                    # `let q = p` re-binds a `&mut` parameter —
+                    # writes rooted at `q` are writes through `p`.
+                    param_index[bname] = param_index[write_root]
+                    # `q` re-binds a `&mut`, so it is one itself:
+                    # `let r = q` keeps the alias chain.
+                    self._mut_ref_params[-1].add(bname)
             return None
         if t == "return_expression":
             val = next(
@@ -841,12 +1019,15 @@ class _Builder:
         try:
             ret = None
             if body is not None:
-                for c in _children(body):
-                    r = self._statement(
-                        c, inner, param_index, summary
-                    )
-                    if r is not None:
-                        ret = r if ret is None else ret | r
+                # Loop-body `let`s are scoped to the body — the
+                # shared binding maps restore like a block's.
+                with self._scope(inner, param_index):
+                    for c in _children(body):
+                        r = self._statement(
+                            c, inner, param_index, summary
+                        )
+                        if r is not None:
+                            ret = r if ret is None else ret | r
         finally:
             touched = self._writes.pop()
         merged = lc_merged
