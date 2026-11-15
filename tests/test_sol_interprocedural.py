@@ -1762,3 +1762,89 @@ def test_reuse_route_merges_and_rekeys(tmp_path, capsys):
     by_name = {f["name"]: f for f in out["functions"]}
     assert by_name["C.g"]["return_dependencies"] == []
     assert "C.f" in by_name
+
+
+def test_manifest_restoration_rejects_duplicate_function_names():
+    s = sol.summarize_solidity(_SOL_OVERLOAD).to_dict()
+    s["functions"].append(dict(s["functions"][0]))
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(s)
+
+
+def test_call_record_accepts_a_null_callee():
+    call = sol.SolCall.from_dict(
+        {"byte": 1, "callee": None, "arguments": [], "result": None}
+    )
+    assert call.callee is None
+    # and a full manifest containing it round-trips
+    s = sol.summarize_solidity(_SOL_OVERLOAD).to_dict()
+    s["functions"][0]["calls"].append(
+        {"byte": 1, "callee": None, "arguments": [], "result": None}
+    )
+    sol.SolSummarySet.from_dict(s)
+
+
+_SOL_OVERLOAD = (
+    "contract C {"
+    " function g(uint x) public returns (uint) { return x; }"
+    " function g(uint x, uint y) public returns (uint)"
+    " { return x + y; } }"
+)
+
+
+def test_accept_route_bare_name_of_overloads_is_ambiguous(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_OVERLOAD)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_OVERLOAD).to_dict())
+    )
+    args = type(
+        "A",
+        (),
+        {
+            "source": str(src),
+            "manifest": str(manifest),
+            "function": "g",
+            "output": None,
+        },
+    )()
+    with pytest.raises(SystemExit):
+        sol.main_accept(args)
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "ambiguous_function"
+
+
+def test_accept_route_qualified_name_picks_one_overload(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_OVERLOAD)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_OVERLOAD).to_dict())
+    )
+    names = {
+        f["name"] for f in sol.summarize_solidity(
+            _SOL_OVERLOAD
+        ).to_dict()["functions"]
+    }
+    assert "C.g#2" in names
+    args = type(
+        "A",
+        (),
+        {
+            "source": str(src),
+            "manifest": str(manifest),
+            "function": "C.g#2",
+            "output": None,
+        },
+    )()
+    with pytest.raises(SystemExit):
+        sol.main_accept(args)
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is True
+    assert out["summary"]["name"] == "C.g#2"
