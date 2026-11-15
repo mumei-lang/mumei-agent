@@ -3241,6 +3241,12 @@ class _Builder:
                     self.expression(
                         condition, params, inner, transfers, count
                     )
+                snap = {}
+                for sname, sval in inner.items():
+                    if isinstance(sval, _Composite):
+                        snap[sname] = ("fields", dict(sval.fields))
+                    elif isinstance(sval, _Callable):
+                        snap[sname] = ("captured", dict(sval.captured))
                 self.statement(
                     body, params, inner, transfers, count, deps,
                     saw_return, conditional,
@@ -3255,6 +3261,23 @@ class _Builder:
                         saw_return, conditional or frame["broke"],
                     )
                 changed = False
+                for sname, (skind, before) in snap.items():
+                    cur = inner.get(sname)
+                    table = getattr(cur, skind, None)
+                    if not isinstance(table, dict):
+                        changed = True
+                        continue
+                    if set(before) - set(table):
+                        changed = True
+                    for k, v in table.items():
+                        # A pass introduces new information when a
+                        # mutated field isn't leq its snapshot —
+                        # rewrites inside the merged frontier don't
+                        # count (they stay below it).
+                        if not _val_leq(
+                            v, before.get(k, frozenset())
+                        ):
+                            changed = True
                 for name, ndeps in inner.items():
                     if name in scope:
                         if not _val_leq(ndeps, scope[name]):

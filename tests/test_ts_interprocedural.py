@@ -5807,3 +5807,19 @@ o["*"] = {n: 1};
 f(o, 7);"""
     result = _summarize(src)
     assert result.functions
+
+
+def test_slice65_loop_inplace_map_mutation_converges():
+    # `m.set('k', x)` mutates the composite the fixed-point check
+    # reads — convergence must see through in-place mutation.
+    src = """function f(x, n) {
+  let m = new Map();
+  let a = 0;
+  for (let i = 0; i < n; i++) {
+    a = m.get('k');
+    m.set('k', x);
+  }
+  return a;
+}"""
+    (f,) = _summarize(src).functions
+    assert 0 in f.return_dependencies
