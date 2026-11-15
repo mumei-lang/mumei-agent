@@ -45,7 +45,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
-| `evidence-check-accept` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
+| `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -620,27 +620,15 @@ Run the go-summaries produce route as one declared attempt and emit the reconcil
 
 ## `mumei-agent evidence-check-accept`
 
-Mumei Self-Healing Loop: AI-driven autonomous fix loop
-
-### Positional arguments
-
-| Argument | Required | Value | Description |
-|---|---|---|---|
-| `source_file` | no | `[<SOURCE_FILE>]` | Path to a .mm source file or directory to heal (default: examples/sword_test.mm). Directories are searched recursively and processed in dependency-first order; runtime may exceed N× single-file healing due to dependency resolution. |
+Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor.
 
 ### Options
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
-| `--max-retries` | `<MAX_RETRIES>` | no | — | Maximum number of fix attempts (default: from config or 5) |
-| `--strategy` | `{single, multi-stage}` | no | — | Fix strategy: 'single' (one-shot) or 'multi-stage' (diagnose→fix→validate). Default: from AGENT_STRATEGY env var or 'single'. |
-| `--generate` | `<SPEC_JSON>` | no | — | Generate mode: path to a JSON spec file describing the atom to generate. Runs generate → verify → fix loop instead of the normal heal loop. |
-| `--output` | `<OUTPUT_FILE>` | no | — | Output file for generated code (required with --generate). |
-| `--budget-policy` | `<POLICY_JSON>` | no | — | Path to retry budget policy JSON (default: built-in P8-G policy). |
-| `--proof-cert-out` | `<CERT_JSON>` | no | — | After healing, emit a proof certificate for the final source with the repair outcome attached as self_correction_metadata (input for mumei benchmarks/evaluation_suite.py --repair-cert-dir). When SOURCE is a directory this is a directory too: each file gets <dir>/<relative path>.proof.json. |
-| `--charter-lock` | `<LOCK_JSON>` | no | — | Use this charter lock instead of discovering one from the source tree. |
-| `--allow-contract-erosion` | — | no | — | Disable contract-erosion checks for repair candidates. |
-| `--controls-gate` | `{off, warn, require}` | no | off | Rank verified heal candidates using negative controls (default: off). |
+| `--sequence` | `<PATH>` | yes | — | Declared attempt-sequence snapshot (mumei.verifier-attempt-sequence/v1 JSON). |
+| `--check` | `<PATH>` | yes | — | Declared evidence-check record (mumei.verifier-evidence-check/v1 JSON). |
+| `--output` | `<PATH>` | no | — | Write the acceptance descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent rust-summaries`
