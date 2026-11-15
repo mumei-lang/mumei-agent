@@ -55,6 +55,11 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `ts-summaries-check` | 3 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
 | `ts-summaries-reuse` | 3 | Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
 | `ts-summaries-attempt` | 4 | Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `sol-summaries` | 0 | Emit opt-in Solidity interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `sol-summaries-accept` | 2 | Re-derive the Solidity summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `sol-summaries-check` | 2 | Re-derive the Solidity summary set for one declared source and check a declared manifest's functions against it. |
+| `sol-summaries-reuse` | 2 | Re-derive the Solidity summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `sol-summaries-attempt` | 3 | Run the sol-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -783,6 +788,90 @@ Run the ts-summaries produce route as one declared attempt and emit the reconcil
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
+
+
+## `mumei-agent sol-summaries`
+
+Emit opt-in Solidity interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Solidity source file (at most 256 KiB). |
+
+
+## `mumei-agent sol-summaries-accept`
+
+Re-derive the Solidity summary set for one declared source and accept one function's summary under the strict whole-context gate.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Solidity source file (at most 256 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.sol-scalar-parameter-deps/v1) to accept from. |
+| `--function` | `<<NAME>>` | yes | — | Function whose summary to accept — the emitted name ('C.f') or a bare member name ('f') when it is unambiguous. Accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
+
+
+## `mumei-agent sol-summaries-check`
+
+Re-derive the Solidity summary set for one declared source and check a declared manifest's functions against it.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Solidity source file (at most 256 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.sol-scalar-parameter-deps/v1) to check. |
+| `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
+
+
+## `mumei-agent sol-summaries-reuse`
+
+Re-derive the Solidity summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Solidity source file (at most 256 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.sol-scalar-parameter-deps/v1) to reuse unchanged summaries from. |
+| `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+
+
+## `mumei-agent sol-summaries-attempt`
+
+Run the sol-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Solidity source file (at most 256 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |

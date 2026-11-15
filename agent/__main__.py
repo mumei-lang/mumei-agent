@@ -44,6 +44,11 @@ _SUBCOMMANDS = {
     "ts-summaries-check",
     "ts-summaries-reuse",
     "ts-summaries-attempt",
+    "sol-summaries",
+    "sol-summaries-accept",
+    "sol-summaries-check",
+    "sol-summaries-reuse",
+    "sol-summaries-attempt",
 }
 
 
@@ -759,6 +764,76 @@ def main() -> None:
         ts_build_parser(parser)
         args = parser.parse_args(argv[1:])
         ts_main(args)
+    elif command == "sol-summaries":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_parser as sol_build_parser,
+            main as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries",
+            description="Emit opt-in Solidity interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.",
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
+    elif command == "sol-summaries-accept":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_accept_parser as sol_build_parser,
+            main_accept as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-accept",
+            description="Accept one function's declared Solidity summary under the strict whole-context gate.",
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
+    elif command == "sol-summaries-check":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_check_parser as sol_build_parser,
+            main_check as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-check",
+            description="Check a declared Solidity summary manifest against the fresh derivation.",
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
+    elif command == "sol-summaries-reuse":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_reuse_parser as sol_build_parser,
+            main_reuse as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-reuse",
+            description="Emit a manifest reusing a declared manifest's unchanged Solidity summaries.",
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
+    elif command == "sol-summaries-attempt":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_attempt_parser as sol_build_parser,
+            main_attempt as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-attempt",
+            description="Run the sol-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.",
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

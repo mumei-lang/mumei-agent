@@ -7,12 +7,14 @@ import pytest
 
 from agent.adapter_probe import AdapterProbeHistory
 from agent.ts_interprocedural import PROFILE as TS_SUMMARY_PROFILE
+from agent.sol_interprocedural import PROFILE as SOL_SUMMARY_PROFILE
 from agent.summaries_adapters import (
     SUMMARY_DERIVATION,
     go_summaries_adapter,
     rust_summaries_adapter,
     plan_summary_route,
     summary_descriptors,
+    sol_summaries_adapter,
     summary_registry,
     ts_summaries_adapter,
     summary_requirements,
@@ -130,6 +132,7 @@ def test_registry_holds_every_descriptor():
     assert [d.adapter_id for d in summary_descriptors()] == [
         "agent.go-summaries",
         "agent.rust-summaries",
+        "agent.sol-summaries",
         "agent.ts-summaries",
     ]
 
@@ -278,3 +281,21 @@ def test_ts_summaries_descriptor_is_valid_and_in_process():
         ),
     )
     assert result.selected.adapter_id == "agent.ts-summaries"
+
+
+def test_sol_summaries_descriptor_is_valid_and_in_process():
+    descriptor = sol_summaries_adapter()
+    assert descriptor.adapter_id == "agent.sol-summaries"
+    assert SOL_SUMMARY_PROFILE in descriptor.profiles
+    assert descriptor.required_permissions == frozenset({"filesystem.read"})
+    registry = summary_registry()
+    result = registry.plan(
+        summary_requirements(SOL_SUMMARY_PROFILE),
+        PlannerPolicy(allowed_permissions=_PERMISSIONS),
+        (
+            RuntimeObservation(
+                "agent.sol-summaries", "available", "1.0.0"
+            ),
+        ),
+    )
+    assert result.selected.adapter_id == "agent.sol-summaries"
