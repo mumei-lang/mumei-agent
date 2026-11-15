@@ -3174,6 +3174,25 @@ bound actuals before the body runs — `_Callable` gains a
 so `new C(x).a` reads `{x}` where it previously under-read as a
 missing `undefined` field.
 
+### C06 TypeScript super members + object accessors + JSX (slice 40)
+
+`super` member access is now precise: `super.f` / `super.f = v`
+are data-field accesses on `this` (the instance carries the
+data — the previous parent-table descent under-read them as
+dep-free), while `super.p` / `super.p = v` invoke the parent's
+accessor on `this` (the home-object rule: a child override is
+bypassed). `{get p(){}, set p(v){}}` members in object literals
+collect into a synthetic accessor class on the composite, so
+`o.p` / `o.p = v` reuse the class accessor paths with the
+literal as `this`. Sources that fail the `typescript` grammar
+now reparse under `tsx`: JSX elements contribute every embedded
+expression's deps, `<Comp a={x}>{y}</Comp>` invokes a callable
+tag with a props composite (`children` carries the child deps,
+recorded as a `Comp` TsCall for same-unit functions), and
+lowercase tags are host elements. Computed class/literal member
+names `[k]` are skipped — uncallable but no longer fatal; the
+name expression still evaluates.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

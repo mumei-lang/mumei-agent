@@ -2361,14 +2361,16 @@ def test_method_captures_local():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_getter_method_closes():
+def test_getter_method_admits():
+    # `{get a(){...}}` collects into a synthetic accessor class —
+    # the literal instance is `this`, the getter's captured deps
+    # flatten into the composite.
     s = _fn(
         "function f(x: number): number {"
         " const o = {get a(): number { return x; }};"
-        " return x; }"
+        " return o.a; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_generator_method_admits():
@@ -3539,15 +3541,15 @@ def test_own_field_shadows_setter():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_object_literal_getter_closes():
-    # `{get p(){...}}` would bind `this` to the literal — not
-    # modelled; closes.
+def test_object_literal_getter_on_literal_this():
+    # `{get p(){...}}` binds `this` to the literal instance —
+    # `o.p` invokes it through the accessor path.
     s = _fn(
         "function f(x: number): number {"
         " const o = { get p() { return x; } };"
         " return o.p; }"
     )
-    assert not s.available
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_static_getter_admits():
@@ -3846,3 +3848,195 @@ def test_ctor_non_prop_param_not_a_field():
     )
     # `c.c` reads a missing field — dep-free, not the actual's deps.
     assert s.available and s.return_dependencies == frozenset()
+
+
+# --- slice 40: super member access, object-literal accessors,
+# JSX, computed member names -------------------------------------
+
+
+def test_super_field_read_carries_instance_deps():
+    # `super.a` reads the same field `this.a` does — seeded by the
+    # parent's ctor parameter.
+    s = _fn(
+        "class B { a: number; constructor(v: number) { this.a = v; } }"
+        " class C extends B { m(): number { return super.a; } }"
+        " function f(x: number): number {"
+        " const c = new C(x); return c.m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_super_getter_invokes_parent_on_this():
+    s = _fn(
+        "class B { get p(): number { return this.b; } b: number = 0;"
+        " constructor(v: number) { this.b = v; } }"
+        " class C extends B { m(): number { return super.p; } }"
+        " function f(x: number): number {"
+        " const c = new C(x); return c.m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_super_field_store_writes_this():
+    s = _fn(
+        "class B { a: number = 0; }"
+        " class C extends B { m(v: number): void { super.a = v; }"
+        " n(): number { return this.a; } }"
+        " function f(x: number): number {"
+        " const c = new C(); c.m(x); return c.n(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_super_setter_invokes_parent_on_this():
+    s = _fn(
+        "class B { set p(v: number) { this.b = v; } b: number = 0;"
+        " read(): number { return this.b; } }"
+        " class C extends B { m(v: number): void { super.p = v; } }"
+        " function f(x: number): number {"
+        " const c = new C(); c.m(x); return c.read(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_super_method_call_still_resolves():
+    s = _fn(
+        "class B { m(v: number): number { return v; } }"
+        " class C extends B { n(y: number): number {"
+        " return super.m(y); } }"
+        " function f(x: number): number {"
+        " const c = new C(); return c.n(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_literal_getter_admits():
+    # `get p()` on a literal — `this` is the literal instance.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = { b: x, get p(): number { return this.b; } };"
+        " return o.p; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_literal_setter_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = { b: 0, set p(v: number) { this.b = v; } };"
+        " o.p = x; return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_object_literal_getter_captures_deps():
+    # A getter closing over a parameter flattens into the
+    # composite's scalar deps.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = { get p(): number { return x; } };"
+        " return x ? o.p : 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_jsx_host_element_children_deps():
+    s = _fn(
+        "function f(x: number): number {"
+        " const el = <div>{x}</div>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_jsx_component_invokes_callable():
+    s = _fn(
+        "function f(x: number): number {"
+        " const Comp = (p) => p.a;"
+        " const el = <Comp a={x}/>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.callee == "Comp" for c in s.calls)
+
+
+def test_jsx_same_unit_component_records_call():
+    s = _fn(
+        "function Comp(p) { return p.a; }"
+        " function f(x: number): number {"
+        " const el = <Comp a={x}/>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.callee == "Comp" for c in s.calls)
+
+
+def test_jsx_children_flow_to_children_prop():
+    s = _fn(
+        "function Comp(p) { return p.children; }"
+        " function f(x: number, y: number): number {"
+        " const el = <Comp>{x + y}</Comp>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_jsx_fragment_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " const el = <>{x}</>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_jsx_spread_attribute_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " const props = { a: x };"
+        " const el = <div {...props}/>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_jsx_member_tag_invokes():
+    s = _fn(
+        "const UI = { Btn(p) { return p.a; } };"
+        " function f(x: number): number {"
+        " const el = <UI.Btn a={x}/>; return el; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_jsx_unbound_component_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " const el = <Missing a={x}/>; return x; }"
+    )
+    assert not s.available
+    assert any(g.reason == "binding_unavailable" for g in s.gaps)
+
+
+def test_computed_member_skipped_named_members_admit():
+    # `[k]` members can't be keyed — the class still admits and
+    # named members resolve; `c[k]()` calls stay closed.
+    s = _fn(
+        "function f(x: number): number { const k = 'a';"
+        " class C { [k](): number { return 1; }"
+        " m(): number { return x; } }"
+        " const c = new C(); return c.m(); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_computed_member_call_closes():
+    s = _fn(
+        "function f(x: number): number { const k = 'a';"
+        " class C { [k](): number { return 1; } }"
+        " const c = new C(); return c[k](); }"
+    )
+    assert not s.available
+
+
+def test_object_literal_computed_method_skipped():
+    s = _fn(
+        "function f(x: number): number { const k = 'a';"
+        " const o = { [k](): number { return 1; }, m: x };"
+        " return o.m; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

@@ -164,9 +164,14 @@ Admitted:
   static and field tables a `_Class` carries (own members
   shadow) — `super(args)` in a ctor runs the parent
   constructor on the same `this`, `super.m(x)` calls through
-  the parent prototype; `implements` is type-level and
-  admits silently. Computed member names and
-  `abstract`/`declare` members close (`readonly` fields and
+  the parent prototype; `super.f`/`super.f = v` are data
+  field accesses on `this` itself (JS `[[Set]]` owns the
+  property), and `super.p`/`super.p = v` invoke the PARENT's
+  accessor on `this` (a child override is bypassed, matching
+  the home-object rule); `implements` is type-level and
+  admits silently. Computed member names are skipped (the
+  name expression still evaluates; `o[k]()` calls close)
+  and `abstract`/`declare` members close (`readonly` fields and
   parameter properties are value-identical for deps);
   `static get/set p` collect into `sgetters`/`ssetters` —
   `C.p` reads invoke the getter like a no-arg method on
@@ -190,6 +195,15 @@ Admitted:
   spread or a computed `{[k]: v}` key adds unknown fields, so the
   whole literal collapses to a scalar dep union. Optional-chain
   `o?.f`/`o?.[k]` and non-null `x!` read like their plain forms.
+* `get`/`set` members in object literals — `{get p(){}, set p(v){}}`
+  collect into a synthetic accessor class on the composite, so
+  `o.p`/`o.p = v` take the same invoke paths class accessors do
+  with the literal instance as `this`.
+* JSX — sources that fail the plain `typescript` grammar reparse
+  under `tsx`; elements contribute every embedded expression's
+  deps, `<Comp a={x}>{y}</Comp>` invokes a callable/component tag
+  with a props composite (`children` carries the child deps) or
+  records a same-unit call, and lowercase tags are host elements.
 * String/`null`/`undefined` literals (dep-free), template strings
   (the result carries the union of the interpolations' deps), the
   `in`/`instanceof` binary operators (operand-dep union), and
@@ -754,6 +768,15 @@ def _syntax(raw: bytes):
             .parse(raw)
             .root_node
         )
+        if root.has_error:
+            # `.tsx` sources — JSX lives in the tsx grammar; the
+            # plain typescript grammar rejects the syntax
+            # entirely. Only retry when the first parse failed.
+            root = (
+                Parser(Language(tree_sitter_typescript.language_tsx()))
+                .parse(raw)
+                .root_node
+            )
         return None if root.has_error else root
     except (ImportError, ValueError, TypeError, RuntimeError):
         return None
@@ -2528,7 +2551,10 @@ class _Builder:
             node, params, locals_, transfers, count
         )
         if base == "super":
-            # `super.m` — the parent prototype's method table.
+            # `super.m` resolves through the parent prototype's
+            # method table, but `super.f` on a data field reads
+            # the field off `this` — the instance carries the
+            # data, the parent only the methods.
             this = self._lookup("this", params, locals_, _span(node))
             klass = this.klass if isinstance(this, _Composite) else None
             parent = klass.parent if klass is not None else None
@@ -2536,7 +2562,34 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
-            val = parent
+            key0 = path[0] if path else None
+            if isinstance(key0, str) and key0 in parent.getters:
+                # `super.p` invokes the PARENT's `get p()` on
+                # `this` — the home object's accessor, not a
+                # possible child override.
+                result = self._invoke_callable(
+                    parent.getters[key0],
+                    (),
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    this_val=this,
+                )
+                transfers.append(
+                    TsCall(_span(node), key0, (), result)
+                )
+                val = result
+                path = path[1:]
+            elif (
+                isinstance(key0, str)
+                and key0 not in parent.methods
+                and key0 not in parent.setters
+            ):
+                val = this
+            else:
+                val = parent
         elif not isinstance(base, str):
             # `a.slice()[0]` / `f().m` — evaluate the computed
             # base, then descend the remaining path.
@@ -2649,6 +2702,35 @@ class _Builder:
         )
         if any(key is None for key in path):
             raise _Unsupported("unsupported_expression", _span(node))
+        if base == "super":
+            # `super.f = v` stores on `this`: an inherited
+            # setter runs, otherwise the field lands on the
+            # instance (JS [[Set]] always owns the property).
+            this = locals_.get("this")
+            klass = this.klass if isinstance(this, _Composite) else None
+            parent = klass.parent if klass is not None else None
+            if (
+                len(path) == 1
+                and isinstance(path[0], str)
+                and parent is not None
+                and path[0] in parent.setters
+            ):
+                actual = _scalar_of(value)
+                result = self._invoke_callable(
+                    parent.setters[path[0]],
+                    (actual,),
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    this_val=this,
+                )
+                transfers.append(
+                    TsCall(_span(node), path[0], (actual,), result)
+                )
+                return
+            base = "this"
         target = self._write_scope(base, locals_, params)
         if target is None:
             if base in self.classes:
@@ -3009,11 +3091,23 @@ class _Builder:
                 markers = {
                     c.type for c in member.children if not c.is_named
                 }
-                if markers & {"abstract"}:
+                if markers & {"abstract", "declare"}:
                     raise _Unsupported(
                         "unsupported_expression", _span(member)
                     )
                 mname = member.child_by_field_name("name")
+                if mname is not None and (
+                    mname.type == "computed_property_name"
+                ):
+                    # `[k]() {}` — the member can't be keyed into
+                    # the tables, so it is skipped (uncallable —
+                    # `o[k]()` closes on its own). Its name
+                    # expression still evaluates in class scope:
+                    # its deps are already inside `captured` (the
+                    # union of all locals) but its calls run.
+                    for inner in _children(mname):
+                        self.expression(inner, params, locals_, [], [0])
+                    continue
                 if mname is None or mname.type not in {
                     "property_identifier",
                     "private_property_identifier",
@@ -3261,6 +3355,114 @@ class _Builder:
         # `@ns.dec`) evaluates like any other expression —
         # call_expression invokes the factory where resolvable.
         self.expression(node, params, locals_, [], [0])
+
+    def _jsx(self, node, params, locals_, transfers, count):
+        """A JSX element/fragment — `<Comp a={x}>{y}</Comp>`
+        means `Comp({a: x, children: y})`: an uppercase or
+        member tag resolving to a `_Callable` is invoked with a
+        props composite (children deps land on the `children`
+        field); a lowercase identifier is a host element with no
+        value of its own; anything else contributes its scalar
+        deps. The element's value is the call result plus the
+        child-expression deps (the element still holds them)."""
+        children_deps = frozenset()
+        opening = None
+        for child in _children(node):
+            if child.type == "jsx_opening_element":
+                opening = child
+            elif child.type == "jsx_closing_element":
+                continue
+            elif node.type == "jsx_self_closing_element":
+                # The self-closing node is its own opening tag.
+                opening = node
+                break
+            else:
+                children_deps |= _scalar_of(
+                    self._eval(child, params, locals_, transfers, count)
+                )
+        if opening is None:
+            # `<></>` fragment — children only.
+            return children_deps
+        tag = None
+        props: dict = {}
+        extras = children_deps
+        for child in _children(opening):
+            if tag is None:
+                tag = child
+                continue
+            if child.type == "jsx_attribute":
+                name = None
+                for inner in _children(child):
+                    if inner.type == "property_identifier":
+                        name = inner.text.decode()
+                    else:
+                        deps = _scalar_of(
+                            self._eval(
+                                inner, params, locals_, transfers, count
+                            )
+                        )
+                        if name is not None:
+                            props[name] = deps
+                        else:
+                            extras |= deps
+            else:
+                # `{...spread}` and any other attribute-ish child.
+                extras |= _scalar_of(
+                    self._eval(child, params, locals_, transfers, count)
+                )
+        if children_deps:
+            props["children"] = children_deps
+        if tag is None or (
+            tag.type == "identifier"
+            and tag.text.decode()[:1].islower()
+        ):
+            # Host element (`<div>`, `<br/>`) — no callable.
+            return extras
+        # Actuals are scalar dep sets — the props composite
+        # flattens into one argument, so `p.a` inside the
+        # component reads the union of all attribute deps.
+        actual = (_scalar_of(_Composite(props)),)
+        if tag.type == "identifier" and tag.text.decode() in (
+            self.functions
+        ) and not (
+            tag.text.decode() in locals_
+            or tag.text.decode() in self.function_locals
+            or tag.text.decode() in params
+        ):
+            # `<Comp .../>` where Comp is a same-unit function
+            # declaration — recorded like `Comp(props)`, not
+            # invoked (the function is analyzed on its own).
+            result = extras | actual[0]
+            transfers.append(
+                TsCall(
+                    _span(node),
+                    tag.text.decode(),
+                    actual,
+                    result,
+                )
+            )
+            return result
+        raw = self._eval(tag, params, locals_, transfers, count)
+        if isinstance(raw, _Callable):
+            result = self._invoke_callable(
+                raw,
+                actual,
+                params,
+                locals_,
+                transfers,
+                count,
+                _span(node),
+            )
+            transfers.append(
+                TsCall(
+                    _span(node),
+                    tag.text.decode(),
+                    actual,
+                    result,
+                )
+            )
+            return result | extras
+        return _scalar_of(raw) | extras
 
     def _construct(self, cls, actual, params, locals_, transfers, count, span):
         """`new C(args)` — seed `this` to a fresh `_Composite` of
@@ -3535,9 +3737,12 @@ class _Builder:
             # fields (later members override); a scalar spread or a
             # computed `{[k]: v}` key adds unknown fields the model
             # can't name, so the whole literal collapses to a scalar
-            # union. Method/getter/setter members close.
+            # union. `get`/`set` members collect into a synthetic
+            # accessor class on the composite.
             fields: dict = {}
             spilled = frozenset()
+            ogetters: dict = {}
+            osetters: dict = {}
             for child in _children(node):
                 if child.type == "pair":
                     key = child.child_by_field_name("key")
@@ -3606,34 +3811,79 @@ class _Builder:
                 elif child.type == "method_definition":
                     # `{m(v) { ... }}` — a callable field value;
                     # `o.m(x)` invokes like a slice-13 member call.
-                    # `get`/`set` (read/write effects), `*`
-                    # (generator) and `static` markers stay closed;
-                    # `async` admits like an async arrow. `this`
-                    # inside closes at invoke.
+                    # `get`/`set` collect into a synthetic class's
+                    # accessor tables so `o.p`/`o.p = v` route
+                    # through the same invoke paths classes use
+                    # (the literal instance is `this`). `static`
+                    # markers stay closed; `*` (generator) and
+                    # `async` admit like their free-function forms.
+                    # `this` inside closes at invoke.
                     markers = {
                         c.type
                         for c in child.children
                         if not c.is_named
                     }
-                    if markers & {"get", "set", "static"}:
+                    if markers & {"static"}:
                         raise _Unsupported(
                             "unsupported_expression", _span(child)
                         )
                     mname = child.child_by_field_name("name")
+                    if mname is not None and (
+                        mname.type == "computed_property_name"
+                    ):
+                        # `{[k]() {}}` — unnameable member, skipped
+                        # like a class's computed member; the name
+                        # expression still evaluates.
+                        for inner in _children(mname):
+                            spilled |= self.expression(
+                                inner, params, locals_, transfers,
+                                count,
+                            )
+                        continue
                     if mname is None or mname.type != "property_identifier":
                         raise _Unsupported(
                             "unsupported_expression", _span(child)
                         )
-                    fields[mname.text.decode()] = self._callable_value(
-                        child, params, locals_, is_method=True
-                    )
+                    if "get" in markers:
+                        ogetters[mname.text.decode()] = (
+                            self._callable_value(
+                                child, params, locals_, is_method=True
+                            )
+                        )
+                    elif "set" in markers:
+                        osetters[mname.text.decode()] = (
+                            self._callable_value(
+                                child, params, locals_, is_method=True
+                            )
+                        )
+                    else:
+                        fields[mname.text.decode()] = (
+                            self._callable_value(
+                                child, params, locals_, is_method=True
+                            )
+                        )
                 else:
                     raise _Unsupported(
                         "unsupported_expression", _span(child)
                     )
+            oklass = None
+            if ogetters or osetters:
+                # Accessors aren't own fields — the synthetic class
+                # carries them so `o.p`/`o.p = v` take the same
+                # getter/setter paths instances take. Its captured
+                # flattens the accessors' captured deps.
+                ocaptured = frozenset()
+                for fn in (*ogetters.values(), *osetters.values()):
+                    ocaptured |= fn.captured
+                oklass = _Class(
+                    None, {}, {}, {}, ocaptured, None,
+                    ogetters, osetters,
+                )
             if spilled:
-                return spilled | _scalar_of(_Composite(fields))
-            return _Composite(fields)
+                return spilled | _scalar_of(
+                    _Composite(fields, klass=oklass)
+                )
+            return _Composite(fields, klass=oklass)
         if kind == "array":
             # `[e0, e1]` — a composite with positional keys; `a[0]`
             # reads field "0", a dynamic `a[i]` unions the elements,
@@ -3741,6 +3991,34 @@ class _Builder:
             # `import.meta`, `new.target` — meta reads carry no
             # dependencies in this model.
             return frozenset()
+        if kind in {
+            "jsx_element",
+            "jsx_self_closing_element",
+            "jsx_fragment",
+        }:
+            return self._jsx(node, params, locals_, transfers, count)
+        if kind.startswith("jsx_"):
+            # Wrappers (`jsx_expression`, `jsx_attribute`,
+            # `jsx_opening/closing_element`, `jsx_text`) — the
+            # value is the union of their named children.
+            result = frozenset()
+            for child in _children(node):
+                if child.type == "spread_element":
+                    # `{...props}` — a bare `spread_element` only
+                    # appears inside JSX; eval its operand.
+                    inner = next(iter(_children(child)), None)
+                    if inner is not None:
+                        result |= _scalar_of(
+                            self._eval(
+                                inner, params, locals_, transfers,
+                                count,
+                            )
+                        )
+                    continue
+                result |= _scalar_of(
+                    self._eval(child, params, locals_, transfers, count)
+                )
+            return result
         if kind == "await_expression":
             # `await` yields the operand's value — for the dep model
             # that's a pass-through. `for await (...)` iterates the
