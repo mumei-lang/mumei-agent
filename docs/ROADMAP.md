@@ -3376,6 +3376,22 @@ the declared paths basename-redacted; detection only — nothing is
 accepted or merged.
 
 
+### C06 declared summary reuse routes as MCP tools
+
+`ts_summaries_reuse`, `rust_summaries_reuse` and `sol_summaries_reuse`
+expose the declared reuse routes over MCP. Each module's merge is
+shared through `summary_reuse_set(declared, live)`: a declared
+function whose record is identical under the fresh derivation is
+reused verbatim, every other live function is freshly derived and a
+`missing` entry is dropped — the emitted set keyed to the fresh
+context. The CLI route and the tool emit the identical manifest, so
+the weaker per-function freshness merge stays exactly what the CLI
+route promised; the strict whole-context gate remains `accept`'s
+alone. Declared inputs are read under the same byte bounds and the
+same `from_dict` restore as the check tools, and
+`ts_summaries_reuse` carries the `resolve_modules` opt-in.
+
+
 ### C06 declared summary MCP tool (go_summaries)
 
 The MCP surface exposes the produce route as `go_summaries(

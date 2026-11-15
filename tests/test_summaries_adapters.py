@@ -566,8 +566,109 @@ def test_mcp_sol_summaries_check_reusable(tmp_path):
     assert out["check"]["context_match"] is True
 
 
+def test_mcp_ts_summaries_reuse_drops_missing(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+    import agent.ts_interprocedural as ts
+
+    declared_set = ts.summarize_typescript(
+        "function f(x: number): number { return x; }\n"
+        "function g(x: number): number { return x; }"
+    )
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(declared_set.to_dict()))
+    src = tmp_path / "f.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    out = json.loads(
+        mcp_server.ts_summaries_reuse(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    merged = out["manifest"]
+    assert merged["schema_version"] == declared_set.to_dict()[
+        "schema_version"
+    ]
+    assert merged["context_key"] != declared_set.context_key
+    assert [f["name"] for f in merged["functions"]] == ["f"]
+    assert merged["functions"][0] == declared_set.to_dict()[
+        "functions"
+    ][0]
+
+
+def test_mcp_ts_summaries_reuse_derives_fresh_for_stale(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+    import agent.ts_interprocedural as ts
+
+    declared_set = ts.summarize_typescript(
+        "function f(x: number): number { return x; }"
+    )
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(declared_set.to_dict()))
+    src = tmp_path / "f.ts"
+    src.write_text("function f(y: number): number { return y; }")
+    out = json.loads(
+        mcp_server.ts_summaries_reuse(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    merged = out["manifest"]
+    fresh = ts.summarize_typescript(src.read_text())
+    assert merged["functions"][0] == fresh.to_dict()["functions"][0]
+    assert merged["functions"][0] != declared_set.to_dict()[
+        "functions"
+    ][0]
+
+
+def test_mcp_rust_summaries_reuse_merges(tmp_path):
+    from agent import mcp_server
+    import agent.rust_interprocedural as rust
+
+    src_text = "fn f(x: u64) -> u64 { x }"
+    src = tmp_path / "f.rs"
+    src.write_text(src_text)
+    declared_set = rust.summarize_rust(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(declared_set.to_dict()))
+    out = json.loads(
+        mcp_server.rust_summaries_reuse(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    merged = out["manifest"]
+    assert merged["context_key"] == declared_set.to_dict()[
+        "context_key"
+    ]
+    assert [f["name"] for f in merged["functions"]] == ["f"]
+
+
+def test_mcp_sol_summaries_reuse_merges(tmp_path):
+    from agent import mcp_server
+    import agent.sol_interprocedural as sol
+
+    src_text = (
+        "contract C { function f(uint x) public returns (uint) "
+        "{ return x; } }"
+    )
+    src = tmp_path / "c.sol"
+    src.write_text(src_text)
+    declared_set = sol.summarize_solidity(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(declared_set.to_dict()))
+    out = json.loads(
+        mcp_server.sol_summaries_reuse(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    assert [f["name"] for f in out["manifest"]["functions"]] == ["C.f"]
+
+
 @pytest.mark.parametrize(
-    "tool", ["ts_summaries_check", "rust_summaries_check", "sol_summaries_check"]
+    "tool",
+    [
+        "ts_summaries_check",
+        "rust_summaries_check",
+        "sol_summaries_check",
+        "ts_summaries_reuse",
+        "rust_summaries_reuse",
+        "sol_summaries_reuse",
+    ],
 )
 def test_mcp_summaries_check_validates_declared_paths(tmp_path, tool):
     from agent import mcp_server
@@ -588,7 +689,15 @@ def test_mcp_summaries_check_validates_declared_paths(tmp_path, tool):
 
 
 @pytest.mark.parametrize(
-    "tool", ["ts_summaries_check", "rust_summaries_check", "sol_summaries_check"]
+    "tool",
+    [
+        "ts_summaries_check",
+        "rust_summaries_check",
+        "sol_summaries_check",
+        "ts_summaries_reuse",
+        "rust_summaries_reuse",
+        "sol_summaries_reuse",
+    ],
 )
 def test_mcp_summaries_check_rejects_malformed_manifest(tmp_path, tool):
     from agent import mcp_server
