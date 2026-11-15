@@ -39,6 +39,11 @@ _SUBCOMMANDS = {
     "rust-summaries-check",
     "rust-summaries-reuse",
     "rust-summaries-attempt",
+    "ts-summaries",
+    "ts-summaries-accept",
+    "ts-summaries-check",
+    "ts-summaries-reuse",
+    "ts-summaries-attempt",
 }
 
 
@@ -684,6 +689,76 @@ def main() -> None:
         rust_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         rust_attempt_main(args)
+    elif command == "ts-summaries":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_parser as ts_build_parser,
+            main as ts_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries",
+            description="Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict.",
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
+    elif command == "ts-summaries-accept":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_accept_parser as ts_build_parser,
+            main_accept as ts_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-accept",
+            description="Accept one function's declared TypeScript summary under the strict whole-context gate.",
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
+    elif command == "ts-summaries-check":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_check_parser as ts_build_parser,
+            main_check as ts_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-check",
+            description="Check a declared TypeScript summary manifest against the fresh derivation.",
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
+    elif command == "ts-summaries-reuse":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_reuse_parser as ts_build_parser,
+            main_reuse as ts_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-reuse",
+            description="Emit a manifest reusing a declared manifest's unchanged TypeScript summaries.",
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
+    elif command == "ts-summaries-attempt":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_attempt_parser as ts_build_parser,
+            main_attempt as ts_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-attempt",
+            description="Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.",
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
