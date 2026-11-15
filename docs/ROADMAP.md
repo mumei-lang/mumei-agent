@@ -2623,6 +2623,22 @@ in-process; no audit/CLI/MCP route changes.
   slots whose dep set didn't change (a `s += i` with a
   dep-free `i` still records the condition's deps).
 
+### C06 Solidity modifiers (slice 4)
+
+- `modifier m(uint p) { ...; _; }` bodies wrap the function:
+  the invocation's actual args bind scalar modifier params,
+  the modifier body walks in its own scope (modifier params +
+  contract state vars — function locals aren't visible), and
+  each `_;` runs the next stage of the chain and finally the
+  function body. `_` nested inside `if`/`unchecked` blocks
+  resolves through the same placeholder stack.
+- Modifier state writes mark `effects = "state_writes"`;
+  modifiers without `_;` leave the body's return unreachable;
+  unresolvable, arity-mismatched or non-scalar modifiers
+  degrade to an opaque call record with `effects = "unknown"`
+  (tracked separately from the default-effects marker so the
+  closing flatten pass can't lose it).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

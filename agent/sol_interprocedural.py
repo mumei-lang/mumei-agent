@@ -29,8 +29,11 @@ The fragment is deliberately small:
   result.
 * A call whose callee is unavailable or unsupported closes
   the caller (the callee's gap is its own); state-variable
-  reads, member calls (`this.f`, `obj.f`), loops, multiple
-  or unnamed results, structs/arrays/mappings and
+  reads, member calls (`this.f`, `obj.f`), loops and
+  same-contract modifiers with scalar params are modelled
+  (an unresolvable or non-scalar modifier degrades to an
+  opaque call and marks effects `unknown`). Multiple or
+  unnamed results, structs/arrays/mappings and inherited
   modifiers stay closed — a gap records why.
 
 This is a conservative dependency analysis, not value
@@ -180,10 +183,13 @@ class _Builder:
         self.contracts: dict[str, str] = {}
         self.summaries: dict[str, SolFunctionSummary] = {}
         self._inline_depth = 0
+        self._placeholder: list = []
+        self._effects_touched = False
         self._writes: list[set[str]] = []
         self._decls: list[set[str]] = []
         self._state_vars: dict[str, set[str]] = {}
         self._overload_groups: dict[str, list[str]] = {}
+        self.modifiers: dict[str, object] = {}
 
     # -- unit scan ----------------------------------------------------
 
@@ -262,6 +268,20 @@ class _Builder:
                     self._state_vars.setdefault(
                         contract, set()
                     ).add(vname.text.decode())
+                continue
+            if member.type == "modifier_definition":
+                mname = member.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(member)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if mname is not None:
+                    self.modifiers[
+                        f"{contract}.{mname.text.decode()}"
+                    ] = member
                 continue
             if member.type != "function_definition":
                 continue
@@ -342,6 +362,7 @@ class _Builder:
             None,
         )
         self._current_contract = self.contracts[key]
+        self._effects_touched = False
         locals_: dict[str, frozenset[int]] = {
             n: frozenset({i}) for n, i in param_index.items()
         }
@@ -357,9 +378,14 @@ class _Builder:
             # local slot a bare `return` reads back.
             locals_[ret_name] = frozenset()
         self._ret_name = ret_name
+        mods = [
+            c
+            for c in _children(fn_node)
+            if c.type == "modifier_invocation"
+        ]
         try:
-            rets = self._block(
-                body, locals_, param_index, summary
+            rets = self._run_body(
+                body, locals_, param_index, summary, mods
             )
         except _Unsupported as exc:
             summary.gaps.append(SolGap(exc.reason, exc.byte))
@@ -372,11 +398,113 @@ class _Builder:
             return summary
         summary.return_dependencies = rets
         summary.available = True
-        if summary.effects == "unknown":
+        if (
+            summary.effects == "unknown"
+            and not self._effects_touched
+        ):
             summary.effects = "none_in_supported_fragment"
         return summary
 
     # -- statements ---------------------------------------------------
+
+    def _run_body(
+        self, body, locals_, param_index, summary, mods
+    ) -> frozenset[int] | None:
+        # Run the function body through its modifier chain. Each
+        # invocation binds the modifier's scalar params and walks
+        # its body in a fresh scope (modifier params + state vars
+        # only — modifiers can't see function locals); a pushed
+        # continuation lets `_;` run the rest of the chain and then
+        # the function body. Unresolvable or non-scalar modifiers
+        # degrade to an opaque void call and the chain continues
+        # (the wrapped body may still run).
+        if not mods:
+            return self._block(body, locals_, param_index, summary)
+        inv, rest = mods[0], mods[1:]
+        iname = next(
+            (c for c in _children(inv) if c.type == "identifier"),
+            None,
+        )
+        actual = []
+        for a in (
+            c for c in _children(inv) if c.type == "call_argument"
+        ):
+            expr = next(
+                (c for c in _children(a) if c.type == "expression"),
+                a if a.type == "expression" else None,
+            )
+            if expr is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(a)
+                )
+            actual.append(
+                self._expr(expr, locals_, param_index, summary)
+            )
+        mnode = (
+            self.modifiers.get(
+                f"{self._current_contract}.{iname.text.decode()}"
+            )
+            if iname is not None
+            else None
+        )
+        mparams = (
+            [p for p in _children(mnode) if p.type == "parameter"]
+            if mnode is not None
+            else []
+        )
+        if (
+            mnode is None
+            or len(mparams) != len(actual)
+            or any(_scalar_param(p) is None for p in mparams)
+            or self._inline_depth >= MAX_INLINE_DEPTH
+        ):
+            summary.calls.append(
+                SolCall(
+                    _span(inv),
+                    iname.text.decode()
+                    if iname is not None
+                    else None,
+                    tuple(actual),
+                    None,
+                )
+            )
+            if summary.effects != "state_writes":
+                summary.effects = "unknown"
+                self._effects_touched = True
+            return self._run_body(
+                body, locals_, param_index, summary, rest
+            )
+        self._inline_depth += 1
+        try:
+            mlocals: dict[str, frozenset[int]] = {
+                sv: frozenset()
+                for sv in self._state_vars.get(
+                    self._current_contract, ()
+                )
+            }
+            for i, p in enumerate(mparams):
+                mlocals[_scalar_param(p)[0]] = actual[i]
+            mbody = mnode.child_by_field_name("body") or next(
+                (
+                    c
+                    for c in _children(mnode)
+                    if c.type == "function_body"
+                ),
+                None,
+            )
+            self._placeholder.append(
+                lambda: self._run_body(
+                    body, locals_, param_index, summary, rest
+                )
+            )
+            try:
+                return self._block(
+                    mbody, mlocals, param_index, summary
+                )
+            finally:
+                self._placeholder.pop()
+        finally:
+            self._inline_depth -= 1
 
     def _block(
         self, body, locals_, param_index, summary
@@ -452,6 +580,16 @@ class _Builder:
                 None,
             )
             if expr is None:
+                return None
+            inner = _children(expr)
+            if (
+                len(inner) == 1
+                and inner[0].type == "identifier"
+                and inner[0].text == b"_"
+            ):
+                # `_;` inside a modifier runs the wrapped body.
+                if self._placeholder:
+                    return self._placeholder[-1]()
                 return None
             self._assign_or_call(
                 expr, locals_, param_index, summary
@@ -725,6 +863,7 @@ class _Builder:
                 getattr(self, "_current_contract", ""), ()
             ):
                 summary.effects = "state_writes"
+                self._effects_touched = True
             return deps
         if expr.type == "update_expression":
             target = expr.child_by_field_name("argument")
@@ -749,6 +888,7 @@ class _Builder:
                 getattr(self, "_current_contract", ""), ()
             ):
                 summary.effects = "state_writes"
+                self._effects_touched = True
             return locals_[tident.text.decode()]
         if expr.type == "call_expression":
             return self._call(
@@ -1002,6 +1142,7 @@ class _Builder:
                 prev_contract = getattr(
                     self, "_current_contract", None
                 )
+                prev_touch = self._effects_touched
                 try:
                     callee = self._summarize(
                         target, self.functions[target]
@@ -1009,6 +1150,7 @@ class _Builder:
                 finally:
                     self._ret_name = prev_ret
                     self._current_contract = prev_contract
+                    self._effects_touched = prev_touch
                     self._inline_depth -= 1
                 self.summaries[target] = callee
             callees.append(callee)

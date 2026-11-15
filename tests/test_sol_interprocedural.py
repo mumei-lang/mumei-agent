@@ -464,3 +464,127 @@ def test_overload_two_arg_call():
 }"""
     s = _fn(src, "f")
     assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_slice4_modifier_wraps_body():
+    s = _fn(
+        """contract C {
+    modifier onlyPos(uint p) {
+        require(p > 0);
+        _;
+    }
+    function f(uint a) public onlyPos(a) returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.callee == "require" for c in s.calls)
+
+
+def test_slice4_modifier_param_binds_actual():
+    s = _fn(
+        """contract C {
+    uint t;
+    modifier bound(uint lo) {
+        t = lo;
+        _;
+    }
+    function f(uint a) public bound(a) returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice4_modifier_chain():
+    s = _fn(
+        """contract C {
+    modifier m1 { _; }
+    modifier m2(uint q) { _; }
+    function f(uint a) public m1 m2(a) returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice4_modifier_nested_placeholder():
+    s = _fn(
+        """contract C {
+    modifier m(uint p) {
+        if (p > 0) { _; }
+    }
+    function f(uint a) public m(a) returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice4_modifier_without_placeholder_skips_body():
+    s = _fn(
+        """contract C {
+    modifier m { uint z = 1; }
+    function f(uint a) public m returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    # `_;` never runs → the body's return is unreachable.
+    assert not s.available or not s.return_dependencies
+
+
+def test_slice4_unresolved_modifier_is_opaque():
+    s = _fn(
+        """contract C {
+    function f(uint a) public onlyOwner returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"
+    assert any(c.callee == "onlyOwner" for c in s.calls)
+
+
+def test_slice4_modifier_state_var_write():
+    s = _fn(
+        """contract C {
+    uint s;
+    modifier m(uint p) {
+        s = p;
+        _;
+    }
+    function f(uint a) public m(a) returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice4_modifier_arity_mismatch_is_opaque():
+    s = _fn(
+        """contract C {
+    modifier m(uint p, uint q) { _; }
+    function f(uint a) public m(a) returns (uint) {
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "unknown"
+    assert any(c.callee == "m" for c in s.calls)
