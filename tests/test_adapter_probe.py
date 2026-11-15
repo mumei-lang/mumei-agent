@@ -253,3 +253,11 @@ def test_probe_request_runs_declared_command():
     assert out.observation.availability == "available"
     assert out.observation.stamp == 9
 
+
+
+def test_probe_request_passes_declared_tool_version():
+    d = AdapterDescriptor.from_manifest(_manifest())
+    req = probe_request_for(d, stamp=7, tool_version="4.0.0")
+    assert req.tool_version == "4.0.0"
+    with pytest.raises(ValueError):
+        probe_request_for(d, stamp=7, tool_version="bad version!")

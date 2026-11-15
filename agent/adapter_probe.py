@@ -214,6 +214,7 @@ def probe_request_for(
     stamp: int,
     *,
     attempt_number: int = 1,
+    tool_version: str | None = None,
 ) -> AdapterProbeRequest:
     """Bind a manifest-declared probe command to its declared budgets.
 
@@ -235,4 +236,5 @@ def probe_request_for(
         stamp=stamp,
         attempt_number=attempt_number,
         memory_bound_mb=descriptor.max_memory_mb,
+        tool_version=tool_version,
     )
