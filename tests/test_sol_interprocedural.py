@@ -382,7 +382,10 @@ def test_this_state_member_write():
     assert s.effects == "state_writes"
 
 
-def test_non_scalar_state_var_still_closes():
+def test_non_scalar_state_var_read_is_dep_free():
+    # Slice 11: index reads on non-scalar state vars are opaque
+    # external reads — dep-free (a literal index contributes no
+    # deps), but admitted.
     src = """contract C {
   uint256[] xs;
   function f(uint256 x) public view returns (uint256) {
@@ -390,7 +393,8 @@ def test_non_scalar_state_var_still_closes():
   }
 }"""
     s = _fn(src, "f")
-    assert not s.available
+    assert s.available
+    assert s.return_dependencies == frozenset()
 
 
 def test_if_else_return_carries_cond_deps():
