@@ -405,6 +405,11 @@ class _Builder:
         self._type_envs: list = []
         self._mut_ref_params: list = []
         self._block_decls: list = []
+        # Per-scope `name -> deps` of outer bindings captured at the
+        # point a `let` first shadows them: assignments before the
+        # shadow reach the outer binding, so block exit restores this
+        # value — not the block-entry snapshot.
+        self._shadow_vals: list = []
 
     # -- unit scan -------------------------------------------------
 
@@ -606,9 +611,13 @@ class _Builder:
         `param_index`, the current type env and the `&mut`-alias set
         are only ever written by `let`, so they restore wholesale;
         `locals_` is also written by assignments to outer names, so
-        only names a `let` bound inside get their old entry back.
+        only names a `let` bound inside get their old entry back —
+        and a shadowed name restores the value it held at the shadow
+        point, since writes before the `let` reached the outer
+        binding.
         """
         self._block_decls.append(set())
+        self._shadow_vals.append({})
         prev_index = dict(param_index)
         prev_types = (
             dict(self._type_envs[-1]) if self._type_envs else {}
@@ -622,6 +631,7 @@ class _Builder:
             yield
         finally:
             bound = self._block_decls.pop()
+            shadowed = self._shadow_vals.pop()
             param_index.clear()
             param_index.update(prev_index)
             if self._type_envs:
@@ -631,7 +641,9 @@ class _Builder:
                 self._mut_ref_params[-1].clear()
                 self._mut_ref_params[-1].update(prev_muts)
             for name in bound:
-                if name in prev_locals:
+                if name in shadowed:
+                    locals_[name] = shadowed[name]
+                elif name in prev_locals:
                     locals_[name] = prev_locals[name]
                 else:
                     locals_.pop(name, None)
@@ -732,6 +744,16 @@ class _Builder:
                 else frozenset()
             )
             for bname in bound:
+                if (
+                    self._block_decls
+                    and bname not in self._block_decls[-1]
+                    and bname in locals_
+                ):
+                    # First shadow of a live binding in this scope —
+                    # capture the value the outer binding holds now;
+                    # block exit restores it, not the block-entry
+                    # snapshot.
+                    self._shadow_vals[-1][bname] = locals_[bname]
                 locals_[bname] = deps
                 if self._writes:
                     self._writes[-1].add(bname)

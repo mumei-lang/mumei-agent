@@ -1205,3 +1205,50 @@ fn f(p: &mut P, q: &mut P, v: u64) {
     assert s.effects == "state_writes"
     assert s.param_writes.get(0) is None
     assert s.param_writes.get(1) == frozenset({1, 2})
+
+
+def test_review7_assign_then_shadow_keeps_outer_deps():
+    # `x = p` writes the outer `x`; the later `let x` shadows it
+    # only inside the block — block exit must keep the write, not
+    # restore the block-entry value.
+    s = _fn(
+        """fn f(p: u64) -> u64 {
+    let mut x = 0;
+    { x = p; let x = 42; }
+    x
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_review7_assign_then_shadow_keeps_param_write():
+    # Same shape for a `&mut` param: `*q = v` writes through the
+    # outer `q`; a shadowing `let q` afterwards must not drop the
+    # param write.
+    s = _fn(
+        """struct P { v: u64 }
+fn f(p: &mut P, q: &mut P, v: u64) {
+    { *q = v; let q = p; }
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    assert s.param_writes.get(1) == frozenset({1, 2})
+
+
+def test_review7_double_shadow_restores_first_capture():
+    # A second `let x` shadows the inner binding, not the outer
+    # one — the restore value stays the first-shadow capture.
+    s = _fn(
+        """fn f(p: u64, q: u64) -> u64 {
+    let mut x = 0;
+    { x = p; let x = 1; x = q; let x = 2; }
+    x
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
