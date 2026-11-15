@@ -606,8 +606,8 @@ withdrawn `--evidence-core` wiring deterministically `accepted:false`.
 Refuted (exit 1) / inconclusive (exit 3) runs publish the terminal
 lineage with no selection; `--output` may not overwrite declared
 inputs and sources over Core's 64 KiB input bound are rejected before
-dispatch. Acceptance stays representation-level — claim truth,
-freshness, authenticity and correspondence remain unassessed duties.
+dispatch. The `acceptance` descriptor itself stays
+representation-level — it asserts no semantic duty on its own.
 A selected run also discharges five of the six semantic checks for
 the produced record at representation level — `file_identity` (its
 `subject.sha256` was computed over the declared bytes),
