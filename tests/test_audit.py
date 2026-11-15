@@ -2933,24 +2933,67 @@ def test_collect_summary_audits_failure_redacts_checkout_path(
     loud = tmp_path / "rs.rs"
     loud.write_text("x", encoding="utf-8")
 
+    big = tmp_path / "big.ts"
+    big.write_text("x", encoding="utf-8")
+
     def runner(argv: list[str]):
-        if argv[0] == "ts-summaries":
+        if argv[0] == "ts-summaries" and argv[1] == str(ts):
             return _fake_completed(
                 argv, rc=2, stderr=f"boom in {ts} while parsing"
             )
+        if argv[0] == "ts-summaries":
+            # route refusals land in a stdout {"error": {...}} document
+            return _fake_completed(
+                argv,
+                rc=2,
+                stdout=json.dumps(
+                    {"error": {"limit_bytes": 65536, "reason": "source_too_large"},
+                     "schema_version": "mumei.ts-scalar-parameter-deps/v1"}
+                ),
+            )
         return _fake_completed(argv, stdout="not json")
 
-    entries = _collect_summary_audits(tmp_path, [ts, loud], None, runner=runner)
+    entries = _collect_summary_audits(
+        tmp_path, [ts, loud, big], None, runner=runner
+    )
 
-    assert entries[0]["status"] == "failed"
-    assert str(tmp_path) not in entries[0]["error"]
-    assert "main.ts" in entries[0]["error"]
-    assert entries[1] == {
+    assert entries[0] == {
+        "route": "ts-summaries",
+        "unit": "big.ts",
+        "status": "failed",
+        "error": "source_too_large",
+    }
+    assert entries[1]["status"] == "failed"
+    assert str(tmp_path) not in entries[1]["error"]
+    assert "main.ts" in entries[1]["error"]
+    assert entries[2] == {
         "route": "rust-summaries",
         "unit": "rs.rs",
         "status": "failed",
         "error": "produce route emitted no manifest JSON",
     }
+
+
+def test_collect_summary_audits_redacts_declared_helper_path(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    go = tmp_path / "pkg" / "a.go"
+    go.parent.mkdir()
+    go.write_text("x", encoding="utf-8")
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [go],
+        "/opt/tools/go-types",
+        runner=lambda argv: _fake_completed(
+            argv, rc=1, stderr=f"helper /opt/tools/go-types failed at {go}"
+        ),
+    )
+    assert entries[0]["status"] == "failed"
+    assert "/opt/tools/go-types" not in entries[0]["error"]
+    assert str(tmp_path) not in entries[0]["error"]
 
 
 def test_audit_directory_collects_summary_audits(

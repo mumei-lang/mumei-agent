@@ -1155,12 +1155,14 @@ def _collect_summary_audits(
             completed = run(argv)
         except Exception as exc:  # runner failure (spawn, timeout)
             entry["status"] = "failed"
-            entry["error"] = _summary_error_text(exc, source_path)
+            entry["error"] = _summary_error_text(exc, source_path, go_types)
             entries.append(entry)
             continue
         if completed.returncode != 0:
             entry["status"] = "failed"
-            entry["error"] = _summary_error_text(completed.stderr, source_path)
+            entry["error"] = _summary_error_text(
+                _route_failure_text(completed), source_path, go_types
+            )
             entries.append(entry)
             continue
         try:
@@ -1176,10 +1178,41 @@ def _collect_summary_audits(
     return entries
 
 
-def _summary_error_text(detail: object, source_path: Path) -> str:
+def _route_failure_text(completed: subprocess.CompletedProcess) -> str:
+    """Failure text for a refused produce route.
+
+    The routes report refusals as an ``{"error": {...}}`` JSON document
+    on stdout (often with empty stderr), so stdout's declared error is
+    read first; stderr is the fallback.
+    """
+    try:
+        document = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError):
+        document = None
+    if isinstance(document, dict):
+        error = document.get("error")
+        if isinstance(error, dict):
+            reason = error.get("reason") or error.get("message")
+            if isinstance(reason, str) and reason:
+                return reason
+            return json.dumps(error, sort_keys=True)
+        if isinstance(error, str) and error:
+            return error
+    return completed.stderr.strip() or f"produce route failed (exit {completed.returncode})"
+
+
+def _summary_error_text(
+    detail: object, source_path: Path, go_types: str | None
+) -> str:
     text = detail if isinstance(detail, str) else str(detail)
-    # Failure text reaches the report — keep checkout-local paths out.
+    # Failure text reaches the report — keep checkout-local and
+    # declared helper paths out.
     text = text.replace(str(source_path), ".")
+    if go_types:
+        text = text.replace(go_types, "<go-types>")
+    executable = sys.executable
+    if executable:
+        text = text.replace(executable, "<python>")
     return text.strip()[-_SUMMARY_ERROR_TAIL_CHARS:]
 
 
