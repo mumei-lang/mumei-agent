@@ -4596,3 +4596,179 @@ def test_cli_route_missing_file(tmp_path, capsys):
     assert exc.value.code == 2
     out = json.loads(capsys.readouterr().out)
     assert out["error"]["reason"] == "source_unreadable"
+
+
+# --- slice 50: relative module resolution -----------------------------------
+
+_MOD_B = (
+    "function h(a: number): number { return a + 1; }"
+    " export function g(a: number): number { return h(a); }"
+    " export const K: number = 7;"
+    " export class C { v: number = 0;"
+    "   m(x: number): number { return x; } }"
+    " export default function dd(a: number): number { return a * 2; }"
+    " export { h as helper };"
+)
+
+
+def _resolve_b(spec):
+    return {"./b": _MOD_B}.get(spec)
+
+
+def test_resolved_named_import_invokes():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './b';"
+            " function f(x: number): number { return g(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    # `g` invokes under module b's scope — its private helper `h`
+    # resolves there; the result carries the actual's dep.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_resolved_import_alias():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g as h} from './b';"
+            " function f(x: number): number { return h(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_resolved_namespace_import():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import * as ns from './b';"
+            " function f(x: number): number { return ns.g(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_resolved_default_import():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import dd from './b';"
+            " function f(x: number): number { return dd(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_resolved_reexport():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {helper} from './b';"
+            " function f(x: number): number { return helper(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_resolved_class_import():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {C} from './b';"
+            " function f(x: number): number {"
+            " let c = new C(); return c.m(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_imported_scope_not_captured_by_importer():
+    # The importer binds its OWN `h` — the imported `g`'s body
+    # must still resolve `h` inside module b (or g would close
+    # / pick the wrong function).
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './b';"
+            " function h(a: number): number { return 999 + a; }"
+            " function f(x: number): number { return g(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_unresolved_name_stays_external():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {zz} from './b';"
+            " function f(x: number): number { return zz(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_unresolvable_specifier_stays_external():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './z';"
+            " function f(x: number): number { return g(x); }",
+            resolver=_resolve_b,
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_no_resolver_unchanged():
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {g} from './b';"
+            " function f(x: number): number { return g(x); }",
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_import_cycle_is_bounded():
+    modules = {
+        "./a": "import {gb} from './b';"
+        " export function ga(x: number): number { return gb(x); }",
+        "./b": "import {ga} from './a';"
+        " export function gb(x: number): number { return x; }",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {ga} from './a';"
+            " function f(x: number): number { return ga(x); }",
+            resolver=lambda spec: modules.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_fs_resolver_cli(tmp_path, capsys):
+    (tmp_path / "b.ts").write_text(
+        "export function g(a: number): number { return a; }"
+    )
+    (tmp_path / "a.ts").write_text(
+        "import {g} from './b';"
+        " function f(x: number): number { return g(x); }"
+    )
+    ts.main(
+        type(
+            "A",
+            (),
+            {
+                "source": str(tmp_path / "a.ts"),
+                "resolve_modules": True,
+            },
+        )()
+    )
+    out = json.loads(capsys.readouterr().out)
+    (f_summary,) = [
+        fn for fn in out["functions"] if fn["name"] == "f"
+    ]
+    assert f_summary["available"] is True
+    assert f_summary["return_dependencies"] == [0]

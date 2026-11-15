@@ -3318,6 +3318,27 @@ trust gate, and input is bounded (64 KiB — an oversized or
 unreadable source exits 2 with a structured error, never a
 silently truncated analysis).
 
+### C06 TypeScript relative module resolution (slice 50)
+
+`summarize_typescript` accepts an optional `resolver`
+(specifier -> source text) and `ts-summaries` grows
+`--resolve-modules` (relative `./`/`../` specifiers under
+the source's own directory, each file bounded by 64 KiB).
+A resolved module is parsed as its own unit and its
+`export`ed names bind in the importer: `import {g}` binds a
+`_Callable`, `import * as ns` a `_Composite` of the export
+table, `import {C}` the `_Class`, `export {a as b}`/`export
+default` re-export by name. An imported callable carries
+its building `_Builder` as `cval.origin` and invokes under
+its OWN module scope — private helpers and module bindings
+resolve there, never to a same-named importer binding
+(scope confusion would mis-attribute dependencies, not
+just lose precision). Resolution is strictly sharpening:
+a cycle, depth over `MAX_MODULE_DEPTH`, a missing module
+or an unexported name leaves the binding `_External` with
+unchanged call semantics, so summaries only gain
+precision, never lose soundness.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

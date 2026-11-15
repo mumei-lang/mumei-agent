@@ -251,6 +251,23 @@ Admitted:
   normally; `export {}`/`export *` bind nothing the
   function model reads). Imports are top-level only — one
   inside a body closes.
+* Module resolution — when `summarize_typescript` gets a
+  `resolver` (or the CLI runs with `--resolve-modules`), an
+  import specifier that resolves to source text is parsed as
+  its own unit: its `export`ed names (declarations, `export
+  {a, b as c}` re-exports, `export default`) bind locally —
+  `import {g}` to a `_Callable`, `import * as ns` to a
+  `_Composite` of the export table, `import {C}` to the
+  `_Class` — and an imported callable invokes under its own
+  module's scope via `cval.origin` (private helpers resolve
+  there, never to an importer binding). Resolution is
+  bounded (MAX_MODULE_DEPTH chain depth, shared module
+  cache) and strictly sharpening: a cycle, missing module,
+  or unexported name leaves the binding `_External` with
+  unchanged call semantics. `ts-summaries
+  --resolve-modules` resolves relative `./`/`../`
+  specifiers under the source file's directory, bounded by
+  MAX_SOURCE_BYTES each.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -403,6 +420,9 @@ PROFILE = "mumei.ts-interprocedural/v1"
 # Defensive bound on evaluated syntax nodes — a parser or dispatch bug
 # must never hang the analyzer.
 MAX_NODES = 20000
+# Import resolution depth along a chain of relative specifiers
+# — deeper chains stay `_External` like any unresolvable import.
+MAX_MODULE_DEPTH = 8
 
 # The full arithmetic/bitwise/logical operator set is admitted — the dep
 # model only needs the operand union, so `/`, `%`, `**`, shifts and `??`
@@ -690,7 +710,7 @@ class _Callable:
 
     __slots__ = (
         "node", "params", "defaults", "captured", "rest",
-        "is_method", "param_props",
+        "is_method", "param_props", "origin",
     )
 
     def __init__(
@@ -707,6 +727,12 @@ class _Callable:
         # parameter; `new` seeds `this` fields from the bound
         # actuals before the body runs.
         self.param_props: frozenset = frozenset()
+        # The `_Builder` that created this value — a callable
+        # imported from another module invokes under its own
+        # module's scope (its private helpers and module bindings
+        # resolve there), never the importer's. `None` means the
+        # building builder itself.
+        self.origin = None
 
 
 
@@ -889,6 +915,8 @@ def _composite_dyn_set(composite, path, value, span):
                 fval.is_method,
             )
             widened.param_props = fval.param_props
+            widened.origin = fval.origin
+            widened.param_props = fval.param_props
             fields[fname] = widened
         else:
             fields[fname] = _scalar_of(fval) | vdeps
@@ -922,10 +950,34 @@ def _syntax(raw: bytes):
 class _Builder:
     """Evaluates one unit's functions in dependency-set space."""
 
-    def __init__(self, root) -> None:
+    def __init__(
+        self,
+        root,
+        resolver=None,
+        resolving=frozenset(),
+        module_cache=None,
+    ) -> None:
         self.functions: dict[str, object] = {}
         self.classes: dict[str, object] = {}
         self._class_cache: dict[str, object] = {}
+        # Optional module resolver: maps an import specifier to
+        # source text (None = no resolver / unresolvable — the
+        # names stay `_External`, the existing over-approximation).
+        # `resolving` is the ancestor-specifier stack for cycle
+        # detection; `module_cache` shares built export tables
+        # across the whole top-level call.
+        self.resolver = resolver
+        self.resolving = resolving
+        self.module_cache = (
+            module_cache if module_cache is not None else {}
+        )
+        # Local name -> value bound by a resolved import.
+        self.imported_bindings: dict = {}
+        # Exported name -> local name this unit re-exports, and
+        # the materialized export table an importer reads.
+        self.export_names: dict[str, str] = {}
+        self.default_export_node = None
+        self.exports: dict = {}
         # A unit is closed when any top-level node is not an
         # admitted kind — ambient declares, namespaces and
         # top-level statements all qualify.
@@ -962,6 +1014,7 @@ class _Builder:
                     # marker and register what it declares; a
                     # `export {}`/`export default`/`export *`
                     # binds nothing the function model reads.
+                    self._register_export(child, module_items)
                     for inner in child.named_children:
                         if inner.type in {
                             "function_declaration",
@@ -972,6 +1025,13 @@ class _Builder:
                                 self.functions[
                                     name.text.decode()
                                 ] = inner
+                            elif any(
+                                c.type == "default"
+                                and not c.is_named
+                                for c in child.children
+                            ):
+                                # `export default function() {}`.
+                                self.functions["default"] = inner
                         if inner.type in {
                             "class_declaration",
                             "abstract_class_declaration",
@@ -981,6 +1041,12 @@ class _Builder:
                                 self.classes[
                                     name.text.decode()
                                 ] = inner
+                            elif any(
+                                c.type == "default"
+                                and not c.is_named
+                                for c in child.children
+                            ):
+                                self.classes["default"] = inner
                         if inner.type in {
                             "lexical_declaration",
                             "variable_declaration",
@@ -1054,6 +1120,95 @@ class _Builder:
                     )
                 break
         self.function_locals = saved_flocals
+        # Materialize the export table an importing builder reads.
+        # Anything unmodelable simply isn't exported — the
+        # importer's name stays `_External`, the same
+        # over-approximation as before resolution existed.
+        for exported, local in self.export_names.items():
+            value = self._export_value(local)
+            if value is not None:
+                self.exports[exported] = value
+        if self.default_export_node is not None:
+            try:
+                self.exports["default"] = self._eval(
+                    self.default_export_node,
+                    {},
+                    self.module_locals,
+                    [],
+                    [0],
+                )
+            except _Unsupported:
+                pass
+
+    def _export_value(self, local):
+        """The value bound to a local name for re-export — a
+        function/class declaration becomes its callable/class
+        value; a module binding or resolved import re-exports
+        directly."""
+        if local in self.functions:
+            try:
+                return self._callable_value(
+                    self.functions[local], {}, self.module_locals
+                )
+            except _Unsupported:
+                return None
+        if local in self.classes:
+            try:
+                return self._class_value(
+                    self.classes[local], {}, self.module_locals
+                )
+            except _Unsupported:
+                return None
+        if local in self.module_locals:
+            return self.module_locals[local]
+        if local in self.imported_bindings:
+            return self.imported_bindings[local]
+        return None
+
+    def _register_export(self, node, module_items) -> None:
+        """Record which local names an `export` statement exposes.
+        `export default <expr>` keeps the expression node for
+        post-pass-2 evaluation; `export {a, b as c}` maps each
+        exported alias to its local name; `export *` exports
+        nothing the model reads."""
+        is_default = any(
+            c.type == "default" and not c.is_named
+            for c in node.children
+        )
+        for inner in node.named_children:
+            if inner.type == "export_clause":
+                for spec in _children(inner):
+                    if spec.type != "export_specifier":
+                        continue
+                    ids = [
+                        c for c in spec.children if c.is_named
+                    ]
+                    if ids:
+                        local = ids[0].text.decode()
+                        alias = (
+                            ids[1].text.decode()
+                            if len(ids) > 1
+                            else local
+                        )
+                        self.export_names[alias] = local
+                continue
+            name = inner.child_by_field_name("name")
+            if is_default:
+                if name is not None:
+                    self.export_names["default"] = name.text.decode()
+                elif inner.type in {
+                    "function_declaration",
+                    "class_declaration",
+                }:
+                    self.export_names["default"] = "default"
+                else:
+                    # `export default <expr>` — evaluate it in
+                    # module scope after pass 2.
+                    self.default_export_node = inner
+            elif name is not None:
+                self.export_names[name.text.decode()] = (
+                    name.text.decode()
+                )
 
     def _register_enum(self, node, scope_locals=None) -> None:
         """Bind `enum E { A, B = expr, ... }` as a `_Composite`
@@ -1190,6 +1345,9 @@ class _Builder:
             c.type == "type" and not c.is_named for c in node.children
         ):
             return
+        # (local_name, imported_name) pairs — `import * as ns`
+        # uses the `*` marker; a default import reads `default`.
+        pairs: list = []
         for child in _children(clause):
             if child.type == "named_imports":
                 for spec in _children(child):
@@ -1200,21 +1358,74 @@ class _Builder:
                         for c in spec.children
                     ):
                         continue
-                    alias = spec.child_by_field_name("alias")
-                    iname = (
-                        alias
-                        if alias is not None
-                        else spec.child_by_field_name("name")
-                    )
-                    if iname is not None:
-                        self.imports.add(iname.text.decode())
+                    ids = [c for c in spec.children if c.is_named]
+                    if ids:
+                        imported = ids[0].text.decode()
+                        local = (
+                            ids[1].text.decode()
+                            if len(ids) > 1
+                            else imported
+                        )
+                        pairs.append((local, imported))
             elif child.type == "namespace_import":
                 iname = next(iter(_children(child)), None)
                 if iname is not None:
-                    self.imports.add(iname.text.decode())
+                    pairs.append((iname.text.decode(), "*"))
             elif child.type == "identifier":
                 # Default import — the clause's bare name.
-                self.imports.add(child.text.decode())
+                pairs.append((child.text.decode(), "default"))
+        exports = self._resolve_module(node)
+        for local, imported in pairs:
+            bound = False
+            if exports is not None:
+                if imported == "*":
+                    self.imported_bindings[local] = _Composite(
+                        dict(exports)
+                    )
+                    bound = True
+                elif imported in exports:
+                    self.imported_bindings[local] = exports[imported]
+                    bound = True
+            if not bound:
+                self.imports.add(local)
+
+    def _resolve_module(self, node):
+        """Resolve this import's specifier to the imported
+        module's export table — `dict` or None. A missing
+        resolver, unresolvable specifier, cycle, or unreadable
+        module all yield None (the names stay `_External` — the
+        same over-approximation as before resolution existed).
+        Bounded by MAX_MODULE_DEPTH along the import chain; built
+        tables are cached per top-level call."""
+        if self.resolver is None:
+            return None
+        src_node = next(
+            (c for c in node.children if c.type == "string"), None
+        )
+        if src_node is None:
+            return None
+        spec = src_node.text.decode().strip("'\"")
+        if spec in self.module_cache:
+            return self.module_cache[spec]
+        exports = None
+        if (
+            spec not in self.resolving
+            and len(self.resolving) < MAX_MODULE_DEPTH
+        ):
+            raw = self.resolver(spec)
+            if isinstance(raw, str):
+                raw = raw.encode()
+            if isinstance(raw, bytes) and len(raw) <= MAX_SOURCE_BYTES:
+                root = _syntax(raw)
+                if root is not None:
+                    exports = _Builder(
+                        root,
+                        resolver=self.resolver,
+                        resolving=self.resolving | {spec},
+                        module_cache=self.module_cache,
+                    ).exports
+        self.module_cache[spec] = exports
+        return exports
 
     def _register_nested_functions(self, node, params, locals_) -> None:
         """Register every `function inner() {}` declaration under
@@ -2696,6 +2907,8 @@ class _Builder:
                     self.classes[name], params, locals_
                 )
             return self._class_cache[name]
+        if name in self.imported_bindings:
+            return self.imported_bindings[name]
         if name in self.imports:
             return _External()
         if name in _GLOBALS:
@@ -3168,9 +3381,11 @@ class _Builder:
         captured = frozenset(params.values())
         for val in locals_.values():
             captured |= _scalar_of(val)
-        return _Callable(
+        value = _Callable(
             node, names, defaults, captured, rest, is_method
         )
+        value.origin = self
+        return value
 
     def _callable_params(self, node):
         """`(a, b = d, ...rest)` / `x =>` — the formal parameter
@@ -3259,7 +3474,25 @@ class _Builder:
         latest value over-approximates); writes inside the body
         merge back as may-writes so member stores aren't lost;
         the body's own frames/scope state is isolated and
-        restored."""
+        restored. A callable imported from another module
+        invokes under its OWN builder (`cval.origin`) — its free
+        names resolve in the imported module's scope, not the
+        importer's (an importer-local binding of the same name
+        must never capture them). The shared `transfers`/`count`
+        accumulators keep call records and the node budget
+        global across the chain."""
+        if cval.origin is not None and cval.origin is not self:
+            return cval.origin._invoke_callable(
+                cval,
+                actual,
+                {},
+                {},
+                transfers,
+                count,
+                span,
+                this_val=this_val,
+                construct=construct,
+            )
         inner = dict(locals_)
         if this_val is not None:
             inner["this"] = this_val
@@ -3451,15 +3684,17 @@ class _Builder:
                         cnames, cdefaults, crest = (
                             self._callable_params(member)
                         )
+                        _mc = _Callable(
+                            member,
+                            cnames,
+                            cdefaults,
+                            captured,
+                            crest,
+                            is_method=True,
+                        )
+                        _mc.origin = self
                         methods[f"[computed:{member.start_byte}]"] = (
-                            _Callable(
-                                member,
-                                cnames,
-                                cdefaults,
-                                captured,
-                                crest,
-                                is_method=True,
-                            )
+                            _mc
                         )
                     except _Unsupported:
                         pass
@@ -3481,6 +3716,7 @@ class _Builder:
                     rest,
                     is_method=True,
                 )
+                mval.origin = self
                 if key == "constructor":
                     # `constructor(private a, readonly b)` —
                     # accessibility/readonly markers turn a
@@ -3693,6 +3929,7 @@ class _Builder:
                 or name in self.function_locals
                 or name in params
                 or name in self.imports
+                or name in self.imported_bindings
                 or name in _GLOBALS
             )
             if bound:
@@ -4899,6 +5136,7 @@ class _Builder:
                 or callee in self.function_locals
                 or callee in params
                 or callee in self.imports
+                or callee in self.imported_bindings
                 or callee in self.module_locals
                 or callee in _GLOBALS
             )
@@ -5012,13 +5250,26 @@ class _Builder:
         raise _Unsupported("unsupported_expression", _span(node))
 
 
-def summarize_typescript(source: "str | bytes") -> TsSummarySet:
+def summarize_typescript(
+    source: "str | bytes", resolver=None
+) -> TsSummarySet:
     """Compose conservative dependencies only; never infer equality or
     safety.
 
     A nonempty dependency set can overapproximate dependence (`x*0`
     still includes `x`). `None` means unavailable, never a
     parameter-independent or effect-free result.
+
+    `resolver` is optional: a callable mapping an import specifier
+    (e.g. `./b`) to that module's source text, or `None` when the
+    specifier can't be resolved. Resolved modules are parsed and
+    summarized like any unit — imported names bind to the imported
+    module's exported values (functions/classes/const bindings),
+    and an imported callable invokes under its own module's scope.
+    Anything unresolvable stays `_External`: a call through it
+    records a transfer and yields the actuals' union, the same
+    over-approximation as before resolution existed, so resolution
+    can only ever sharpen a summary, never weaken it.
     """
     raw = source.encode() if isinstance(source, str) else source
     root = _syntax(raw)
@@ -5027,7 +5278,7 @@ def summarize_typescript(source: "str | bytes") -> TsSummarySet:
             hashlib.sha256(raw).hexdigest(),
             (),
         )
-    builder = _Builder(root)
+    builder = _Builder(root, resolver=resolver)
     return TsSummarySet(
         hashlib.sha256(raw).hexdigest(),
         builder.summarize_all(),
@@ -5060,6 +5311,13 @@ def build_parser(parser=None):
         help="Path to a single TypeScript/JavaScript source file "
         "(at most 64 KiB).",
     )
+    parser.add_argument(
+        "--resolve-modules",
+        action="store_true",
+        help="Resolve relative './'/'../' import specifiers to "
+        "source files under the source file's directory "
+        "(each at most 64 KiB; unresolvable names stay external).",
+    )
     return parser
 
 
@@ -5069,6 +5327,9 @@ def main(args=None) -> None:
 
     if args is None:
         args = build_parser().parse_args()
+    resolver = None
+    if getattr(args, "resolve_modules", False):
+        resolver = _fs_resolver(args.source)
     try:
         with open(args.source, "rb") as handle:
             raw = handle.read(MAX_SOURCE_BYTES + 1)
@@ -5102,7 +5363,51 @@ def main(args=None) -> None:
         sys.exit(2)
     print(
         json.dumps(
-            summarize_typescript(raw).to_dict(),
+            summarize_typescript(raw, resolver=resolver).to_dict(),
             sort_keys=True,
         )
     )
+
+
+def _fs_resolver(source_path):
+    """Filesystem module resolver for `--resolve-modules`:
+    relative `./`/`../` specifiers only, confined to the source
+    file's own directory tree, each candidate read bounded by
+    MAX_SOURCE_BYTES. Anything else — bare specifiers (`react`),
+    escaping paths, missing or oversized files — returns None so
+    the import stays external."""
+    from pathlib import Path
+
+    try:
+        base = Path(source_path).resolve().parent
+    except OSError:
+        return lambda spec: None
+
+    def resolve(spec):
+        if not spec.startswith(("./", "../")):
+            return None
+        try:
+            target = (base / spec).resolve()
+        except OSError:
+            return None
+        candidates = [target]
+        if target.suffix == "":
+            candidates += [
+                target.with_suffix(".ts"),
+                target.with_suffix(".js"),
+                target / "index.ts",
+            ]
+        for cand in candidates:
+            try:
+                if base not in cand.parents and cand != base:
+                    continue
+                if not cand.is_file():
+                    continue
+                if cand.stat().st_size > MAX_SOURCE_BYTES:
+                    continue
+                return cand.read_bytes()
+            except OSError:
+                continue
+        return None
+
+    return resolve
