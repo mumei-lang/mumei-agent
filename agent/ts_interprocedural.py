@@ -40,9 +40,14 @@ Admitted:
   `switch`/`case`/`default` (clauses processed in source order in a
   shared scope — every clause body is a may-write since entry is
   conditional, and a `break` ends only the paths that entered at an
-  earlier clause), and unlabelled `break`/`continue` inside a loop —
+  earlier clause), unlabelled `break`/`continue` inside a loop —
   a `break` inside a `switch` targets the switch's own frame while a
-  `continue` skips it and still targets the enclosing loop.
+  `continue` skips it and still targets the enclosing loop — and
+  `try`/`catch`/`finally` with `throw` (a `throw` evaluates its
+  expression for calls, then every later statement is a may-write
+  until a `catch` consumes the thrown flag; `finally` always runs —
+  the catch parameter is left unbound, so a body that reads it
+  closes).
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only. The result conservatively depends on
   every evaluated argument and records a `TsCall` transfer; the callee
@@ -54,8 +59,8 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 objects/member access, `this`, arrow-function values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new`, `try`/`throw`,
-`for`-`in`/`of`, labels and `sequence_expression` stay
+spread, destructuring, `new`, `for`-`in`/`of`, labels and
+`sequence_expression` stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -213,6 +218,10 @@ class _Builder:
         self.function_locals: dict[str, frozenset[int]] = {}
         self.var_names: set[str] = set()
         self.block_stack: list[dict[str, frozenset[int] | None]] = []
+        # Whether a `throw` on some path unwound the current statement
+        # list — statements after it are may-writes until a `catch`
+        # consumes the flag or it propagates out of the function.
+        self.thrown: list[bool] = [False]
 
     def summarize_all(self) -> tuple[TsFunctionSummary, ...]:
         return tuple(
@@ -284,6 +293,7 @@ class _Builder:
         self.function_locals = locals_
         self.var_names = set()
         self.block_stack = []
+        self.thrown = [False]
         transfers: list[TsCall] = []
         count = [0]
         deps = [frozenset()]
@@ -327,7 +337,9 @@ class _Builder:
     ) -> None:
         frame = self.frames[-1] if self.frames else None
         for child in children:
-            if frame is not None and frame["exited"]:
+            if (
+                frame is not None and frame["exited"]
+            ) or self.thrown[0]:
                 conditional = True
             self.statement(
                 child, params, locals_, transfers, count, deps,
@@ -583,6 +595,70 @@ class _Builder:
                 body, None, condition, params, locals_, transfers, count,
                 deps, saw_return, conditional, node,
             )
+            return
+        if kind == "throw_statement":
+            thrown_expr = next(iter(_children(node)), None)
+            if thrown_expr is not None:
+                self.expression(
+                    thrown_expr, params, locals_, transfers, count
+                )
+            # The throw unwinds to the nearest `catch` or out of the
+            # function — every later statement is a may-write until a
+            # `catch` clears the flag.
+            self.thrown[0] = True
+            return
+        if kind == "try_statement":
+            body = node.child_by_field_name("body")
+            handler = node.child_by_field_name("handler")
+            finalizer = node.child_by_field_name("finalizer")
+            if body is None or (
+                handler is None and finalizer is None
+            ):
+                raise _Unsupported("unsupported_statement", _span(node))
+            catch_body = None
+            if handler is not None:
+                catch_body = handler.child_by_field_name("body")
+                catch_param = handler.child_by_field_name("parameter")
+                if catch_body is None or (
+                    catch_param is not None
+                    and catch_param.type != "identifier"
+                ):
+                    raise _Unsupported(
+                        "unsupported_statement", _span(handler)
+                    )
+            fin_body = None
+            if finalizer is not None:
+                fin_body = finalizer.child_by_field_name("body")
+                if fin_body is None:
+                    raise _Unsupported(
+                        "unsupported_statement", _span(finalizer)
+                    )
+            self.statement(
+                body, params, locals_, transfers, count, deps,
+                saw_return, conditional,
+            )
+            propagated = self.thrown[0]
+            self.thrown[0] = False
+            if catch_body is not None:
+                # The `catch` parameter is left unbound — a body that
+                # reads it closes with `binding_unavailable`. The
+                # clause only runs on a thrown path, so its writes are
+                # always may-writes; a rethrow inside stays flagged.
+                self.statement(
+                    catch_body, params, locals_, transfers, count,
+                    deps, saw_return, True,
+                )
+                propagated = self.thrown[0]
+            self.thrown[0] = False
+            if fin_body is not None:
+                # `finally` always runs — the propagating flag is
+                # parked so its statements are not may-writes.
+                self.statement(
+                    fin_body, params, locals_, transfers, count,
+                    deps, saw_return, conditional,
+                )
+                propagated = propagated or self.thrown[0]
+            self.thrown[0] = propagated
             return
         if kind in {"break_statement", "continue_statement"}:
             if node.named_children:

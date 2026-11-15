@@ -2446,10 +2446,30 @@ run-once guarantee is invisible to the union join. A ternary unions
 the condition's and both arms' dependencies.
 
 Boundaries: labels and labelled `break`/`continue` still close, as
-do `for`/`of` and `for`/`in` (they iterate composite values) and
-`try`/`throw`; the arithmetic boundary is unchanged — `/`, `%`,
+do `for`/`of` and `for`/`in` (they iterate composite values); the
+arithmetic boundary is unchanged — `/`, `%`,
 `**`, shifts and `??` still close (JS division is floating-point,
 matching the Go fragment's admitted operators).
+
+### C06 TypeScript exceptions (slice 2)
+
+The same scalar fragment admits `try`/`catch`/`finally` and `throw`.
+A `throw` evaluates its expression like any other (its calls still
+record), then marks the function's thrown flag: every statement after
+it is a may-write until a `catch` consumes the flag — the model does
+not know whether the throw was on a taken path, so it keeps both.
+`catch` bodies always process as may-writes (the clause runs only on
+a thrown path) and the catch parameter is left unbound — a body that
+reads it closes with `binding_unavailable` rather than guessing its
+dependency shape. Without a `catch`, the thrown flag propagates past
+`finally`, which always runs: its statements process unconditionally
+(parked flag) and can clobber the catch's may-writes, and a `throw`
+inside `catch` or `finally` propagates like the try's own.
+
+Boundaries: labels still close; the thrown flag is a may-write hint,
+not a type — thrown *values* carry no dependency information, so the
+analysis does not compose catch-param flows (reading the parameter
+closes instead).
 
 ## Roadmap authority and vocabulary
 

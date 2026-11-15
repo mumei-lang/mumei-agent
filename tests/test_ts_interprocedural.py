@@ -326,21 +326,90 @@ def test_generator_closes():
 # --- statement closures ------------------------------------------------------
 
 
-def test_throw_closes():
+def test_throw_admits():
+    s = _fn(
+        "function f(x: number): number { throw x; return 0; }"
+    )
+    assert s.available
+
+
+def test_throw_new_expression_closes():
     s = _fn(
         "function f(x: number): number { throw new Error(); return x; }"
     )
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_try_catch_closes():
+def test_try_catch_admits():
     s = _fn(
         "function f(x: number): number {"
         " try { return x; } catch (e) { return 0; } }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_catch_writes_are_may_writes():
+    # `y = x` in the catch unions with the no-throw path's `y = 0`.
+    s = _fn(
+        "function f(x: number): number {"
+        " let y = 0; try { y = 1; } catch (e) { y = x; } return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_throw_makes_later_statements_may_writes():
+    # The `y = 0` after a conditional `throw` may not run, so `y`
+    # keeps the parameter's deps.
+    s = _fn(
+        "function f(x: number): number {"
+        " let y = x; if (x > 0) { throw y; } y = 0; return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_try_finally_without_catch_propagates():
+    # No `catch`: the thrown state propagates past `finally`, so
+    # `y = 0` stays a may-write and `y` keeps x's deps; `finally`
+    # still records its call.
+    s = _fn(
+        "function h(x: number): number { return x; }"
+        "function f(x: number): number {"
+        " let y = x; try { throw y; } finally { h(x); }"
+        " y = 0; return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert len(s.calls) == 1
+
+
+def test_finally_writes_unconditionally():
+    # `finally` runs on every path — its `y = 0` clobbers even the
+    # catch clause's may-write.
+    s = _fn(
+        "function f(x: number): number {"
+        " let y = x; try { y = 1; } catch (e) { y = x; }"
+        " finally { y = 0; } return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_catch_rethrow_propagates():
+    # A throw inside `catch` propagates like the try's own throw —
+    # `y = 0` is a may-write, so `y` keeps the parameter's deps.
+    s = _fn(
+        "function f(x: number): number {"
+        " let y = x; try { } catch (e) { throw y; }"
+        " y = 0; return y; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_throw_expression_records_calls():
+    s = _fn(
+        "function g(x: number): number { return x; }"
+        "function f(x: number): number { throw g(x); }"
+    )
+    assert s.available and len(s.calls) == 1
 
 
 def test_switch_admits():
