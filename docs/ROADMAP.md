@@ -3127,6 +3127,24 @@ invokes `f`. `import('m')` is an opaque callee (actuals' union
 boundary ("a scalar callee still closes") is superseded —
 scalar callee is now uniformly over-approximated, never a gap.
 
+### C06 TypeScript remaining operators + decorators (slice 37)
+
+Every binary operator now admits — `/`, `%`, `**`, `<<`, `>>`,
+`>>>` and `??` join `*`, `||` etc. with the same operand-dep
+union (the dep model never needed the operator itself), and
+`??=`/`<<=`/`>>=`/`>>>=`/`**=` arrive free through the
+augmented-op table. Decorators admit too: a class-level or
+member `decorator` child evaluates at definition time — a
+bare `@dec` is the call `dec(C)` (a bound `_Callable`
+invokes, a same-unit function or `_External` records nothing
+extra), a factory `@dec(y)` evaluates its call expression —
+and the class `captured`, already the union of every local,
+covers whatever deps the decoration adds. An unresolvable
+decorator name still closes (`binding_unavailable`). Also a
+latent crash fixed: class-eval sites (`extends`, `static`
+field inits, decorators) passed a `dict` for `transfers` —
+any call inside them appended to it; now a discarded list.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

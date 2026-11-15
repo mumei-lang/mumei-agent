@@ -23,10 +23,9 @@ Admitted:
   bound parameters/locals, parentheses, pure unary (`!`, `-`, `+`,
   `~`), `void` (evaluates for calls, yields no deps) and `typeof`
   (operand deps pass through), `as`/`satisfies`/`!` assertions
-  (transparent), and binary operators (`+`, `-`, `*`, comparisons, `==`/`===`/
-  `!=`/`!==`, `&&`, `||`, `&`, `|`, `^`). Division, remainder,
-  exponentiation, shifts and `??` stay closed — mirroring the Go
-  fragment's arithmetic boundary (and JS `/` yields floats anyway).
+  (transparent), and binary operators (`+`, `-`, `*`, `/`, `%`,
+  `**`, comparisons, `==`/`===`/`!=`/`!==`, `&&`, `||`, `??`,
+  `&`, `|`, `^`, `<<`, `>>`, `>>>`).
 * `return expr` (dependency union over every return — an
   over-approximation, not a per-site result), bare `return` (no
   tracked result), assignments `x = e` to bound names, compound
@@ -164,12 +163,17 @@ Admitted:
   shadow) — `super(args)` in a ctor runs the parent
   constructor on the same `this`, `super.m(x)` calls through
   the parent prototype; `implements` is type-level and
-  admits silently. Getters/setters, computed names and
-  `abstract`/`declare`/`readonly`/`decorated` members close;
+  admits silently. Computed member names, `static`
+  accessors, and `abstract`/`declare`/`readonly` members
+  close;
   `*m()` generator methods admit like `function*`, private
   `#` members behave like named fields/methods keyed `#`,
   and `static {}` blocks evaluate once into the class's
-  captured set.
+  captured set. Decorators (`@dec`, `@dec(y)`, `@ns.dec(y)`
+  on the class or a member) evaluate at definition time —
+  a bare `@dec` is the call `dec(C)`, a factory `@dec(y)`
+  evaluates its call; the class `captured` already unions
+  every local so decorator deps need no extra pin.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -332,14 +336,15 @@ MAX_NODES = 20000
 
 _SCALAR_TYPES = {b"number", b"boolean"}
 
-# `*` is admitted; `/`, `%`, `**`, shifts and `??` stay closed — the Go
-# fragment's arithmetic boundary, and JS division is floating-point.
+# The full arithmetic/bitwise/logical operator set is admitted — the dep
+# model only needs the operand union, so `/`, `%`, `**`, shifts and `??`
+# over-approximate the same way `*` and `||` do.
 _BINARY_OPS = {
-    "+", "-", "*",
+    "+", "-", "*", "/", "%", "**",
     "<", "<=", ">", ">=",
     "==", "===", "!=", "!==",
-    "&&", "||",
-    "&", "|", "^",
+    "&&", "||", "??",
+    "&", "|", "^", "<<", ">>", ">>>",
     # `in`/`instanceof` yield booleans — the operand dep union is
     # the over-approximation.
     "in", "instanceof",
@@ -2819,9 +2824,13 @@ class _Builder:
         `statics` table). Instance `get`/`set` accessors collect
         into `getters`/`setters` — invoked on member read/store
         like a no-arg/one-arg method. `extends`/`implements`,
-        static accessors, computed names and `abstract`/decorated
-        members all close."""
+        static accessors, computed names and `abstract`/ambient
+        members all close. Decorators evaluate after `captured`
+        is known: `@dec` is the call `dec(C)` and `@dec(y)` a
+        factory call — either way the class's `captured` (every
+        local's union) already covers the resulting deps."""
         parent = None
+        decorators: list = []
         for child in node.children:
             if child.type == "class_heritage":
                 for clause in _children(child):
@@ -2839,7 +2848,7 @@ class _Builder:
                             "unsupported_expression", _span(clause)
                         )
                     pval = self._eval(
-                        expr, params, locals_, {}, [0]
+                        expr, params, locals_, [], [0]
                     )
                     if not isinstance(pval, _Class):
                         raise _Unsupported(
@@ -2853,7 +2862,8 @@ class _Builder:
             }:
                 raise _Unsupported("unsupported_expression", _span(child))
             if child.type == "decorator":
-                raise _Unsupported("unsupported_expression", _span(child))
+                decorators.extend(_children(child))
+                continue
         body_node = node.child_by_field_name("body")
         if body_node is None:
             raise _Unsupported("unsupported_expression", _span(node))
@@ -2935,7 +2945,7 @@ class _Builder:
                     # `static s = e` evaluates eagerly — the class
                     # value itself carries the deps.
                     deps = (
-                        self._eval(init, params, locals_, {}, [0])
+                        self._eval(init, params, locals_, [], [0])
                         if init is not None
                         else frozenset()
                     )
@@ -2950,8 +2960,17 @@ class _Builder:
                 # may reference `C` itself.
                 static_blocks.append(member)
                 continue
-            # index signatures, decorators, ambient members.
+            if member.type == "decorator":
+                # Precedes the member it annotates; evaluated
+                # like a class decorator once `captured` exists.
+                decorators.extend(_children(member))
+                continue
+            # index signatures, ambient members.
             raise _Unsupported("unsupported_expression", _span(member))
+        for dec_expr in decorators:
+            self._eval_decorator(
+                dec_expr, params, locals_, captured
+            )
         for member in static_blocks:
             # `static { ... }` runs once at class evaluation —
             # the deps it computes join the class's captured
@@ -3030,6 +3049,54 @@ class _Builder:
             ctor, methods, statics, field_inits, all_deps, parent,
             getters, setters,
         )
+
+    def _eval_decorator(self, node, params, locals_, captured):
+        """Evaluate one decorator expression (`@dec`, `@dec(y)`,
+        `@ns.dec(y)`) at class-definition time. The decorated
+        class's `captured` already unions every local, so the
+        decorator's result deps need no pin — the evaluation is
+        for its calls/writes only (records dropped, same as
+        `extends`). A bare `@dec` applies `dec(C)`; a bound
+        `_Callable` decorates by invocation, an `_External` or a
+        same-unit function is a recorded-but-dropped call, and a
+        factory `@dec(y)` evaluates its call expression. A name
+        resolving to nothing closes — the decorator cannot be
+        modeled."""
+        if node.type == "identifier":
+            name = node.text.decode()
+            bound = (
+                name in locals_
+                or name in self.function_locals
+                or name in params
+                or name in self.imports
+                or name in _GLOBALS
+            )
+            if bound:
+                raw = self._lookup(
+                    name, params, locals_, _span(node)
+                )
+                if isinstance(raw, _Callable):
+                    # `dec(C)` — the class's captured deps are the
+                    # argument.
+                    self._invoke_callable(
+                        raw,
+                        (captured,),
+                        params,
+                        locals_,
+                        [],
+                        [0],
+                        _span(node),
+                    )
+                return
+            if name in self.functions:
+                return
+            raise _Unsupported(
+                "binding_unavailable", _span(node), name
+            )
+        # A call/member/subscript expression (`@dec(y)`,
+        # `@ns.dec`) evaluates like any other expression —
+        # call_expression invokes the factory where resolvable.
+        self.expression(node, params, locals_, [], [0])
 
     def _construct(self, cls, actual, params, locals_, transfers, count, span):
         """`new C(args)` — seed `this` to a fresh `_Composite` of

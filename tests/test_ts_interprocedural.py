@@ -824,24 +824,52 @@ def test_await_passthrough():
     assert s.gaps[0].reason == "binding_unavailable"
 
 
-def test_division_modulo_exponent_close():
+def test_division_modulo_exponent_union():
     for op in ("/", "%", "**"):
         s = _fn(f"function f(x: number, y: number): number {{ return x {op} y; }}")
-        assert not s.available, op
-        assert s.gaps[0].reason == "unsupported_expression"
+        assert s.available, op
+        assert s.return_dependencies == frozenset({0, 1})
 
 
-def test_shift_operators_close():
+def test_shift_operators_union():
     for op in ("<<", ">>", ">>>"):
         s = _fn(f"function f(x: number, y: number): number {{ return x {op} y; }}")
-        assert not s.available, op
-        assert s.gaps[0].reason == "unsupported_expression"
+        assert s.available, op
+        assert s.return_dependencies == frozenset({0, 1})
 
 
-def test_nullish_coalescing_closes():
+def test_nullish_coalescing_unions():
     s = _fn("function f(x: number): number { return x ?? 0; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nullish_assign_may_write():
+    # `a ??= x` — the write may not run, so it unions.
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let a = y; a ??= x; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_class_decorator_admits():
+    s = _fn(
+        "function dec(x: number): number { return x; }"
+        " function f(x: number, y: number): number {"
+        " @dec(y) class C { m(): number { return 1; } }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_member_decorator_admits():
+    s = _fn(
+        "function dec(x: number): number { return x; }"
+        " function f(x: number): number {"
+        " class D { @dec m(): number { return 1; } }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_template_string_admits():
