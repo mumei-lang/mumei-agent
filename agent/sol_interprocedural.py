@@ -2990,6 +2990,26 @@ def summary_check_document(declared, live) -> dict:
     }
 
 
+def summary_reuse_set(declared, live) -> SolSummarySet:
+    """The merged summary set emitted by ``sol-summaries-reuse``.
+
+    Shared by ``sol-summaries-reuse`` and the ``sol_summaries_reuse``
+    MCP tool so both emit the identical manifest: a declared function
+    whose record is identical under the fresh derivation is reused
+    verbatim, every other live function is freshly derived and a
+    `missing` entry is dropped. The emitted set is keyed to the fresh
+    context — per-function reuse stays the host's weaker freshness
+    choice, never the strict whole-context gate.
+    """
+    reusable, _, _ = _reuse_partition(declared, live)
+    declared_by_name = {f.name: f for f in declared.functions}
+    merged = [
+        declared_by_name.get(f.name, f) if f.name in reusable else f
+        for f in live.functions
+    ]
+    return SolSummarySet(live.context_key, merged)
+
+
 def main_check(args=None) -> None:
     """Check a declared manifest against a fresh summary set.
 
@@ -3045,14 +3065,8 @@ def main_reuse(args=None) -> None:
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     live = summarize_solidity(raw)
-    reusable, _, _ = _reuse_partition(declared, live)
-    declared_by_name = {f.name: f for f in declared.functions}
-    merged = [
-        declared_by_name.get(f.name, f) if f.name in reusable else f
-        for f in live.functions
-    ]
     document = json.dumps(
-        SolSummarySet(live.context_key, merged).to_dict(),
+        summary_reuse_set(declared, live).to_dict(),
         sort_keys=True,
     )
     if getattr(args, "output", None):

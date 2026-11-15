@@ -2783,20 +2783,23 @@ def sol_summaries(source_path: str) -> str:
     return _ok({"manifest": live.to_dict()})
 
 
-def _summaries_check_tool(
+def _summaries_declared_tool(
     source_path: str,
     manifest_path: str,
     module,
     summary_set_cls,
     summarize_kwargs,
+    emit,
 ) -> str:
-    """Shared body for the `*_summaries_check` MCP tools.
+    """Shared body for the `*_summaries_{check,reuse}` MCP tools.
 
     Bounded reads identical to the CLI routes (the module's
     `MAX_SOURCE_BYTES` / `MAX_MANIFEST_BYTES`), a strict `from_dict`
-    manifest restore, a fresh derivation and the shared
-    `summary_check_document` — both sides emit the identical
-    partition. Detection only; no manifest is accepted.
+    manifest restore and a fresh derivation; `emit(declared, live)`
+    builds the payload — the shared `summary_check_document` for the
+    check tools or `summary_reuse_set` for the reuse tools, so both
+    sides emit the identical document. Detection/merge only; nothing
+    is accepted.
     """
     declared_paths = [source_path, manifest_path]
     for name, path in (
@@ -2841,9 +2844,7 @@ def _summaries_check_tool(
         return _err(
             _redact_declared_paths(str(exc), declared_paths)
         )
-    return _ok(
-        {"check": module.summary_check_document(declared, live)}
-    )
+    return _ok(emit(declared, live))
 
 
 @mcp.tool()
@@ -2875,7 +2876,7 @@ def ts_summaries_check(
         import agent.ts_interprocedural as mod
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
-    return _summaries_check_tool(
+    return _summaries_declared_tool(
         source_path,
         manifest_path,
         mod,
@@ -2889,6 +2890,9 @@ def ts_summaries_check(
             ),
             source_path=source_path,
         ),
+        lambda declared, live: {
+            "check": mod.summary_check_document(declared, live)
+        },
     )
 
 
@@ -2915,12 +2919,15 @@ def rust_summaries_check(source_path: str, manifest_path: str) -> str:
         import agent.rust_interprocedural as mod
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
-    return _summaries_check_tool(
+    return _summaries_declared_tool(
         source_path,
         manifest_path,
         mod,
         mod.RustSummarySet,
         mod.summarize_rust,
+        lambda declared, live: {
+            "check": mod.summary_check_document(declared, live)
+        },
     )
 
 
@@ -2947,12 +2954,143 @@ def sol_summaries_check(source_path: str, manifest_path: str) -> str:
         import agent.sol_interprocedural as mod
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
-    return _summaries_check_tool(
+    return _summaries_declared_tool(
         source_path,
         manifest_path,
         mod,
         mod.SolSummarySet,
         mod.summarize_solidity,
+        lambda declared, live: {
+            "check": mod.summary_check_document(declared, live)
+        },
+    )
+
+
+@mcp.tool()
+def ts_summaries_reuse(
+    source_path: str,
+    manifest_path: str,
+    resolve_modules: bool = False,
+) -> str:
+    """Emit a manifest reusing a declared TS manifest's unchanged
+    summaries (C06/C07).
+
+    The same wiring as `ts-summaries-reuse`: a declared function
+    whose record is identical under the fresh derivation is reused
+    verbatim, every other live function is freshly derived and a
+    `missing` entry is dropped. The emitted set is keyed to the
+    fresh context — the host's weaker freshness choice, never the
+    strict whole-context gate.
+
+    Args:
+        source_path: Declared TypeScript/JavaScript source (64 KiB).
+        manifest_path: Declared
+            `mumei.ts-scalar-parameter-deps/v1` manifest (8 MiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
+
+    Returns:
+        JSON with `manifest` — the merged
+        `mumei.ts-scalar-parameter-deps/v1` document — or `error` on
+        a declared failure.
+    """
+    try:
+        import agent.ts_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_declared_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.TsSummarySet,
+        lambda raw: mod.summarize_typescript(
+            raw,
+            resolver=(
+                mod._fs_resolver(source_path)
+                if resolve_modules
+                else None
+            ),
+            source_path=source_path,
+        ),
+        lambda declared, live: {
+            "manifest": mod.summary_reuse_set(declared, live).to_dict()
+        },
+    )
+
+
+@mcp.tool()
+def rust_summaries_reuse(source_path: str, manifest_path: str) -> str:
+    """Emit a manifest reusing a declared Rust manifest's unchanged
+    summaries.
+
+    The same wiring as `rust-summaries-reuse`: a declared function
+    whose record is identical under the fresh derivation is reused
+    verbatim, every other live function is freshly derived and a
+    `missing` entry is dropped. The emitted set is keyed to the
+    fresh context — the host's weaker freshness choice, never the
+    strict whole-context gate.
+
+    Args:
+        source_path: Declared Rust source (64 KiB).
+        manifest_path: Declared
+            `mumei.rust-scalar-parameter-deps/v1` manifest (8 MiB).
+
+    Returns:
+        JSON with `manifest` — the merged
+        `mumei.rust-scalar-parameter-deps/v1` document — or `error`
+        on a declared failure.
+    """
+    try:
+        import agent.rust_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_declared_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.RustSummarySet,
+        mod.summarize_rust,
+        lambda declared, live: {
+            "manifest": mod.summary_reuse_set(declared, live).to_dict()
+        },
+    )
+
+
+@mcp.tool()
+def sol_summaries_reuse(source_path: str, manifest_path: str) -> str:
+    """Emit a manifest reusing a declared Solidity manifest's
+    unchanged summaries.
+
+    The same wiring as `sol-summaries-reuse`: a declared function
+    whose record is identical under the fresh derivation is reused
+    verbatim, every other live function is freshly derived and a
+    `missing` entry is dropped. The emitted set is keyed to the
+    fresh context — the host's weaker freshness choice, never the
+    strict whole-context gate.
+
+    Args:
+        source_path: Declared Solidity source (256 KiB).
+        manifest_path: Declared
+            `mumei.sol-scalar-parameter-deps/v1` manifest (8 MiB).
+
+    Returns:
+        JSON with `manifest` — the merged
+        `mumei.sol-scalar-parameter-deps/v1` document — or `error`
+        on a declared failure.
+    """
+    try:
+        import agent.sol_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_declared_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.SolSummarySet,
+        mod.summarize_solidity,
+        lambda declared, live: {
+            "manifest": mod.summary_reuse_set(declared, live).to_dict()
+        },
     )
 
 

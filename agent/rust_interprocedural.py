@@ -1993,6 +1993,27 @@ def main_check(args=None) -> None:
         print(document)
 
 
+def summary_reuse_set(declared, live) -> RustSummarySet:
+    """The merged summary set emitted by ``rust-summaries-reuse``.
+
+    Shared by ``rust-summaries-reuse`` and the
+    ``rust_summaries_reuse`` MCP tool so both emit the identical
+    manifest: a declared function whose record is identical under the
+    fresh derivation is reused verbatim, every other live function is
+    freshly derived and a `missing` entry is dropped. The emitted set
+    is keyed to the fresh context — per-function reuse stays the
+    host's weaker freshness choice, never the strict whole-context
+    gate.
+    """
+    reusable, _, _ = _reuse_partition(declared, live)
+    declared_by_name = {f.name: f for f in declared.functions}
+    merged = [
+        declared_by_name.get(f.name, f) if f.name in reusable else f
+        for f in live.functions
+    ]
+    return RustSummarySet(live.context_key, PROFILE, merged)
+
+
 def main_reuse(args=None) -> None:
     """Emit a manifest reusing a declared manifest's unchanged
     summaries.
@@ -2016,14 +2037,8 @@ def main_reuse(args=None) -> None:
         CHECK_PROFILE,
     )
     live = _summarize_declared(raw, CHECK_PROFILE)
-    reusable, _, _ = _reuse_partition(declared, live)
-    declared_by_name = {f.name: f for f in declared.functions}
-    merged = [
-        declared_by_name.get(f.name, f) if f.name in reusable else f
-        for f in live.functions
-    ]
     document = json.dumps(
-        RustSummarySet(live.context_key, PROFILE, merged).to_dict(),
+        summary_reuse_set(declared, live).to_dict(),
         sort_keys=True,
     )
     if getattr(args, "output", None):
