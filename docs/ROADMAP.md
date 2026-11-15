@@ -2773,6 +2773,45 @@ the model has no `TemplateStringsArray` shape; a tag whose
 result depends on the literal text itself is silent in the
 deps (strings are always dep-free in the model).
 
+### C06 TypeScript classes, `this` and `new` (slice 21)
+
+`class C { f = e; m(v) {...} }` — top-level or in a body —
+binds a `_Class` value (`_TOP_LEVEL` gains
+`class_declaration`, `self.classes` is the name registry
+consulted after params in `_lookup`; `_class_cache` builds
+the value once per unit). Methods and static methods are
+`is_method` `_Callable`s sharing the class body's capture;
+field initializers keep their initializer nodes and run at
+`new` time (with `this` seeded, ctor params not yet bound).
+`new C(args)` — `new_expression` — seeds `this` to a fresh
+`_Composite(klass=cls)`, runs the inits then the
+constructor body via `_invoke_callable(construct=True)`,
+and yields the evolved instance, recorded as a
+`new <ctor>` `TsCall` transfer. `new f()` on a
+`function`-expression value constructs the same way with a
+klass-less instance.
+
+`this` is the pseudo-name `"this"` in the invocation scope:
+a member call `c.m(x)` on an `is_method` callee binds the
+receiver `_Composite`; any other `this` read is
+`binding_unavailable`. `_Composite.klass` carries the
+prototype: a missing instance field in `_member_read` falls
+through to `klass.methods`; a `_Class` base itself reads
+`C.sf`/`C.sm` through `statics`/`methods`. `static f = e`
+evaluates eagerly at class creation (deps ride on the class
+value). Merge-join keeps klass identity (`None` on
+mismatch) and `_bindable` widens: instances re-bind through
+`new_expression`, class values through `class`/identifiers.
+
+Boundaries: `extends`/`implements`/`super`, getters/setters,
+generators, computed member names, `abstract`/`declare`/
+`readonly` and decorators close (`class_heritage` is
+rejected up front — the subclass's method table can't be
+built without a parent walk). `new` on a scalar/composite
+or unbound name closes. There is no prototype chain beyond
+the single class — `Object`/`Function.prototype` and
+property descriptors are not modelled.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

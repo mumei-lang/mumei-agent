@@ -394,7 +394,10 @@ def test_throw_new_expression_closes():
         "function f(x: number): number { throw new Error(); return x; }"
     )
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    # `new Error()` resolves an unbound ctor name — a thrown
+    # exception still throws the body (the gap keeps the function
+    # unavailable either way).
+    assert s.gaps[0].reason == "binding_unavailable"
 
 
 def test_try_catch_admits():
@@ -776,10 +779,12 @@ def test_unresolved_call_closes():
     assert s.gaps[0].reason == "call_unresolved"
 
 
-def test_new_expression_closes():
+def test_new_expression_unbound_ctor_closes():
     s = _fn("function f(x: number): number { return new C(x); }")
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    # The ctor name resolves through the class registry — an
+    # unbound name is `binding_unavailable`.
+    assert s.gaps[0].reason == "binding_unavailable"
 
 
 def test_member_access_on_unbound_closes():
@@ -891,14 +896,13 @@ def test_declare_closes_unit():
     assert s.gaps[0].reason == "unsupported_unit"
 
 
-def test_top_level_class_closes_unit():
+def test_top_level_class_admits_unit():
     src = (
         "class C {}\n"
         "function f(x: number): number { return x; }"
     )
     s = _fn(src)
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_unit"
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_top_level_statement_closes_unit():
@@ -2527,3 +2531,84 @@ def test_tagged_template_unresolved_tag_closes():
     )
     assert not s.available
     assert s.gaps[0].reason == "call_unresolved"
+
+
+# --- slice 21: classes, this, new
+
+
+def test_class_ctor_and_field():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f: number = 0; constructor(v: number) { this.f = v; } }"
+        " const c = new C(x);"
+        " return c.f; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "new C"
+
+
+def test_class_method_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f = 0; m(v: number): number { return this.f + v; } }"
+        " const c = new C(x);"
+        " return c.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_class_field_init():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f = 1; g = 2; }"
+        " const c = new C(x);"
+        " return c.f; }"
+    )
+    assert s.available
+
+
+def test_static_method_call():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { static sm(v: number): number { return v; } }"
+        " return C.sm(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_class_extends_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C extends D { }"
+        " return x; }"
+    )
+    assert not s.available
+
+
+def test_this_outside_method_closes():
+    s = _fn(
+        "function f(x: number): number { return this.a; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "binding_unavailable"
+
+
+def test_method_this_write_propagates():
+    s = _fn(
+        "function f(x: number): number {"
+        " class C { f = 0; set(v: number): number { this.f = v; return 0; } }"
+        " const c = new C(0);"
+        " c.set(x);"
+        " return c.f; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_top_level_class():
+    s = _fn(
+        "class C { f = 0; m(v: number): number { return this.f + v; } }"
+        "function f(x: number): number {"
+        " const c = new C(x);"
+        " return c.m(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

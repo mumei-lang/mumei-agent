@@ -110,8 +110,9 @@ Admitted:
   `MAX_NODES` and closes the caller with `analysis_limit`.
 * Member calls `o.f(x)` where the field holds a `_Callable`
   (`{f: v => v}`) — the member read resolves the callee and the
-  body evaluates as with a name call. There is no `this`
-  binding: a body that reads `this` closes inside.
+  body evaluates as with a name call. A `function` expression or
+  shorthand method (`is_method`) invoked through a member path
+  receives `this` = the object; an arrow does not.
 * `async` functions, async arrows and `await` expressions — in the
   dep model a promise is its resolved value, so `await e` passes
   the operand's deps through and `async` admits at the signature
@@ -125,7 +126,8 @@ Admitted:
 * Shorthand method definitions `{m(v) { ... }}` — a callable
   field value like an arrow, invoked through the slice-13 member
   call path (`o.m(x)`). `get`/`set`/`*`/`static` markers stay
-  closed; `async` admits. `this` inside closes at invoke.
+  closed; `async` admits. `this` binds to the receiver object
+  inside (see the classes bullet).
 * Destructured formal parameters `f({a, b}, [x])` — the pattern
   occupies one scalar index; its sub-names bind member reads of
   the slot at body start (each sees the slot's whole dep set).
@@ -148,6 +150,17 @@ Admitted:
   call: declared name → transfer, bound `_Callable` (name or
   member) → inline invoke. Actuals are the dep-free cooked
   strings array then each substitution's deps.
+* Classes — `class C { f = e; m(v) {...} }` at top level or in a
+  body binds a `_Class` (methods/statics as `is_method`
+  callables, field initializers run at `new`). `new C(args)`
+  seeds `this` to a fresh `_Composite`, runs field inits and the
+  `constructor` body, and yields the evolved instance — member
+  calls `c.m(x)` receive `this`, and a missing instance field
+  falls through to the class's methods (the prototype). `C.sf` /
+  `C.sm(x)` read statics on the class object; `this` anywhere
+  else is unbound. `extends`/`implements`, getters/setters,
+  generators, computed names, `abstract`/`declare`/`readonly`
+  and decorated members close.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -169,14 +182,14 @@ Admitted:
   every evaluated argument and records a `TsCall` transfer; the callee
   body is opaque (self-recursion records a transfer like any other
   name-resolved call). Everything else — calls through a
-  non-callable field, unresolved names, `new` — stays closed.
+  non-callable field, unresolved names — stays closed.
 
 Closed with declared gaps: `import`/`export` and ambient/`declare`
-declarations close the whole unit (`unsupported_unit`); classes,
-`this`, getters/setters,
+declarations close the whole unit (`unsupported_unit`); class
+heritage (`extends`/`implements`/`super`), getters/setters,
 generators, `any`/composite/missing parameter
-types,
-`new` and generator function values stay
+types, `eval`, `with`, `new` on a non-class/non-function
+ctor, and generator function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -210,7 +223,7 @@ _UNARY_OPS = {"!", "-", "+", "~"}
 _AUGMENTED_OPS = {op + "=" for op in _BINARY_OPS if op not in {"==", "===", "!=", "!==", "<", "<=", ">", ">="}}
 
 # Top-level children that keep the unit a fragment unit.
-_TOP_LEVEL = {"function_declaration", "comment"}
+_TOP_LEVEL = {"function_declaration", "class_declaration", "comment"}
 
 
 @dataclass(frozen=True)
@@ -287,12 +300,14 @@ class _Composite:
     """An object-shaped value: field name -> scalar deps or nested
     `_Composite`. Treated as immutable — a member write produces a
     new instance bound to the base name, so branch scopes may share
-    an instance freely."""
+    an instance freely. `klass` is the `_Class` an instance came
+    from (None for literals) — method lookup falls through to it."""
 
-    __slots__ = ("fields",)
+    __slots__ = ("fields", "klass")
 
-    def __init__(self, fields: dict) -> None:
+    def __init__(self, fields: dict, klass=None) -> None:
         self.fields = fields
+        self.klass = klass
 
 
 class _Callable:
@@ -302,16 +317,42 @@ class _Callable:
     the union of every visible binding's deps at the definition
     site — so passing or returning the value is a scalar.
     `rest` is the index of a `...rest` formal (-1 when absent):
-    invocation binds it to the union of every remaining actual."""
+    invocation binds it to the union of every remaining actual.
+    `is_method` marks values that receive `this` when invoked
+    through a member path (`function` expressions and shorthand
+    methods — arrows never do)."""
 
-    __slots__ = ("node", "params", "defaults", "captured", "rest")
+    __slots__ = (
+        "node", "params", "defaults", "captured", "rest", "is_method"
+    )
 
-    def __init__(self, node, params, defaults, captured, rest=-1) -> None:
+    def __init__(
+        self, node, params, defaults, captured, rest=-1, is_method=False
+    ) -> None:
         self.node = node
         self.params = params
         self.defaults = defaults
         self.captured = captured
         self.rest = rest
+        self.is_method = is_method
+
+
+class _Class:
+    """A class value: `ctor` (`_Callable` or None), `methods` /
+    `statics` (name -> `_Callable` for methods, scalar deps for
+    static fields) and `field_inits` (name -> initializer node).
+    `extends`/`implements`, getters/setters, generators and
+    computed names close the class instead. `captured` flattens
+    the whole class to a scalar."""
+
+    __slots__ = ("ctor", "methods", "statics", "field_inits", "captured")
+
+    def __init__(self, ctor, methods, statics, field_inits, captured):
+        self.ctor = ctor
+        self.methods = methods
+        self.statics = statics
+        self.field_inits = field_inits
+        self.captured = captured
 
 
 def _scalar_of(value) -> frozenset[int]:
@@ -322,8 +363,12 @@ def _scalar_of(value) -> frozenset[int]:
         result = frozenset()
         for field in value.fields.values():
             result |= _scalar_of(field)
+        if value.klass is not None:
+            result |= value.klass.captured
         return result
     if isinstance(value, _Callable):
+        return value.captured
+    if isinstance(value, _Class):
         return value.captured
     return value
 
@@ -339,7 +384,10 @@ def _merge_vals(old, new):
                 fields[key] = _merge_vals(fields[key], nval)
             else:
                 fields[key] = nval
-        return _Composite(fields)
+        # Same class keeps method resolution; a class divergence
+        # (or a plain literal join) loses it — reads then collapse.
+        klass = old.klass if old.klass is new.klass else None
+        return _Composite(fields, klass)
     if isinstance(old, _Composite) or isinstance(new, _Composite):
         return _scalar_of(old) | _scalar_of(new)
     # Two callables (or a callable and a scalar) join to the
@@ -377,7 +425,7 @@ def _composite_delete(composite, path, span):
             # to delete through.
             raise _Unsupported("unsupported_expression", span)
         fields[key] = _composite_delete(sub, path[1:], span)
-    return _Composite(fields)
+    return _Composite(fields, composite.klass)
 
 
 def _composite_set(composite, path, value, conditional, span):
@@ -399,7 +447,7 @@ def _composite_set(composite, path, value, conditional, span):
         fields[key] = _composite_set(
             sub, path[1:], value, conditional, span
         )
-    return _Composite(fields)
+    return _Composite(fields, composite.klass)
 
 
 def _syntax(raw: bytes):
@@ -422,6 +470,8 @@ class _Builder:
 
     def __init__(self, root) -> None:
         self.functions: dict[str, object] = {}
+        self.classes: dict[str, object] = {}
+        self._class_cache: dict[str, object] = {}
         # A unit is closed when any top-level node is not a function
         # declaration or comment — imports/exports, ambient declares,
         # classes, namespaces and top-level statements all qualify.
@@ -432,6 +482,10 @@ class _Builder:
                     name = child.child_by_field_name("name")
                     if name is not None:
                         self.functions[name.text.decode()] = child
+                if child.type == "class_declaration":
+                    name = child.child_by_field_name("name")
+                    if name is not None:
+                        self.classes[name.text.decode()] = child
             else:
                 # `export function f` wraps the declaration — register
                 # the name so the summary exists to carry the gap.
@@ -1060,6 +1114,21 @@ class _Builder:
                     params,
                     locals_,
                 )
+            return
+        if kind == "class_declaration":
+            # `class C { ... }` in a body — binds a `_Class` (no
+            # hoisting: declaration order applies).
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                raise _Unsupported("unsupported_statement", _span(node))
+            self._declare_name(
+                name_node.text.decode(),
+                self._class_value(node, params, locals_),
+                False,
+                conditional,
+                params,
+                locals_,
+            )
             return
         if kind == "function_declaration":
             # Already registered by the hoisting pass — a declaration
@@ -1722,7 +1791,12 @@ class _Builder:
         collapses to its leaf deps. A callable binds via its literal
         or a name alias; anything else (a member path, a call
         result) collapses to the captured deps."""
-        if isinstance(value, (_Composite, _Callable)) and (
+        if isinstance(value, _Composite) and (
+            node.type
+            not in {"object", "array", "identifier", "new_expression"}
+        ):
+            return _scalar_of(value)
+        if isinstance(value, _Callable) and (
             node.type
             not in {
                 "object",
@@ -1731,6 +1805,11 @@ class _Builder:
                 "arrow_function",
                 "function_expression",
             }
+        ):
+            return _scalar_of(value)
+        if isinstance(value, _Class) and (
+            node.type
+            not in {"identifier", "class", "class_declaration"}
         ):
             return _scalar_of(value)
         return value
@@ -1744,6 +1823,12 @@ class _Builder:
             return self.function_locals[name]
         if name in params:
             return frozenset({params[name]})
+        if name in self.classes:
+            if name not in self._class_cache:
+                self._class_cache[name] = self._class_value(
+                    self.classes[name], params, locals_
+                )
+            return self._class_cache[name]
         raise _Unsupported("binding_unavailable", span)
 
     def _read_name(self, node, params, locals_, span) -> frozenset[int]:
@@ -1804,6 +1889,9 @@ class _Builder:
                     "unsupported_expression", _span(cur)
                 )
             cur = obj
+        if cur.type == "this":
+            path.reverse()
+            return "this", path, index_deps
         if cur.type != "identifier":
             raise _Unsupported("unsupported_expression", _span(cur))
         path.reverse()
@@ -1818,12 +1906,31 @@ class _Builder:
             node, params, locals_, transfers, count
         )
         val = self._lookup(base, params, locals_, _span(node))
-        for key in path:
+        for idx, key in enumerate(path):
+            if isinstance(val, _Class):
+                # `C.sm` / `C.sf` — statics and methods on the
+                # class object itself.
+                if key is None:
+                    return _scalar_of(val) | index_deps
+                if key in val.statics:
+                    val = val.statics[key]
+                elif key in val.methods:
+                    val = val.methods[key]
+                else:
+                    return frozenset()
+                continue
             if not isinstance(val, _Composite):
                 raise _Unsupported("unsupported_expression", _span(node))
             if key is None:
                 return _scalar_of(val) | index_deps
-            val = val.fields.get(key, frozenset())
+            if key not in val.fields:
+                # Missing fields on an instance fall through to
+                # the class's methods (the prototype) — still
+                # missing means `undefined`, dep-free.
+                if val.klass is not None and key in val.klass.methods:
+                    return val.klass.methods[key]
+                return frozenset()
+            val = val.fields[key]
         return val
 
     def _member_delete(
@@ -1893,7 +2000,7 @@ class _Builder:
             self._eval(node, params, locals_, transfers, count)
         )
 
-    def _callable_value(self, node, params, locals_):
+    def _callable_value(self, node, params, locals_, is_method=False):
         """`const g = (v) => v + x` — the arrow/function value.
         `captured` is the union of every visible binding's deps at
         the definition site, so the closure's free reads are
@@ -1903,7 +2010,9 @@ class _Builder:
         captured = frozenset(params.values())
         for val in locals_.values():
             captured |= _scalar_of(val)
-        return _Callable(node, names, defaults, captured, rest)
+        return _Callable(
+            node, names, defaults, captured, rest, is_method
+        )
 
     def _callable_params(self, node):
         """`(a, b = d, ...rest)` / `x =>` — the formal parameter
@@ -1986,6 +2095,8 @@ class _Builder:
         transfers,
         count,
         span,
+        this_val=None,
+        construct=False,
     ) -> frozenset[int]:
         """`g(args)` where `g` binds an arrow/function value —
         evaluate the body inline. Captured names read the CALL
@@ -1995,6 +2106,8 @@ class _Builder:
         the body's own frames/scope state is isolated and
         restored."""
         inner = dict(locals_)
+        if this_val is not None:
+            inner["this"] = this_val
         for i, pname in enumerate(cval.params):
             if i == cval.rest:
                 # `...rest` collects every remaining argument —
@@ -2045,6 +2158,10 @@ class _Builder:
             self.block_stack = saved_block
             self.var_names = saved_var
             self.function_locals = saved_flocals
+        if construct:
+            # `new f()` — the value is the evolved `this`, not
+            # the body's return.
+            result = inner.get("this", result)
         # Writes inside the body are may-writes on the caller's
         # scope — member stores rebase shared `_Composite`
         # instances on `inner`, so join them back.
@@ -2055,6 +2172,158 @@ class _Builder:
             if not _val_leq(ival, locals_[name]):
                 locals_[name] = _merge_vals(locals_[name], ival)
         return result
+
+    def _class_value(self, node, params, locals_):
+        """`class C { f = e; m(v){...} }` — a `_Class` whose methods
+        are `_Callable`s (`is_method`) sharing the class body's
+        capture. `extends`/`implements`, getters/setters,
+        generators, computed names and `abstract`/decorated
+        members all close."""
+        for child in node.children:
+            if child.type == "class_heritage":
+                raise _Unsupported("unsupported_expression", _span(child))
+            if not child.is_named and child.type in {
+                "abstract",
+                "declare",
+            }:
+                raise _Unsupported("unsupported_expression", _span(child))
+            if child.type == "decorator":
+                raise _Unsupported("unsupported_expression", _span(child))
+        body_node = node.child_by_field_name("body")
+        if body_node is None:
+            raise _Unsupported("unsupported_expression", _span(node))
+        captured = frozenset(params.values())
+        for val in locals_.values():
+            captured |= _scalar_of(val)
+        ctor = None
+        methods: dict = {}
+        statics: dict = {}
+        field_inits: dict = {}
+        for member in _children(body_node):
+            if member.type == "method_definition":
+                markers = {
+                    c.type for c in member.children if not c.is_named
+                }
+                if markers & {"get", "set", "*", "abstract"}:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(member)
+                    )
+                mname = member.child_by_field_name("name")
+                if mname is None or mname.type != "property_identifier":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(member)
+                    )
+                key = mname.text.decode()
+                names, defaults, rest = self._callable_params(member)
+                mval = _Callable(
+                    member,
+                    names,
+                    defaults,
+                    captured,
+                    rest,
+                    is_method=True,
+                )
+                if key == "constructor":
+                    ctor = mval
+                elif "static" in markers:
+                    statics[key] = mval
+                else:
+                    methods[key] = mval
+                continue
+            if member.type in {
+                "public_field_definition",
+                "field_definition",
+                "property_definition",
+            }:
+                markers = {
+                    c.type for c in member.children if not c.is_named
+                }
+                if markers & {"abstract", "declare", "readonly"}:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(member)
+                    )
+                fname = member.child_by_field_name("name")
+                if fname is None or fname.type != "property_identifier":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(member)
+                    )
+                init = member.child_by_field_name("value")
+                if "static" in markers:
+                    # `static s = e` evaluates eagerly — the class
+                    # value itself carries the deps.
+                    deps = (
+                        self._eval(init, params, locals_, {}, [0])
+                        if init is not None
+                        else frozenset()
+                    )
+                    statics[fname.text.decode()] = _scalar_of(deps)
+                elif init is not None:
+                    field_inits[fname.text.decode()] = init
+                else:
+                    field_inits[fname.text.decode()] = None
+                continue
+            # index signatures, decorators, ambient members.
+            raise _Unsupported("unsupported_expression", _span(member))
+        all_deps = captured
+        for s in statics.values():
+            all_deps |= _scalar_of(s)
+        return _Class(ctor, methods, statics, field_inits, all_deps)
+
+    def _construct(self, cls, actual, params, locals_, transfers, count, span):
+        """`new C(args)` — seed `this` to a fresh `_Composite` of
+        the class, run field initializers (which see `this` and
+        the captured scope, not ctor params), then the ctor body;
+        the value is the evolved instance."""
+        inner = dict(locals_)
+        inner["this"] = _Composite({}, klass=cls)
+        saved_frames, self.frames = self.frames, []
+        saved_thrown, self.thrown = self.thrown, [False]
+        saved_block, self.block_stack = self.block_stack, []
+        saved_var, self.var_names = self.var_names, set()
+        saved_flocals, self.function_locals = self.function_locals, inner
+        try:
+            for fname, init in cls.field_inits.items():
+                deps = (
+                    _scalar_of(
+                        self._eval(
+                            init, params, inner, transfers, count
+                        )
+                    )
+                    if init is not None
+                    else frozenset()
+                )
+                inner["this"] = _composite_set(
+                    inner["this"], [fname], deps, False, span
+                )
+            if cls.ctor is not None:
+                instance = self._invoke_callable(
+                    cls.ctor,
+                    actual,
+                    params,
+                    inner,
+                    transfers,
+                    count,
+                    span,
+                    this_val=inner["this"],
+                    construct=True,
+                )
+                inner["this"] = instance
+        finally:
+            self.frames = saved_frames
+            self.thrown = saved_thrown
+            self.block_stack = saved_block
+            self.var_names = saved_var
+            self.function_locals = saved_flocals
+        # Member stores inside the ctor are may-writes on the
+        # caller's scope — merge back non-shadowed names.
+        shadowed = set(cls.ctor.params) if cls.ctor is not None else set()
+        shadowed.add("this")
+        for name, ival in inner.items():
+            if name in shadowed or name not in locals_:
+                continue
+            if not _val_leq(ival, locals_[name]):
+                locals_[name] = _merge_vals(locals_[name], ival)
+        return inner["this"]
 
     def _call_actuals(
         self, arguments, params, locals_, transfers, count, node
@@ -2087,6 +2356,11 @@ class _Builder:
         if count[0] > MAX_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         kind = node.type
+        if kind == "this":
+            # `this` binds only inside a method/ctor invoked
+            # through a member path or `new` — anywhere else the
+            # read is unbound.
+            return self._lookup("this", params, locals_, _span(node))
         if kind == "identifier":
             return self._lookup(
                 node.text.decode(), params, locals_, _span(node)
@@ -2187,7 +2461,7 @@ class _Builder:
                             "unsupported_expression", _span(child)
                         )
                     fields[mname.text.decode()] = self._callable_value(
-                        child, params, locals_
+                        child, params, locals_, is_method=True
                     )
                 else:
                     raise _Unsupported(
@@ -2346,7 +2620,90 @@ class _Builder:
                 left, params, locals_, transfers, count
             ) | self.expression(right, params, locals_, transfers, count)
         if kind in {"arrow_function", "function_expression"}:
-            return self._callable_value(node, params, locals_)
+            return self._callable_value(
+                node,
+                params,
+                locals_,
+                is_method=kind == "function_expression",
+            )
+        if kind in {"class", "class_declaration"}:
+            return self._class_value(node, params, locals_)
+        if kind == "new_expression":
+            # `new C(args)` — the callee resolves to a `_Class`
+            # (constructed) or a function-expression ctor; `new`
+            # on anything else closes.
+            ctor_node = node.child_by_field_name("constructor")
+            args_node = node.child_by_field_name("arguments")
+            if ctor_node is None or args_node is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            actual_n = self._call_actuals(
+                args_node, params, locals_, transfers, count, node
+            )
+            if ctor_node.type == "identifier":
+                raw_n = self._lookup(
+                    ctor_node.text.decode(), params, locals_,
+                    _span(ctor_node),
+                )
+            elif ctor_node.type in {
+                "member_expression",
+                "subscript_expression",
+            }:
+                raw_n = self._member_read(
+                    ctor_node, params, locals_, transfers, count
+                )
+            elif ctor_node.type in {
+                "class",
+                "parenthesized_expression",
+            }:
+                raw_n = self._eval(
+                    ctor_node, params, locals_, transfers, count
+                )
+            else:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            if isinstance(raw_n, _Class):
+                result_n = self._construct(
+                    raw_n, actual_n, params, locals_, transfers,
+                    count, _span(node),
+                )
+                transfers.append(
+                    TsCall(
+                        _span(node),
+                        "new " + ctor_node.text.decode(),
+                        actual_n,
+                        _scalar_of(result_n),
+                    )
+                )
+                return result_n
+            if isinstance(raw_n, _Callable) and raw_n.is_method:
+                # `new f()` on a `function` value — `this` is a
+                # fresh composite; the instance is the value.
+                result_n = self._invoke_callable(
+                    raw_n,
+                    actual_n,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                    this_val=_Composite({}),
+                    construct=True,
+                )
+                transfers.append(
+                    TsCall(
+                        _span(node),
+                        "new " + ctor_node.text.decode(),
+                        actual_n,
+                        _scalar_of(result_n),
+                    )
+                )
+                return result_n
+            raise _Unsupported(
+                "unsupported_expression", _span(node)
+            )
         if kind == "call_expression":
             function = node.child_by_field_name("function")
             arguments = node.child_by_field_name("arguments")
@@ -2369,6 +2726,21 @@ class _Builder:
                     raise _Unsupported(
                         "unsupported_expression", _span(node)
                     )
+                # A `function`/shorthand method invoked through a
+                # member path receives `this` = the object; an
+                # arrow never does.
+                this_val = None
+                if raw.is_method:
+                    obj_node = function.child_by_field_name("object")
+                    base_val = (
+                        None
+                        if obj_node is None
+                        else self._eval(
+                            obj_node, params, locals_, transfers, count
+                        )
+                    )
+                    if isinstance(base_val, _Composite):
+                        this_val = base_val
                 result = self._invoke_callable(
                     raw,
                     actual_m,
@@ -2377,6 +2749,7 @@ class _Builder:
                     transfers,
                     count,
                     _span(node),
+                    this_val=this_val,
                 )
                 transfers.append(
                     TsCall(
