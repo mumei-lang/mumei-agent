@@ -1031,6 +1031,9 @@ class _Builder:
             # `uint[1] storage xs = arr` — a storage reference bound
             # to a state variable. Reads/writes on `xs` resolve to
             # `arr`'s slot, so `xs[i] = v` marks the state write.
+            # A fresh declaration shadows any earlier binding —
+            # drop a stale alias for the name first.
+            self._storage_alias.pop(name.text.decode(), None)
             if (
                 expr is not None
                 and any(
@@ -1572,9 +1575,43 @@ class _Builder:
             )
             if expr.type == "augmented_assignment_expression":
                 deps |= locals_[lident.text.decode()]
-            lname = self._storage_alias.get(
-                lident.text.decode(), lident.text.decode()
-            )
+            raw = lident.text.decode()
+            lname = self._storage_alias.get(raw, raw)
+            if (
+                expr.type == "assignment_expression"
+                and raw in self._storage_alias
+            ):
+                # `xs = ys` where `ys` is another storage pointer
+                # or state variable retargets the reference —
+                # nothing is written through the old pointee.
+                # A value RHS (`y = a`) is a write-through and
+                # keeps the current target.
+                ein = (
+                    _children(right)[0]
+                    if right.type == "expression"
+                    and len(_children(right)) == 1
+                    else right
+                )
+                rroot = (
+                    ein.text.decode()
+                    if ein is not None
+                    and ein.type == "identifier"
+                    else None
+                )
+                target = None
+                if rroot in self._storage_alias:
+                    target = self._storage_alias[rroot]
+                elif (
+                    rroot is not None
+                    and rroot
+                    in self._all_state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    )
+                ):
+                    target = rroot
+                if target is not None:
+                    self._storage_alias[raw] = target
+                    lname = raw
             locals_[lname] = deps
             if self._writes:
                 self._writes[-1].add(lname)

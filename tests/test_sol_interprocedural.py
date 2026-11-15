@@ -2380,3 +2380,39 @@ def test_review6_modifier_local_block_does_not_suppress_sync():
     s = _fn(src, "f")
     assert s.available
     assert 0 in s.return_dependencies
+
+
+def test_review7_shadowing_decl_evicts_storage_alias():
+    # After the block ends, a fresh `uint256 xs` shadows the
+    # storage reference — reads must no longer forward to `arr`.
+    src = """contract C {
+  uint256[] arr;
+  function f(uint256 a, uint256 b) public returns (uint256) {
+    { uint256[] storage xs = arr; xs[0] = a; }
+    uint256 xs = b;
+    return xs;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.return_dependencies == frozenset({1})
+
+
+def test_review7_storage_rebind_retargets_pointer():
+    # `xs = other` retargets the storage pointer — the indexed
+    # write after it must land on `other`, not keep hitting `arr`.
+    src = """contract C {
+  uint256[] arr;
+  uint256[] other;
+  function f(uint256 a) public returns (uint256) {
+    uint256[] storage xs = arr;
+    xs[0] = a;
+    xs = other;
+    xs[1] = a;
+    return other[1];
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert s.effects == "state_writes"
+    assert 0 in s.return_dependencies
