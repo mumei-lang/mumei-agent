@@ -3248,6 +3248,20 @@ the shared `_Composite` (the copy-on-write result now lands
 in `module_locals` too, so an alias across scopes isn't
 dropped — a real store-loss fix).
 
+### C06 TypeScript parameter annotation widening (slice 45)
+
+Parameter annotations are type-level and ignored everywhere:
+`function f(x)` (no annotation), `f(o: Foo)`, `f(x: string)`
+all admit — each parameter binds its index and actuals
+scalarize at the call site, so the dep model needs no
+annotation at all. The same lift applies to callable values
+(`{ tag(a: TemplateStringsArray, ...b: number[]){} }`
+object-literal methods admit). Return annotations admit
+identically: `x is T`, `void`, `Foo`, `Promise<...>` or no
+annotation at all — recorded deps come from the actual
+`return` statements, so the signature gate is now purely
+structural (named function + statement-block body).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -9,15 +9,16 @@ declared gap — never a silently wrong summary.
 
 Admitted:
 
-* `number`/`boolean`-annotated parameters on a top-level
-  `function name(...) : number|boolean { ... }` declaration —
-  optional (`x?`) and defaulted (`x = expr`) parameters admit like
-  required ones and a default's calls still record; a missing
-  scalar annotation, a rest or destructuring pattern, or a
-  non-scalar type closes the function. The return annotation is
-  looser: a `x is T` predicate (a runtime boolean) or a
-  value-less `void`/`never`/`any`/`unknown`/`undefined`/`null`
-  also admits — recorded deps come from the actual `return`s.
+* Parameters on a top-level `function name(...) { ... }`
+  declaration — optional (`x?`) and defaulted (`x = expr`)
+  parameters admit like required ones and a default's calls
+  still record. Annotations are type-level and ignored
+  (`f(o: Foo)` binds the index like `f(x: number)` — actuals
+  scalarize at the call site); a `...rest` occupies the last
+  index slot and a destructuring pattern destructures it (see
+  below). Return annotations are equally type-level — `x is T`,
+  `void`, `Foo`, `Promise<...>` or none at all all admit;
+  recorded deps come from the actual `return` statements.
 * `let`/`const`/`var` declarations whose declarators bind one
   identifier to a supported expression or to nothing (`let x;`
   binds `undefined` — no dependencies; any annotation is
@@ -384,8 +385,6 @@ PROFILE = "mumei.ts-interprocedural/v1"
 # Defensive bound on evaluated syntax nodes — a parser or dispatch bug
 # must never hang the analyzer.
 MAX_NODES = 20000
-
-_SCALAR_TYPES = {b"number", b"boolean"}
 
 # The full arithmetic/bitwise/logical operator set is admitted — the dep
 # model only needs the operand union, so `/`, `%`, `**`, shifts and `??`
@@ -1181,23 +1180,11 @@ class _Builder:
         # the dep model (a promise resolves to its value).
         params_node = node.child_by_field_name("parameters")
         body = node.child_by_field_name("body")
-        ret = node.child_by_field_name("return_type")
         if params_node is None or body is None or body.type != "statement_block":
             raise _Unsupported("unsupported_signature", _span(node))
-        is_async = any(c.type == "async" for c in node.children)
-        if ret is not None and not self._return_annotation(ret):
-            inner = next(iter(_children(ret)), None)
-            # `async f(): Promise<T>` — the promise resolves to its
-            # value, so `Promise<number|boolean>` admits exactly
-            # where a plain scalar annotation would.
-            if not (
-                is_async
-                and inner is not None
-                and self._promise_scalar(inner)
-            ):
-                raise _Unsupported("unsupported_signature", _span(node))
-        elif ret is None:
-            raise _Unsupported("unsupported_signature", _span(node))
+        # Any return annotation — or none — admits: annotations
+        # are type-level and recorded deps come from the actual
+        # `return` statements regardless.
         params: dict[str, int] = {}
         destructured: list = []
         rest_seen = False
@@ -1208,7 +1195,6 @@ class _Builder:
             if param.type not in {"required_parameter", "optional_parameter"}:
                 raise _Unsupported("unsupported_signature", _span(param))
             pattern = param.child_by_field_name("pattern")
-            ptype = param.child_by_field_name("type")
             if rest_seen:
                 raise _Unsupported("unsupported_signature", _span(param))
             if pattern is not None and pattern.type == "rest_pattern":
@@ -1244,13 +1230,11 @@ class _Builder:
                 params[pname] = len(params)
                 destructured.append((pattern, params[pname]))
                 continue
-            if (
-                pattern is None
-                or pattern.type != "identifier"
-                or ptype is None
-                or not self._scalar_annotation(ptype)
-            ):
+            if pattern is None or pattern.type != "identifier":
                 raise _Unsupported("unsupported_signature", _span(param))
+            # The annotation is type-level — `f(o: Foo)` binds the
+            # index like `f(x: number)`: actuals scalarize at the
+            # call site, so any annotation (or none) admits.
             pname = pattern.text.decode()
             if pname in params:
                 raise _Unsupported("unsupported_signature", _span(param))
@@ -1322,57 +1306,6 @@ class _Builder:
             (),
             "unknown" if transfers else "none_in_supported_fragment",
         )
-
-    @staticmethod
-    def _scalar_annotation(node) -> bool:
-        """`node` is a `type_annotation` whose inner type is a scalar
-        `predefined_type` (`number`/`boolean`). A `x is T` type
-        predicate is a runtime boolean — equally scalar."""
-        inner = next(iter(_children(node)), None)
-        if inner is None:
-            return False
-        if inner.type == "type_predicate":
-            return True
-        return (
-            inner.type == "predefined_type"
-            and inner.text in _SCALAR_TYPES
-        )
-
-    def _return_annotation(self, node) -> bool:
-        """`node` is an admissible return `type_annotation`: a scalar
-        annotation, a `x is T` predicate, or a value-less/loose
-        `predefined_type` (`void`/`never`/`any`/`unknown`/
-        `undefined`/`null`) — recorded deps come from the actual
-        `return` statements, so a looser annotation is still
-        dep-accurate."""
-        if self._scalar_annotation(node):
-            return True
-        inner = next(iter(_children(node)), None)
-        return (
-            inner is not None
-            and inner.type == "predefined_type"
-            and inner.text
-            in {b"void", b"never", b"any", b"unknown",
-                b"undefined", b"null"}
-        )
-
-    def _promise_scalar(self, tnode) -> bool:
-        """A type node that is `number`/`boolean` or a
-        `Promise<...>` wrapping one — the `async` return-annotation
-        counterpart of `_scalar_annotation`."""
-        if tnode.type == "predefined_type":
-            return tnode.text in _SCALAR_TYPES
-        if tnode.type == "generic_type":
-            name = tnode.child_by_field_name("name")
-            args = tnode.child_by_field_name("type_arguments")
-            targs = _children(args) if args is not None else []
-            return (
-                name is not None
-                and name.text == b"Promise"
-                and len(targs) == 1
-                and self._promise_scalar(targs[0])
-            )
-        return False
 
     def _sequence(
         self,
@@ -3018,8 +2951,9 @@ class _Builder:
         """`(a, b = d, ...rest)` / `x =>` — the formal parameter
         names plus any default expressions (evaluated at the call
         site) and the rest index (-1 when absent). A rest
-        parameter must come last; destructured/typed-non-scalar
-        parameters close."""
+        parameter must come last; destructured patterns close.
+        Annotations are type-level and ignored — `a: Foo` binds
+        positionally like `a`."""
         params_node = node.child_by_field_name("parameters")
         if params_node is None:
             p = node.child_by_field_name("parameter")
@@ -3046,7 +2980,6 @@ class _Builder:
                     "unsupported_expression", _span(param)
                 )
             pattern = param.child_by_field_name("pattern")
-            ptype = param.child_by_field_name("type")
             if pattern is not None and pattern.type == "rest_pattern":
                 target = next(
                     iter(_children(pattern)), None
@@ -3058,10 +2991,7 @@ class _Builder:
                 names.append(target.text.decode())
                 rest = len(names) - 1
                 continue
-            if pattern is None or (
-                ptype is not None
-                and not self._scalar_annotation(ptype)
-            ):
+            if pattern is None:
                 raise _Unsupported(
                     "unsupported_expression", _span(param)
                 )

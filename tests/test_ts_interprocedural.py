@@ -236,9 +236,11 @@ def test_multiple_functions_each_summarized():
     summaries = _summarize(src).functions
     assert {s.name for s in summaries} == {"g", "f", "h"}
     by_name = {s.name: s for s in summaries}
+    # Annotations are type-level — `bad: string` admits, and its
+    # param binds index 1 like any other.
     assert by_name["g"].available and by_name["f"].available
-    assert not by_name["h"].available
-    assert by_name["h"].gaps[0].reason == "unsupported_signature"
+    assert by_name["h"].available
+    assert by_name["h"].return_dependencies == frozenset({0})
 
 
 def test_parenthesized_expressions():
@@ -257,17 +259,18 @@ def test_pinned_is_empty_in_slice0():
 # --- signature closures ------------------------------------------------------
 
 
-def test_unannotated_parameter_closes():
+def test_unannotated_parameter_admits():
+    # `function f(x)` — the param binds its index; annotations
+    # were never needed by the dep model.
     s = _fn("function f(x): number { return 1; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available
+    assert s.return_dependencies == frozenset()
 
 
-def test_non_scalar_parameter_closes():
+def test_non_scalar_parameter_admits():
     for t in ("string", "any", "number[]", "unknown"):
         s = _fn(f"function f(x: {t}): number {{ return 1; }}")
-        assert not s.available, t
-        assert s.gaps[0].reason == "unsupported_signature"
+        assert s.available, t
 
 
 def test_optional_parameter_admits():
@@ -350,16 +353,17 @@ def test_destructured_parameter_admits():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_missing_return_type_closes():
+def test_missing_return_type_admits():
+    # The return annotation is type-level — deps come from the
+    # actual `return`.
     s = _fn("function f(x: number) { return x; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
 
 
-def test_non_scalar_return_type_closes():
+def test_non_scalar_return_type_admits():
     s = _fn("function f(x: number): string { return \"s\"; }")
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available
 
 
 def test_async_function_admits_scalar():
@@ -370,13 +374,14 @@ def test_async_function_admits_scalar():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_generator_closes():
-    # A generator is not a function_declaration — it is not summarized
-    # at all (it is a closed top-level node, not a named function).
-    summaries = _summarize("function* g() { yield 1; }").functions
-    assert summaries == () or not any(
-        s.name == "g" and s.available for s in summaries
-    )
+def test_generator_admits():
+    # A generator's `yield` operand deps union into its return
+    # deps (no iterator slot — over-approximation).
+    summaries = _summarize(
+        "function* g(x: number) { yield x; }"
+    ).functions
+    (g,) = [s for s in summaries if s.name == "g"]
+    assert g.available and g.return_dependencies == frozenset({0})
 
 
 # --- statement closures ------------------------------------------------------
@@ -1002,7 +1007,11 @@ def test_deps_are_over_approximation():
 
 
 def test_unavailable_is_none_not_empty():
-    s = _fn("function f(x): number { return 1; }")
+    # An unresolvable callee still closes — return_dependencies
+    # is None, not an empty set.
+    s = _fn(
+        "function f(x: number): number { return missing(x); }"
+    )
     assert not s.available
     assert s.return_dependencies is None
 
@@ -1231,7 +1240,9 @@ def test_for_condition_call_transfer_widens():
 
 
 def test_unavailable_summary_reports_unknown_effects():
-    s = _fn("function f(x): number { return 1; }")
+    s = _fn(
+        "function f(x: number): number { return missing(x); }"
+    )
     assert not s.available
     assert s.effects == "unknown"
 
@@ -3646,19 +3657,20 @@ def test_async_nested_promise():
     assert s.available and s.return_dependencies == frozenset({0})
 
 
-def test_async_non_scalar_promise_closes():
+def test_async_non_scalar_promise_admits():
     s = _fn(
         "async function f(x: number): Promise<string> { return x; }"
     )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_signature"
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
 
 
-def test_nonasync_promise_closes():
+def test_nonasync_promise_admits():
     s = _fn(
         "function f(x: number): Promise<number> { return x; }"
     )
-    assert not s.available
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
 
 
 def test_for_await():
@@ -4295,3 +4307,27 @@ def test_module_composite_member_store():
         " return o[\"a\"]; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+# --- slice 45: parameter annotation widening --------------------
+
+
+def test_unannotated_param_binds_index():
+    s = _fn("function f(x): number { return x; }")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_composite_param_annotation_admits():
+    # `f(o: Foo)` — the param binds its index; a member read of
+    # it reads the whole index (over-approximation).
+    s = _fn("function f(o: Foo): number { return o.a; }")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_method_typed_params_admit():
+    s = _fn(
+        "const T = { tag(a: TemplateStringsArray, ...b: number[])"
+        " { return 0; } };\n"
+        "function f(x: number): number { return x; }"
+    )
+    assert s.available
