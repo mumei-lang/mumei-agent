@@ -5985,8 +5985,7 @@ class _Builder:
             raise _Unsupported("unsupported_expression", span)
         return old, tpath, arr
 
-    @staticmethod
-    def _rebind_composite(locals_, old, tpath, new_arr, span):
+    def _rebind_composite(self, locals_, old, tpath, new_arr, span):
         """Rebind every same-scope alias of `old` to a copy whose
         `tpath` field table is `new_arr`'s (copy-on-write like
         `_member_store`)."""
@@ -5995,6 +5994,13 @@ class _Builder:
             if tpath
             else new_arr
         )
+        if self._may_depth:
+            # May-write (short-circuit RHS, optional chain): union
+            # into the shared object — rebinding would drop the
+            # skipped path's fields and split one alias into two
+            # objects (same rule as `_member_store`).
+            _merge_into(old, new)
+            return new
         for name, val in locals_.items():
             if val is old:
                 locals_[name] = new
@@ -6420,9 +6426,12 @@ class _Builder:
                     True, span,
                 )
             )
-            for name, val in locals_.items():
-                if val is old:
-                    locals_[name] = new
+            if self._may_depth:
+                _merge_into(old, new)
+            else:
+                for name, val in locals_.items():
+                    if val is old:
+                        locals_[name] = new
             return record(actual_union)
         if prop in {"map", "flatMap"}:
             result = cb_result if cb_result is not None else elem

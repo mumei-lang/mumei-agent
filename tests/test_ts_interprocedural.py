@@ -6949,6 +6949,18 @@ def test_review_conditional_static_write_over_method():
     assert s.available
 
 
+def test_review_conditional_array_mutation_keeps_deps():
+    # `c && a.shift()` is a may-write: when `c` is false the
+    # original `a[0]` still answers the read, so its deps survive.
+    s = _fn(
+        "function f(c: boolean, x: number): number {"
+        " let a = [x, 0];"
+        " c && a.shift();"
+        " return a[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
 def test_review_fs_resolver_importer_relative(tmp_path):
     # `./c` imported from `sub/b.ts` resolves `sub/c.ts`, not the
     # entry directory's `c.ts`.
