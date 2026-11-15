@@ -31,6 +31,7 @@ _SUBCOMMANDS = {
     "sol-summaries-accept",
     "sol-summaries-check",
     "sol-summaries-reuse",
+    "sol-summaries-attempt",
     "config",
 }
 
@@ -554,6 +555,23 @@ def main() -> None:
         sol_reuse_build_parser(parser)
         args = parser.parse_args(argv[1:])
         sol_reuse_main(args)
+    elif command == "sol-summaries-attempt":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_attempt_parser as sol_attempt_build_parser,
+            main_attempt as sol_attempt_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-attempt",
+            description=(
+                "Run the sol-summaries produce route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        sol_attempt_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_attempt_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

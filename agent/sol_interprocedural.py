@@ -2597,3 +2597,152 @@ def main_reuse(args=None) -> None:
             handle.write(document + "\n")
     else:
         print(document)
+
+
+ATTEMPT_REQUEST_PROFILE = "mumei.sol-summaries-attempt-request/v1"
+ATTEMPT_REPORT_PROFILE = "mumei.sol-summaries-attempt-report/v1"
+
+
+def build_attempt_parser(parser=None):
+    """Parser for ``sol-summaries-attempt``: the produce route's
+    declared inputs plus the attempt's own declared timeout and an
+    optional memory bound."""
+    parser = build_parser(parser)
+    parser.description = (
+        "Run the sol-summaries produce route as one declared attempt "
+        "and emit the reconciled lineage descriptors."
+    )
+    parser.add_argument(
+        "--attempt-timeout",
+        type=int,
+        required=True,
+        metavar="<MS>",
+        help="Declared attempt bound in milliseconds (required).",
+    )
+    parser.add_argument(
+        "--memory-bound-mb",
+        type=int,
+        default=None,
+        metavar="<MB>",
+        help=(
+            "Optional declared POSIX RLIMIT_AS ceiling applied to the "
+            "attempt child's whole address space."
+        ),
+    )
+    parser.add_argument(
+        "--output",
+        metavar="<PATH>",
+        help="Write the attempt report JSON here instead of stdout.",
+    )
+    return parser
+
+
+def main_attempt(args=None) -> None:
+    """Run the produce route as one declared attempt.
+
+    Spawns ``python -m agent sol-summaries <source>`` through the C11
+    lifecycle: an ``AttemptSequence`` keyed to a request fingerprint
+    binding the declared source's bytes, one attempt observed by
+    ``AttemptRunner`` under ``--attempt-timeout``, reconcile and
+    canonical publication. Emits
+    ``mumei.sol-summaries-attempt-report/v1`` — the canonical
+    lineage, the normalized run-result descriptor and, only when a
+    result was selected, the
+    ``mumei.verifier-evidence-candidate/v1`` descriptor.
+    """
+    import hashlib
+    import json
+    import sys
+    from pathlib import Path
+
+    if args is None:
+        args = build_attempt_parser().parse_args()
+    if args.output is not None:
+        try:
+            same = (
+                Path(args.output).resolve() == Path(args.source).resolve()
+            )
+        except RuntimeError:
+            same = True
+        if same:
+            _emit(
+                {
+                    "schema_version": ATTEMPT_REPORT_PROFILE,
+                    "error": {
+                        "reason": "output_overwrites_source",
+                        "detail": (
+                            "declared output path would overwrite a "
+                            "declared source"
+                        ),
+                    },
+                },
+                2,
+            )
+    raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
+    from agent.attempt_runner import AttemptRunner
+    from agent.verification_attempt import (
+        AttemptOutput,
+        AttemptSequence,
+        AttemptSequenceStore,
+    )
+
+    request_doc = {
+        "schema_version": ATTEMPT_REQUEST_PROFILE,
+        "source": {
+            "path": args.source,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        },
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            request_doc, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    argv = (
+        sys.executable,
+        "-m",
+        "agent",
+        "sol-summaries",
+        args.source,
+    )
+    try:
+        sequence = AttemptSequence(
+            fingerprint, args.attempt_timeout
+        ).begin_attempt()
+        request = sequence.next_dispatch()
+        run = AttemptRunner().run(
+            request, argv, memory_bound_mb=args.memory_bound_mb
+        )
+        published = sequence.reconcile_report(run.record)
+        if run.record.state == "exited":
+            published = published.select_result(
+                AttemptOutput(
+                    published.current,
+                    run.stdout,
+                    hashlib.sha256(run.stdout).hexdigest(),
+                    complete=run.complete,
+                )
+            )
+        store = AttemptSequenceStore()
+        store.publish(published)
+    except ValueError as exc:
+        _emit(
+            {
+                "schema_version": ATTEMPT_REPORT_PROFILE,
+                "error": {"reason": "attempt_failed", "detail": str(exc)},
+            },
+            2,
+        )
+    report = {
+        "schema_version": ATTEMPT_REPORT_PROFILE,
+        "sequence": published.to_dict(),
+        "normalized": run.normalized().to_dict(),
+    }
+    if published.selected_result is not None:
+        report["candidate"] = published.evidence_candidate().to_dict()
+    document = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(document)
+    else:
+        sys.stdout.write(document)

@@ -43,6 +43,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `sol-summaries-accept` | 2 | Re-derive the Solidity summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `sol-summaries-check` | 2 | Re-derive the Solidity summary set for one declared source and check a declared manifest's functions against it. |
 | `sol-summaries-reuse` | 2 | Re-derive the Solidity summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `sol-summaries-attempt` | 3 | Run the sol-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -559,6 +560,25 @@ Re-derive the Solidity summary set for one declared source and emit a manifest t
 |---|---|---|---|---|
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.sol-interprocedural/v1) to reuse unchanged summaries from. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+
+
+## `mumei-agent sol-summaries-attempt`
+
+Run the sol-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `source` | yes | `<SOURCE>` | Path to a single Solidity source file (at most 256 KiB). |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 
 
 ## `mumei-agent mcp-server`
