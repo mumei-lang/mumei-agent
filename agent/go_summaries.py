@@ -128,6 +128,30 @@ def build_check_parser(
     return parser
 
 
+def build_reuse_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """Parser for ``go-summaries-reuse``: the produce route's declared
+    inputs plus ``--manifest`` naming the summary manifest to reuse."""
+    parser = build_check_parser(parser)
+    parser.description = (
+        "Run a provisioned go-types helper on declared Go sources and "
+        "emit a manifest that reuses a declared manifest's summaries "
+        "for the functions the fresh report confirms unchanged."
+    )
+    for action in parser._actions:
+        if action.dest == "manifest":
+            action.help = (
+                "Summary manifest (mumei.go-scalar-parameter-deps/v1) "
+                "to reuse."
+            )
+        elif action.dest == "output":
+            action.help = (
+                "Write the merged manifest JSON here instead of stdout."
+            )
+    return parser
+
+
 def _read_sources(paths: list[str]) -> dict[str, str]:
     """Map each declared basename to its UTF-8 file contents.
 
@@ -364,6 +388,31 @@ def main(args: argparse.Namespace | None = None) -> int:
     return 0
 
 
+def _reuse_partition(
+    restored: GoSummarySet, live: GoSummarySet, report: bytes
+) -> tuple[list[str], list[str], list[str]]:
+    """Partition the manifest's functions against the fresh report.
+
+    `reusable` — the identity survives in the fresh report and
+    `stale_dependents` does not flag it; `stale` — it references a
+    replaced identity, transitively; `missing` — the fresh report no
+    longer produces the identity. Detection only.
+    """
+    known: set[str] = set()
+    _report_identities(json.loads(report), known)
+    live_ids = {f.binding_id for f in live.functions}
+    stale = restored.stale_dependents(known)
+    reusable, stale_ids, missing = [], [], []
+    for entry in restored.functions:
+        if entry.binding_id not in live_ids:
+            missing.append(entry.binding_id)
+        elif entry.binding_id in stale:
+            stale_ids.append(entry.binding_id)
+        else:
+            reusable.append(entry.binding_id)
+    return reusable, stale_ids, missing
+
+
 def main_check(args: argparse.Namespace | None = None) -> int:
     """Check a declared manifest against a fresh helper report.
 
@@ -381,18 +430,7 @@ def main_check(args: argparse.Namespace | None = None) -> int:
         restored = _read_manifest(args.manifest)
         sources, report = _run_declared(args)
         live = _summarize(sources, report, args.target_arch)
-        known: set[str] = set()
-        _report_identities(json.loads(report), known)
-        live_ids = {f.binding_id for f in live.functions}
-        stale = restored.stale_dependents(known)
-        reusable, stale_ids, missing = [], [], []
-        for entry in restored.functions:
-            if entry.binding_id not in live_ids:
-                missing.append(entry.binding_id)
-            elif entry.binding_id in stale:
-                stale_ids.append(entry.binding_id)
-            else:
-                reusable.append(entry.binding_id)
+        reusable, stale_ids, missing = _reuse_partition(restored, live, report)
         document = (
             json.dumps(
                 {
@@ -411,5 +449,44 @@ def main_check(args: argparse.Namespace | None = None) -> int:
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"go-summaries-check: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return 0
+
+
+def main_reuse(args: argparse.Namespace | None = None) -> int:
+    """Emit a manifest reusing a declared manifest's unchanged summaries.
+
+    Same partition as ``go-summaries-check``: a manifest function whose
+    identity survives in the fresh report and that `stale_dependents`
+    does not flag is reused verbatim, every other live function is
+    freshly derived and a `missing` entry is dropped. The emitted set is
+    keyed to the fresh context — per-function reuse stays the host's
+    weaker freshness choice, never the strict `for_function` gate.
+    """
+    if args is None:
+        args = build_reuse_parser().parse_args()
+    try:
+        restored = _read_manifest(args.manifest)
+        if restored.target_arch != args.target_arch:
+            raise SnapshotError(
+                "declared manifest was derived for a different "
+                "target architecture"
+            )
+        sources, report = _run_declared(args)
+        live = _summarize(sources, report, args.target_arch)
+        reusable, _, _ = _reuse_partition(restored, live, report)
+        by_id = {f.binding_id: f for f in restored.functions}
+        merged = GoSummarySet(
+            live.context_key,
+            tuple(
+                by_id[f.binding_id] if f.binding_id in reusable else f
+                for f in live.functions
+            ),
+            live.target_arch,
+        )
+        document = json.dumps(merged.to_dict(), indent=2, sort_keys=True) + "\n"
+        _emit(document, args.output)
+    except (SnapshotError, OSError, UnicodeDecodeError) as exc:
+        print(f"go-summaries-reuse: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0

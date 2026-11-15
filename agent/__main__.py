@@ -30,6 +30,7 @@ _SUBCOMMANDS = {
     "config",
     "go-summaries",
     "go-summaries-check",
+    "go-summaries-reuse",
 }
 
 
@@ -518,6 +519,24 @@ def main() -> None:
         go_summaries_check_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_check_main(args))
+    elif command == "go-summaries-reuse":
+        import argparse
+        from agent.go_summaries import (
+            build_reuse_parser as go_summaries_reuse_build_parser,
+            main_reuse as go_summaries_reuse_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent go-summaries-reuse",
+            description=(
+                "Run a provisioned go-types helper on declared Go sources "
+                "and emit a manifest reusing a declared manifest's "
+                "unchanged summaries."
+            ),
+        )
+        go_summaries_reuse_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(go_summaries_reuse_main(args))
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

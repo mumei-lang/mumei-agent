@@ -2819,7 +2819,9 @@ fields (`result_type`, `pinned`, `callee`, `imported`) stay absent
 rather than defaulting. Spans serialize with their file index for
 package units and without it for single-file units; anything that is
 not a declared `ByteSpan`/`FileSpan` fails statically rather than
-serializing a foreign shape.
+serializing a foreign shape. The set also declares the `target_arch`
+it was derived for — scalar widths are arch-dependent while binding
+identities are not — so a reuse route can refuse a mismatched unit.
 
 `GoSummarySet.from_dict()` rebuilds a declared set with the same
 boundary discipline as the C11 snapshot restorations: strict key sets
@@ -2891,6 +2893,31 @@ check — `stale_dependents` itself stays a detection helper and what
 to recompute remains the host's call. `--output` may not equal any
 declared input (sources, import files or the manifest itself). No
 scheduling, re-derivation or audit route is wired yet; Evidence
+normalization/acceptance stays open.
+
+### C06 declared summary manifest reuse (go-summaries-reuse)
+
+`python -m agent go-summaries-reuse` is the third consumable route: it
+runs the same provisioned helper on the same declared inputs plus
+`--manifest <PATH>`, partitions the declared manifest's functions by the
+same rule `go-summaries-check` reports, and emits a merged
+`mumei.go-scalar-parameter-deps/v1` manifest — a `reusable` function's
+declared summary is carried over verbatim, every other live function is
+freshly derived and a `missing` entry is dropped. The merged set is
+keyed to the fresh context, so it describes the current unit, not the
+declared one. The manifest now declares the `target_arch` it was
+derived for (`int`/`uintptr` widths are arch-dependent while binding
+identities are not): a manifest whose declared architecture differs
+from `--target-arch` — or that declares none — fails closed rather
+than carrying wrong-width summaries forward.
+
+Reuse remains detection, not authorization: carrying a declared summary
+forward is the host's per-function freshness choice under the weaker
+identity-survival rule — the strict whole-set gate is still
+`for_function`/`for_package_function` against the live context key, and
+`stale_dependents` still flags what must be re-derived. `--output` may
+not equal any declared input (sources, import files or the manifest
+itself). No scheduling or audit route is wired yet; Evidence
 normalization/acceptance stays open.
 
 

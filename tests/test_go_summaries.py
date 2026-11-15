@@ -14,7 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from agent.go_summaries import build_check_parser, build_parser, main, main_check
+from agent.go_summaries import (
+    build_check_parser,
+    build_parser,
+    build_reuse_parser,
+    main,
+    main_check,
+    main_reuse,
+)
 from agent.go_type_snapshot import PACKAGE_PROFILE, TARGETS
 from tests.test_go_type_snapshot import SOURCE, schema_fixture
 
@@ -103,6 +110,19 @@ def _check_args(helper: Path, manifest: Path, *sources: Path, extra=()):
     return _args(
         helper, *sources, extra=["--manifest", str(manifest), *extra]
     )
+
+
+def _run_reuse(capsys, argv: list[str]):
+    try:
+        code = main_reuse(build_reuse_parser().parse_args(argv))
+    except SystemExit as exc:
+        code = exc.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def _reuse_args(helper: Path, manifest: Path, *sources: Path, extra=()):
+    return _check_args(helper, manifest, *sources, extra=extra)
 
 
 def _produce_manifest(tmp_path, capsys, helper: Path, *sources: Path):
@@ -560,6 +580,136 @@ def test_check_counts_member_identity_lists_as_known(tmp_path, capsys):
         f["binding_id"] for f in manifest["functions"]
     ]
     assert report_out["stale"] == [] and report_out["missing"] == []
+
+
+def test_reuse_merges_declared_and_fresh_summaries(tmp_path, capsys):
+    files = {
+        "a.go": "package p\nfunc F0() int64 { return 1 }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    helper = _write_helper(
+        tmp_path, json.dumps(_package_fixture(files)).encode()
+    )
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, *paths)
+    manifest = json.loads(manifest_path.read_text())
+    fresh_context = manifest["context_key"]
+    fresh_f1 = dict(manifest["functions"][1])
+    # F0 stays reusable: tamper a declared field to prove the emitted
+    # entry is the declared one, not a fresh derivation.
+    manifest["functions"][0]["key"] = "tampered"
+    # F1 goes stale via a call target the report never declares; F1's
+    # merged entry must come from the fresh derivation instead.
+    manifest["functions"][1]["calls"] = [
+        {
+            "span": {"file": 0, "start": 0, "end": 1},
+            "target": "absent-target",
+            "arguments": [],
+            "result": [],
+        }
+    ]
+    # A manifest function the report no longer produces is dropped.
+    manifest["functions"].append(
+        {
+            "binding_id": "gone-fn",
+            "key": "gone",
+            "parameters": [],
+            "calls": [],
+            "gaps": [],
+        }
+    )
+    manifest["context_key"] = "tampered-context"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_reuse(
+        capsys, _reuse_args(helper, manifest_path, *paths)
+    )
+    assert code == 0 and err == ""
+    merged = json.loads(out)
+    assert merged["context_key"] == fresh_context
+    keys = [f["key"] for f in merged["functions"]]
+    assert keys == ["tampered", fresh_f1["key"]]
+    assert merged["functions"][1] == fresh_f1
+    assert all(
+        f["binding_id"] != "gone-fn" for f in merged["functions"]
+    )
+
+
+def test_reuse_output_declares_its_target_arch(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    merged_path = tmp_path / "merged.json"
+    code, _, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper, manifest_path, source,
+            extra=["--output", str(merged_path)],
+        ),
+    )
+    assert code == 0 and err == ""
+    merged = json.loads(merged_path.read_text(encoding="utf-8"))
+    assert merged["target_arch"] == "amd64"
+    # A merged manifest is itself reusable for the same target.
+    code, _, err = _run_reuse(
+        capsys, _reuse_args(helper, merged_path, source)
+    )
+    assert code == 0 and err == ""
+
+
+def test_reuse_rejects_a_manifest_from_another_target_arch(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    code, _, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper, manifest_path, source,
+            extra=["--target-arch", "386"],
+        ),
+    )
+    assert code == 1 and "target architecture" in err
+
+
+def test_reuse_rejects_a_manifest_without_a_target_arch(
+    tmp_path, capsys
+):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["target_arch"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, _, err = _run_reuse(
+        capsys, _reuse_args(helper, manifest_path, source)
+    )
+    assert code == 1 and "target architecture" in err
+
+
+def test_reuse_rejects_a_malformed_manifest(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    code, _, err = _run_reuse(
+        capsys, _reuse_args(helper, bad, source)
+    )
+    assert code == 1 and "manifest" in err
+
+
+def test_reuse_output_equal_to_the_manifest_fails(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    code, _, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper, manifest_path, source,
+            extra=["--output", str(manifest_path)],
+        ),
+    )
+    assert code == 1 and "declared" in err
 
 
 def test_check_rejects_a_malformed_manifest(tmp_path, capsys):
