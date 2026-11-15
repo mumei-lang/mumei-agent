@@ -268,6 +268,59 @@ def build_plan_parser(parser):
     return parser
 
 
+def run_plan(args, *, runner=None) -> dict:
+    """Plan a summary route and return the ``mumei.summaries-plan/v1`` dict.
+
+    Shared by the CLI entrypoint and the ``summaries_plan`` MCP tool so
+    both bind the same declared request: histories are restored from the
+    declared file, `plan_summary_route` drives the probes and the
+    emitted document is identical. Declared failures raise —
+    `(OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError)` —
+    rather than exiting, so callers choose their own error surface.
+    """
+    import json
+
+    histories = ()
+    if args.histories is not None:
+        from agent.adapter_probe import AdapterProbeHistory
+
+        declared = json.loads(
+            Path(args.histories).read_text(encoding="utf-8")
+        )
+        if type(declared) is not list:
+            raise ValueError("histories file must be a JSON array")
+        histories = tuple(
+            AdapterProbeHistory.from_dict(record) for record in declared
+        )
+    probe_plan = plan_summary_route(
+        args.profile,
+        PlannerPolicy(),
+        stamp=args.stamp,
+        tool_version=args.tool_version,
+        histories=histories,
+        rounds=args.rounds,
+        max_parallel=args.max_parallel,
+        runner=runner,
+    )
+    return {
+        "schema_version": PLAN_PROFILE,
+        "profile": args.profile,
+        "plan": probe_plan.plan.to_dict(),
+        "observations": [
+            {
+                "adapter_id": observation.adapter_id,
+                "availability": observation.availability,
+                "tool_version": observation.tool_version,
+                "stamp": observation.stamp,
+            }
+            for observation in probe_plan.observations
+        ],
+        "histories": [
+            history.to_dict() for history in probe_plan.histories
+        ],
+    }
+
+
 def main_plan(args=None, *, runner=None) -> int:
     """Plan a summary route through the declared probe boundary.
 
@@ -291,67 +344,10 @@ def main_plan(args=None, *, runner=None) -> int:
         )
         build_plan_parser(parser)
         args = parser.parse_args()
-    histories = ()
-    if args.histories is not None:
-        from agent.adapter_probe import AdapterProbeHistory
-
-        try:
-            declared = json.loads(
-                Path(args.histories).read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            print(f"summaries-plan: {exc}", file=sys.stderr)
-            sys.exit(1)
-        if type(declared) is not list:
-            print(
-                "summaries-plan: histories file must be a JSON array",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        try:
-            histories = tuple(
-                AdapterProbeHistory.from_dict(record) for record in declared
-            )
-        except ValueError as exc:
-            print(f"summaries-plan: {exc}", file=sys.stderr)
-            sys.exit(1)
     try:
-        probe_plan = plan_summary_route(
-            args.profile,
-            PlannerPolicy(),
-            stamp=args.stamp,
-            tool_version=args.tool_version,
-            histories=histories,
-            rounds=args.rounds,
-            max_parallel=args.max_parallel,
-            runner=runner,
-        )
-    except (ValueError, OSError) as exc:
+        document = run_plan(args, runner=runner)
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"summaries-plan: {exc}", file=sys.stderr)
         sys.exit(1)
-    document = (
-        json.dumps(
-            {
-                "schema_version": PLAN_PROFILE,
-                "profile": args.profile,
-                "plan": probe_plan.plan.to_dict(),
-                "observations": [
-                    {
-                        "adapter_id": observation.adapter_id,
-                        "availability": observation.availability,
-                        "tool_version": observation.tool_version,
-                        "stamp": observation.stamp,
-                    }
-                    for observation in probe_plan.observations
-                ],
-                "histories": [
-                    history.to_dict() for history in probe_plan.histories
-                ],
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    sys.stdout.write(document)
+    sys.stdout.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
     return 0

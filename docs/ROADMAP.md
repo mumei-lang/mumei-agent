@@ -3329,6 +3329,20 @@ Routing only — a selected adapter is a routing decision, not an
 accepted manifest.
 
 
+### C06 summary planning as an MCP tool (summaries_plan)
+
+The `summaries_plan` MCP tool exposes the same declared boundary:
+`run_plan(args)` is the shared report builder the CLI entrypoint and
+the tool both call — identical request binding, identical
+`mumei.summaries-plan/v1` document. `histories_path` is a declared
+path checked against the single-line rule; a declared failure
+(invalid profile/stamp, unreadable or malformed histories, a probe
+boundary error) surfaces as `error` with the histories path
+basename-redacted, never as a process exit. Planning is routing
+only: the tool returns `plan`, `observations` and `histories` and a
+selected adapter is still not an accepted manifest.
+
+
 ### C06 declared summary MCP tool (go_summaries)
 
 The MCP surface exposes the produce route as `go_summaries(
