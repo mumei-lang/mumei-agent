@@ -1159,6 +1159,15 @@ def _merge_vals(old, new):
     return _scalar_of(old) | _scalar_of(new)
 
 
+def _alt_key(alt):
+    """Dedup key for alternate candidates: node identity plus the
+    bound-argument deps — `f.bind(t, a)` and `f.bind(t, b)` share a
+    node but are different partial applications."""
+    if alt.bound is None:
+        return (id(alt.node), None)
+    return (id(alt.node), alt.bound[0])
+
+
 def _merge_callables(old, new):
     """Join two function values keeping both invocable: the merged
     value is `old` carrying `new` as an extra alternate candidate."""
@@ -1166,10 +1175,16 @@ def _merge_callables(old, new):
         # Same primary candidate — but `new` may carry alts the
         # branch-local merge already collected (e.g. `g = n`
         # inside a branch merged `n` first, then `_join` merges
-        # that result against `old`). Keep every candidate.
-        seen = {id(alt.node) for alt in old.alts}
+        # that result against `old`). Keep every candidate. A
+        # differing `bound` makes `new` itself a distinct
+        # candidate — `f.bind(t, a)` merged with `f.bind(t, b)`
+        # must not drop `b`'s bound actuals.
+        extras = list(new.alts)
+        if new.bound != old.bound:
+            extras.append(new)
+        seen = {_alt_key(alt) for alt in old.alts}
         kept = tuple(
-            alt for alt in new.alts if id(alt.node) not in seen
+            alt for alt in extras if _alt_key(alt) not in seen
         )
         if not kept and not (new.extra - old.extra) and not (
             new.captured - old.captured
@@ -1225,6 +1240,22 @@ def _widen_callable(old, deps):
     widened.alts = old.alts
     widened.extra = old.extra | deps
     return widened
+
+
+def _deep_fields(fields):
+    """Structure-only deep copy of a composite's field table for
+    the loop fixed-point snapshot — nested `_Composite`s are
+    cloned so in-place may-writes can't corrupt the snapshot;
+    leaf deps and callables are immutable and shared."""
+    out = {}
+    for key, val in fields.items():
+        if isinstance(val, _Composite):
+            out[key] = _Composite(
+                _deep_fields(val.fields), val.klass, val.deleted
+            )
+        else:
+            out[key] = val
+    return out
 
 
 def _merge_into(old, new):
@@ -3605,9 +3636,14 @@ class _Builder:
                 snap = {}
                 for sname, sval in inner.items():
                     if isinstance(sval, _Composite):
+                        # Deep-copy nested composites — a may-write
+                        # into a nested field mutates the shared
+                        # inner object in place, and a shallow
+                        # snapshot would see the mutation and end
+                        # the fixed point a pass early.
                         snap[sname] = (
                             "fields",
-                            dict(sval.fields),
+                            _deep_fields(sval.fields),
                             frozenset(sval.deleted),
                         )
                     elif isinstance(sval, _Callable):
@@ -4590,9 +4626,14 @@ class _Builder:
             self._opaque_call_writes(actual_values, result)
             return result
         self._invoke_depth += 1
-        if may:
+        widened_may = may or bool(cval.extra)
+        if widened_may:
             # `o?.f(x)` / `f?.(x)` — the callee may be absent, so
-            # its writes to shared composites are may-writes.
+            # its writes to shared composites are may-writes. A
+            # non-empty `extra` means a scalar (un-invocable)
+            # candidate was joined into the value — the invoked
+            # function may not be any analyzed body, so the
+            # analyzed writes are may-writes too.
             self._may_depth += 1
         try:
             saved_frame = dict(locals_) if cval.alts else None
@@ -4633,11 +4674,13 @@ class _Builder:
                 # pre-call frame: the primary's writes must not
                 # reach the alternate's reads (and vice versa),
                 # then both worlds' writes union back in.
-                if cval.bound is not None:
+                if cval.bound is not None and alt.bound is None:
                     # `bind()` applied to the primary carries the
                     # same partial application onto each
                     # candidate — bound actuals and a bound
-                    # `this` must reach the alternate too.
+                    # `this` must reach the alternate too. An alt
+                    # carrying its OWN bound (`f.bind(t, b)` kept
+                    # as a distinct candidate) keeps it instead.
                     bound_alt = _Callable(
                         alt.node,
                         alt.params,
@@ -4785,6 +4828,24 @@ class _Builder:
                     else:
                         locals_[name] = _merge_vals(old, aval)
             if cval.extra:
+                # The scalar candidate's call is opaque — it may
+                # write arbitrary fields of composite actuals and
+                # of the `this` object, so fold the union of its
+                # deps plus every actual in as a may-write.
+                opaque = frozenset(cval.extra)
+                for a in actual:
+                    opaque |= a
+                wvals = (
+                    list(actual_values) if actual_values else []
+                )
+                if isinstance(this_val, _Composite):
+                    wvals.append(this_val)
+                if (
+                    cval.bound is not None
+                    and isinstance(cval.bound[2], _Composite)
+                ):
+                    wvals.append(cval.bound[2])
+                self._opaque_call_writes(wvals, opaque)
                 if isinstance(result, frozenset):
                     result = result | cval.extra
                 elif isinstance(result, _Composite):
@@ -4803,7 +4864,7 @@ class _Builder:
                     result = widened
             return result
         finally:
-            if may:
+            if widened_may:
                 self._may_depth -= 1
             self._invoke_depth -= 1
 
@@ -7659,15 +7720,35 @@ def _reuse_partition(declared, live):
     """
     live_by_name = {}
     for f in live.functions:
-        live_by_name.setdefault(f.name, f)
-    reusable, stale, missing = [], [], []
+        live_by_name.setdefault(f.name, []).append(f)
+    declared_counts = {}
     for entry in declared.functions:
-        fresh = live_by_name.get(entry.name)
-        if fresh is None:
-            missing.append(entry.name)
-        elif fresh == entry:
+        declared_counts[entry.name] = (
+            declared_counts.get(entry.name, 0) + 1
+        )
+    reusable, stale, missing = [], [], []
+    seen_stale, seen_missing = set(), set()
+    for entry in declared.functions:
+        group = live_by_name.get(entry.name)
+        if group is None:
+            if entry.name not in seen_missing:
+                seen_missing.add(entry.name)
+                missing.append(entry.name)
+            continue
+        if len(group) != 1 or declared_counts[entry.name] != 1:
+            # Nested + top-level declarations can share a plain
+            # name — an ambiguous name must never adopt a record:
+            # comparing the first match while emitting the last
+            # would swap one function's summary for another's.
+            if entry.name not in seen_stale:
+                seen_stale.add(entry.name)
+                stale.append(entry.name)
+            continue
+        fresh = group[0]
+        if fresh == entry:
             reusable.append(entry.name)
-        else:
+        elif entry.name not in seen_stale:
+            seen_stale.add(entry.name)
             stale.append(entry.name)
     return reusable, stale, missing
 

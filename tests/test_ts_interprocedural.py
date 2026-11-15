@@ -6603,3 +6603,79 @@ def test_reuse_route_output_file(tmp_path, capsys):
     assert merged["context_key"] == (
         ts.summarize_typescript(_SRC_TWO).context_key
     )
+
+
+def test_loop_nested_field_write_keeps_next_pass_deps():
+    # A nested field read then rewritten inside a loop — the
+    # may-write mutates the shared inner composite in place; a
+    # shallow fixed-point snapshot would see its own mutation and
+    # end the loop a pass early, dropping `b` from `r`.
+    s = _fn(
+        "function f(a: number, b: number): number {"
+        " let o = { n: { v: 0 } };"
+        " let r = 0;"
+        " for (let i = 0; i < 2; i++) {"
+        "   r = o.n.v;"
+        "   o.n.v = b;"
+        " }"
+        " return r;"
+        " }"
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({1})
+
+
+def test_bind_merged_partials_keep_every_bound_actual():
+    # `g.bind(null, x)` joined with `g.bind(null, y)` — the two
+    # partial applications differ only in `bound`, so both must
+    # stay candidates and both bound actuals feed the result.
+    s = _fn(
+        "function g(a: number, b: number): number { return a + b; }"
+        "function f(x: number, c: boolean, y: number): number {"
+        " let h = c ? g.bind(null, x) : g.bind(null, y);"
+        " return h(0);"
+        " }"
+    )
+    assert s.available
+    # The boolean condition's dep may also fold in via `extra` —
+    # the bound actuals are the requirement.
+    assert {0, 2} <= s.return_dependencies
+
+
+def test_scalar_candidate_makes_writes_may():
+    # `cb` is `w` joined with the scalar `x` — the call may not run
+    # `w` at all, so `w`'s constant overwrite of `o.f` must union
+    # with the pre-call value instead of replacing it.
+    s = _fn(
+        "function f(x: number, c: boolean): number {"
+        " let o = { f: x };"
+        " function w(): number { o.f = 0; return 0; }"
+        " let cb = c ? w : x;"
+        " cb();"
+        " return o.f;"
+        " }"
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_check_route_ambiguous_name_is_never_reusable(
+    tmp_path, capsys
+):
+    source = (
+        "function f(x: number): number { return x; }"
+        "function g(): number {"
+        " function f(x: number, y: number): number { return y; }"
+        " return f(0, 1);"
+        " }"
+    )
+    src = tmp_path / "a.ts"
+    src.write_text(source)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(source).to_dict())
+    )
+    ts.main_check(_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert "f" in out["stale"]
+    assert "f" not in out["reusable"]
