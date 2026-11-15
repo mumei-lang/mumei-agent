@@ -2660,11 +2660,22 @@ declaration (JS resolution order); calling a name bound to a
 scalar or composite closes. Self-recursion hits `MAX_NODES`
 and closes the caller with `analysis_limit`.
 
-Boundaries: member calls `o.m()` (a callable in a field is
-reachable but the callee shape isn't an identifier — still
-closed), `new`, generators, tagged templates and `async` arrows
-stay closed, as do rest/destructured/typed-non-scalar arrow
-parameters.
+Boundaries: `new`, generators, tagged templates and `async`
+arrows stay closed, as do rest/destructured/typed-non-scalar
+arrow parameters. (Member calls on callable fields were admitted
+in slice 13.)
+
+### C06 TypeScript member calls on callable fields (slice 13)
+
+`o.f(x)` resolves the field's value — when it holds a
+`_Callable` (`{f: v => v}`), the body evaluates exactly like a
+name call: args bind, captured names read the call site, writes
+merge back as may-writes. The `TsCall` callee is the member
+path text (`o.g`). Calling a scalar/absent field closes.
+
+Boundaries: no `this` binding — a body reading `this` closes;
+shorthand method definitions `{m(){}}` still close at the
+literal; `new` stays closed.
 
 ## Roadmap authority and vocabulary
 

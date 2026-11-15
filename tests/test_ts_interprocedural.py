@@ -762,11 +762,12 @@ def test_arrow_function_value_admits():
 
 
 def test_member_call_closes():
+    # `Math` is an unbound base — the member call can't resolve.
     s = _fn(
         "function f(x: number): number { return Math.abs(x); }"
     )
     assert not s.available
-    assert s.gaps[0].reason == "unsupported_expression"
+    assert s.gaps[0].reason == "binding_unavailable"
 
 
 def test_unresolved_call_closes():
@@ -2111,3 +2112,43 @@ def test_arrow_no_return_is_dep_free():
         " const g = (v: number) => { v; }; return g(x); }"
     )
     assert s.available and s.return_dependencies == frozenset()
+
+
+# --- slice 13: member calls on callable fields
+
+
+def test_member_call_on_callable_field():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { g: (v: number) => v + 1 }; return o.g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert s.calls and s.calls[0].callee == "o.g"
+
+
+def test_member_call_scalar_field_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { g: x }; return o.g(x); }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_member_call_capture():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let z = y; let o = { g: () => z }; return o.g(); }"
+    )
+    # Captured `z` read at the call site.
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_member_call_write_merges_back():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " let o = { a: x, g: () => { o.a = y; } };"
+        " o.g(); return o.a; }"
+    )
+    # `o` shares the instance — the body's store reaches it.
+    assert s.available and s.return_dependencies == frozenset({0, 1})

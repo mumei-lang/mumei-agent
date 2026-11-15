@@ -108,6 +108,10 @@ Admitted:
   A local binding shadows a same-named function declaration, and
   calling a scalar/composite-bound name closes. Recursion hits
   `MAX_NODES` and closes the caller with `analysis_limit`.
+* Member calls `o.f(x)` where the field holds a `_Callable`
+  (`{f: v => v}`) — the member read resolves the callee and the
+  body evaluates as with a name call. There is no `this`
+  binding: a body that reads `this` closes inside.
 * Destructured declarations `const {a, b: c = d, ...rest} = o` /
   `const [x, y = d] = arr` — each sub-name binds the member read
   at its path (defaults union the default expression's deps, a
@@ -136,12 +140,12 @@ Admitted:
   the caller's admission. The result conservatively depends on
   every evaluated argument and records a `TsCall` transfer; the callee
   body is opaque (self-recursion records a transfer like any other
-  name-resolved call). Everything else — member calls, unresolved
-  names, `new` — stays closed.
+  name-resolved call). Everything else — calls through a
+  non-callable field, unresolved names, `new` — stays closed.
 
 Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
-member CALLS (`o.m()` — no method model yet), `this`,
+`this`, shorthand method definitions (`{m(){}}`),
 generators, `async`/`await`, `any`/composite/missing parameter
 types, destructured formal parameters, `new` and
 generator/tagged-template function values stay
@@ -2085,11 +2089,47 @@ class _Builder:
         if kind == "call_expression":
             function = node.child_by_field_name("function")
             arguments = node.child_by_field_name("arguments")
-            if (
-                function is None
-                or function.type != "identifier"
-                or arguments is None
-            ):
+            if function is None or arguments is None:
+                raise _Unsupported("unsupported_expression", _span(node))
+            if function.type in {
+                "member_expression",
+                "subscript_expression",
+            }:
+                # `o.f(x)` — the field may hold a `_Callable`
+                # (`{f: v => v}`). There is no `this` binding —
+                # a body reading `this` closes inside.
+                actual_m = tuple(
+                    self.expression(
+                        arg, params, locals_, transfers, count
+                    )
+                    for arg in _children(arguments)
+                )
+                raw = self._member_read(
+                    function, params, locals_, transfers, count
+                )
+                if not isinstance(raw, _Callable):
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                result = self._invoke_callable(
+                    raw,
+                    actual_m,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    _span(node),
+                )
+                transfers.append(
+                    TsCall(
+                        _span(node),
+                        function.text.decode(),
+                        actual_m,
+                        result,
+                    )
+                )
+                return result
+            if function.type != "identifier":
                 raise _Unsupported("unsupported_expression", _span(node))
             callee = function.text.decode()
             bound = (
