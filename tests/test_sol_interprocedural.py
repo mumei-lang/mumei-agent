@@ -1103,3 +1103,58 @@ def test_slice12_this_member_read_dep_free():
         "f",
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice13_new_contract_inlines_constructor():
+    s = _fn(
+        """contract D { uint x; constructor(uint b) { x = b; } }
+contract C {
+    function f(uint a) public returns (uint) {
+        D d = new D(a);
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice13_new_array_opaque():
+    s = _fn(
+        """contract C {
+    function f(uint a) public returns (uint) {
+        uint[] memory xs = new uint[](a);
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice13_delete_index_marks_state():
+    s = _fn(
+        """contract C {
+    uint[] arr;
+    function f(uint a) public returns (uint) {
+        delete arr[0];
+        return a;
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"
+
+
+def test_slice13_non_scalar_local_decl_binds():
+    s = _fn(
+        """contract D { function g(uint b) public returns (uint) { return b; } }
+contract C {
+    function f(uint a) public returns (uint) {
+        D d = new D(a);
+        return d.g(a);
+    }
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

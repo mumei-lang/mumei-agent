@@ -2735,6 +2735,19 @@ in-process; no audit/CLI/MCP route changes.
   tolerant base deps — since scalar receivers cannot have
   members in Solidity.
 
+### C06 Solidity new/delete/non-scalar locals (slice 13)
+
+- `new C(args)` inlines `C.constructor` when declared in the
+  file (its `state_writes` propagate); other `new` targets
+  (`new uint[](n)`, unknown contracts) record an opaque call
+  whose result carries the arg deps and marks `unknown`.
+- `delete arr[i]` / `delete m[k]` parse as an index access on
+  a `delete` base — the element write marks `state_writes`
+  through `_all_state_vars` now too.
+- Non-scalar local declarations (`D d = ...`, `uint[] memory
+  x`) bind the name to the RHS deps like a scalar slot — an
+  approximation that keeps calls and effects flowing.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

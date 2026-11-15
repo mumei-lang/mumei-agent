@@ -739,8 +739,11 @@ class _Builder:
                     "unsupported_statement", _span(st)
                 )
             name = decl.child_by_field_name("name")
-            tnode = decl.child_by_field_name("type")
-            if name is None or not _scalar_type(tnode):
+            # Non-scalar local decls (`D d = new D(a)`, `uint[]
+            # memory x`) bind the name to the RHS deps like a
+            # scalar slot — an approximation, but the effects and
+            # call records still flow.
+            if name is None:
                 raise _Unsupported(
                     "unsupported_statement", _span(st)
                 )
@@ -1314,11 +1317,17 @@ class _Builder:
                         ]
                         if len(did) == 2 and did[0].text == b"this":
                             dname = did[1].text.decode()
-                if dname is not None and dname in locals_:
+                if dname is not None and (
+                    dname in locals_
+                    or dname
+                    in self._all_state_vars_of(
+                        getattr(self, "_current_contract", "")
+                    )
+                ):
                     locals_[dname] = frozenset()
                     if self._writes:
                         self._writes[-1].add(dname)
-                    if dname in self._state_vars_of(
+                    if dname in self._all_state_vars_of(
                         getattr(self, "_current_contract", "")
                     ):
                         summary.effects = "state_writes"
@@ -1541,6 +1550,74 @@ class _Builder:
         actual_union = frozenset()
         for a in actual:
             actual_union |= a
+        if fn_expr is not None and fn_expr.type == "new_expression":
+            # `new C(args)` — contract deployment runs the
+            # constructor when declared; other `new` targets
+            # (arrays, unknown contracts) are opaque and their
+            # result carries the arg deps.
+            tn = fn_expr.child_by_field_name("name")
+            cname = tn.text.decode() if tn is not None else None
+            ctor = (
+                f"{cname}.constructor"
+                if cname in self._contract_names
+                and f"{cname}.constructor" in self.functions
+                else None
+            )
+            if ctor is not None:
+                callee = self.summaries.get(ctor)
+                if callee is None:
+                    if self._inline_depth >= MAX_INLINE_DEPTH:
+                        raise _Unsupported(
+                            "analysis_limit", _span(node)
+                        )
+                    self._inline_depth += 1
+                    prev_ret = getattr(self, "_ret_names", ())
+                    prev_contract = getattr(
+                        self, "_current_contract", None
+                    )
+                    prev_touch = self._effects_touched
+                    try:
+                        callee = self._summarize(
+                            ctor, self.functions[ctor]
+                        )
+                    finally:
+                        self._ret_names = prev_ret
+                        self._current_contract = prev_contract
+                        self._effects_touched = prev_touch
+                        self._inline_depth -= 1
+                    self.summaries[ctor] = callee
+                result_deps = (
+                    actual_union | frozenset(
+                        callee.return_dependencies
+                    )
+                )
+                if callee.effects == "state_writes":
+                    summary.effects = "state_writes"
+                    self._effects_touched = True
+                elif summary.effects != "state_writes":
+                    summary.effects = "unknown"
+                    self._effects_touched = True
+                summary.calls.append(
+                    SolCall(
+                        _span(node),
+                        f"new {cname}",
+                        actual_t,
+                        result_deps,
+                    )
+                )
+                return result_deps
+            summary.calls.append(
+                SolCall(
+                    _span(node),
+                    f"new {cname}" if cname else "new",
+                    actual_t,
+                    actual_union,
+                )
+            )
+            if summary.effects != "state_writes":
+                summary.effects = "unknown"
+                self._effects_touched = True
+            return actual_union
         if abi_member is not None:
             # abi.encode*/decode — the encoded result
             # carries every argument's deps.
