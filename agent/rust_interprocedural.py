@@ -290,15 +290,20 @@ class _Builder:
 
     def _if(self, st, locals_, param_index, summary):
         cond = st.child_by_field_name("condition")
-        if cond is not None and cond.type == "let_condition":
-            raise _Unsupported("unsupported_statement", _span(st))
         cons = st.child_by_field_name("consequence")
         alt = st.child_by_field_name("alternative")
-        merged = (
-            self._expr(cond, locals_, param_index, summary)
-            if cond is not None
-            else frozenset()
-        )
+        merged = frozenset()
+        if cond is not None:
+            if cond.type == "let_condition":
+                lc_val = cond.child_by_field_name("value")
+                if lc_val is not None:
+                    merged = self._expr(
+                        lc_val, locals_, param_index, summary
+                    )
+            else:
+                merged = self._expr(
+                    cond, locals_, param_index, summary
+                )
         left_locals = dict(locals_)
         right_locals = dict(locals_)
         left_ret = (
@@ -375,6 +380,19 @@ class _Builder:
         cond = st.child_by_field_name("condition")
         body = st.child_by_field_name("body")
         inner = dict(locals_)
+        if st.type == "for_expression":
+            # `for i in 0..n` — bind the pattern name to the
+            # iterator's deps in the loop scope.
+            pat = st.child_by_field_name("pattern")
+            val = st.child_by_field_name("value")
+            if pat is not None and pat.type == "identifier":
+                inner[pat.text.decode()] = (
+                    self._expr(
+                        val, inner, param_index, summary
+                    )
+                    if val is not None
+                    else frozenset()
+                )
         self._writes.append(set())
         try:
             ret = None
@@ -387,15 +405,28 @@ class _Builder:
                         ret = r if ret is None else ret | r
         finally:
             touched = self._writes.pop()
-        merged = (
-            self._expr(cond, inner, param_index, summary)
-            if cond is not None and cond.type != "let_condition"
-            else frozenset()
-        )
+        merged = frozenset()
+        if cond is not None:
+            if cond.type == "let_condition":
+                # `while let Some(x) = it` — the iterated value's
+                # deps join; pattern bindings stay unbound.
+                lc_val = cond.child_by_field_name("value")
+                if lc_val is not None:
+                    merged |= self._expr(
+                        lc_val, inner, param_index, summary
+                    )
+            else:
+                merged |= self._expr(
+                    cond, inner, param_index, summary
+                )
         for name in list(locals_):
             deps = inner.get(name, frozenset())
             if deps != locals_[name] or name in touched:
                 locals_[name] = locals_[name] | deps | merged
+        if ret is not None:
+            # `while s > 0 { return x; }` — whether the body ran
+            # depends on the condition.
+            ret = ret | merged
         return ret
 
     # -- assignment / call ------------------------------------------
@@ -451,6 +482,22 @@ class _Builder:
         actual_union = frozenset()
         for a in actual:
             actual_union |= a
+        recv_deps = frozenset()
+        if (
+            fn_expr is not None
+            and fn_expr.type == "field_expression"
+        ):
+            # `x.m(args)` — the receiver's deps join the opaque
+            # result like another argument.
+            recv = fn_expr.child_by_field_name("value")
+            if recv is not None:
+                try:
+                    recv_deps = self._expr(
+                        recv, locals_, param_index, summary
+                    )
+                except _Unsupported:
+                    recv_deps = frozenset()
+            actual_union |= recv_deps
         name = (
             fn_expr.text.decode()
             if fn_expr is not None
@@ -531,6 +578,8 @@ class _Builder:
         }:
             deps = frozenset()
             for c in _children(node):
+                if c.type in _TYPE_NAMES:
+                    continue
                 deps |= self._expr(
                     c, locals_, param_index, summary
                 )
@@ -555,15 +604,38 @@ class _Builder:
             return self._block(node, locals_, param_index, summary) or frozenset()
         if t in {"break_expression", "continue_expression"}:
             return frozenset()
-        if t == "tuple_expression":
+        if t in {
+            "tuple_expression", "range_expression",
+            "array_expression", "struct_expression",
+            "field_expression", "index_expression",
+            "await_expression", "macro_invocation",
+            "generic_function",
+        }:
+            # Containers/member access/`f!()`/`x.await` — union
+            # every named child's deps (over-approx: field/index
+            # reads carry the receiver's deps). Type and field
+            # names are not expressions.
             deps = frozenset()
             for c in _children(node):
+                if c.type in _TYPE_NAMES:
+                    continue
                 deps |= self._expr(
                     c, locals_, param_index, summary
                 )
             return deps
         raise _Unsupported("unsupported_expression", _span(node))
 
+
+_TYPE_NAMES = {
+    "primitive_type", "type_identifier", "generic_type",
+    "scoped_identifier", "field_identifier",
+    "shorthand_field_identifier", "type_arguments",
+    "type_parameters", "lifetime", "attribute_item",
+    "tuple_type", "array_type", "function_type",
+    "reference_type", "pointer_type", "unit_type",
+    "abstract_type", "trait_bounds", "higher_ranked_trait_bound",
+    "removed_trait_bound", "bounded_type", "qualified_type",
+}
 
 _EXPR_TYPES = {
     "identifier", "integer_literal", "float_literal",
@@ -577,6 +649,9 @@ _EXPR_TYPES = {
     "match_expression", "while_expression", "loop_expression",
     "for_expression", "block", "break_expression",
     "continue_expression", "tuple_expression",
+    "range_expression", "array_expression", "struct_expression",
+    "field_expression", "index_expression", "await_expression",
+    "macro_invocation", "generic_function",
 }
 
 

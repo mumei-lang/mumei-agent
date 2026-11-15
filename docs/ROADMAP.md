@@ -2558,6 +2558,20 @@ for any non-`direct_import` call, for arity below two, and for a
 non-integer value. A forged arity that still validates is caught at
 the consumer: the left-hand width must equal it.
 
+### C06 Rust scalar interprocedural (slices 0-1)
+
+- `agent/rust_interprocedural.py` mirrors the Solidity
+  adapter's model on a single file: scalar params
+  (`i*`/`u*`/`f*`/`bool`/`char`), `let`/`let mut`, if/match
+  joins, a one-pass loop may-analysis, intra-file `fn`
+  inlining (return-dep projection onto actuals) and opaque
+  `RustCall` records.
+- `for i in it` binds the pattern to the iterator's deps;
+  loop returns gain condition deps; `x.m(args)` method calls
+  union the receiver deps into the opaque result; index/
+  field/tuple/range/cast expressions union their children
+  (type and field names are skipped).
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

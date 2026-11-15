@@ -108,3 +108,66 @@ def test_unknown_call_is_opaque():
     assert s.available
     assert s.return_dependencies == frozenset({0})
     assert s.effects == "unknown"
+
+
+def test_slice1_for_binds_pattern_to_iterator():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..x { s += i; }
+    s
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice1_loop_return_gains_cond_deps():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    while x > 0 { return 1; }
+    0
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice1_mut_param():
+    s = _fn("fn f(mut y: u64) -> u64 { y += 1; y }", "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_slice1_method_call_receiver_deps():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let v = x.max(2);
+    v
+}""",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+    assert s.effects == "unknown"
+
+
+def test_slice1_index_read_union():
+    s = _fn(
+        """fn f(x: u64, i: u64) -> u64 {
+    let a = [x, 1];
+    a[i as usize]
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice1_tuple_field_read():
+    s = _fn(
+        """fn f(x: u64) -> u64 {
+    let p = (x, 1u64);
+    p.0
+}""",
+        "f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
