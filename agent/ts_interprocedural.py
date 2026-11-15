@@ -96,6 +96,12 @@ Admitted:
   loop while `var` escapes, and a bare identifier target binds as
   a may-write (the loop may not run). Any other right-hand side
   or a non-identifier left closes.
+* String/`null`/`undefined` literals (dep-free), template strings
+  (the result carries the union of the interpolations' deps), the
+  `in`/`instanceof` binary operators (operand-dep union), and
+  `delete o.f` (copy-on-write field removal propagated to aliases;
+  a dynamic `delete o[k]` keeps every field — the surviving deps
+  are the over-approximation).
 * Calls `f(args)` whose callee is a `function` declared in the same
   unit — resolved by name only, including nested `function inner()`
   declarations (hoisted: a call before its site still resolves) —
@@ -139,6 +145,9 @@ _BINARY_OPS = {
     "==", "===", "!=", "!==",
     "&&", "||",
     "&", "|", "^",
+    # `in`/`instanceof` yield booleans — the operand dep union is
+    # the over-approximation.
+    "in", "instanceof",
 }
 _UNARY_OPS = {"!", "-", "+", "~"}
 _AUGMENTED_OPS = {op + "=" for op in _BINARY_OPS if op not in {"==", "===", "!=", "!==", "<", "<=", ">", ">="}}
@@ -273,6 +282,23 @@ def _val_leq(new, old) -> bool:
     if isinstance(old, _Composite):
         return False
     return new <= old
+
+
+def _composite_delete(composite, path, span):
+    """Copy-on-write `delete composite.path` — removes the leaf
+    field and returns the updated `_Composite`."""
+    fields = dict(composite.fields)
+    key = path[0]
+    if len(path) == 1:
+        fields.pop(key, None)
+    else:
+        sub = fields.get(key)
+        if not isinstance(sub, _Composite):
+            # The intermediate field is scalar or absent — nothing
+            # to delete through.
+            raise _Unsupported("unsupported_expression", span)
+        fields[key] = _composite_delete(sub, path[1:], span)
+    return _Composite(fields)
 
 
 def _composite_set(composite, path, value, conditional, span):
@@ -1345,6 +1371,30 @@ class _Builder:
             val = val.fields.get(key, frozenset())
         return val
 
+    def _member_delete(
+        self, node, params, locals_, transfers, count
+    ) -> None:
+        """`delete o.f` — copy-on-write removal of a literal-key
+        field, propagated to every alias in scope. A dynamic key
+        (`delete o[k]`) may remove ANY field, so every field's deps
+        stay (the model can't represent absence — keeping the deps
+        is the over-approximation)."""
+        base, path, _ = self._member_target(
+            node, params, locals_, transfers, count
+        )
+        if any(key is None for key in path):
+            return
+        target = self._write_scope(base, locals_, params)
+        if target is None:
+            raise _Unsupported("binding_unavailable", _span(node))
+        old = target.get(base)
+        if not isinstance(old, _Composite):
+            raise _Unsupported("unsupported_expression", _span(node))
+        new = _composite_delete(old, path, _span(node))
+        for name, val in locals_.items():
+            if val is old:
+                locals_[name] = new
+
     def _member_store(
         self, node, value, params, locals_, transfers, count,
         conditional,
@@ -1471,8 +1521,28 @@ class _Builder:
             return self._member_read(
                 node, params, locals_, transfers, count
             )
-        if kind in {"number", "true", "false"}:
+        if kind in {
+            "number",
+            "true",
+            "false",
+            "string",
+            "undefined",
+            "null",
+        }:
             return frozenset()
+        if kind == "template_string":
+            # Interpolations evaluate for deps/calls — the string
+            # result carries the union of their deps.
+            result = frozenset()
+            for child in _children(node):
+                # `string_fragment` is literal text; only the
+                # substitutions evaluate.
+                if child.type == "template_substitution":
+                    for inner in _children(child):
+                        result |= self.expression(
+                            inner, params, locals_, transfers, count
+                        )
+            return result
         if kind == "parenthesized_expression":
             exprs = _children(node)
             if len(exprs) != 1:
@@ -1483,9 +1553,31 @@ class _Builder:
             argument = node.child_by_field_name("argument")
             if op is None or argument is None or (
                 op.type not in _UNARY_OPS
-                and op.type not in {"void", "typeof"}
+                and op.type not in {"void", "typeof", "delete"}
             ):
                 raise _Unsupported("unsupported_expression", _span(node))
+            if op.type == "delete":
+                # `delete o.f` removes the field copy-on-write; a
+                # dynamic key may hit any field, so it keeps them all
+                # (the surviving deps over-approximate); `delete x`
+                # on a name is a runtime no-op. Yields a boolean —
+                # no deps.
+                if argument.type in {
+                    "member_expression",
+                    "subscript_expression",
+                }:
+                    self._member_delete(
+                        argument, params, locals_, transfers, count
+                    )
+                elif argument.type == "identifier":
+                    self._read_name(
+                        argument, params, locals_, _span(argument)
+                    )
+                else:
+                    self.expression(
+                        argument, params, locals_, transfers, count
+                    )
+                return frozenset()
             deps_a = self.expression(
                 argument, params, locals_, transfers, count
             )

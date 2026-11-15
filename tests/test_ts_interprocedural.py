@@ -733,9 +733,9 @@ def test_unbound_identifier_closes():
     assert s.gaps[0].reason == "binding_unavailable"
 
 
-def test_string_literal_closes():
+def test_string_literal_admits():
     s = _fn('function f(x: number): number { return "s" as any; }')
-    assert not s.available
+    assert s.available and s.return_dependencies == frozenset()
 
 
 def test_ternary_admits():
@@ -838,9 +838,9 @@ def test_nullish_coalescing_closes():
     assert s.gaps[0].reason == "unsupported_expression"
 
 
-def test_template_string_closes():
+def test_template_string_admits():
     s = _fn("function f(x: number): number { return `v${x}`; }")
-    assert not s.available
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_assignment_to_unbound_closes():
@@ -1690,3 +1690,84 @@ def test_array_spread_closes():
     )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_expression"
+
+
+# --- slice 9: string/null/undefined literals, templates, in/instanceof, delete
+
+
+def test_string_null_undefined_literals_admit():
+    s = _fn(
+        "function f(x: number): number {"
+        ' let a = "hi"; let u = undefined; let n = null;'
+        " if (a === u || n === u) { return x; } return 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_template_string_interpolation_deps():
+    s = _fn(
+        "function f(x: number): number {"
+        ' let s = `v${x}w`; if (s === "v0w") { return x; } return 0; }'
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_template_string_call_sub_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        ' let s = `v${m()}`; return 0; }'
+    )
+    assert not s.available
+
+
+def test_in_operator_deps():
+    s = _fn(
+        "function f(x: number): number {"
+        ' let o = { a: x }; let b = "a" in o ? x : 0; return b; }'
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_delete_removes_field():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x, b: 1 }; delete o.a; return o.a === o.b ? x : 0; }"
+    )
+    # o.a reads undefined after delete; the `? x` still dep 0.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_delete_alias_propagates():
+    s = _fn(
+        "function f(x: number): number {"
+        " let o = { a: x }; let p = o; delete p.a;"
+        " return o.a === 0 ? x : 0; }"
+    )
+    # `p` alias: delete reached `o` too — `o.a` is undefined.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_delete_dynamic_key_keeps_fields():
+    s = _fn(
+        "function f(x: number, k: number): number {"
+        " let o = { a: x, b: 2 }; delete o[k]; return o.a + o.b; }"
+    )
+    # Any field may be gone — keeping deps is the over-approximation.
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_delete_on_scalar_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " let y = x; delete y.b; return y; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_expression"
+
+
+def test_delete_identifier_arg_admits():
+    s = _fn(
+        "function f(x: number): number {"
+        " let y = x; let d = delete y; return d ? x : 0; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

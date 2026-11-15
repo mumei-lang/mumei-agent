@@ -2584,6 +2584,24 @@ Boundaries: array spread stays closed, destructuring
 (`const [a] = arr`) closes at the declarator, and mutating
 methods (`a.push`) close as member calls.
 
+### C06 TypeScript literals, in/instanceof, delete (slice 9)
+
+`string`, `null`, `undefined` literals evaluate dep-free like
+`number`/`boolean`. Template strings carry the union of their
+`${...}` interpolations' deps. `a in o` and `x instanceof T`
+yield booleans — admitted as operand-dep unions (the same
+over-approximation other binary ops use). `delete o.f` removes
+the field copy-on-write and propagates to every name-level alias
+holding the instance; `delete o[k]` may hit any field, so every
+field's deps are kept (absence isn't representable — keeping
+deps is the over-approximation); `delete x` on a name is a
+runtime no-op. A conditional delete (inside `if`) keeps the
+field — the may-not-run path retains it.
+
+Boundaries: `delete` on a scalar base closes (unsupported), as
+does `delete` of an unbound base (binding_unavailable); `??`,
+division/modulo/exponent and shifts stay deliberately closed.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
