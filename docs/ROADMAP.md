@@ -2413,14 +2413,13 @@ transfer whose `arguments` hold the argument dependency sets, and the
 result is the union of all of them (the opaque-callee model: the callee
 body is not composed). Everything else closes: `unsupported_expression`
 covers member access/calls, subscripts, `new`, arrow/function values,
-ternary, `await`, template strings, sequences and any other node;
+`await`, template strings and any other node;
 `binding_unavailable` covers reads or stores to names never bound;
 `call_unresolved` covers callees not defined in the unit.
 
 Boundaries: there is no type checker, no module resolution and no
-imported-member model — every cross-unit reference closes; labels,
-`try`, `throw`, `for..of`/`for..in`, nested
-function declarations, classes and `this` close with
+imported-member model — every cross-unit reference closes;
+`for..of`/`for..in`, classes and `this` close with
 `unsupported_statement`/`unsupported_expression`. Later slices can
 open units (import/export wiring), member calls, arrow values and
 composite parameter types along the same line the Go slices opened:
@@ -2506,6 +2505,20 @@ nesting depth.
 
 Boundaries: `continue` to a non-loop label and `break`/`continue`
 to an unknown label close; `for`/`of`/`for`/`in` still close.
+
+### C06 TypeScript nested functions (slice 5)
+
+The same scalar fragment admits `function inner() {}` declarations
+inside a body. They hoist to the enclosing function's scope — a
+call before the declaration site still resolves — and each is
+summarized like a top-level function. A nested declaration whose
+body reads an enclosing local closes itself with
+`binding_unavailable` (there are no closures) while the caller's
+admission is unaffected, matching the opaque-callee model.
+
+Boundaries: function expressions and arrow values (`const g = fn`,
+`const g = () => x`) still close — binding a callable to a name is
+the composite-value boundary the whole slice line defers.
 
 ## Roadmap authority and vocabulary
 

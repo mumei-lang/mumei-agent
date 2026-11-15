@@ -680,14 +680,47 @@ def test_bare_break_outside_loop_closes():
     assert s.gaps[0].reason == "unsupported_statement"
 
 
-def test_nested_function_closes():
+def test_nested_function_call_admits():
     s = _fn(
+        "function f(x: number): number {"
+        " function inner(y: number): number { return y; }"
+        " return inner(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_function_is_summarized():
+    summaries = _summarize(
+        "function f(x: number): number {"
+        " function inner(y: number): number { return y; }"
+        " return inner(x); }"
+    ).functions
+    by_name = {s.name: s for s in summaries}
+    assert by_name["f"].available and by_name["inner"].available
+
+
+def test_hoisted_nested_call_admits():
+    # A declaration hoists — the call resolves before its site.
+    s = _fn(
+        "function f(x: number): number {"
+        " return inner(x);"
+        " function inner(y: number): number { return y; } }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_nested_function_reading_outer_closes_itself():
+    # `x` is `f`'s local — `inner` has no closure, so IT closes
+    # while `f` still admits (the callee body is opaque).
+    summaries = _summarize(
         "function f(x: number): number {"
         " function inner(): number { return x; }"
         " return inner(); }"
-    )
-    assert not s.available
-    assert s.gaps[0].reason == "unsupported_statement"
+    ).functions
+    by_name = {s.name: s for s in summaries}
+    assert by_name["f"].available
+    assert not by_name["inner"].available
+    assert by_name["inner"].gaps[0].reason == "binding_unavailable"
 
 
 # --- expression closures -----------------------------------------------------

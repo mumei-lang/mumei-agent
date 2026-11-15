@@ -64,7 +64,11 @@ Admitted:
   operator — operands evaluate left to right, the union is the
   result).
 * Calls `f(args)` whose callee is a `function` declared in the same
-  unit — resolved by name only. The result conservatively depends on
+  unit — resolved by name only, including nested `function inner()`
+  declarations (hoisted: a call before its site still resolves) —
+  each nested declaration gets its own summary, and one that reads
+  an enclosing local closes itself (no closures) without disturbing
+  the caller's admission. The result conservatively depends on
   every evaluated argument and records a `TsCall` transfer; the callee
   body is opaque (self-recursion records a transfer like any other
   name-resolved call). Everything else — member calls, unresolved
@@ -74,7 +78,8 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 objects/member access, `this`, arrow-function values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new` and `for`-`in`/`of` stay
+spread, destructuring, `new`, `for`-`in`/`of` and function
+expressions/`=>` values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -240,10 +245,36 @@ class _Builder:
         # `continue L` looks its frame up by name.
         self.pending_labels: list[str] = []
 
+    def _register_nested_functions(self, node) -> None:
+        """Register every `function inner() {}` declaration under
+        `node` in the unit's call table — function declarations
+        hoist within their enclosing function."""
+        if node.type == "function_declaration":
+            inner_name = node.child_by_field_name("name")
+            if inner_name is not None:
+                self.functions[inner_name.text.decode()] = node
+            return
+        for child in _children(node):
+            self._register_nested_functions(child)
+
     def summarize_all(self) -> tuple[TsFunctionSummary, ...]:
-        return tuple(
-            self.summarize(node) for node in self.functions.values()
-        )
+        # Summarizing a body can register nested function
+        # declarations — walk the table to a fixed point.
+        results: list[TsFunctionSummary] = []
+        seen: set[int] = set()
+        queue = list(self.functions.values())
+        i = 0
+        while i < len(queue):
+            node = queue[i]
+            i += 1
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            results.append(self.summarize(node))
+            for inner in self.functions.values():
+                if id(inner) not in seen:
+                    queue.append(inner)
+        return tuple(results)
 
     def summarize(self, node) -> TsFunctionSummary:
         name_node = node.child_by_field_name("name")
@@ -326,6 +357,12 @@ class _Builder:
                 self.expression(
                     default, params, locals_, transfers, count
                 )
+        # Function declarations hoist to the enclosing function's
+        # scope — pre-register every `function inner() {}` in the
+        # body subtree so calls resolve wherever they appear.
+        for inner_decl in body.children:
+            self._register_nested_functions(inner_decl)
+        self.frames = []
         saw_return = [False]
         self._sequence(
             _children(body), params, locals_, transfers, count, deps,
@@ -478,6 +515,10 @@ class _Builder:
                     self._store(
                         locals_, params, name, deps_v, conditional
                     )
+            return
+        if kind == "function_declaration":
+            # Already registered by the hoisting pass — a declaration
+            # statement evaluates to nothing.
             return
         if kind == "expression_statement":
             self._expression_statement(
