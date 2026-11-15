@@ -6400,6 +6400,12 @@ class _Builder:
                 }
                 for j, adeps in enumerate(actual):
                     added[str(j)] = adeps
+            # A slot a maybe-removal (`c && a.pop()`) left marked
+            # may be empty — the appended element can land there,
+            # so a read of that index sees either value.
+            for k in added:
+                if k.isdigit() and k in arr.deleted:
+                    added[k] = _merge_vals(added[k], actual_union)
             added["*"] = added.get("*", frozenset()) | actual_union
             self._rebind_composite(
                 locals_,
@@ -6475,8 +6481,8 @@ class _Builder:
                 obj_node, params, locals_, transfers, count, span
             )
             added = dict(arr.fields)
+            idxs = [int(k) for k in added if k.isdigit()]
             if prop == "pop":
-                idxs = [int(k) for k in added if k.isdigit()]
                 if idxs:
                     added.pop(str(max(idxs)), None)
             else:
@@ -6485,12 +6491,21 @@ class _Builder:
                     (str(int(k) - 1) if k.isdigit() else k): v
                     for k, v in added.items()
                 }
+            # Under a may-removal the dropped index survives as
+            # maybe-deleted — `pop` drops only the top one, while
+            # `shift` leaves every surviving position uncertain.
+            new_deleted = arr.deleted
+            if self._may_depth and idxs:
+                if prop == "pop":
+                    new_deleted |= {str(max(idxs))}
+                else:
+                    new_deleted |= {k for k in added if k.isdigit()}
             self._rebind_composite(
                 locals_,
                 old,
                 tpath,
                 _Composite(
-                    added, klass=arr.klass, deleted=arr.deleted
+                    added, klass=arr.klass, deleted=new_deleted
                 ),
                 span,
             )

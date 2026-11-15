@@ -7053,3 +7053,16 @@ def test_review_check_output_rejects_manifest_overwrite(
     out = json.loads(capsys.readouterr().out)
     assert out["error"]["reason"] == "output_overwrites_source"
     assert json.loads(manifest.read_text())["functions"]
+
+
+def test_review6_conditional_pop_then_push_keeps_deps():
+    # `c && a.pop()` may empty the array, so `a.push(x)` can land
+    # at index 0 — a read of `a[0]` must keep `x`'s dep.
+    s = _fn(
+        "function f(c: boolean, x: number): number {"
+        " let a = [0];"
+        " c && a.pop();"
+        " a.push(x);"
+        " return a[0]; }"
+    )
+    assert s.available and 1 in s.return_dependencies
