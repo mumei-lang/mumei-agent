@@ -295,6 +295,17 @@ Admitted:
   function's dep-union, `_External`, `import()`) may
   write any field of a composite actual — every field
   takes the call's dep union (`_opaque_call_writes`).
+* Shorthand object fields keep a function/class value's
+  shape — `{e}` stores the `_Callable` like `{e: e}` —
+  so `m.e(o, x)` invokes through the field. Member calls
+  through `Function.prototype` on a known callable
+  (`_funproto_call`): `g.call(t, a)` binds `this` = `t`;
+  `g.apply(t, arr)` supplies a `_Composite` array's
+  element values or covers every parameter with the
+  scalar dep; `g.bind(t, a...)` returns a `_Callable`
+  with the partial application in its `bound` slot —
+  invocations prepend the bound actuals and apply the
+  bound `this` when the call supplies none.
 * Module-scope `let`/`const`/`var`/`export const` — a second
   pass over top-level declarators evaluates each into
   `self.module_locals` (params empty; `var` writes land in
@@ -737,7 +748,7 @@ class _Callable:
 
     __slots__ = (
         "node", "params", "defaults", "captured", "rest",
-        "is_method", "param_props", "origin",
+        "is_method", "param_props", "origin", "bound",
     )
 
     def __init__(
@@ -754,6 +765,11 @@ class _Callable:
         # parameter; `new` seeds `this` fields from the bound
         # actuals before the body runs.
         self.param_props: frozenset = frozenset()
+        # `Function.prototype.bind` partial application: a
+        # `(deps, values, this)` triple prepended to every
+        # invocation's actuals — the params stay full-length so
+        # bound positions bind their recorded values.
+        self.bound = None
         # The `_Builder` that created this value — a callable
         # imported from another module invokes under its own
         # module's scope (its private helpers and module bindings
@@ -3782,6 +3798,20 @@ class _Builder:
                 construct=construct,
                 actual_values=actual_values,
             )
+        if cval.bound is not None:
+            # `bind(t, a...)` — prepend the recorded partial
+            # application to this invocation's actuals; a bound
+            # `this` applies when the call supplies none.
+            bdeps, bvals, bthis = cval.bound
+            actual = list(bdeps) + list(actual)
+            if actual_values is not None:
+                actual_values = list(bvals) + list(actual_values)
+            else:
+                actual_values = list(bvals) + [None] * (
+                    len(actual) - len(bvals)
+                )
+            if this_val is None and bthis is not None:
+                this_val = bthis
         inner = dict(locals_)
         if this_val is not None:
             inner["this"] = this_val
@@ -4515,6 +4545,99 @@ class _Builder:
                     val.fields[key], deps
                 )
 
+    def _funproto_call(
+        self,
+        prop,
+        base,
+        vals,
+        deps,
+        params,
+        locals_,
+        transfers,
+        count,
+        node,
+        callee_text,
+    ):
+        """`Function.prototype.call/apply/bind` where the receiver
+        is a known `_Callable` value (`g.call(t, a)`,
+        `g.apply(t, [a])`, `g.bind(t, a)`). `call`/`apply` invoke
+        the callee with `this` bound to the first actual —
+        `apply`'s array actual supplies its elements when the
+        value is a `_Composite`, otherwise its scalar dep covers
+        every parameter (an over-approximation of the unknown
+        arity). `bind` returns a `_Callable` carrying the bound
+        actuals in its `bound` slot — invocations prepend them so
+        the params stay full-length — while the bound scalars
+        also fold into `captured`; `origin` carries over so an
+        imported callee still invokes under its own module's
+        scope."""
+        this_arg = vals[0] if vals else None
+        this_val = (
+            this_arg if isinstance(this_arg, _Composite) else None
+        )
+        if prop == "bind":
+            bound = vals[1:]
+            bound_deps = (
+                _scalar_of(this_arg)
+                if this_arg is not None
+                else frozenset()
+            )
+            for val in bound:
+                bound_deps |= _scalar_of(val)
+            out = _Callable(
+                base.node,
+                base.params,
+                base.defaults,
+                base.captured | bound_deps,
+                base.rest,
+                base.is_method,
+            )
+            out.bound = (
+                tuple(_scalar_of(v) for v in bound),
+                tuple(bound),
+                this_val,
+            )
+            out.origin = base.origin
+            transfers.append(
+                TsCall(
+                    _span(node),
+                    callee_text,
+                    deps,
+                    out.captured,
+                )
+            )
+            return out
+        if prop == "call":
+            call_vals = vals[1:]
+            call_deps = deps[1:]
+        else:  # apply
+            arr = vals[1] if len(vals) > 1 else None
+            if isinstance(arr, _Composite):
+                call_vals = list(arr.fields.values())
+                call_deps = [_scalar_of(v) for v in call_vals]
+            elif arr is None:
+                call_vals = []
+                call_deps = []
+            else:
+                arr_deps = _scalar_of(arr)
+                call_vals = None
+                call_deps = [arr_deps] * max(len(base.params), 1)
+        result = self._invoke_callable(
+            base,
+            call_deps,
+            params,
+            locals_,
+            transfers,
+            count,
+            _span(node),
+            this_val=this_val,
+            actual_values=call_vals,
+        )
+        transfers.append(
+            TsCall(_span(node), callee_text, deps, result)
+        )
+        return result
+
     def _collection_call(
         self,
         prop,
@@ -4736,15 +4859,21 @@ class _Builder:
                         else key.text.decode()
                     ] = fdeps
                 elif child.type == "shorthand_property_identifier":
-                    # `{o}` — a whole-name alias collapses like a
-                    # non-literal field value.
-                    fields[child.text.decode()] = _scalar_of(
-                        self._lookup(
-                            child.text.decode(),
-                            params,
-                            locals_,
-                            _span(child),
-                        )
+                    # `{o}` — a whole-name composite alias
+                    # collapses like a non-literal field value;
+                    # function/class values keep their shape so
+                    # `{e}` + `m.e(x)` invokes through the field
+                    # (same as the explicit `{e: e}` pair form).
+                    fval = self._lookup(
+                        child.text.decode(),
+                        params,
+                        locals_,
+                        _span(child),
+                    )
+                    fields[child.text.decode()] = (
+                        _scalar_of(fval)
+                        if isinstance(fval, _Composite)
+                        else fval
                     )
                 elif child.type == "spread_element":
                     src = self._eval(
@@ -5305,6 +5434,26 @@ class _Builder:
                             )
                         )
                         return result_m
+                    if isinstance(base_val2, _Callable) and prop in {
+                        "call",
+                        "apply",
+                        "bind",
+                    }:
+                        # `g.call(t, a)`, `g.apply(t, [a])`,
+                        # `g.bind(t, a)` — Function.prototype
+                        # plumbing on a known callable value.
+                        return self._funproto_call(
+                            prop,
+                            base_val2,
+                            vals_m,
+                            actual_m,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            node,
+                            function.text.decode(),
+                        )
                     if (
                         isinstance(base_val2, _Composite)
                         and prop is None

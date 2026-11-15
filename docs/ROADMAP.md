@@ -3398,6 +3398,27 @@ result, `_External`, `import()` — may write any field of
 a composite actual, so every field takes the call's dep
 union as a may-write (`_opaque_call_writes`).
 
+### C06 TypeScript function values in fields and Function.prototype plumbing (slice 54)
+
+Shorthand object fields keep a function/class value's shape:
+`{e}` stores the raw `_Callable` like the explicit `{e: e}`
+pair form (only a whole-name COMPOSITE alias still collapses),
+so `let m = {e}; m.e(o, x)` invokes the imported callee's
+body and its writes reach the caller's composite. Member
+calls through `Function.prototype` on a known callable value
+admit via `_funproto_call`: `g.call(t, a)` invokes `g` with
+`this` = `t`; `g.apply(t, arr)` supplies the array's element
+values when `arr` is a `_Composite` and otherwise covers
+every parameter with the array's scalar dep (unknown-arity
+over-approximation); `g.bind(t, a...)` returns a `_Callable`
+whose `bound` slot records the partial application —
+invocations prepend the bound actuals (params stay
+full-length) and apply the bound `this` when the call
+supplies none, while the bound scalars also fold into
+`captured` so the bound value remains a scalar. `origin`
+carries through `bind`, so a bound imported callee still
+invokes under its own module's scope.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

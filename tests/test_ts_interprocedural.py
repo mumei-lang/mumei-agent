@@ -5150,3 +5150,122 @@ def test_loop_member_write_snapshot_preserved():
         ).functions if fn.name == "f"
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_shorthand_function_value_invokes_through_field():
+    # `{g}` keeps the callable shape (like `{g: g}`), so a member
+    # call through the field invokes the real body.
+    s = _fn(
+        "function g(a) { return a; }"
+        " function f(x: number): number {"
+        " let m = {g}; return m.g(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_shorthand_imported_callable_writes_through_field():
+    mods = {
+        "./x": "export function e(o, x) { o.a = x; }",
+    }
+    s = next(
+        fn for fn in ts.summarize_typescript(
+            "import {e} from './x';"
+            " let m = {e};"
+            " function f(x: number): number {"
+            " let o = {a: 1}; m.e(o, x); return o.a; }",
+            resolver=lambda spec: mods.get(spec),
+        ).functions if fn.name == "f"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_shorthand_composite_field_still_collapses():
+    s = _fn(
+        "function f(x: number): number {"
+        " let p = {a: x}; let m = {p}; return m.p.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_call_invokes():
+    s = _fn(
+        "function g(a) { return a; }"
+        " function f(x: number): number {"
+        " return g.call(null, x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_call_binds_this():
+    s = _fn(
+        "function g(a) { this.b = a; }"
+        " function f(x: number): number {"
+        " let o = {b: 1}; g.call(o, x); return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_apply_array_elements():
+    s = _fn(
+        "function g(a, b) { return a; }"
+        " function f(x: number): number {"
+        " return g.apply(null, [x, 2]); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_apply_opaque_array_covers_params():
+    # `arr` is opaque — its scalar dep covers every parameter
+    # (unknown arity over-approximates).
+    s = _fn(
+        "function g(a, b) { return a; }"
+        " function f(x: number, arr): number {"
+        " return g.apply(null, arr); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_function_prototype_bind_prepends_actuals():
+    s = _fn(
+        "function g(a, b) { return b; }"
+        " function f(x: number): number {"
+        " return g.bind(null, 1)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_bind_ignores_bound_positions():
+    # The bound `a` is the literal — `return a` has no deps.
+    s = _fn(
+        "function g(a, b) { return a; }"
+        " function f(x: number): number {"
+        " return g.bind(null, 1)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_function_prototype_bind_binds_this():
+    s = _fn(
+        "function g(a) { return this.a; }"
+        " function f(x: number): number {"
+        " let o = {a: x}; return g.bind(o)(1); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_bind_stored_value():
+    s = _fn(
+        "function g(a, b) { return b; }"
+        " function f(x: number): number {"
+        " let h = g.bind(null, 2); return h(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_function_prototype_bind_rest_position():
+    s = _fn(
+        "function g(a, ...r) { return a; }"
+        " function f(x: number): number {"
+        " return g.bind(null, 1, 2)(x); }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
