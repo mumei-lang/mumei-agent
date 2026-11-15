@@ -96,7 +96,7 @@ def test_non_scalar_param_binds_dep_index():
     )
     assert s.available
     assert s.return_dependencies == frozenset()
-    assert s.gaps[0].reason == "unsupported_parameter"
+    assert not s.gaps
 
 
 def test_unknown_call_is_opaque():
