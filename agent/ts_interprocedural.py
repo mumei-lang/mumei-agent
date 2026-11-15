@@ -1375,6 +1375,42 @@ def _composite_set(composite, path, value, conditional, span):
     return _Composite(fields, composite.klass, deleted)
 
 
+def _pattern_binders(pattern):
+    """The local names a destructuring pattern binds. Used to name
+    a parameter slot WITHOUT the pattern's raw text — a default
+    like `{a = read_secret()}` must not leak source into the
+    manifest's `parameters`."""
+    names: list = []
+
+    def walk(node):
+        if node.type in {
+            "identifier",
+            "shorthand_property_identifier",
+            "shorthand_property_identifier_pattern",
+        }:
+            names.append(node.text.decode())
+            return
+        if node.type == "property_identifier":
+            return  # a key, not a binding
+        if node.type == "assignment_pattern":
+            # `{a = default}` — only the left side binds; the
+            # default's expression never names anything.
+            left = node.child_by_field_name("left")
+            if left is not None:
+                walk(left)
+            return
+        if node.type in {"pair", "pair_pattern"}:
+            value = node.child_by_field_name("value")
+            if value is not None:
+                walk(value)
+            return
+        for child in node.named_children:
+            walk(child)
+
+    walk(pattern)
+    return names
+
+
 def _composite_dyn_set(composite, path, value, span):
     """Copy-on-write member store through a dynamic key:
     `composite[k].rest = value`. The target field is unknown, so
@@ -1400,6 +1436,10 @@ def _composite_dyn_set(composite, path, value, span):
             )
         return _Composite(fields, composite.klass)
     vdeps = _scalar_of(value)
+    # The write's key is unknown — a never-named field it may
+    # add records its deps in the `"*"` bucket so a later read
+    # of a missing key still carries them.
+    fields["*"] = fields.get("*", frozenset()) | vdeps
     for fname, fval in fields.items():
         if len(path) > 1 and isinstance(fval, _Composite):
             fields[fname] = _composite_dyn_set(
@@ -1460,6 +1500,7 @@ class _Builder:
         resolving=frozenset(),
         module_cache=None,
         module_digests=None,
+        source_path=None,
     ) -> None:
         self.functions: dict[str, object] = {}
         self.classes: dict[str, object] = {}
@@ -1487,6 +1528,22 @@ class _Builder:
         # across the whole top-level call.
         self.resolver = resolver
         self.resolving = resolving
+        # The importing unit's own path — `_resolve_builder`
+        # hands it to the resolver so `./`/`../` specifiers
+        # resolve against THIS module's directory, not the
+        # entry file's. None = no origin (in-memory resolvers).
+        self.source_path = source_path
+        if resolver is not None:
+            try:
+                import inspect
+
+                self._resolver_importer = (
+                    len(inspect.signature(resolver).parameters) > 1
+                )
+            except (TypeError, ValueError):
+                self._resolver_importer = False
+        else:
+            self._resolver_importer = False
         self.module_cache = (
             module_cache if module_cache is not None else {}
         )
@@ -2023,18 +2080,44 @@ class _Builder:
         """The resolved module's own `_Builder` — cached per
         top-level call; cycles and chains past MAX_MODULE_DEPTH
         yield None."""
-        if spec in self.module_cache:
-            return self.module_cache[spec]
+        # Cache/resolving keys carry the importer's path: `./c`
+        # means a different file from `sub/b.ts` than from the
+        # entry file.
+        key = (
+            str(self.source_path) if self.source_path else "",
+            spec,
+        )
+        if key in self.module_cache:
+            return self.module_cache[key]
         builder = None
         if (
-            spec not in self.resolving
+            key not in self.resolving
             and len(self.resolving) < MAX_MODULE_DEPTH
         ):
-            raw = self.resolver(spec)
+            raw = (
+                self.resolver(spec, self.source_path)
+                if self._resolver_importer
+                else self.resolver(spec)
+            )
+            # A filesystem resolver returns the resolved Path so
+            # the imported module can in turn resolve ITS relative
+            # specifiers against its own directory; a bytes/str
+            # result stays keyed on the bare specifier.
+            module_ref = spec
+            child_path = None
+            from pathlib import Path
+
+            if isinstance(raw, Path):
+                child_path = str(raw)
+                module_ref = child_path
+                try:
+                    raw = raw.read_bytes()
+                except OSError:
+                    raw = None
             if isinstance(raw, str):
                 raw = raw.encode()
             if isinstance(raw, bytes) and len(raw) <= MAX_SOURCE_BYTES:
-                self.module_digests[spec] = hashlib.sha256(
+                self.module_digests[module_ref] = hashlib.sha256(
                     raw
                 ).hexdigest()
                 root = _syntax(raw)
@@ -2042,11 +2125,12 @@ class _Builder:
                     builder = _Builder(
                         root,
                         resolver=self.resolver,
-                        resolving=self.resolving | {spec},
+                        resolving=self.resolving | {key},
                         module_cache=self.module_cache,
                         module_digests=self.module_digests,
+                        source_path=child_path,
                     )
-        self.module_cache[spec] = builder
+        self.module_cache[key] = builder
         return builder
 
     def _require_specifier(self, arguments):
@@ -2274,11 +2358,56 @@ class _Builder:
             if id(node) in seen:
                 continue
             seen.add(id(node))
+            # Each top-level function summarizes against a clean
+            # module scope: a module-local written inside one
+            # function must not carry that function's parameter
+            # indices into the next function's summary — `m = a`
+            # inside `f` makes `g`'s `m` read external, never
+            # `a`. Writes a callee performs DURING one function's
+            # analysis still propagate inside that analysis.
+            self._scrub_module_deps()
             results.append(self.summarize(node))
             for inner in self.functions.values():
                 if id(inner) not in seen:
                     queue.append(inner)
         return tuple(results)
+
+    def _scrub_module_deps(self) -> None:
+        """Empty every scalar dep-set reachable from module scope.
+
+        Module-level initializers run with no params, so any
+        non-empty frozenset there can only hold a just-finished
+        function's parameter indices. Composites keep their shape
+        (fields are scrubbed recursively); callables keep their
+        identity and captured set (only a def-site can set those,
+        and a def-site never sees params)."""
+
+        def scrub(val, memo):
+            if isinstance(val, _Composite):
+                # Memoized copy — `a`/`b` aliasing one object keep
+                # aliasing (and a cyclic table can't recurse
+                # forever).
+                oid = id(val)
+                if oid in memo:
+                    return memo[oid]
+                out = _Composite({}, val.klass, val.deleted)
+                memo[oid] = out
+                out.fields.update(
+                    {
+                        k: scrub(v, memo)
+                        for k, v in val.fields.items()
+                    }
+                )
+                return out
+            if isinstance(val, frozenset):
+                return frozenset()
+            return val
+
+        memo: dict = {}
+        for name in list(self.module_locals):
+            self.module_locals[name] = scrub(
+                self.module_locals[name], memo
+            )
 
     def summarize(self, node) -> TsFunctionSummary:
         name_node = node.child_by_field_name("name")
@@ -2359,7 +2488,18 @@ class _Builder:
                 # `f({a, b}, [x])` — the slot still occupies one
                 # scalar index; the pattern's sub-names destructure
                 # it at body start (each sees the whole slot's deps).
-                pname = pattern.text.decode()
+                binders = _pattern_binders(pattern)
+                if not binders:
+                    raise _Unsupported(
+                        "unsupported_signature", _span(param)
+                    )
+                pname = (
+                    "[" if pattern.type == "array_pattern" else "{"
+                ) + ", ".join(sorted(binders)) + (
+                    "]" if pattern.type == "array_pattern" else "}"
+                )
+                if pname in params:
+                    pname = f"{pname}#{len(params)}"
                 if pname in params:
                     raise _Unsupported(
                         "unsupported_signature", _span(param)
@@ -2913,8 +3053,17 @@ class _Builder:
                     # `let x;` binds `undefined` — no dependencies.
                     else frozenset()
                 )
+                vname = pname.text.decode()
+                if (
+                    is_var
+                    and value is None
+                    and (vname in locals_ or vname in params)
+                ):
+                    # `var a;` hoists without clearing — an
+                    # already-bound name keeps its deps.
+                    continue
                 self._declare_name(
-                    pname.text.decode(),
+                    vname,
                     deps_v,
                     is_var,
                     conditional,
@@ -4272,7 +4421,7 @@ class _Builder:
             # every static setter may run.
             vdeps = _scalar_of(value)
             for sname, sval in list(old.statics.items()):
-                old.statics[sname] = sval | vdeps
+                old.statics[sname] = _scalar_of(sval) | vdeps
             for sset in old.ssetters.values():
                 result = self._invoke_callable(
                     sset,
@@ -4313,7 +4462,14 @@ class _Builder:
             # `C.s = v` — a static write updates the shared class
             # table; `C` aliases see it. A deeper path would need
             # a composite static we don't descend.
-            old.statics[path[0]] = _scalar_of(value)
+            sdeps = _scalar_of(value)
+            if conditional:
+                # `if (k) C.s = v` — the skipped path keeps the
+                # old static binding.
+                sdeps = (
+                    old.statics.get(path[0], frozenset()) | sdeps
+                )
+            old.statics[path[0]] = sdeps
             return
         if isinstance(old, _Callable):
             # `g.extra = v` — an own property on a function
@@ -5761,17 +5917,87 @@ class _Builder:
         actuals = []
         for arg in _children(arguments):
             if arg.type == "spread_element":
-                # `f(...a)` — the spread actual contributes the
-                # operand's dep union.
+                # `f(...a)` — a composite operand contributes one
+                # actual per element (index order); an opaque or
+                # empty one contributes its dep union once.
                 operand = next(iter(_children(arg)), None)
                 if operand is None:
                     raise _Unsupported(
                         "unsupported_expression", _span(arg)
                     )
-                actuals.append(add(operand))
+                sval = self._eval(
+                    operand, params, locals_, transfers, count
+                )
+                if isinstance(sval, _Composite):
+                    spread_items = [
+                        (int(k), v)
+                        for k, v in sval.fields.items()
+                        if k.isdigit()
+                    ]
+                    spread_items.sort()
+                    star = sval.fields.get("*")
+                    if not spread_items and star is None:
+                        if values_out is not None:
+                            values_out.append(sval)
+                        actuals.append(_scalar_of(sval))
+                    else:
+                        for _, fval in spread_items:
+                            if values_out is not None:
+                                values_out.append(fval)
+                            actuals.append(_scalar_of(fval))
+                        if star is not None:
+                            if values_out is not None:
+                                values_out.append(star)
+                            actuals.append(_scalar_of(star))
+                else:
+                    if values_out is not None:
+                        values_out.append(sval)
+                    actuals.append(_scalar_of(sval))
                 continue
             actuals.append(add(arg))
         return tuple(actuals)
+
+    def _array_base(
+        self, obj_node, params, locals_, transfers, count, span
+    ):
+        """The composite an array method mutates: the top binding,
+        the member path, and the array sub-composite itself."""
+        tbase, tpath, _ = self._member_target(
+            obj_node, params, locals_, transfers, count
+        )
+        if tpath and any(k is None for k in tpath):
+            raise _Unsupported("unsupported_expression", span)
+        target = self._write_scope(tbase, locals_, params)
+        if target is None:
+            raise _Unsupported("binding_unavailable", span)
+        old = target.get(tbase)
+        arr = old
+        for step in tpath:
+            arr = (
+                arr.fields.get(step)
+                if isinstance(arr, _Composite)
+                else None
+            )
+        if not isinstance(old, _Composite) or not isinstance(
+            arr, _Composite
+        ):
+            raise _Unsupported("unsupported_expression", span)
+        return old, tpath, arr
+
+    @staticmethod
+    def _rebind_composite(locals_, old, tpath, new_arr, span):
+        """Rebind every same-scope alias of `old` to a copy whose
+        `tpath` field table is `new_arr`'s (copy-on-write like
+        `_member_store`)."""
+        new = (
+            _composite_set(old, tpath, new_arr, True, span)
+            if tpath
+            else new_arr
+        )
+        for name, val in locals_.items():
+            if val is old:
+                locals_[name] = new
+        return new
 
     @staticmethod
     def _opaque_call_writes(values, deps):
@@ -6109,7 +6335,9 @@ class _Builder:
                     return record(elem | actual_union)
                 return record(frozenset())
             if prop in {"keys", "values", "entries"}:
-                return record(_Composite({str(0): elem}))
+                return record(
+                    _Composite({str(0): elem, "*": elem})
+                )
             if prop == "get" and lit_key is not None and (
                 lit_key in base_val.fields
             ):
@@ -6125,32 +6353,40 @@ class _Builder:
             # transfers it recorded.
             return record(frozenset())
         if prop in {"push", "unshift"}:
-            # Mutating append — copy-on-write like `_member_store`:
-            # rebind every same-scope alias to the grown instance.
-            tbase, tpath, _ = self._member_target(
-                obj_node, params, locals_, transfers, count
+            # Mutating append/prepend — copy-on-write like
+            # `_member_store`: rebind every same-scope alias to
+            # the grown instance. `push` appends ONE slot per
+            # actual; `unshift` shifts every existing element
+            # right by the argument count.
+            old, tpath, arr = self._array_base(
+                obj_node, params, locals_, transfers, count, span
             )
-            if tpath and any(k is None for k in tpath):
-                raise _Unsupported("unsupported_expression", span)
-            target = self._write_scope(tbase, locals_, params)
-            if target is None:
-                raise _Unsupported("binding_unavailable", span)
-            old = target.get(tbase)
-            if not isinstance(old, _Composite):
-                raise _Unsupported("unsupported_expression", span)
-            added = dict(old.fields)
-            next_idx = 0
-            for k in added:
-                if k.isdigit() and int(k) >= next_idx:
-                    next_idx = int(k) + 1
-            added[str(next_idx)] = actual_union
-            new = _composite_set(
-                old, tpath + [str(next_idx)], actual_union, True,
+            added = dict(arr.fields)
+            if prop == "push":
+                next_idx = 0
+                for k in added:
+                    if k.isdigit() and int(k) >= next_idx:
+                        next_idx = int(k) + 1
+                for j, adeps in enumerate(actual):
+                    added[str(next_idx + j)] = adeps
+            else:
+                n_args = len(actual)
+                added = {
+                    (str(int(k) + n_args) if k.isdigit() else k): v
+                    for k, v in added.items()
+                }
+                for j, adeps in enumerate(actual):
+                    added[str(j)] = adeps
+            added["*"] = added.get("*", frozenset()) | actual_union
+            self._rebind_composite(
+                locals_,
+                old,
+                tpath,
+                _Composite(
+                    added, klass=arr.klass, deleted=arr.deleted
+                ),
                 span,
-            ) if tpath else _Composite(added, klass=old.klass, deleted=old.deleted)
-            for name, val in locals_.items():
-                if val is old:
-                    locals_[name] = new
+            )
             return record(actual_union)
         if prop == "fill":
             # `a.fill(v)` mutates in place — every element takes
@@ -6189,11 +6425,10 @@ class _Builder:
             return record(actual_union)
         if prop in {"map", "flatMap"}:
             result = cb_result if cb_result is not None else elem
-            return record(_Composite({str(0): result}))
+            return record(_Composite({str(0): result, "*": result}))
         if prop == "filter":
-            return record(
-                _Composite({str(0): elem | (cb_result or frozenset())})
-            )
+            filt = elem | (cb_result or frozenset())
+            return record(_Composite({str(0): filt, "*": filt}))
         if prop in {
             "slice",
             "concat",
@@ -6201,14 +6436,42 @@ class _Builder:
             "sort",
             "reverse",
         }:
+            permuted = elem | actual_union
             return record(
-                _Composite({str(0): elem | actual_union})
+                _Composite({str(0): permuted, "*": permuted})
             )
         if prop in {"keys", "values", "entries"}:
-            return record(_Composite({str(0): elem}))
-        if prop in {"pop", "shift", "at", "find"}:
-            # The removed/found element over-approximates to the
-            # whole element union.
+            return record(_Composite({str(0): elem, "*": elem}))
+        if prop in {"pop", "shift"}:
+            # Mutating removal — `pop` drops the highest index,
+            # `shift` drops index 0 and moves every element down.
+            old, tpath, arr = self._array_base(
+                obj_node, params, locals_, transfers, count, span
+            )
+            added = dict(arr.fields)
+            if prop == "pop":
+                idxs = [int(k) for k in added if k.isdigit()]
+                if idxs:
+                    added.pop(str(max(idxs)), None)
+            else:
+                added.pop("0", None)
+                added = {
+                    (str(int(k) - 1) if k.isdigit() else k): v
+                    for k, v in added.items()
+                }
+            self._rebind_composite(
+                locals_,
+                old,
+                tpath,
+                _Composite(
+                    added, klass=arr.klass, deleted=arr.deleted
+                ),
+                span,
+            )
+            return record(elem | (cb_result or frozenset()))
+        if prop in {"at", "find"}:
+            # The found element over-approximates to the whole
+            # element union.
             return record(elem | (cb_result or frozenset()))
         # some/every/findIndex/includes/indexOf/lastIndexOf/join/
         # reduce/reduceRight/toString — a scalar over the elements
@@ -7295,9 +7558,30 @@ class _Builder:
                 "subscript_expression",
             }:
                 raise _Unsupported("unsupported_expression", _span(node))
-            return _scalar_of(
+            deps = _scalar_of(
                 self._eval(argument, params, locals_, transfers, count)
             )
+            # The expression still writes: `o.p++` runs the setter
+            # path and `x++` rebinds the name — each a may-write
+            # carrying the pre-increment deps.
+            if argument.type == "identifier":
+                aname = argument.text.decode()
+                scope = self._write_scope(aname, locals_, params)
+                if scope is not None:
+                    self._store(
+                        scope, params, aname, deps, True
+                    )
+            else:
+                self._member_store(
+                    argument,
+                    deps,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    True,
+                )
+            return deps
         if kind in {
             "assignment_expression",
             "augmented_assignment_expression",
@@ -7350,7 +7634,7 @@ class _Builder:
 
 
 def summarize_typescript(
-    source: "str | bytes", resolver=None
+    source: "str | bytes", resolver=None, source_path=None
 ) -> TsSummarySet:
     """Compose conservative dependencies only; never infer equality or
     safety.
@@ -7379,7 +7663,10 @@ def summarize_typescript(
         )
     module_digests: dict[str, str] = {}
     builder = _Builder(
-        root, resolver=resolver, module_digests=module_digests
+        root,
+        resolver=resolver,
+        module_digests=module_digests,
+        source_path=source_path,
     )
     functions = builder.summarize_all()
     context = hashlib.sha256(raw)
@@ -7818,7 +8105,9 @@ def main(args=None) -> None:
     if args is None:
         args = build_parser().parse_args()
     raw = _read_declared_source(args.source, PROFILE)
-    live = summarize_typescript(raw, resolver=_resolver_for(args))
+    live = summarize_typescript(
+        raw, resolver=_resolver_for(args), source_path=args.source
+    )
     print(json.dumps(live.to_dict(), sort_keys=True))
 
 
@@ -7827,7 +8116,9 @@ def main_accept(args=None) -> None:
         args = build_accept_parser().parse_args()
     declared = _read_declared_manifest(args.manifest)
     raw = _read_declared_source(args.source, ACCEPT_PROFILE)
-    live = summarize_typescript(raw, resolver=_resolver_for(args))
+    live = summarize_typescript(
+        raw, resolver=_resolver_for(args), source_path=args.source
+    )
     report = {
         "schema_version": ACCEPT_PROFILE,
         "accepted": False,
@@ -7840,15 +8131,22 @@ def main_accept(args=None) -> None:
         # Emit the freshly derived record, never the declared one —
         # identical for honest manifests, and removes the manifest-
         # forgery channel entirely.
-        record = next(
-            (f for f in live.functions if f.name == args.function),
-            None,
-        )
-        if record is None:
+        matches = [
+            f for f in live.functions if f.name == args.function
+        ]
+        declared_names = {f.name for f in declared.functions}
+        if not matches:
             report["reason"] = "unknown_function"
+        elif len(matches) > 1:
+            # Nested + top-level declarations can share a plain
+            # name — an ambiguous target must never adopt one
+            # function's summary for another's.
+            report["reason"] = "ambiguous_function"
+        elif matches[0].name not in declared_names:
+            report["reason"] = "undeclared_function"
         else:
             report["accepted"] = True
-            report["summary"] = record.to_dict()
+            report["summary"] = matches[0].to_dict()
     _emit(report, 0)
 
 
@@ -7866,11 +8164,19 @@ def _fs_resolver(source_path):
     except OSError:
         return lambda spec: None
 
-    def resolve(spec):
+    def resolve(spec, importer=None):
         if not spec.startswith(("./", "../")):
             return None
         try:
-            target = (base / spec).resolve()
+            # `./`/`../` resolve against the IMPORTING module's
+            # directory — an imported file's own imports are
+            # relative to it, not to the entry file.
+            ibase = (
+                Path(importer).resolve().parent
+                if importer is not None
+                else base
+            )
+            target = (ibase / spec).resolve()
         except OSError:
             return None
         candidates = [target]
@@ -7882,18 +8188,58 @@ def _fs_resolver(source_path):
             ]
         for cand in candidates:
             try:
-                if base not in cand.parents and cand != base:
+                # Resolve each CANDIDATE too — `cand.is_file()`
+                # follows links, so a symlinked candidate or
+                # index file could otherwise escape `base`.
+                rcand = cand.resolve()
+                if base not in rcand.parents and rcand != base:
                     continue
-                if not cand.is_file():
+                if not rcand.is_file():
                     continue
-                if cand.stat().st_size > MAX_SOURCE_BYTES:
+                if rcand.stat().st_size > MAX_SOURCE_BYTES:
                     continue
-                return cand.read_bytes()
+                # Return the Path: the builder reads the bytes
+                # and chains the importer for nested specifiers.
+                return rcand
             except OSError:
                 continue
         return None
 
     return resolve
+
+
+def _reject_overwrite(output, declared_paths, schema):
+    """`--output` may not overwrite a declared input — writing
+    the report would destroy the bytes the report describes."""
+    import os
+    from pathlib import Path
+
+    if output is None:
+        return
+    for declared in declared_paths:
+        try:
+            same = Path(output).resolve() == Path(declared).resolve()
+        except RuntimeError:
+            same = True
+        if not same:
+            try:
+                same = os.path.samefile(output, declared)
+            except OSError:
+                same = False
+        if same:
+            _emit(
+                {
+                    "schema_version": schema,
+                    "error": {
+                        "reason": "output_overwrites_source",
+                        "detail": (
+                            "declared output path would overwrite a "
+                            "declared input"
+                        ),
+                    },
+                },
+                2,
+            )
 
 
 def _reuse_partition(declared, live):
@@ -7954,9 +8300,16 @@ def main_check(args=None) -> None:
 
     if args is None:
         args = build_check_parser().parse_args()
+    _reject_overwrite(
+        getattr(args, "output", None),
+        [args.manifest, args.source],
+        CHECK_PROFILE,
+    )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
-    live = summarize_typescript(raw, resolver=_resolver_for(args))
+    live = summarize_typescript(
+        raw, resolver=_resolver_for(args), source_path=args.source
+    )
     reusable, stale, missing = _reuse_partition(declared, live)
     document = json.dumps(
         {
@@ -7990,9 +8343,16 @@ def main_reuse(args=None) -> None:
 
     if args is None:
         args = build_reuse_parser().parse_args()
+    _reject_overwrite(
+        getattr(args, "output", None),
+        [args.manifest, args.source],
+        CHECK_PROFILE,
+    )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
-    live = summarize_typescript(raw, resolver=_resolver_for(args))
+    live = summarize_typescript(
+        raw, resolver=_resolver_for(args), source_path=args.source
+    )
     reusable, _, _ = _reuse_partition(declared, live)
     declared_by_name = {f.name: f for f in declared.functions}
     merged = [

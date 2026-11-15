@@ -6813,3 +6813,204 @@ def test_attempt_route_skips_candidate_when_inputs_change(
     report = json.loads(capsys.readouterr().out)
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
+
+
+# --- declared-route review regressions ----------------------------------------
+
+
+def test_review_destructured_param_names_binders_not_source():
+    # The manifest slot names the BOUND identifiers — a default
+    # expression's source text must never leak into `parameters`.
+    s = _fn(
+        "function f({a = 1, b}: {a?: number, b: number}): number {"
+        " return a + b; }"
+    )
+    assert s.available
+    assert s.parameters == ("{a, b}",)
+    assert "1" not in s.parameters[0]
+
+
+def test_review_spread_actual_expands_elements():
+    # `g(...[0, x])` binds b to x's own index — an element-wise
+    # expansion, not one union slot.
+    s = _fn(
+        "function g(a: number, b: number): number { return b; }"
+        "function f(x: number): number { return g(...[0, x]); }",
+        name="f",
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_unshift_shifts_existing_indices():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [0, 0];"
+        " a.unshift(x);"
+        " return a[0]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+    s2 = _fn(
+        "function f(x: number): number {"
+        " let a = [0, 0];"
+        " a.unshift(x);"
+        " return a[2]; }"
+    )
+    assert s2.return_dependencies == frozenset()
+
+
+def test_review_push_multi_arg_indices():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [0];"
+        " a.push(0, x);"
+        " return a[2]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_array_map_any_index():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = [0];"
+        " let b = a.map(v => v + x);"
+        " return b[3]; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_dynamic_write_records_wildcard():
+    # `o[k] = x` may add a field never named — a later missing-key
+    # read still carries x via the `"*"` bucket.
+    s = _fn(
+        "function f(k: string, x: number): number {"
+        " let o = {a: 0};"
+        " o[k] = x;"
+        " return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
+
+
+def test_review_var_redecl_keeps_binding():
+    s = _fn(
+        "function f(a: number): number {"
+        " var a;"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_expr_subscript_update_writes():
+    # `o[k]++` inside an expression still writes — the wildcard
+    # bucket picks up the key's deps.
+    s = _fn(
+        "function f(k: string): number {"
+        " let o = {a: 0};"
+        " let r = (o[k]++, 0);"
+        " return o.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_review_module_write_does_not_leak_params():
+    # A module-local written inside f must not carry f's parameter
+    # index into g's summary — `g`'s read of `m` is external.
+    summaries = _summarize(
+        "let m = 0;"
+        "function f(a: number): void { m = a; }"
+        "function g(): number { return m; }"
+    )
+    g = next(s for s in summaries.functions if s.name == "g")
+    assert g.available and g.return_dependencies == frozenset()
+
+
+def test_review_conditional_static_write_unions():
+    # `if (c) C.s = x` is a may-write — the skipped path's binding
+    # survives the join.
+    s = _fn(
+        "class C { static s = 0; }"
+        "function f(c: boolean, x: number, y: number): number {"
+        " C.s = y;"
+        " if (c) { C.s = x; }"
+        " return C.s; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1, 2})
+
+
+def test_review_fs_resolver_importer_relative(tmp_path):
+    # `./c` imported from `sub/b.ts` resolves `sub/c.ts`, not the
+    # entry directory's `c.ts`.
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "c.ts").write_text("export const w = 9;")
+    (tmp_path / "c.ts").write_text("export const w = 0;")
+    resolver = ts._fs_resolver(str(tmp_path / "a.ts"))
+    resolved = resolver("./c", importer=str(sub / "b.ts"))
+    assert resolved is not None
+    assert resolved.read_bytes() == b"export const w = 9;"
+
+
+def test_review_fs_resolver_rejects_symlink_escape(tmp_path):
+    # A symlinked candidate must not read outside the declared
+    # directory tree.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.ts").write_text("export const s = 1;")
+    base = tmp_path / "src"
+    base.mkdir()
+    (base / "c.ts").symlink_to(outside / "secret.ts")
+    resolver = ts._fs_resolver(str(base / "a.ts"))
+    assert resolver("./c") is None
+
+
+def test_review_accept_rejects_ambiguous_name(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(
+        "function f(x: number): number { return x; }"
+        "function g(v: number): number {"
+        "  function f(n: number): number { return n; }"
+        "  return f(v); }"
+    )
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            ts.summarize_typescript(src.read_bytes()).to_dict()
+        )
+    )
+    with pytest.raises(SystemExit):
+        ts.main_accept(_accept_args(src, manifest, "f"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "ambiguous_function"
+
+
+def test_review_accept_rejects_undeclared_function(tmp_path, capsys):
+    # The fresh set has `g`, the manifest doesn't declare it —
+    # context matches but the record stays unadopted.
+    src = tmp_path / "a.ts"
+    src.write_text("function g(x: number): number { return x; }")
+    doc = ts.summarize_typescript(src.read_bytes()).to_dict()
+    doc["functions"] = []
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(doc))
+    with pytest.raises(SystemExit):
+        ts.main_accept(_accept_args(src, manifest, "g"))
+    out = json.loads(capsys.readouterr().out)
+    assert out["accepted"] is False
+    assert out["reason"] == "undeclared_function"
+
+
+def test_review_check_output_rejects_manifest_overwrite(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_check(_route_args(src, manifest, output=manifest))
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+    assert json.loads(manifest.read_text())["functions"]
