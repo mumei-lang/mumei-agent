@@ -1351,6 +1351,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if member.kind != "var" or member.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
             pointee_id = member.type.type_id
+            if not pointee_id:
+                # An unnamed pointee still classifies by its declared
+                # shallow kind — `*lib.PU` reads an `int64`, `*lib.PPV`
+                # a `*T` — provided the pointee tree is fully
+                # pinnable (`pointee_type_ids` present), which a
+                # `*struct{ F T }` member fails. Non-scalar shapes
+                # (`*[4]int64`, `*[]T`, `*struct`) stay closed like a
+                # named struct pointee does.
+                if member.pointee_type_ids is None or (
+                    member.pointee_kind
+                    not in {"integer", "boolean", "pointer"}
+                ):
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
+                self.pinned.update(member.pointee_type_ids)
         else:
             # `*t` — a dereference read of a bound pointer. The
             # pointee is memory the dep model never tracks, so the
@@ -1382,9 +1398,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             pointee_id = binding.type.type_id
         target = self.members.get(pointee_id)
         if (
-            target is None
-            or target.kind != "type"
-            or target.type.kind not in {"integer", "boolean", "pointer"}
+            pointee_id
+            and (
+                target is None
+                or target.kind != "type"
+                or target.type.kind
+                not in {"integer", "boolean", "pointer"}
+            )
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
         if bound_ref is not None:

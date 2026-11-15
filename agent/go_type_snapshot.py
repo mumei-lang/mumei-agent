@@ -302,6 +302,10 @@ class PackageMember:
     # pointee tree resolves fully, so None (key absent) marks an
     # unpinnable pointee rather than an empty list.
     pointee_type_ids: tuple[str, ...] | None = None
+    # The pointee's underlying kind word ("integer", "pointer",
+    # "slice", ...) — emitted iff `pointee_type_ids` is, so a
+    # dereference read can classify its result when `type_id` is empty.
+    pointee_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -762,6 +766,7 @@ def load_go_package_snapshot(
                     "type",
                     "signature_type_ids",
                     "pointee_type_ids",
+                    "pointee_kind",
                 }
             )
             m = item
@@ -795,9 +800,19 @@ def load_go_package_snapshot(
                     for s in sig_ids
                 )
             )
-            # `pointee_type_ids` may only ride on a pointer-typed var.
+            # `pointee_type_ids`/`pointee_kind` may only ride on a
+            # pointer-typed var. `pointee_kind` without
+            # `pointee_type_ids` is meaningless and rejected, but the
+            # reverse is accepted: an older producer declares the ids
+            # alone, and a missing kind simply degrades to the
+            # pre-`pointee_kind` boundary — a deref read it cannot
+            # classify stays closed, exactly as before.
             _require(kind == "var" or "pointee_type_ids" not in m)
+            _require(
+                "pointee_kind" not in m or "pointee_type_ids" in m
+            )
             pointee_ids: tuple[str, ...] | None = None
+            pointee_kind: str | None = None
             if "pointee_type_ids" in m:
                 _require(t.kind == "pointer")
                 pointee_ids = tuple(
@@ -810,8 +825,13 @@ def load_go_package_snapshot(
                         for s in pointee_ids
                     )
                 )
+            if "pointee_kind" in m:
+                pointee_kind = _string(m["pointee_kind"])
+                _require(bool(pointee_kind))
             members.append(
-                PackageMember(mid, name, kind, t, sig_ids, pointee_ids)
+                PackageMember(
+                    mid, name, kind, t, sig_ids, pointee_ids, pointee_kind
+                )
             )
         _require(len({m.id for m in members}) == len(members))
         functions = []

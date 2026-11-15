@@ -2007,8 +2007,14 @@ and `effects` reports `unknown`, and redeclaring the pointee type
 flags the summary. Admission is pointee-gated: the named pointee
 must resolve to a `type` member whose fact is scalar or pointer —
 a struct or interface pointee stays closed because the dep model
-cannot represent the value, an unnamed pointee (`*int64`) and a
-nested pointer (`**T`) carry no identity to classify. A bound
+cannot represent the value. An unnamed pointee classifies by the
+member's `pointee_kind` declaration instead: `*lib.PU` on `*int64`
+reads an `integer` dep-free, `*lib.PPV` on `**T` reads a `*T` and
+pins `T` through `pointee_type_ids` — whose identities the producer
+now declares as members so a bound `*p` on the stored pointer
+resolves `T` too — while a non-scalar shape (`*lib.PA` on
+`*[4]int64`, `*lib.PSTR` on `*struct{ F T }`) stays closed like a
+named struct pointee. A bound
 pointer dereferences the same way: `*t` on a parameter or local
 whose declared `*T` names the pointee admits, records its own
 imported transfer against the pointee identity (the binding's read

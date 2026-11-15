@@ -156,6 +156,11 @@ type member struct {
 	// fully (no signature, struct, interface or type parameter inside),
 	// so its absence — not just an empty list — means unpinnable.
 	PointeeTypeIDs *[]string `json:"pointee_type_ids,omitempty"`
+	// PointeeKind is the pointee's underlying shape as a kind word
+	// ("integer", "pointer", "slice", "array", "map", "string",
+	// "unsupported", ...) — a dereference read needs it to classify
+	// its result when `type_id` is empty. Present iff PointeeTypeIDs is.
+	PointeeKind *string `json:"pointee_kind,omitempty"`
 }
 
 type snapshot struct {
@@ -607,8 +612,10 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 					pointeeIDs = []string{}
 				}
 				m.PointeeTypeIDs = &pointeeIDs
+				pointeeKind := ix.typeOf(ptr.Elem()).Kind
+				m.PointeeKind = &pointeeKind
 				// `m` was stored by value above — put the updated
-				// record back so the key actually serializes.
+				// record back so the keys actually serialize.
 				ix.importMembers[id] = m
 				// The ids collect without declaring their member
 				// records — a `*chan T` or `*[]T` pointee names `T`
