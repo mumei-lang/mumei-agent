@@ -2336,13 +2336,21 @@ identity — plus a container element's — pins for
 way when it names a pointer-typed `var` member whose pointee is
 named: `*lib.PV = v` and dot-imported `*PV = v` store through the
 member into package state and pin the pointee's identity through
-the pointer fact's `type_id`. A non-pointer member behind a `*`
-stays closed (uncompilable), any unary operator other than `*`
-never unwraps, and a pointer member whose pointee is unnamed
-(`*lib.PU = v` on `*int64`, `(*lib.PA)[i] = v` on `*[4]int64`,
-`*lib.PPV` or `**lib.PPV` on `**T`) stays closed because the fact
-carries no identity for the stored type a redeclaration would
-flag. A deref store can also alias a tracked binding — `lib.PV =
+the pointer fact's `type_id`. Deeper pointee trees declare their
+named uses on the member record's `pointee_type_ids` — a fully
+unnamed pointee (`*lib.PU = v` on `*int64`, `(*lib.PA)[i] = v` on
+`*[4]int64`) resolves to the empty list and admits because the
+member's own identity covers the declaration completely, while a
+deeper named use (`*lib.PPV` or `**lib.PPV` on `**T`) declares and
+pins `T` exactly like a type argument. Only a pointee shape the
+key cannot declare stays closed — an anonymous struct hiding a
+named use (`*lib.PSTR` on `*struct{ F T }`) or a signature tree —
+a `*chan T` pointee resolves its `T` element like a slice or map
+and admits. A shape the walk cannot reach stays closed because
+the member's own identity would not flag a redeclaration inside
+it. A non-pointer member behind a `*`
+stays closed (uncompilable), and any unary operator other than
+`*` never unwraps. A deref store can also alias a tracked binding — `lib.PV =
 &x` aims the member at `x` — so any binding `&x` escaped marks the
 binding, and a `*lib.PV = v` write unions the stored value's
 dependencies into every escaped binding (`return x` then reports
@@ -2358,9 +2366,8 @@ Compilable closed cases: a computed operand
 (`g()[0] = v` or `*g() = v`) names no member, and a `const`, `func`
 or `type`
 member names no writable storage. Inc/dec statements
-(`lib.V++`, `(*lib.PV)++`) route through this same gate — the
-named-pointee requirement applies to them too (`(*lib.PU)++` stays
-closed).
+(`lib.V++`, `(*lib.PV)++`, `(*lib.PU)++`) route through this same
+gate — the `pointee_type_ids` rule applies to them too.
 
 An index read of an imported container var — `lib.VA[i]` — admits
 through the member record's new element fact: slice and array type

@@ -4084,7 +4084,8 @@ METHOD_LIB = {
         "var VM map[string]int64\ntype NS []int64\nvar VNS NS\n"
         "var VSS []S\nvar VStr string\nvar V2 [][]int64\n"
         "type S2 struct{ N int64\n G string\n P *T }\nvar VS2 S2\n"
-        "var VMK map[MK]int64\nvar VSM map[string]S\n",
+        "var VMK map[MK]int64\nvar VSM map[string]S\n"
+        "var PSTR *struct{ F T }\nvar PCH *chan T\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
         "t.go": "package lib\ntype T int64\n",
@@ -6536,30 +6537,96 @@ def test_imported_deref_member_write_dot_import(go_types_helper):
     assert result.available
 
 
-def test_imported_deref_member_inc_unnamed_pointee_stays_closed(
+def test_imported_deref_member_inc_unnamed_pointee_is_admitted(
     go_types_helper,
 ):
-    # `(*lib.PU)++` — PU is `*int64`; the unnamed pointee carries no
-    # identity the store could pin, so the inc stays closed even
-    # though the operand resolves the pointer var.
+    # `(*lib.PU)++` — PU is `*int64`; the pointee tree names nothing,
+    # so `pointee_type_ids: []` and the member's own identity covers
+    # the whole declaration — the inc admits like `*lib.PV = v`.
     files = _files_member_inc("(*lib.PU)++")
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.effects == "unknown"
 
 
-def test_imported_deref_index_write_unnamed_pointee_stays_closed(
+def test_imported_deref_member_write_unnamed_pointee_is_admitted(
+    go_types_helper,
+):
+    # `*lib.PU = v` — the fully unnamed `*int64` pointee resolves to
+    # an empty `pointee_type_ids`; PU's own member identity covers
+    # the declaration a redeclaration would change.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { *lib.PU = v\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["PU"]["pointee_type_ids"] == []
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["PU"]["id"]
+
+
+def test_imported_deref_index_write_unnamed_pointee_is_admitted(
     go_types_helper,
 ):
     # `(*lib.PA)[i] = v` — PA is `*[4]int64`; the unnamed array
-    # pointee carries no identity the store could pin, so the write
-    # stays closed.
+    # pointee resolves to `[]` like `*int64`, so the write admits
+    # and the index still evaluates.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(i int64, v int64) int64 { (*lib.PA)[i] = v\n\treturn 0 }\n"
     }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_imported_chan_pointee_declares_elem_member(go_types_helper):
+    # `PCH` is `*chan T`: the pointee walk recurses a channel's
+    # element like a slice or map, so `T` declares on
+    # `pointee_type_ids` — and its member record is emitted too, or
+    # pinning the id would flag `stale_dependents` forever.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { *lib.PCH = nil\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["PCH"]["pointee_type_ids"] == [members["T"]["id"]]
+
+
+def test_imported_deref_member_write_struct_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*lib.PSTR = v` — `*struct{ F T }` hides a named use inside an
+    # anonymous shape the key cannot declare, so no
+    # `pointee_type_ids` is emitted and the store stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { *lib.PSTR = *lib.PSTR\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert "pointee_type_ids" not in members["PSTR"]
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
@@ -6592,29 +6659,35 @@ def test_imported_deref_member_write_flags_stale_dependents(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
-def test_imported_deref_pointer_write_unnamed_pointee_stays_closed(
+def test_imported_deref_pointer_write_deep_pointee_pins_named(
     go_types_helper,
 ):
-    # `*lib.PPV = lib.PV` — PPV is `**T`; the stored `*T` is unnamed
-    # on the wire even though it names T inside, so nothing pins T
-    # against redeclaration and the write stays closed.
+    # `*lib.PPV = lib.PV` — PPV is `**T`: the fact's `type_id` is
+    # empty because the stored `*T` is unnamed, but `pointee_type_ids`
+    # declares the `T` use inside the pointee tree, so the store
+    # admits and pins `T` against redeclaration.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 { *lib.PPV = lib.PV\n\treturn 0 }\n"
     }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["PPV"]["pointee_type_ids"] == [members["T"]["id"]]
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.effects == "unknown"
+    assert members["T"]["id"] in result.pinned
 
 
-def test_imported_double_deref_member_write_stays_closed(
+def test_imported_double_deref_member_write_is_admitted(
     go_types_helper,
 ):
-    # `**lib.PPV = v` — PPV is `**T`; the fact's `type_id` is empty
-    # because the stored `*T` is unnamed, so `T` cannot be pinned and
-    # the write stays closed.
+    # `**lib.PPV = v` — two dereferences deep; `T` still pins through
+    # `pointee_type_ids`.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(v int64) int64 { **lib.PPV = lib.T(v)\n\treturn 0 }\n"
@@ -6623,24 +6696,7 @@ def test_imported_double_deref_member_write_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
-
-
-def test_imported_deref_member_write_unnamed_pointee_stays_closed(
-    go_types_helper,
-):
-    # `*lib.PU = v` — PU is `*int64`; the fact's `type_id` is empty
-    # because the pointee is unnamed, so the write cannot pin a
-    # stored-type identity and stays closed.
-    files = {
-        "a.go": "package p\nimport \"lib\"\n"
-        "func F(v int64) int64 { *lib.PU = v\n\treturn 0 }\n"
-    }
-    snapshot = _method_snapshot_for(go_types_helper, files)
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert not result.available
+    assert result.available and result.effects == "unknown"
 
 
 def test_imported_deref_write_computed_pointer_stays_closed(go_types_helper):

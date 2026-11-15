@@ -297,6 +297,11 @@ class PackageMember:
     # A function member's declared named/alias signature type identities,
     # in the imported unit's coordinate space — staleness pins for callers.
     signature_type_ids: tuple[str, ...] = ()
+    # A pointer-typed var's pointee identities at any depth — `**T`
+    # declares `[T]`; `*int64` declares `[]` — emitted only when the
+    # pointee tree resolves fully, so None (key absent) marks an
+    # unpinnable pointee rather than an empty list.
+    pointee_type_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -750,7 +755,14 @@ def load_go_package_snapshot(
                 isinstance(item, dict)
                 and {"id", "name", "kind", "type"} <= set(item)
                 and set(item)
-                <= {"id", "name", "kind", "type", "signature_type_ids"}
+                <= {
+                    "id",
+                    "name",
+                    "kind",
+                    "type",
+                    "signature_type_ids",
+                    "pointee_type_ids",
+                }
             )
             m = item
             mid = _string(m["id"])
@@ -783,7 +795,24 @@ def load_go_package_snapshot(
                     for s in sig_ids
                 )
             )
-            members.append(PackageMember(mid, name, kind, t, sig_ids))
+            # `pointee_type_ids` may only ride on a pointer-typed var.
+            _require(kind == "var" or "pointee_type_ids" not in m)
+            pointee_ids: tuple[str, ...] | None = None
+            if "pointee_type_ids" in m:
+                _require(t.kind == "pointer")
+                pointee_ids = tuple(
+                    _string(s) for s in _list(m["pointee_type_ids"])
+                )
+                _require(
+                    len(set(pointee_ids)) == len(pointee_ids)
+                    and all(
+                        _IMPORTED_ID.fullmatch(s) is not None
+                        for s in pointee_ids
+                    )
+                )
+            members.append(
+                PackageMember(mid, name, kind, t, sig_ids, pointee_ids)
+            )
         _require(len({m.id for m in members}) == len(members))
         functions = []
         for item in _list(v["functions"]):

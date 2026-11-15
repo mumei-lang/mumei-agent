@@ -149,6 +149,13 @@ type member struct {
 	Kind             string   `json:"kind"`
 	Type             typeFact `json:"type"`
 	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
+	// PointeeTypeIDs declares the named/alias identities a pointer-typed
+	// var's pointee mentions, at any depth of pointer, slice, array, map
+	// or channel constructors — `**T` declares `[T]`; `*int64` declares
+	// `[]`. The key is present only when the pointee tree resolves
+	// fully (no signature, struct, interface or type parameter inside),
+	// so its absence — not just an empty list — means unpinnable.
+	PointeeTypeIDs *[]string `json:"pointee_type_ids,omitempty"`
 }
 
 type snapshot struct {
@@ -589,7 +596,63 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 					ix.recordMember(elem, eid)
 				}
 			}
+			// Deeper pointees (`**T`, `*[]*T`) still name identities a
+			// dereference store needs pinned — collect them like type
+			// arguments do; a fully unnamed pointee (`*int64`) resolves
+			// to the empty list, which the member's own identity then
+			// covers completely.
+			var pointeeIDs []string
+			if ix.collectTypeArgIDs(ptr.Elem(), map[string]bool{}, &pointeeIDs) {
+				if pointeeIDs == nil {
+					pointeeIDs = []string{}
+				}
+				m.PointeeTypeIDs = &pointeeIDs
+				// `m` was stored by value above — put the updated
+				// record back so the key actually serializes.
+				ix.importMembers[id] = m
+				// The ids collect without declaring their member
+				// records — a `*chan T` or `*[]T` pointee names `T`
+				// through the list alone, and a pinned id with no
+				// member record flags `stale_dependents` forever.
+				// Declare each like a direct pointee does.
+				ix.recordPointeeMembers(ptr.Elem(), map[string]bool{})
+			}
 		}
+	}
+}
+
+// recordPointeeMembers declares every named/alias object a resolved
+// pointee tree mentions: `pointee_type_ids` pins those identities, and
+// a pin only detects a redeclaration when the member record exists.
+func (ix *indexer) recordPointeeMembers(t types.Type, seen map[string]bool) {
+	switch tt := t.(type) {
+	case *types.Named:
+		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+			seen[id] = true
+			ix.recordMember(tt.Obj(), id)
+		}
+		for i := 0; i < tt.TypeArgs().Len(); i++ {
+			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
+		}
+	case *types.Alias:
+		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+			seen[id] = true
+			ix.recordMember(tt.Obj(), id)
+		}
+		for i := 0; i < tt.TypeArgs().Len(); i++ {
+			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
+		}
+	case *types.Pointer:
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Slice:
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Array:
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Map:
+		ix.recordPointeeMembers(tt.Key(), seen)
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Chan:
+		ix.recordPointeeMembers(tt.Elem(), seen)
 	}
 }
 
