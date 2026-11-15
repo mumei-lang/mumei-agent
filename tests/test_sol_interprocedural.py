@@ -1679,3 +1679,86 @@ def test_accept_route_refuses_an_ambiguous_bare_name(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["accepted"] is True
     assert out["summary"]["name"] == "B.f"
+
+
+# --- slice 18: sol-summaries-check / sol-summaries-reuse routes ---------------
+
+def _sol_route_args(source, manifest, output=None):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest),
+            "output": str(output) if output else None,
+        },
+    )()
+
+
+_SOL_CHANGED = (
+    "contract C { uint s;"
+    " function f(uint x) public returns (uint) { return g(x); }"
+    " function g(uint v) public returns (uint) { return 7; } }"
+)
+
+
+def test_check_route_partitions_names(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    old = sol.summarize_solidity(_SOL_SRC).to_dict()
+    old["functions"].append(
+        {
+            "name": "C.gone",
+            "contract": "C",
+            "available": True,
+            "parameters": [],
+            "return_dependencies": [],
+            "calls": [],
+            "gaps": [],
+            "effects": "none_in_supported_fragment",
+        }
+    )
+    manifest.write_text(json.dumps(old))
+    src.write_text(_SOL_CHANGED)
+    sol.main_check(_sol_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.sol-summary-check/v1"
+    assert out["context_match"] is False
+    # g's deps flip {0}→{} and f inlines the callee result —
+    # both records change.
+    assert out["stale"] == ["C.f", "C.g"]
+    assert out["missing"] == ["C.gone"]
+    assert out["reusable"] == []
+
+
+def test_check_route_reports_reusable_records(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_SRC)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    sol.main_check(_sol_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["context_match"] is True
+    assert out["reusable"] == ["C.f", "C.g"]
+    assert out["stale"] == []
+    assert out["missing"] == []
+
+
+def test_reuse_route_merges_and_rekeys(tmp_path, capsys):
+    src = tmp_path / "a.sol"
+    src.write_text(_SOL_CHANGED)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(_SOL_SRC).to_dict())
+    )
+    sol.main_reuse(_sol_route_args(src, manifest))
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == "mumei.sol-interprocedural/v1"
+    fresh = sol.summarize_solidity(_SOL_CHANGED)
+    assert out["context_key"] == fresh.context_key
+    by_name = {f["name"]: f for f in out["functions"]}
+    assert by_name["C.g"]["return_dependencies"] == []
+    assert "C.f" in by_name
