@@ -21,7 +21,9 @@ Admitted:
   `number`/`boolean` annotation is checked when present).
 * Scalar literals (`number`, `true`, `false`), identifier reads of
   bound parameters/locals, parentheses, pure unary (`!`, `-`, `+`,
-  `~`) and binary operators (`+`, `-`, `*`, comparisons, `==`/`===`/
+  `~`), `void` (evaluates for calls, yields no deps) and `typeof`
+  (operand deps pass through), `as`/`satisfies`/`!` assertions
+  (transparent), and binary operators (`+`, `-`, `*`, comparisons, `==`/`===`/
   `!=`/`!==`, `&&`, `||`, `&`, `|`, `^`). Division, remainder,
   exponentiation, shifts and `??` stay closed — mirroring the Go
   fragment's arithmetic boundary (and JS `/` yields floats anyway).
@@ -50,7 +52,11 @@ Admitted:
   expression for calls, then every later statement is a may-write
   until a `catch` consumes the thrown flag; `finally` always runs —
   the catch parameter is left unbound, so a body that reads it
-  closes).
+  closes), and `L: stmt` labels — a labeled loop or switch claims
+  the label on its own frame, any other labeled statement gets a
+  plain frame, so `break L` exits exactly the labeled statement and
+  `continue L` only targets labeled loops (an unknown label, or a
+  `continue` to a non-loop label, closes).
 * Expressions also admit `a = b`/`a op= b` used as a
   sub-expression (writes like the statement form, always as a
   may-write since e.g. a `||`/`?:` arm may not run, and yields the
@@ -68,7 +74,7 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 objects/member access, `this`, arrow-function values or callbacks,
 generators, `async`/`await`, `any`/composite/missing parameter types,
-spread, destructuring, `new`, `for`-`in`/`of` and labels stay
+spread, destructuring, `new` and `for`-`in`/`of` stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
 """
@@ -230,6 +236,9 @@ class _Builder:
         # list — statements after it are may-writes until a `catch`
         # consumes the flag or it propagates out of the function.
         self.thrown: list[bool] = [False]
+        # Labels the next loop/switch frame claims — a `break L` or
+        # `continue L` looks its frame up by name.
+        self.pending_labels: list[str] = []
 
     def summarize_all(self) -> tuple[TsFunctionSummary, ...]:
         return tuple(
@@ -304,6 +313,7 @@ class _Builder:
         self.var_names = set()
         self.block_stack = []
         self.thrown = [False]
+        self.pending_labels = []
         transfers: list[TsCall] = []
         count = [0]
         deps = [frozenset()]
@@ -354,11 +364,11 @@ class _Builder:
         saw_return,
         conditional,
     ) -> None:
-        frame = self.frames[-1] if self.frames else None
         for child in children:
             if (
-                frame is not None and frame["exited"]
-            ) or self.thrown[0]:
+                any(f["exited"] for f in self.frames)
+                or self.thrown[0]
+            ):
                 conditional = True
             self.statement(
                 child, params, locals_, transfers, count, deps,
@@ -560,7 +570,12 @@ class _Builder:
             # nothing before the next).
             frame = {
                 "exited": False, "broke": False,
-                "broke_always": False, "switch": True,
+                "broke_always": False, "loop": False,
+                "label": (
+                    self.pending_labels.pop()
+                    if self.pending_labels
+                    else None
+                ),
             }
             self.frames.append(frame)
             # `let`/`const` in a clause share the switch's block scope —
@@ -681,16 +696,76 @@ class _Builder:
                 propagated = propagated or self.thrown[0]
             self.thrown[0] = propagated
             return
-        if kind in {"break_statement", "continue_statement"}:
-            if node.named_children:
+        if kind == "labeled_statement":
+            label = node.child_by_field_name("label")
+            body = node.child_by_field_name("body")
+            if label is None or body is None:
                 raise _Unsupported("unsupported_statement", _span(node))
-            if kind == "continue_statement":
-                # A `continue` inside a `switch` targets the enclosing
-                # loop, never the switch itself — skip switch frames.
+            name = label.text.decode()
+            if body.type in {
+                "while_statement",
+                "for_statement",
+                "do_statement",
+                "switch_statement",
+            }:
+                # The loop/switch claims the label on the frame it
+                # pushes — a `break L` / `continue L` then finds it.
+                self.pending_labels.append(name)
+                try:
+                    self.statement(
+                        body, params, locals_, transfers, count, deps,
+                        saw_return, conditional,
+                    )
+                finally:
+                    if name in self.pending_labels:
+                        self.pending_labels.remove(name)
+                return
+            # Any other labeled statement (a block, another label,
+            # ...) gets a plain frame — `break L` exits it and a
+            # `continue` skips it like it skips a `switch`.
+            frame = {
+                "exited": False, "broke": False,
+                "broke_always": False, "loop": False, "label": name,
+            }
+            self.frames.append(frame)
+            try:
+                self.statement(
+                    body, params, locals_, transfers, count, deps,
+                    saw_return, conditional,
+                )
+            finally:
+                self.frames.pop()
+            return
+        if kind in {"break_statement", "continue_statement"}:
+            label_node = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type == "statement_identifier"
+                ),
+                None,
+            )
+            if len(node.named_children) > (1 if label_node else 0):
+                raise _Unsupported("unsupported_statement", _span(node))
+            if label_node is not None:
+                target = label_node.text.decode()
                 frame = next(
                     (
-                        f for f in reversed(self.frames)
-                        if not f.get("switch")
+                        f
+                        for f in reversed(self.frames)
+                        if f.get("label") == target
+                        and (
+                            kind == "break_statement" or f.get("loop")
+                        )
+                    ),
+                    None,
+                )
+            elif kind == "continue_statement":
+                # A `continue` inside a `switch` or labeled block
+                # targets the enclosing loop — skip non-loop frames.
+                frame = next(
+                    (
+                        f for f in reversed(self.frames) if f.get("loop")
                     ),
                     None,
                 )
@@ -815,7 +890,15 @@ class _Builder:
         """Iterate a loop body to a dependency fixed point — a join, not
         an unroll; trip counts are never modelled."""
         passes = 0
-        frame = {"exited": False, "broke": False, "broke_always": False}
+        frame = {
+            "exited": False, "broke": False, "broke_always": False,
+            "loop": True,
+            "label": (
+                self.pending_labels.pop()
+                if self.pending_labels
+                else None
+            ),
+        }
         self.frames.append(frame)
         try:
             while True:
@@ -912,10 +995,30 @@ class _Builder:
         if kind == "unary_expression":
             op = node.child_by_field_name("operator")
             argument = node.child_by_field_name("argument")
-            if op is None or argument is None or op.type not in _UNARY_OPS:
+            if op is None or argument is None or (
+                op.type not in _UNARY_OPS
+                and op.type not in {"void", "typeof"}
+            ):
+                raise _Unsupported("unsupported_expression", _span(node))
+            deps_a = self.expression(
+                argument, params, locals_, transfers, count
+            )
+            # `void` discards to `undefined`; `typeof`'s string has no
+            # dependency shape, so the operand's deps are the
+            # over-approximation.
+            return frozenset() if op.type == "void" else deps_a
+        if kind in {
+            "as_expression",
+            "satisfies_expression",
+            "non_null_expression",
+        }:
+            # Type assertions and `!` don't change the value — the
+            # operand's deps pass through.
+            operand = next(iter(_children(node)), None)
+            if operand is None:
                 raise _Unsupported("unsupported_expression", _span(node))
             return self.expression(
-                argument, params, locals_, transfers, count
+                operand, params, locals_, transfers, count
             )
         if kind == "binary_expression":
             op = node.child_by_field_name("operator")

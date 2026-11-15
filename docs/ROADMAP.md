@@ -2487,8 +2487,25 @@ evaluate left to right in the same scope and the union is the
 result, which is what makes `for (…; …; i++, b = x)` work).
 
 Boundaries: rest and destructured parameters still close, as do
-labels and `for`/`of`/`for`/`in`; a write to a name that is not
+`for`/`of`/`for`/`in`; a write to a name that is not
 bound anywhere still closes with `binding_unavailable`.
+
+### C06 TypeScript labels and casts (slice 4)
+
+The same scalar fragment admits `L: stmt` labels, `x as T` /
+`x satisfies T` / `x!` assertions (transparent — the operand's deps
+pass through) and `void`/`typeof` unary (`void` evaluates for calls
+and yields no dependencies; `typeof` keeps the operand's as the
+over-approximation). A labeled `while`/`for`/`do`/`switch` claims
+the label on the frame it pushes; any other labeled statement gets a
+plain frame. `break L` then exits exactly the labeled statement —
+a labeled block inside a loop leaves the loop running — while
+`continue L` only matches labeled loops (`break` may target any
+label). Every exited frame marks later statements may-writes at any
+nesting depth.
+
+Boundaries: `continue` to a non-loop label and `break`/`continue`
+to an unknown label close; `for`/`of`/`for`/`in` still close.
 
 ## Roadmap authority and vocabulary
 

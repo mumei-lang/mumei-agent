@@ -585,15 +585,91 @@ def test_for_in_closes():
     assert s.gaps[0].reason == "unsupported_statement"
 
 
-def test_labeled_break_closes():
+def test_labeled_break_admits():
     s = _fn(
         "function f(x: number): number {"
         " let a = 0;"
         " outer: while (a < 10) { a = x; break outer; }"
         " return a; }"
     )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_labeled_continue_admits():
+    # `continue outer` from an inner loop still iterates the outer —
+    # `a = x` on a taken path keeps the parameter's deps.
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = x;"
+        " outer: while (a < 10) {"
+        "  while (a > 0) { continue outer; }"
+        "  a = 0; }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_break_unknown_label_closes():
+    s = _fn(
+        "function f(x: number): number { break outer; return x; }"
+    )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_statement"
+
+
+def test_continue_to_non_loop_label_closes():
+    s = _fn(
+        "function f(x: number): number {"
+        " L: { continue L; } return x; }"
+    )
+    assert not s.available
+    assert s.gaps[0].reason == "unsupported_statement"
+
+
+def test_break_in_labeled_block_admits():
+    # `break L` exits just the labeled block — `a = 0` after it is
+    # unconditional, but the loop's zero-trip path keeps `a = x`.
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = x;"
+        " while (a > 0) { L: { a = 1; break L; } a = 0; }"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_break_in_labeled_block_outside_loop():
+    # Outside any loop the story is clean: `a = x` stands and the
+    # block's `break` only exits the block.
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = 0; L: { a = x; break L; } return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_as_satisfies_non_null_admit():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a = x as number; let b = x!; let c = x satisfies number;"
+        " return a + b + c; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_void_evaluates_and_drops():
+    s = _fn(
+        "function g(x: number): number { return x; }"
+        "function f(x: number): number { void g(x); return 0; }"
+    )
+    assert s.available and len(s.calls) == 1
+
+
+def test_typeof_reads_operand():
+    s = _fn(
+        "function f(x: number): number { let a = typeof x; return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
 
 
 def test_bare_break_outside_loop_closes():
