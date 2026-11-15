@@ -337,12 +337,17 @@ bounded stdout as an `AttemptOutput` on the reconciled current record
 (stream `stdout`, `complete` carried from the run's collection claim);
 a failed, timed-out or cancelled run cannot mint a snapshot — output
 requires an exited record — and the result is still a host claim, not
-Evidence.
+Evidence. `publish_dispatch(store, dispatch, expected=None)` closes the
+loop: an `exited` run first selects its captured output, then the
+terminal lineage is atomically published — CAS against `expected`, or
+first publication on an empty store — while non-exited terminals
+publish the reconciled lineage without a selection.
 
 The driver adds no new authority: it composes the declared dispatch
-boundary with the same single-spawn runner, performing no scheduling,
-ordering, result selection or publication — the host still calls
-`select_result` and publishes through `AttemptSequenceStore`. C11 stays partial; Evidence
+boundary with the same single-spawn runner, performing no scheduling or
+ordering, and publication goes through the same CAS/first-publish
+contract — cross-sequence arbitration, durability and Evidence remain
+host duties. C11 stays partial; Evidence
 normalization/acceptance remains open, and C12's demand gate plus
 existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged.
