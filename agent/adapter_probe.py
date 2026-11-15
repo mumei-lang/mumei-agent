@@ -30,6 +30,12 @@ candidate excluded **only** by observation-level reasons
 structurally are never probed, since no probe fixes an unsupported
 method or a denied location.
 
+`observe_probes(requests, runner=..., cancel_event=...)` executes a
+scheduled request tuple through one shared runner and returns the
+observations in request order — the caller feeds them back into
+`plan()` to close the observe → re-plan loop. Normalized results stay
+inside `run_probe`; only availability/stamp/version cross the boundary.
+
 Boundary held honestly: a probe reports **observed command behavior**,
 not tool health, availability proof, version truth or acceptance. The
 command is host-declared, so a lying or wrong probe simply records a
@@ -309,4 +315,35 @@ def probe_requests_for(
                 tool_version=tool_version,
             )
         )
+    return tuple(out)
+
+def observe_probes(
+    requests: tuple[AdapterProbeRequest, ...],
+    *,
+    runner: AttemptRunner | None = None,
+    cancel_event: "threading.Event | None" = None,
+) -> tuple[RuntimeObservation, ...]:
+    """Execute probe requests and return their observations.
+
+    One shared runner serves every request (the runner is an
+    execution surface, not a per-attempt resource). The returned
+    observations preserve request order and are ready to hand back
+    to `registry.plan(..., observations)` or the next
+    `probe_requests_for` round — feeding them through the caller
+    is what closes the observe → re-plan loop; this helper never
+    plans itself. Normalized attempt results stay inside
+    `run_probe`: only availability/stamp/version cross the
+    boundary, so a probe's stdout or exit detail cannot leak into
+    a routing decision.
+    """
+    if not isinstance(requests, tuple):
+        raise ValueError("probe observation requires a request tuple")
+    if cancel_event is not None and type(cancel_event) is not threading.Event:
+        raise ValueError("probe cancellation requires an event")
+    if runner is None:
+        runner = AttemptRunner()
+    out: list[RuntimeObservation] = []
+    for req in requests:
+        outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
+        out.append(outcome.observation)
     return tuple(out)
