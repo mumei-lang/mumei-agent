@@ -4465,10 +4465,11 @@ class _Builder:
             sdeps = _scalar_of(value)
             if conditional:
                 # `if (k) C.s = v` — the skipped path keeps the
-                # old static binding.
-                sdeps = (
-                    old.statics.get(path[0], frozenset()) | sdeps
-                )
+                # old static binding (a static METHOD flattens to
+                # its captured deps).
+                sdeps = _scalar_of(
+                    old.statics.get(path[0], frozenset())
+                ) | sdeps
             old.statics[path[0]] = sdeps
             return
         if isinstance(old, _Callable):

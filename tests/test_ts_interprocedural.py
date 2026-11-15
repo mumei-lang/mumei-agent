@@ -6936,6 +6936,19 @@ def test_review_conditional_static_write_unions():
     assert s.available and s.return_dependencies == frozenset({1, 2})
 
 
+def test_review_conditional_static_write_over_method():
+    # The same may-write over a static METHOD must not crash on a
+    # `_Callable | frozenset` union — the method flattens to its
+    # captured deps.
+    s = _fn(
+        "class C { static m(): number { return 0; } }"
+        "function f(c: boolean, v: number): number {"
+        " if (c) { C.m = v; }"
+        " return 1; }"
+    )
+    assert s.available
+
+
 def test_review_fs_resolver_importer_relative(tmp_path):
     # `./c` imported from `sub/b.ts` resolves `sub/c.ts`, not the
     # entry directory's `c.ts`.
