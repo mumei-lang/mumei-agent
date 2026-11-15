@@ -275,6 +275,17 @@ def real_core():
     pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
 
 
+def _require_bundle(built: subprocess.CompletedProcess) -> None:
+    """Skip only on the documented unsupported-host rejection; every
+    other build failure is a genuine incompatibility the test must
+    surface, not skip."""
+    if built.returncode == 0:
+        return
+    if "unsupported host for first native profile" in built.stderr:
+        pytest.skip("native-bundle build needs linux/x86_64")
+    pytest.fail(f"native-bundle build failed: {built.stderr}")
+
+
 @pytest.mark.integration
 def test_real_core_rechecks_native_bundle_equivalent(
     tmp_path, capsys, real_core
@@ -291,8 +302,7 @@ def test_real_core_rechecks_native_bundle_equivalent(
         text=True,
         timeout=300,
     )
-    if built.returncode != 0:
-        pytest.skip(f"native-bundle build unavailable: {built.stderr}")
+    _require_bundle(built)
     build_id = next(
         line.split(":", 1)[1].strip()
         for line in built.stdout.splitlines()
@@ -325,8 +335,7 @@ def test_real_core_rejects_wrong_build_id(
         text=True,
         timeout=300,
     )
-    if built.returncode != 0:
-        pytest.skip(f"native-bundle build unavailable: {built.stderr}")
+    _require_bundle(built)
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = "b" * 64
     code, out, _ = _run(capsys, argv)
