@@ -87,13 +87,15 @@ def test_match_arms_join():
     assert s.available and s.return_dependencies == frozenset({0, 1})
 
 
-def test_non_scalar_param_closes():
+def test_non_scalar_param_binds_dep_index():
+    # Slice 2: any identifier param gets a dep index
+    # (over-approx — reads carry the param's dep).
     s = _fn(
         "fn f(xs: Vec<u64>) -> u64 { 0 }",
         "f",
     )
-    assert not s.available
-    assert s.effects == "unknown"
+    assert s.available
+    assert s.return_dependencies == frozenset()
     assert s.gaps[0].reason == "unsupported_parameter"
 
 
@@ -224,7 +226,7 @@ def test_slice2_macro_opaque_call():
     assert s.available
     assert s.return_dependencies == frozenset({0})
     assert s.effects == "unknown"
-    assert any(c.callee == "println!" for c in s.calls)
+    assert any(c.name == "println!" for c in s.calls)
 
 
 def test_slice2_generic_call_inlines():
