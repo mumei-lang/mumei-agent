@@ -52,10 +52,14 @@ NATIVE_ATTEMPT_REPORT_PROFILE = "mumei.native-attempt-report/v1"
 # even read is a static error, not a run.
 MAX_SOURCE_BYTES = 65_536
 
+# The bundle record member — its sha256 is the Build ID a
+# `native-recheck --expected-build-id` call pins.
+RECORD_FILE = "native-bundle.json"
+
 # The five members a produced bundle must hold — the same set
 # native-recheck fingerprints when consuming the directory.
 BUNDLE_MEMBERS = (
-    "native-bundle.json",
+    RECORD_FILE,
     "program.ll",
     "program.o",
     "proof-cert.json",
@@ -80,15 +84,18 @@ def _check_output_path(args: argparse.Namespace, declared: list[Path]) -> None:
     if args.output is None:
         return
     out_path = Path(args.output)
-    for declared_path in declared:
+    # The bundle is a write target, not a declared input — but letting
+    # the report land on the directory or on a member's path would
+    # corrupt the produced bundle after selection.
+    protected = declared + [Path(args.bundle)] + [
+        Path(args.bundle).joinpath(name) for name in BUNDLE_MEMBERS
+    ]
+    for protected_path in protected:
         try:
-            if out_path.samefile(declared_path):
+            if out_path.samefile(protected_path):
                 raise ValueError(
-                    "--output may not overwrite a declared input document"
-                )
-            if out_path.samefile(Path(args.bundle)):
-                raise ValueError(
-                    "--output may not overwrite the declared bundle directory"
+                    "--output may not overwrite a declared input "
+                    "or bundle output"
                 )
         except FileNotFoundError:
             continue
@@ -272,14 +279,21 @@ def run_attempt(args: argparse.Namespace) -> dict:
         else None
     )
     # `native-bundle build` writes the bundle directory as a side
-    # effect: an exit 0 without a parseable Build ID or without the
-    # full declared member set is not a selectable production.
-    if (
-        exit_code == 0
-        and not inputs_changed
-        and build_id is not None
-        and _bundle_complete(Path(args.bundle))
-    ):
+    # effect: an exit 0 without a parseable Build ID, without the full
+    # declared member set, or whose printed ID does not match the
+    # sha256 of native-bundle.json (the identity a later
+    # `native-recheck --expected-build-id` pins) is not a selectable
+    # production — and the printed value is not claimable either.
+    verified_build_id = None
+    if exit_code == 0 and not inputs_changed and build_id is not None:
+        record_path = Path(args.bundle).joinpath(RECORD_FILE)
+        if _bundle_complete(Path(args.bundle)):
+            try:
+                if _file_sha256(record_path) == build_id:
+                    verified_build_id = build_id
+            except OSError:
+                pass
+    if verified_build_id is not None:
         updated = dispatch.sequence.select_result(
             dispatch.captured_output()
         )
@@ -296,8 +310,8 @@ def run_attempt(args: argparse.Namespace) -> dict:
         # request: its exit code is not a verdict on this
         # fingerprint. Surface the drift; claim no build ID.
         report["inputs_changed"] = True
-    elif build_id is not None:
-        report["build_id"] = build_id
+    elif verified_build_id is not None:
+        report["build_id"] = verified_build_id
     if published.selected_result is not None:
         report["candidate"] = (
             published.evidence_candidate().to_dict()

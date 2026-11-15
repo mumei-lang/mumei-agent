@@ -435,7 +435,7 @@ class TestEvidenceCompareTool:
 
 class TestNativeAttemptTool:
     def _write_build_core(self, tmp_path, complete: bool = True,
-                          build_id: str = "c" * 64, build_exit: int = 0):
+                          build_exit: int = 0):
         names = ("native-bundle.json", "program.ll", "program.o",
                  "proof-cert.json", "program")
         members = "\n".join(
@@ -449,7 +449,8 @@ class TestNativeAttemptTool:
             '    out="$5"\n'
             "    mkdir -p \"$out\"\n"
             f"{members}\n"
-            f'    printf "Build ID: {build_id}\\n"\n'
+            '    printf "Build ID: %s\\n" '
+            '"$(sha256sum "$out/native-bundle.json" | cut -c1-64)"\n'
             f"    exit {build_exit}\n"
             "fi\n"
             "exit 2\n"
@@ -466,7 +467,8 @@ class TestNativeAttemptTool:
         assert out["status"] == "ok"
         report = out["report"]
         assert report["schema_version"] == "mumei.native-attempt-report/v1"
-        assert report["build_id"] == "c" * 64
+        assert report["build_id"] == hashlib.sha256(
+            (bundle / "native-bundle.json").read_bytes()).hexdigest()
         assert report["candidate"]["schema_version"] == (
             "mumei.verifier-evidence-candidate/v1"
         )

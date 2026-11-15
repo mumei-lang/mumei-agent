@@ -23,14 +23,23 @@ BUILD_ID = "b" * 64
 
 
 def _write_core(tmp_path: Path, build_exit: int = 0,
-                complete: bool = True, build_id: str = BUILD_ID) -> Path:
+                complete: bool = True, build_id: str | None = None) -> Path:
     """Stub `mumei` executable: `native-bundle build <src> -o <dir>`
     writes the declared members into the directory and prints the
-    Build ID line (exit per `build_exit`)."""
+    Build ID line (exit per `build_exit`). With `build_id=None` the
+    stub computes the record's sha256 like the real Core; pass a
+    literal to simulate a misbehaving Core."""
     members = "\n".join(
         f'    printf %s "{name}-bytes" > "$out/{name}"'
         for name in (BUNDLE_MEMBERS if complete else BUNDLE_MEMBERS[:-1])
     )
+    if build_id is None:
+        id_line = (
+            '    printf "Build ID: %s\\n" '
+            '"$(sha256sum "$out/native-bundle.json" | cut -c1-64)"\n'
+        )
+    else:
+        id_line = f'    printf "Build ID: {build_id}\\n"\n'
     core = tmp_path / "mumei-stub"
     core.write_text(
         "#!/bin/sh\n"
@@ -38,7 +47,7 @@ def _write_core(tmp_path: Path, build_exit: int = 0,
         '    out="$5"\n'
         "    mkdir -p \"$out\"\n"
         f"{members}\n"
-        f'    printf "Build ID: {build_id}\\n"\n'
+        f"{id_line}"
         f"    exit {build_exit}\n"
         "fi\n"
         "exit 2\n"
@@ -80,7 +89,9 @@ def test_selected_build_reports_candidate_and_build_id(tmp_path, capsys):
     assert code == 0 and err == ""
     report = json.loads(out)
     assert report["schema_version"] == "mumei.native-attempt-report/v1"
-    assert report["build_id"] == BUILD_ID
+    assert report["build_id"] == hashlib.sha256(
+        bundle.joinpath("native-bundle.json").read_bytes()
+    ).hexdigest()
     assert report["sequence"]["selected_result"] is not None
     assert report["candidate"]["schema_version"] == (
         "mumei.verifier-evidence-candidate/v1"
@@ -123,11 +134,26 @@ def test_exit_zero_with_incomplete_bundle_selects_nothing(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    # The Build ID was printed, so it is reported as observed data —
-    # but the incomplete bundle is not a selectable production.
-    assert report["build_id"] == BUILD_ID
+    # The printed ID is claimable only once it verifies against the
+    # record — an incomplete bundle pins nothing and selects nothing.
+    assert "build_id" not in report
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
+
+
+def test_mismatched_build_id_selects_nothing(tmp_path, capsys):
+    """A Build ID line that does not match sha256(native-bundle.json)
+    is not the identity a recheck pins: no selection, no claimed ID."""
+    core = _write_core(tmp_path, build_id="c" * 64)
+    bundle = tmp_path / "bundle"
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert "build_id" not in report
+    assert report["sequence"].get("selected_result") is None
+    assert "candidate" not in report
+    assert report["normalized"]["exit_code"] == 0
 
 
 def test_relative_and_nul_paths_are_static_errors(tmp_path, capsys):
@@ -160,6 +186,23 @@ def test_output_may_not_overwrite_source(tmp_path, capsys):
               extra=("--output", str(source))),
     )
     assert code == 1 and "declared input" in err
+
+
+def test_output_may_not_overwrite_bundle_member(tmp_path, capsys):
+    """`--output <bundle>/program` would replace a produced member
+    with the report — refuse before the attempt is dispatched."""
+    core = _write_core(tmp_path)
+    source = _write_source(tmp_path)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    member = bundle / "program"
+    member.write_text("existing")
+    code, _, err = _run(
+        capsys,
+        _args(core, bundle, source,
+              extra=("--output", str(member))),
+    )
+    assert code == 1 and "bundle output" in err
 
 
 MUMEI_BIN = os.environ.get("MUMEI_BIN")
