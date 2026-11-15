@@ -5823,3 +5823,32 @@ def test_slice65_loop_inplace_map_mutation_converges():
 }"""
     (f,) = _summarize(src).functions
     assert 0 in f.return_dependencies
+
+
+def test_review3_function_value_in_loop_scope_converges():
+    s = _fn(
+        "function f(x) { let g = () => x; "
+        "for (let i = 0; i < 3; i++) { g(); } return x; }",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == {0}
+
+
+def test_review3_delete_field_in_loop_converges():
+    s = _fn(
+        "function f(x) { let o = {a: x, b: 1}; "
+        "for (let i = 0; i < 3; i++) { delete o.a; } return o.b; }",
+        "f",
+    )
+    assert s.available
+
+
+def test_review3_reassign_smaller_composite_in_loop_converges():
+    s = _fn(
+        "function f(x) { let o = {a: x, b: 1}; "
+        "for (let i = 0; i < 3; i++) { o = {a: x}; } return o.a; }",
+        "f",
+    )
+    assert s.available
+    assert s.return_dependencies == {0}

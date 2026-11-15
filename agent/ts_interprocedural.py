@@ -3246,7 +3246,9 @@ class _Builder:
                     if isinstance(sval, _Composite):
                         snap[sname] = ("fields", dict(sval.fields))
                     elif isinstance(sval, _Callable):
-                        snap[sname] = ("captured", dict(sval.captured))
+                        # `captured` is a dep frozenset, not a
+                        # dict — compare it as a set.
+                        snap[sname] = ("captured", sval.captured)
                 self.statement(
                     body, params, inner, transfers, count, deps,
                     saw_return, conditional,
@@ -3263,12 +3265,21 @@ class _Builder:
                 changed = False
                 for sname, (skind, before) in snap.items():
                     cur = inner.get(sname)
+                    if skind == "captured":
+                        caps = getattr(cur, "captured", None)
+                        if (
+                            not isinstance(caps, frozenset)
+                            or not caps <= before
+                        ):
+                            changed = True
+                        continue
                     table = getattr(cur, skind, None)
                     if not isinstance(table, dict):
                         changed = True
                         continue
-                    if set(before) - set(table):
-                        changed = True
+                    # A deleted or narrowed field carries no new
+                    # dep information — the merged frontier already
+                    # holds it — so only widened fields count.
                     for k, v in table.items():
                         # A pass introduces new information when a
                         # mutated field isn't leq its snapshot —
