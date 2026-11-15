@@ -2558,6 +2558,26 @@ for any non-`direct_import` call, for arity below two, and for a
 non-integer value. A forged arity that still validates is caught at
 the consumer: the left-hand width must equal it.
 
+### C06 Solidity scalar interprocedural summaries (slice 0)
+
+`agent/sol_interprocedural.py` mirrors the Go consumer's
+*model* — not its producer — for single-file Solidity: a
+`SolFunctionSummary` reports the parameter indexes a
+function's scalar result may depend on (over-approximation),
+the same-contract calls it makes with formal-to-actual dep
+sets, and gaps. The fragment: `contract`/`library` functions
+with scalar `primitive_type` params (`uint*`/`int*`/`bool`)
+and one scalar return; bodies admit `T x = e` declarations,
+`=`/compound assignment, `++`/`--`, `if`/`else` joins,
+`return`, `require`/`assert`/`revert` as recorded opaque
+calls; expressions admit param/local reads, literals,
+parens, unary/binary/ternary ops, and same-contract `f()`
+calls composed through the callee's summary. An unavailable
+callee blocks the caller. State variables, member calls,
+loops, multiple/unnamed results, structs/arrays/mappings and
+modifiers stay closed (`SolGap` records why). Opt-in and
+in-process; no audit/CLI/MCP route changes.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
