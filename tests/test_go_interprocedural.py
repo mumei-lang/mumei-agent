@@ -8476,11 +8476,137 @@ def test_imported_len_of_string_var_is_admitted(go_types_helper):
 
 
 def test_imported_len_computed_operand_stays_closed(go_types_helper):
-    # `len(lib.VM2["a"])` — the operand is an index read, not a
-    # member name: the builtin stays opaque.
+    # `len(lib.VS2.G)` — a string field, not a member name or an
+    # index chain on one: the builtin stays opaque.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return int64(len(lib.VS2.G)) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_len_of_indexed_container_is_admitted(go_types_helper):
+    # `len(lib.V2[i])` — the element `[]int64` is external state like
+    # the var itself: dep-free apart from the index's deps.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 { return k + int64(len(lib.V2[0])) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_imported_len_of_indexed_container_carries_index_deps(
+    go_types_helper,
+):
+    # `len(lib.V2[k])` — the length itself is dep-free, but the index
+    # expression's dependencies join the result like the index read's.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 { return int64(len(lib.V2[k])) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_cap_of_indexed_container_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return int64(cap(lib.V2[0])) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_imported_len_of_map_element_is_admitted(go_types_helper):
+    # `len(lib.VM2["a"])` — the map value is itself a map, and `len`
+    # on a map is valid Go: the external read admits dep-free.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 { return int64(len(lib.VM2[\"a\"])) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_imported_len_of_parenthesized_chain_carries_inner_index_deps(
+    go_types_helper,
+):
+    # `len((lib.V3[i])[j])` — parentheses inside the chain must not
+    # hide the inner index's dependencies.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar V3 [][][]int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i, j int64) int64 { return int64(len((lib.V3[i])[j])) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_imported_len_of_channel_element_stays_closed(go_types_helper):
+    # `len(lib.VC2[i])` — `len` on a channel is valid Go, but the
+    # element's kind is not a modelled container: stays opaque.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar VC2 []chan int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return int64(len(lib.VC2[0])) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_len_of_call_result_stays_closed(
+    go_types_helper,
+):
+    # `len(g())` — a call result names no imported member: stays
+    # opaque.
+    files = {
+        "a.go": "package p\n"
+        "func g() []int64 { return nil }\n"
+        "func F() int64 { return int64(len(g())) }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(

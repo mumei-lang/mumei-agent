@@ -1663,8 +1663,12 @@ one extra shape: a single argument naming an imported container `var`
 (`len(lib.VA)`, `cap(lib.VA)`, `len(lib.VS)` on a `string` var) reads
 external state like the member itself, so the result is dep-free —
 the call still records the imported transfer and pins the declared
-identity. Any other operand (`len(xs)` on a binding, `len(f())`,
-`len(lib.VM2["a"])` on an index read, `len(lib.VC)` on a channel)
+identity. An index chain on an imported var whose element is itself
+a container admits the same way (`len(lib.V2[i])` on `[][]int64`,
+`len(lib.VM2["a"])` on a map-valued map): dep-free apart from the
+indexes' own dependencies, and the member's whole fact tree pins.
+Any other operand (`len(xs)` on a binding, `len(f())`,
+`len(lib.VS2.G)` on a field, `len(lib.VC)` on a channel)
 stays opaque, as does every other builtin (`panic`, `append`,
 `make`, `new`, `complex`, `real`, `imag`, ...).
 
