@@ -10,6 +10,7 @@ truncation happened, not that the producer stopped writing.
 """
 
 import hashlib
+import shutil
 import subprocess
 import threading
 import time
@@ -41,6 +42,23 @@ def _memory_bound_preexec(bound_mb: int):
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
     return _apply
+
+
+# `prlimit` applies the same RLIMIT_AS as `preexec_fn` but through a
+# plain exec, so bounded spawns stay on the posix_spawn path and are
+# safe inside a multithreaded process. `preexec_fn` remains only as
+# the fallback for POSIX hosts without prlimit (e.g. macOS).
+_PRLIMIT = shutil.which("prlimit")
+
+
+def memory_bound_spawn_thread_safe() -> bool:
+    """Whether a memory-bound spawn avoids `preexec_fn`.
+
+    `preexec_fn` forces the fork+exec spawn path, which can deadlock
+    in a multithreaded process. With `prlimit` present the bound is
+    applied by an exec wrapper instead, making bounded spawns
+    thread-safe."""
+    return _PRLIMIT is not None
 
 
 class _BoundedCollector:
@@ -175,7 +193,11 @@ class AttemptRunner:
             or not 1 <= memory_bound_mb <= MAX_MEMORY_BOUND_MB
         ):
             raise ValueError("invalid attempt run memory bound")
-        if memory_bound_mb is not None and resource is None:
+        if (
+            memory_bound_mb is not None
+            and resource is None
+            and _PRLIMIT is None
+        ):
             raise ValueError(
                 "attempt run memory bound requires a POSIX resource boundary"
             )
@@ -184,16 +206,24 @@ class AttemptRunner:
             request.attempt_number,
             request.timeout_ms,
         )
+        spawn_argv: list[str] = list(argv)
+        preexec = None
+        if memory_bound_mb is not None:
+            if _PRLIMIT is not None:
+                spawn_argv = [
+                    _PRLIMIT,
+                    f"--as={memory_bound_mb * 1_048_576}",
+                    "--",
+                    *spawn_argv,
+                ]
+            else:
+                preexec = _memory_bound_preexec(memory_bound_mb)
         try:
             process = subprocess.Popen(
-                list(argv),
+                spawn_argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                preexec_fn=(
-                    _memory_bound_preexec(memory_bound_mb)
-                    if memory_bound_mb is not None
-                    else None
-                ),
+                preexec_fn=preexec,
             )
         except (OSError, subprocess.SubprocessError):
             return AttemptRunResult(

@@ -457,12 +457,16 @@ class _ConcurrencyStubRunner:
         return self._Result()
 
 
-def test_observe_probes_memory_bound_batch_runs_sequentially():
+def test_observe_probes_memory_bound_batch_runs_sequentially(monkeypatch):
     import dataclasses as _dc
 
-    # preexec_fn carries the memory bound and is unsafe under
-    # threads: a batch carrying a memory-bound probe must stay
+    # When the only way to apply a memory bound is preexec_fn
+    # (no prlimit), a batch carrying a bound probe must stay
     # sequential even when max_parallel allows concurrency.
+    monkeypatch.setattr(
+        "agent.adapter_probe.memory_bound_spawn_thread_safe",
+        lambda: False,
+    )
     bound = _dc.replace(_req(), adapter_id="bound.probe", memory_bound_mb=64)
     plain_a = _dc.replace(_req(), adapter_id="plain.a")
     plain_b = _dc.replace(_req(), adapter_id="plain.b")
@@ -471,6 +475,24 @@ def test_observe_probes_memory_bound_batch_runs_sequentially():
     obs = observe_probes((bound, plain_a, plain_b), runner=runner, max_parallel=3)
     assert [o.adapter_id for o in obs] == ["bound.probe", "plain.a", "plain.b"]
     assert runner.max_seen == 1
+
+
+def test_observe_probes_memory_bound_batch_parallel_when_spawn_safe(monkeypatch):
+    import dataclasses as _dc
+
+    # A prlimit-backed bound is applied by an exec wrapper, so
+    # memory-bound probes may run under threads.
+    monkeypatch.setattr(
+        "agent.adapter_probe.memory_bound_spawn_thread_safe",
+        lambda: True,
+    )
+    bound = _dc.replace(_req(), adapter_id="bound.probe", memory_bound_mb=64)
+    plain = _dc.replace(_req(), adapter_id="plain.probe")
+
+    runner = _ConcurrencyStubRunner()
+    obs = observe_probes((bound, plain), runner=runner, max_parallel=2)
+    assert [o.adapter_id for o in obs] == ["bound.probe", "plain.probe"]
+    assert runner.max_seen == 2
 
 
 def test_observe_probes_unbound_batch_runs_in_parallel():

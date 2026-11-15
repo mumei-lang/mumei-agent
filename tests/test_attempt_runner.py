@@ -409,7 +409,63 @@ def test_run_memory_bound_failure_reports_failed(monkeypatch):
     def boom(limit):
         raise OSError("rlimit refused")
 
+    # Force the preexec fallback so the refused rlimit surfaces
+    # as a spawn failure rather than a wrapped prlimit exit.
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
     monkeypatch.setattr(runner_mod.resource, "setrlimit", boom)
     result = AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
     assert result.record.state == "failed"
     assert result.stdout == b""
+
+
+def test_run_memory_bound_prefers_prlimit_wrapper(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            spawned["preexec_fn"] = kw.get("preexec_fn")
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    result = AttemptRunner().run(
+        request(), argv("pass"), memory_bound_mb=64
+    )
+    assert result.record.state == "failed"
+    assert spawned["args"][:3] == [
+        "/usr/bin/prlimit",
+        "--as=67108864",
+        "--",
+    ]
+    assert spawned["args"][3:] == list(argv("pass"))
+    assert spawned["preexec_fn"] is None
+
+
+def test_run_memory_bound_falls_back_to_preexec(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            spawned["preexec_fn"] = kw.get("preexec_fn")
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
+    assert spawned["args"] == list(argv("pass"))
+    assert spawned["preexec_fn"] is not None
+
+
+def test_memory_bound_spawn_thread_safe(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    assert runner_mod.memory_bound_spawn_thread_safe()
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    assert not runner_mod.memory_bound_spawn_thread_safe()
