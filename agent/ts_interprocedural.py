@@ -4175,9 +4175,9 @@ class _Builder:
                     # `_pattern_read` carries them without
                     # mutating the caller's object.
                     seeded = _Composite(dict(psrc.fields), psrc.klass)
-                    seeded.fields["*"] = seeded.fields.get(
-                        "*", frozenset()
-                    ) | deps
+                    seeded.fields["*"] = _merge_vals(
+                        seeded.fields.get("*", frozenset()), deps
+                    )
                     psrc = seeded
                 destructured_params.append((pnode, psrc))
                 continue
@@ -4995,7 +4995,9 @@ class _Builder:
                 val.fields[key] = _merge_vals(
                     val.fields[key], deps
                 )
-            val.fields["*"] = val.fields.get("*", frozenset()) | deps
+            val.fields["*"] = _merge_vals(
+                val.fields.get("*", frozenset()), deps
+            )
 
     def _funproto_call(
         self,
@@ -5248,8 +5250,8 @@ class _Builder:
                                 stored,
                             )
                         else:
-                            added["*"] = (
-                                added.get("*", frozenset()) | stored
+                            added["*"] = _merge_vals(
+                                added.get("*", frozenset()), stored
                             )
                     old.fields.clear()
                     old.fields.update(added)
@@ -5277,8 +5279,8 @@ class _Builder:
                                 stored,
                             )
                         else:
-                            added["*"] = (
-                                added.get("*", frozenset()) | stored
+                            added["*"] = _merge_vals(
+                                added.get("*", frozenset()), stored
                             )
                     new = (
                         _composite_set(

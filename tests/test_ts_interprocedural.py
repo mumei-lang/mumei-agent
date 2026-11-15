@@ -5793,3 +5793,17 @@ def test_dynamic_computed_key_deps_seed_fields():
         " function f(x: number, k: string) { return new C().a + x; }"
     )
     assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_slice65_destructured_default_star_bucket_merge():
+    # `({a} = {a: x})` on a composite actual seeds its "*" bucket
+    # — when "*" holds a non-frozenset the union must not crash.
+    src = """function f(o, x) {
+  const g = ({a} = {a: x}) => a;
+  return g(o);
+}
+const o = {};
+o["*"] = {n: 1};
+f(o, 7);"""
+    result = _summarize(src)
+    assert result.functions
