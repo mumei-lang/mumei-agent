@@ -332,13 +332,17 @@ static error rather than a lost observation. The returned
 `AttemptDispatch(sequence, run)` pairs the reconciled sequence with the
 observed run — its own validation requires the sequence's current
 record to carry the run's full binding (fingerprint, ordinal, declared
-timeout) and events.
+timeout) and events. `dispatch.captured_output()` binds the run's
+bounded stdout as an `AttemptOutput` on the reconciled current record
+(stream `stdout`, `complete` carried from the run's collection claim);
+a failed, timed-out or cancelled run cannot mint a snapshot — output
+requires an exited record — and the result is still a host claim, not
+Evidence.
 
 The driver adds no new authority: it composes the declared dispatch
 boundary with the same single-spawn runner, performing no scheduling,
-ordering, result selection, output snapshot or publication — the host
-still calls `select_result`, builds `AttemptOutput` and publishes
-through `AttemptSequenceStore`. C11 stays partial; Evidence
+ordering, result selection or publication — the host still calls
+`select_result` and publishes through `AttemptSequenceStore`. C11 stays partial; Evidence
 normalization/acceptance remains open, and C12's demand gate plus
 existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged.

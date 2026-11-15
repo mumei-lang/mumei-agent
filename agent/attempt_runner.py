@@ -23,6 +23,7 @@ from agent.verification_attempt import (
     AttemptEvent,
     AttemptExecutionRequest,
     AttemptNormalizedResult,
+    AttemptOutput,
     AttemptRecord,
     AttemptSequence,
 )
@@ -338,6 +339,28 @@ class AttemptDispatch:
             != self.run.record.request_fingerprint
         ):
             raise ValueError("attempt dispatch does not match the sequence")
+
+    def captured_output(self) -> AttemptOutput:
+        """Bind the run's captured stdout as an `AttemptOutput` snapshot.
+
+        The snapshot is built from the reconciled sequence's current
+        record — identical to the run's record after reconciliation — the
+        bounded captured bytes and the run's `complete` collection claim,
+        then checked against `check_output_binding`. A non-`exited`
+        terminal run cannot produce a snapshot: `AttemptOutput` requires
+        an exited record, so a failed, timed-out or cancelled dispatch
+        fails statically rather than minting an output for a process
+        that never produced one. The snapshot is still a host claim, not
+        Evidence — selection and publication stay explicit host steps.
+        """
+        output = AttemptOutput(
+            self.sequence.current,
+            self.run.stdout,
+            hashlib.sha256(self.run.stdout).hexdigest(),
+            complete=self.run.complete,
+        )
+        self.sequence.check_output_binding(output)
+        return output
 
 
 def dispatch_attempt(

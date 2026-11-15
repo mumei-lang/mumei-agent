@@ -711,3 +711,33 @@ def test_dispatch_attempt_rejects_missing_or_stale_stamps(stamp):
 def test_dispatch_attempt_rejects_malformed_stamps(stamp):
     with pytest.raises(ValueError, match="^invalid attempt report stamp$"):
         dispatch_attempt(ready_sequence(), argv("pass"), report_stamp=stamp)
+
+
+def test_dispatch_captured_output_binds_the_run_snapshot():
+    dispatch = dispatch_attempt(
+        ready_sequence(), argv("import sys; sys.stdout.write('payload')")
+    )
+    output = dispatch.captured_output()
+    assert output.attempt is dispatch.sequence.current
+    assert output.stdout == b"payload"
+    assert output.expected_stdout_sha256 == hashlib.sha256(b"payload").hexdigest()
+    assert output.stream == "stdout"
+    assert output.complete is True
+    dispatch.sequence.check_output_binding(output)
+
+
+def test_dispatch_captured_output_carries_the_complete_claim():
+    dispatch = dispatch_attempt(
+        ready_sequence(), argv("import sys; sys.exit(9)")
+    )
+    assert dispatch.run.complete is True
+    assert dispatch.captured_output().complete is True
+
+
+def test_dispatch_captured_output_rejects_non_exited_runs():
+    dispatch = dispatch_attempt(
+        ready_sequence(), ("/FAKE_PRIVATE_missing_executable_9f31",)
+    )
+    assert dispatch.run.record.state == "failed"
+    with pytest.raises(ValueError, match="exited"):
+        dispatch.captured_output()
