@@ -652,6 +652,29 @@ drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
 C02/C10 stay partial.
 
+### C02 declared evidence file-identity route (evidence-identity-check)
+
+`python -m agent evidence-identity-check --evidence <path>
+--source <path>` discharges the `file_identity` duty at
+representation level: it reads a declared
+`mumei.verification-evidence/v1` record — fail-closed on a foreign
+schema or a `subject` outside the closed `{id, kind, sha256}` shape —
+and a declared source file, then emits
+`mumei.evidence-file-identity/v1` comparing the record's bound
+`subject.sha256` (the source digest Core binds at production) with the
+sha256 of the current source bytes. `identity` is `"match"` or
+`"mismatch"`; a mismatch is data, not an error — a saved record that
+no longer binds the declared source answers `mismatch`, while a
+malformed or oversized input (over Core's 64 KiB bound) is a static
+failure. A match only means the record still binds THESE bytes: full
+representation validity stays Core's `evidence check` duty, and the
+other five checks (`claim_truth`, `freshness`,
+`producer_authenticity`, `semantic_correspondence`,
+`artifact_semantics`) stay in `checks_not_performed`. The route runs
+no Core and no fresh query — it is the byte-level staleness
+companion of `verify-recheck`, which discharges freshness by
+re-running the source query. C02 stays partial.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
