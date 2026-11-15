@@ -751,7 +751,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             "pointer",
         }:
             return False
-        self._pin_member_type(member)
+        self._pin_fact_identities(member.type)
         transfers.append(
             CallTransfer(
                 FileSpan(self.current_file, node.start_byte, node.end_byte),

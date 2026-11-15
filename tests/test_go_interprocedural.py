@@ -4215,6 +4215,9 @@ def _method_expr_lib():
                 "type W struct{ N int64 }\n"
                 "func (w W) WF(x int64) int64 { return x }\n"
                 "var VW W\nvar VW2 []W\n"
+                "type T int64\ntype N []T\n"
+                "func (n N) Size() int64 { return int64(len(n)) }\n"
+                "var VN N\n"
             ),
         }
     }
@@ -4265,6 +4268,24 @@ def test_method_expr_scalar_var_receiver_stays_a_member_read(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_receiver_pins_element_identity(go_types_helper):
+    # `lib.N.Size(lib.VN)` on `N = []T`: redeclaring `T` inside the
+    # imported unit must flag `stale_dependents`, so the receiver
+    # read pins the element identity, not only `N`'s own.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.N.Size(lib.VN) + x }\n"
+    }
+    report = package_report_imports(go_types_helper, files, _method_expr_lib())
+    snapshot = load_go_package_snapshot(report, files, target_arch="amd64")
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    vn = next(m for m in snapshot.imported_members if m.name == "VN")
+    assert vn.type.elem.type_id in result.pinned
 
 
 def test_method_expr_indexed_receiver_stays_closed(go_types_helper):
