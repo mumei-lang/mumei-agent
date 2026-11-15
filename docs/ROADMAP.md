@@ -3181,6 +3181,25 @@ C11 probe boundary, not the route.
 Producing or accepting a summary is not a proof, an audit or a
 verification verdict — the routes emit declared routing evidence only.
 
+### C06 declared summaries in directory audits (audit --enable-summaries)
+
+`python -m agent audit --code-file <dir> --enable-summaries` connects the
+directory audit to the declared produce routes: every collected source
+unit that has a summary route (`go-summaries` per package directory,
+`ts-summaries` / `rust-summaries` / `sol-summaries` per file) is invoked
+through `python -m agent <route>` as a bounded subprocess, and the
+directory result records only the manifest's declared metadata under
+`summary_audits` — `route`, `unit`, `status` (`emitted`,
+`skipped_no_helper`, `failed`), plus `context_key` and `function_count`
+on emitted entries. Manifest bytes never land in the audit output.
+
+Go units need the provisioned helper declared via `--go-types <path>`;
+without it they record `skipped_no_helper` and never spawn. Entries are
+advisory — a failed or skipped unit reports its status without flipping
+`success`, matching the `trusted_atoms` convention. The flag is
+CLI-only; `scan_and_fix` does not expose it, and single-file audits are
+unchanged.
+
 ### C11 declared availability probes
 
 The opt-in `agent.adapter_probe` module connects a host-declared probe

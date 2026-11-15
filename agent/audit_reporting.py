@@ -792,6 +792,19 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
         lines.extend(
             f"  - {entry}" for entry in _trusted_atom_strings(result.trusted_atoms)
         )
+    if result.summary_audits:
+        lines.append("summary_audits:")
+        for entry in result.summary_audits:
+            status = entry.get("status", "unknown")
+            detail = (
+                f" context_key={entry['context_key']}"
+                f" functions={entry['function_count']}"
+                if status == "emitted"
+                else (f" {entry['error']}" if entry.get("error") else "")
+            )
+            lines.append(
+                f"  - {entry.get('route')} {entry.get('unit')}: {status}{detail}"
+            )
     if result.errors:
         lines.append(f"errors: {result.errors}")
     if result.next_steps:

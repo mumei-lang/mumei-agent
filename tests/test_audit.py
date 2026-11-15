@@ -1821,6 +1821,8 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         include_tests=False,
         enable_body_port=False,
         enable_native_replay=False,
+        enable_summaries=False,
+        go_types=None,
     )
 
 
@@ -2822,3 +2824,211 @@ def test_scan_and_fix_human_report_reads_nested_finding_counts(tmp_path: Path) -
     report = payload["formatted_report"]
     assert "- finding_counts: `code=0, spec=2, model_limitations=1, errors=0`" in report
     assert report.count("- files_with_spec_diagnostics: `1`") == 1
+
+
+def _fake_completed(
+    argv: list[str], rc: int = 0, stdout: str = "", stderr: str = ""
+):
+    import subprocess
+
+    return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+
+def _manifest_json(functions: int = 2) -> str:
+    return json.dumps(
+        {
+            "schema_version": "mumei.summaries/v1",
+            "context_key": "ck-test",
+            "functions": [{"name": f"f{i}"} for i in range(functions)],
+        }
+    )
+
+
+def test_summary_audit_units_groups_go_by_directory(tmp_path: Path) -> None:
+    from agent.audit import _summary_audit_units
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    files = []
+    for rel in ("pkg/a.go", "pkg/b.go", "main.ts", "lib.rs", "token.sol", "main.py"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+        files.append(path)
+
+    units = _summary_audit_units(tmp_path, files)
+
+    by_route = {}
+    for route, unit, argv in units:
+        by_route.setdefault(route, []).append((unit, argv))
+    assert sorted(by_route) == [
+        "go-summaries",
+        "rust-summaries",
+        "sol-summaries",
+        "ts-summaries",
+    ]
+    assert len(by_route["go-summaries"]) == 1
+    _, go_argv = by_route["go-summaries"][0]
+    assert go_argv.count("--source") == 2  # one unit for the whole package dir
+    assert all(len(args) == 1 for _, args in by_route["ts-summaries"])
+    # python has no declared summary route — it is not a unit
+    assert "main.py" not in {
+        arg for entries in by_route.values() for _, argv in entries for arg in argv
+    }
+
+
+def test_collect_summary_audits_emitted_and_skipped(tmp_path: Path) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    go = tmp_path / "pkg" / "a.go"
+    go.parent.mkdir()
+    go.write_text("x", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        return _fake_completed(argv, stdout=_manifest_json())
+
+    entries = _collect_summary_audits(tmp_path, [ts, go], None, runner=runner)
+
+    assert entries == [
+        {"route": "ts-summaries", "unit": "main.ts", "status": "emitted",
+         "context_key": "ck-test", "function_count": 2},
+        {"route": "go-summaries", "unit": "pkg", "status": "skipped_no_helper"},
+    ]
+    # the go unit never spawned — no helper was declared
+    assert calls == [["ts-summaries", str(ts)]]
+
+
+def test_collect_summary_audits_passes_go_types_helper(tmp_path: Path) -> None:
+    from agent.audit import _collect_summary_audits
+
+    go = tmp_path / "pkg" / "a.go"
+    go.parent.mkdir()
+    go.write_text("x", encoding="utf-8")
+
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [go],
+        "/opt/go-types",
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_manifest_json(1)),
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert calls[0][:3] == ["go-summaries", "--go-types", "/opt/go-types"]
+
+
+def test_collect_summary_audits_failure_redacts_checkout_path(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    loud = tmp_path / "rs.rs"
+    loud.write_text("x", encoding="utf-8")
+
+    def runner(argv: list[str]):
+        if argv[0] == "ts-summaries":
+            return _fake_completed(
+                argv, rc=2, stderr=f"boom in {ts} while parsing"
+            )
+        return _fake_completed(argv, stdout="not json")
+
+    entries = _collect_summary_audits(tmp_path, [ts, loud], None, runner=runner)
+
+    assert entries[0]["status"] == "failed"
+    assert str(tmp_path) not in entries[0]["error"]
+    assert "main.ts" in entries[0]["error"]
+    assert entries[1] == {
+        "route": "rust-summaries",
+        "unit": "rs.rs",
+        "status": "failed",
+        "error": "produce route emitted no manifest JSON",
+    }
+
+
+def test_audit_directory_collects_summary_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (src / "util.ts").write_text("export const g = () => 1\n", encoding="utf-8")
+    pkg = src / "pkg"
+    pkg.mkdir()
+    (pkg / "a.go").write_text("package pkg\n", encoding="utf-8")
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        "agent.audit._run_summary_route",
+        lambda argv: seen.append(argv)
+        or _fake_completed(argv, stdout=_manifest_json()),
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src, enable_summaries=True)
+
+    assert {
+        (entry["route"], entry["unit"], entry["status"])
+        for entry in result.summary_audits
+    } == {
+        ("ts-summaries", "util.ts", "emitted"),
+        ("go-summaries", "pkg", "skipped_no_helper"),
+    }
+    assert seen == [["ts-summaries", str(src / "util.ts")]]
+    # advisory only — manifest bytes never land in the result
+    assert "functions" not in result.summary_audits[0]
+    assert asdict(result)["summary_audits"] == result.summary_audits
+    assert "summary_audits:" in result.summary
+
+
+def test_audit_directory_summaries_opt_in(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "util.ts").write_text("export const g = () => 1\n", encoding="utf-8")
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="typescript",
+        errors=[],
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src)
+    assert result.summary_audits == []
+
+
+def test_audit_parser_accepts_summaries_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "--code-file", "src",
+            "--enable-summaries", "--go-types", "/opt/go-types",
+        ]
+    )
+    assert args.enable_summaries is True
+    assert args.go_types == "/opt/go-types"

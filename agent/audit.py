@@ -6,8 +6,10 @@ import contextlib
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import cast
@@ -245,6 +247,8 @@ class AuditPipeline:
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
         include_tests: bool = False,
+        enable_summaries: bool = False,
+        go_types: str | None = None,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -258,6 +262,8 @@ class AuditPipeline:
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
                 include_tests=include_tests,
+                enable_summaries=enable_summaries,
+                go_types=go_types,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -610,6 +616,8 @@ class AuditPipeline:
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
         include_tests: bool = False,
+        enable_summaries: bool = False,
+        go_types: str | None = None,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
@@ -633,6 +641,8 @@ class AuditPipeline:
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
                 include_tests=include_tests,
+                enable_summaries=enable_summaries,
+                go_types=go_types,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -656,6 +666,8 @@ class AuditPipeline:
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
         include_tests: bool = False,
+        enable_summaries: bool = False,
+        go_types: str | None = None,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -714,6 +726,12 @@ class AuditPipeline:
         if not code_files:
             errors.append(f"no supported source-code files found in directory: {source_label}")
 
+        summary_audits = (
+            _collect_summary_audits(source_path, code_files, go_types)
+            if enable_summaries and code_files
+            else []
+        )
+
         file_results: list[AuditResult] = []
         for code_path in code_files:
             audit_language = normalized_language or AUDIT_EXTENSION_MAP.get(
@@ -760,6 +778,7 @@ class AuditPipeline:
                 if file_result.skipped_rate_limited
             ],
             trusted_atoms=trusted_atoms,
+            summary_audits=summary_audits,
         )
         _aggregate_directory_fixed_keys(result)
         result.next_steps = _generate_directory_next_steps(result)
@@ -1004,6 +1023,27 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "tests/ dirs), which are skipped by default for directory audits."
         ),
     )
+    parser.add_argument(
+        "--enable-summaries",
+        action="store_true",
+        help=(
+            "Directory audits only: invoke each declared *-summaries "
+            "produce route on the collected source units and record "
+            "declared manifest metadata (route, unit, status, context "
+            "key, function count) under summary_audits — advisory; "
+            "manifest bytes are not stored."
+        ),
+    )
+    parser.add_argument(
+        "--go-types",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Path to the provisioned tools/go-types helper binary; Go "
+            "summary units record skipped_no_helper when "
+            "--enable-summaries is set without it."
+        ),
+    )
     return parser
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
@@ -1019,6 +1059,8 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         include_tests=bool(getattr(args, "include_tests", False)),
         enable_body_port=bool(getattr(args, "enable_body_port", False)),
         enable_native_replay=bool(getattr(args, "enable_native_replay", False)),
+        enable_summaries=bool(getattr(args, "enable_summaries", False)),
+        go_types=getattr(args, "go_types", None),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
@@ -1036,6 +1078,119 @@ _RATE_LIMIT_MARKERS = (
     "too many requests",
     "retry-after",
 )
+
+
+# Declared produce routes ``audit --enable-summaries`` invokes per
+# collected unit. Go's unit is the package directory (one manifest per
+# directory); the other languages summarize one file each.
+_SUMMARY_ROUTE_BY_EXTENSION = {
+    ".go": "go-summaries",
+    ".ts": "ts-summaries",
+    ".tsx": "ts-summaries",
+    ".rs": "rust-summaries",
+    ".sol": "sol-summaries",
+}
+
+_SUMMARY_ROUTE_TIMEOUT_SECONDS = 120
+_SUMMARY_ERROR_TAIL_CHARS = 400
+
+
+def _summary_audit_units(
+    source_path: Path, code_files: list[Path]
+) -> list[tuple[str, str, list[str]]]:
+    """Group collected code files into (route, unit label, argv tail) units."""
+    units: list[tuple[str, str, list[str]]] = []
+    go_dirs: dict[Path, list[Path]] = {}
+    for code_path in sorted(code_files):
+        route = _SUMMARY_ROUTE_BY_EXTENSION.get(code_path.suffix.lower())
+        if route is None:
+            continue
+        if route == "go-summaries":
+            go_dirs.setdefault(code_path.parent, []).append(code_path)
+        else:
+            units.append((route, str(code_path), [str(code_path)]))
+    for directory, files in sorted(go_dirs.items()):
+        units.append(
+            (
+                "go-summaries",
+                str(directory),
+                [
+                    arg
+                    for f in files
+                    for arg in ("--source", str(f))
+                ],
+            )
+        )
+    return units
+
+
+def _collect_summary_audits(
+    source_path: Path,
+    code_files: list[Path],
+    go_types: str | None,
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
+) -> list[dict]:
+    """Run each declared produce route on its unit and keep only the
+    manifest's declared metadata (context key + function count).
+
+    Advisory by construction: a failed or skipped unit records its
+    status without failing the audit, and manifest bytes are never
+    stored in the report.
+    """
+    run = runner or _run_summary_route
+    entries: list[dict] = []
+    for route, unit, argv_tail in _summary_audit_units(source_path, code_files):
+        label = _directory_file_label(str(source_path), unit)
+        entry: dict = {"route": route, "unit": label}
+        if route == "go-summaries" and not go_types:
+            entry["status"] = "skipped_no_helper"
+            entries.append(entry)
+            continue
+        argv = [route]
+        if route == "go-summaries":
+            argv += ["--go-types", cast(str, go_types)]
+        argv += argv_tail
+        try:
+            completed = run(argv)
+        except Exception as exc:  # runner failure (spawn, timeout)
+            entry["status"] = "failed"
+            entry["error"] = _summary_error_text(exc, source_path)
+            entries.append(entry)
+            continue
+        if completed.returncode != 0:
+            entry["status"] = "failed"
+            entry["error"] = _summary_error_text(completed.stderr, source_path)
+            entries.append(entry)
+            continue
+        try:
+            manifest = json.loads(completed.stdout)
+            functions = manifest.get("functions")
+            entry["context_key"] = manifest.get("context_key")
+            entry["function_count"] = len(functions) if isinstance(functions, list) else 0
+            entry["status"] = "emitted"
+        except (json.JSONDecodeError, AttributeError):
+            entry["status"] = "failed"
+            entry["error"] = "produce route emitted no manifest JSON"
+        entries.append(entry)
+    return entries
+
+
+def _summary_error_text(detail: object, source_path: Path) -> str:
+    text = detail if isinstance(detail, str) else str(detail)
+    # Failure text reaches the report — keep checkout-local paths out.
+    text = text.replace(str(source_path), ".")
+    return text.strip()[-_SUMMARY_ERROR_TAIL_CHARS:]
+
+
+def _run_summary_route(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "agent", *argv],
+        capture_output=True,
+        text=True,
+        timeout=_SUMMARY_ROUTE_TIMEOUT_SECONDS,
+        check=False,
+    )
 
 
 def _errors_indicate_rate_limit(errors: list[str]) -> bool:
