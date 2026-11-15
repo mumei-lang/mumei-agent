@@ -2315,3 +2315,20 @@ def test_review_loop_scoped_state_slot_propagates():
 }"""
     s = _fn(src, "f")
     assert s.return_dependencies == frozenset({0, 1})
+
+
+def test_review_multiple_named_arg_groups_fall_back_to_arity():
+    src = """contract C {
+  function g(uint256 x, uint256 y) public pure returns (uint256) {
+    return x;
+  }
+  function f(uint256 a, uint256 b) public returns (uint256) {
+    return g({x: a}, {x: b});
+  }
+}"""
+    s = _fn(src, "f")
+    # Two braced groups share one `named_args` dict — `x` would
+    # collide. With no single group recorded, arity matching
+    # applies and `x`'s dep is the first arg.
+    assert s.available
+    assert s.return_dependencies == frozenset({0})

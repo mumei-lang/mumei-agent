@@ -1986,6 +1986,14 @@ class _Builder:
         ]
         actual = []
         named_args: dict[str, frozenset[int]] = {}
+        named_arg_groups = sum(
+            1
+            for a in args
+            if any(
+                c.type == "call_struct_argument"
+                for c in _children(a)
+            )
+        )
         for a in args:
             struct_args = [
                 c
@@ -1995,7 +2003,12 @@ class _Builder:
             if struct_args:
                 # `{name: value, ...}` named call args / struct
                 # literal fields — keep the field names so a
-                # resolved callee can map each to its param.
+                # resolved callee can map each to its param. Only
+                # a single braced group is a well-formed named
+                # call; several groups share `named_args`, so a
+                # repeated field name would collide — leave it
+                # empty and let arity matching apply.
+                record_names = named_arg_groups == 1
                 ndeps = frozenset()
                 for sa in struct_args:
                     v = sa.child_by_field_name("value")
@@ -2007,7 +2020,7 @@ class _Builder:
                         if v is not None
                         else frozenset()
                     )
-                    if fname is not None:
+                    if fname is not None and record_names:
                         named_args[fname.text.decode()] = vdeps
                     ndeps |= vdeps
                 actual.append(ndeps)
