@@ -48,10 +48,12 @@ Admitted:
   a `break` inside a `switch` targets the switch's own frame while a
   `continue` skips it and still targets the enclosing loop — and
   `try`/`catch`/`finally` with `throw` (a `throw` evaluates its
-  expression for calls, then every later statement is a may-write
-  until a `catch` consumes the thrown flag; `finally` always runs —
-  the catch parameter is left unbound, so a body that reads it
-  closes), and `L: stmt` labels — a labeled loop or switch claims
+  expression for calls and unions its deps into `thrown_deps`,
+  then every later statement is a may-write until a `catch`
+  consumes the thrown flag; `finally` always runs — a
+  `catch (e)` binds `e` to the union of the thrown deps, the
+  sound over-approximation for whichever throw reached it), and
+  `L: stmt` labels — a labeled loop or switch claims
   the label on its own frame, any other labeled statement gets a
   plain frame, so `break L` exits exactly the labeled statement and
   `continue L` only targets labeled loops (an unknown label, or a
@@ -164,13 +166,16 @@ Admitted:
   constructor on the same `this`, `super.m(x)` calls through
   the parent prototype; `implements` is type-level and
   admits silently. Computed member names and
-  `abstract`/`declare`/`readonly` members close;
+  `abstract`/`declare` members close (`readonly` fields and
+  parameter properties are value-identical for deps);
   `static get/set p` collect into `sgetters`/`ssetters` —
   `C.p` reads invoke the getter like a no-arg method on
   the class object, `C.p = v` invokes the setter unless an
   own `static p` data field shadows it, and `C.s = v` on a
   module-scope class name updates the shared `statics`
-  table;
+  table; `constructor(private a, readonly b)` parameter
+  properties seed `this` fields from the bound actuals
+  before the body runs;
   `*m()` generator methods admit like `function*`, private
   `#` members behave like named fields/methods keyed `#`,
   and `static {}` blocks evaluate once into the class's
@@ -579,7 +584,8 @@ class _Callable:
     methods — arrows never do)."""
 
     __slots__ = (
-        "node", "params", "defaults", "captured", "rest", "is_method"
+        "node", "params", "defaults", "captured", "rest",
+        "is_method", "param_props",
     )
 
     def __init__(
@@ -591,6 +597,12 @@ class _Callable:
         self.captured = captured
         self.rest = rest
         self.is_method = is_method
+        # Constructor parameter properties — names declared
+        # `public`/`private`/`protected`/`readonly` on a ctor
+        # parameter; `new` seeds `this` fields from the bound
+        # actuals before the body runs.
+        self.param_props: frozenset = frozenset()
+
 
 
 class _External:
@@ -827,6 +839,9 @@ class _Builder:
         # list — statements after it are may-writes until a `catch`
         # consumes the flag or it propagates out of the function.
         self.thrown: list[bool] = [False]
+        # The dep union of every `throw` expression since the flag
+        # was last consumed — a `catch (e)` binds `e` to it.
+        self.thrown_deps: list = [frozenset()]
         # Labels the next loop/switch frame claims — a `break L` or
         # `continue L` looks its frame up by name.
         self.pending_labels: list[str] = []
@@ -1169,6 +1184,7 @@ class _Builder:
         self.var_names = set()
         self.block_stack = []
         self.thrown = [False]
+        self.thrown_deps = [frozenset()]
         self.pending_labels = []
         transfers: list[TsCall] = []
         count = [0]
@@ -1936,7 +1952,7 @@ class _Builder:
         if kind == "throw_statement":
             thrown_expr = next(iter(_children(node)), None)
             if thrown_expr is not None:
-                self.expression(
+                self.thrown_deps[0] |= self.expression(
                     thrown_expr, params, locals_, transfers, count
                 )
             # The throw unwinds to the nearest `catch` or out of the
@@ -1976,15 +1992,38 @@ class _Builder:
             )
             propagated = self.thrown[0]
             self.thrown[0] = False
+            catch_deps = self.thrown_deps[0]
+            self.thrown_deps[0] = frozenset()
             if catch_body is not None:
-                # The `catch` parameter is left unbound — a body that
-                # reads it closes with `binding_unavailable`. The
-                # clause only runs on a thrown path, so its writes are
-                # always may-writes; a rethrow inside stays flagged.
-                self.statement(
-                    catch_body, params, locals_, transfers, count,
-                    deps, saw_return, True,
+                # The `catch` parameter binds the union of thrown
+                # deps (any throw reaching it could produce it —
+                # the sound over-approximation). The clause only
+                # runs on a thrown path, so its writes are always
+                # may-writes; a rethrow inside stays flagged.
+                pname = (
+                    catch_param.text.decode()
+                    if catch_param is not None
+                    else None
                 )
+                missing = object()
+                prev = (
+                    locals_.get(pname, missing)
+                    if pname is not None
+                    else missing
+                )
+                if pname is not None:
+                    locals_[pname] = catch_deps
+                try:
+                    self.statement(
+                        catch_body, params, locals_, transfers, count,
+                        deps, saw_return, True,
+                    )
+                finally:
+                    if pname is not None:
+                        if prev is missing:
+                            locals_.pop(pname, None)
+                        else:
+                            locals_[pname] = prev
                 propagated = self.thrown[0]
             self.thrown[0] = False
             if fin_body is not None:
@@ -2821,6 +2860,15 @@ class _Builder:
                     dnode, params, inner, transfers, count
                 )
             inner[pname] = deps
+            if (
+                construct
+                and pname in cval.param_props
+                and isinstance(this_val, _Composite)
+            ):
+                # `constructor(private a)` — the field takes the
+                # bound actual before the body runs (a body write
+                # to `this.a` merges over it normally).
+                this_val.fields[pname] = deps
         if actual:
             # `arguments` inside an invoked function value — every
             # element over-approximates to the actuals' union.
@@ -2833,6 +2881,9 @@ class _Builder:
             raise _Unsupported("unsupported_expression", span)
         saved_frames, self.frames = self.frames, []
         saved_thrown, self.thrown = self.thrown, [False]
+        saved_tdeps, self.thrown_deps = (
+            self.thrown_deps, [frozenset()]
+        )
         saved_block, self.block_stack = self.block_stack, []
         saved_var, self.var_names = self.var_names, set()
         saved_flocals, self.function_locals = self.function_locals, inner
@@ -2861,6 +2912,7 @@ class _Builder:
         finally:
             self.frames = saved_frames
             self.thrown = saved_thrown
+            self.thrown_deps = saved_tdeps
             self.block_stack = saved_block
             self.var_names = saved_var
             self.function_locals = saved_flocals
@@ -2979,6 +3031,30 @@ class _Builder:
                     rest,
                     is_method=True,
                 )
+                if key == "constructor":
+                    # `constructor(private a, readonly b)` —
+                    # accessibility/readonly markers turn a
+                    # parameter into a field initializer.
+                    props = set()
+                    ctor_params = member.child_by_field_name(
+                        "parameters"
+                    )
+                    for prm in _children(ctor_params):
+                        if prm.type not in {
+                            "required_parameter",
+                            "optional_parameter",
+                        }:
+                            continue
+                        if any(
+                            c.type in {"accessibility_modifier", "readonly"}
+                            for c in prm.children
+                        ):
+                            pat = prm.child_by_field_name("pattern")
+                            if pat is not None and (
+                                pat.type == "identifier"
+                            ):
+                                props.add(pat.text.decode())
+                    mval.param_props = frozenset(props)
                 if markers & {"get", "set"}:
                     if "static" in markers:
                         # `static get/set p` — the class-object
@@ -3006,7 +3082,7 @@ class _Builder:
                 markers = {
                     c.type for c in member.children if not c.is_named
                 }
-                if markers & {"abstract", "declare", "readonly"}:
+                if markers & {"abstract", "declare"}:
                     raise _Unsupported(
                         "unsupported_expression", _span(member)
                     )
@@ -3071,6 +3147,9 @@ class _Builder:
             block_saw = [False]
             saved_frames, self.frames = self.frames, []
             saved_thrown, self.thrown = self.thrown, [False]
+            saved_tdeps, self.thrown_deps = (
+                self.thrown_deps, [frozenset()]
+            )
             saved_block, self.block_stack = self.block_stack, []
             saved_var, self.var_names = self.var_names, set()
             saved_flocals, self.function_locals = (
@@ -3091,6 +3170,7 @@ class _Builder:
             finally:
                 self.frames = saved_frames
                 self.thrown = saved_thrown
+                self.thrown_deps = saved_tdeps
                 self.block_stack = saved_block
                 self.var_names = saved_var
                 self.function_locals = saved_flocals
@@ -3191,6 +3271,9 @@ class _Builder:
         inner["this"] = _Composite({}, klass=cls)
         saved_frames, self.frames = self.frames, []
         saved_thrown, self.thrown = self.thrown, [False]
+        saved_tdeps, self.thrown_deps = (
+            self.thrown_deps, [frozenset()]
+        )
         saved_block, self.block_stack = self.block_stack, []
         saved_var, self.var_names = self.var_names, set()
         saved_flocals, self.function_locals = self.function_locals, inner
@@ -3224,6 +3307,7 @@ class _Builder:
         finally:
             self.frames = saved_frames
             self.thrown = saved_thrown
+            self.thrown_deps = saved_tdeps
             self.block_stack = saved_block
             self.var_names = saved_var
             self.function_locals = saved_flocals

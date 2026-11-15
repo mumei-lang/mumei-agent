@@ -450,6 +450,51 @@ def test_finally_writes_unconditionally():
     assert s.available and s.return_dependencies == frozenset()
 
 
+def test_catch_parameter_binds_thrown_deps():
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch (e) { return e; } return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_catch_parameter_unions_throws():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " try { if (x > 0) { throw x; } else { throw y; } }"
+        " catch (e) { return e; } return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_catch_parameter_scoped_to_clause():
+    # `e` doesn't leak past the catch block.
+    s = _fn(
+        "function f(x: number): number {"
+        " try { throw x; } catch (e) { } return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_catch_parameter_write_is_scoped():
+    # Writing `e` inside the catch doesn't shadow a real local.
+    s = _fn(
+        "function f(x: number): number {"
+        " let e = 0; try { throw x; } catch (e) { }"
+        " return e; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_nested_catch_parameter():
+    s = _fn(
+        "function f(x: number, y: number): number {"
+        " try { try { throw x; } catch (e1) { throw y; } }"
+        " catch (e2) { return e2; } return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
 def test_catch_rethrow_propagates():
     # A throw inside `catch` propagates like the try's own throw —
     # `y = 0` is a may-write, so `y` keeps the parameter's deps.
@@ -3759,3 +3804,45 @@ def test_namespace_bad_member_closes_unit():
     )
     assert not s.available
     assert s.gaps[0].reason == "unsupported_unit"
+
+
+# --- slice 39: catch parameters + constructor parameter properties ---------
+
+
+def test_ctor_param_property_admits():
+    s = _fn(
+        "class C { constructor(private a: number) {} }"
+        " function f(x: number): number {"
+        " const c = new C(x); return c.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_ctor_readonly_param_property():
+    s = _fn(
+        "class C { constructor(readonly b: number, c: number) {} }"
+        " function f(x: number): number {"
+        " const c = new C(x); return c.b; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_ctor_param_property_overwritten():
+    # `this.a = 2` inside the body is an unconditional store —
+    # the field loses the parameter deps.
+    s = _fn(
+        "class C { constructor(private a: number) { this.a = 2; } }"
+        " function f(x: number): number {"
+        " const c = new C(x); return c.a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset()
+
+
+def test_ctor_non_prop_param_not_a_field():
+    s = _fn(
+        "class C { constructor(c: number) {} }"
+        " function f(x: number): number {"
+        " const c = new C(x); return c.c; }"
+    )
+    # `c.c` reads a missing field — dep-free, not the actual's deps.
+    assert s.available and s.return_dependencies == frozenset()

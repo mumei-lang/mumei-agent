@@ -3160,6 +3160,20 @@ module-scope class name now reach the `_Class` value at all:
 bases (the binding is immutable, the statics table mutable) —
 a write path that previously closed `binding_unavailable`.
 
+### C06 TypeScript catch params + ctor param properties (slice 39)
+
+`catch (e)` binds `e`: every `throw expr` now unions its deps
+into `thrown_deps`, consumed (and reset) when a `catch` runs —
+the clause's parameter reads the union of whatever throws could
+reach it, scoped to the clause (restored after, so neither the
+binding nor a write to it leaks past `catch`). A rethrow keeps
+accumulating for the outer clause. `constructor(private a,
+readonly b)` parameter properties seed `this` fields from the
+bound actuals before the body runs — `_Callable` gains a
+`param_props` set collected only on the `constructor` member —
+so `new C(x).a` reads `{x}` where it previously under-read as a
+missing `undefined` field.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
