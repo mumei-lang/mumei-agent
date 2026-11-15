@@ -519,6 +519,49 @@ def test_check_partitions_stale_and_missing(tmp_path, capsys):
     ]
 
 
+def test_check_counts_member_identity_lists_as_known(tmp_path, capsys):
+    """An identity declared only inside a member's `signature_type_ids`
+    list is still produced by the fresh report — pinning it must not be
+    flagged stale."""
+    files = {
+        "a.go": "package p\nfunc F0() int64 { return 1 }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    report = _package_fixture(files)
+    type_id = "sha256:" + "ab" * 32 + ":1:2:3:4"
+    member_id = "sha256:" + "cd" * 32 + ":0:0:0:5"
+    report["imported_members"] = [
+        {
+            "id": member_id,
+            "name": "G",
+            "kind": "function",
+            "type": {
+                "kind": "function",
+                "basic_name": "",
+                "bit_width": 0,
+                "signed": None,
+                "type_id": "",
+            },
+            "signature_type_ids": [type_id],
+        }
+    ]
+    helper = _write_helper(tmp_path, json.dumps(report).encode())
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, *paths)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["functions"][0]["pinned"] = [type_id]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_check(
+        capsys, _check_args(helper, manifest_path, *paths)
+    )
+    assert code == 0 and err == ""
+    report_out = json.loads(out)
+    assert report_out["reusable"] == [
+        f["binding_id"] for f in manifest["functions"]
+    ]
+    assert report_out["stale"] == [] and report_out["missing"] == []
+
+
 def test_check_rejects_a_malformed_manifest(tmp_path, capsys):
     helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
     source = _write_source(tmp_path, "main.go", SOURCE)

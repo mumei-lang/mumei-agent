@@ -206,19 +206,31 @@ def _read_manifest(path: str) -> GoSummarySet:
     return GoSummarySet.from_dict(value)
 
 
+def _collect_strings(item: object, acc: set[str]) -> None:
+    if isinstance(item, str):
+        acc.add(item)
+    elif isinstance(item, dict):
+        for value in item.values():
+            _collect_strings(value, acc)
+    elif isinstance(item, list):
+        for value in item:
+            _collect_strings(value, acc)
+
+
 def _report_identities(value: object, acc: set[str]) -> None:
     """Collect every identity string a helper report declares.
 
     `stale_dependents` flags a summary that references an identity the
     fresh report no longer produces, so `known` is the union of binding
-    ids, imported member ids and type identities anywhere in the report.
+    ids, imported member ids and type identities anywhere in the report
+    — including the identity *lists* members declare
+    (`signature_type_ids`, `pointee_type_ids`, `type_arg_type_ids`), not
+    only scalar `id`/`binding_id`/`type_id` fields.
     """
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in ("id", "binding_id", "type_id") and isinstance(
-                item, str
-            ):
-                acc.add(item)
+            if key == "id" or key.endswith("_id") or key.endswith("_ids"):
+                _collect_strings(item, acc)
             else:
                 _report_identities(item, acc)
     elif isinstance(value, list):
