@@ -47,6 +47,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
+| `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -648,6 +649,24 @@ Run a declared Core source-evidence production as one attempt and emit the recon
 | `--check-timeout` | `<<MS>>` | no | — | Bound for the live representation check in milliseconds (defaults to --attempt-timeout, capped at 60000). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the attempt report JSON here instead of stdout. |
+
+
+## `mumei-agent verify-recheck`
+
+Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence recheck-source`. |
+| `--evidence` | `<PATH>` | yes | — | Declared saved Evidence record (absolute path, a common mumei.verification-evidence/v1 JSON, at most 65536 bytes). |
+| `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path); the saved record's own labels/paths are never read. |
+| `--solver-timeout` | `<<MS>>` | no | 5000 | Bounded solver budget passed to `evidence recheck-source` (ms); must match the producer's explicit budget. |
+| `--solver-resource-limit` | `<<N>>` | no | 1000000 | Bounded solver resource limit passed to `evidence recheck-source`. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the recheck report JSON here instead of stdout. |
 
 
 ## `mumei-agent rust-summaries`

@@ -51,6 +51,7 @@ _SUBCOMMANDS = {
     "sol-summaries-attempt",
     "evidence-check-accept",
     "verify-attempt",
+    "verify-recheck",
 }
 
 
@@ -646,6 +647,24 @@ def main() -> None:
         verify_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(verify_attempt_main(args))
+    elif command == "verify-recheck":
+        import argparse
+        from agent.verify_recheck import (
+            build_recheck_parser as verify_recheck_build_parser,
+            main_recheck as verify_recheck_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-recheck",
+            description=(
+                "Run a declared Core source-evidence recheck as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared recheck outcome."
+            ),
+        )
+        verify_recheck_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(verify_recheck_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
