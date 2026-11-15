@@ -68,6 +68,7 @@ from dataclasses import dataclass, replace
 from agent.attempt_runner import (
     MAX_MEMORY_BOUND_MB,
     AttemptRunner,
+    memory_bound_spawn_thread_safe,
 )
 from agent.verification_attempt import (
     AttemptCancelRequest,
@@ -397,16 +398,22 @@ def _run_probe_batch(
     """Execute probe requests, preserving order; returns full outcomes.
 
     The parallel path is only taken when no request declares a
-    `memory_bound_mb`: `AttemptRunner` installs that limit through a
-    `preexec_fn`, and `preexec_fn` forces the fork+exec spawn path,
-    which can deadlock in a multithreaded process. A batch carrying a
-    memory-bound probe falls back to sequential execution rather than
-    risk a spawn that can stall before timeout accounting starts.
+    `memory_bound_mb` whose spawn would use `preexec_fn`: `preexec_fn`
+    forces the fork+exec spawn path, which can deadlock in a
+    multithreaded process. When `memory_bound_spawn_thread_safe()`
+    reports that bounds go through a plain exec (`prlimit`), a
+    memory-bound batch stays parallel-safe; otherwise it falls back to
+    sequential execution rather than risk a spawn that can stall
+    before timeout accounting starts.
     """
+    memory_bound_serial = (
+        any(req.memory_bound_mb is not None for req in requests)
+        and not memory_bound_spawn_thread_safe()
+    )
     if (
         max_parallel == 1
         or len(requests) <= 1
-        or any(req.memory_bound_mb is not None for req in requests)
+        or memory_bound_serial
     ):
         return tuple(
             run_probe(req, runner=runner, cancel_event=cancel_event)
@@ -451,12 +458,15 @@ def observe_probes(
     `observations[i]` always answers `requests[i]`. `max_parallel=1`
     is plain sequential execution.
 
-    The parallel path is only taken when no request declares a
-    `memory_bound_mb`: `AttemptRunner` installs that limit through a
-    `preexec_fn`, and `preexec_fn` forces the fork+exec spawn path,
-    which can deadlock in a multithreaded process. A batch carrying a
-    memory-bound probe falls back to sequential execution rather than
-    risk a spawn that can stall before timeout accounting starts.
+    The parallel path is only skipped when a request declares a
+    `memory_bound_mb` AND the runner would install it through a
+    `preexec_fn` — `preexec_fn` forces the fork+exec spawn path,
+    which can deadlock in a multithreaded process. With `prlimit`
+    available the bound is applied by an exec wrapper instead, so
+    memory-bound probes stay parallel-safe; only on a host without
+    `prlimit` does such a batch fall back to sequential execution
+    rather than risk a spawn that can stall before timeout
+    accounting starts.
     """
     if not isinstance(requests, tuple):
         raise ValueError("probe observation requires a request tuple")

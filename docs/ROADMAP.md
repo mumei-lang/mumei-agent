@@ -2671,9 +2671,12 @@ no state between calls, so concurrent workers are safe; the returned
 tuple keeps request order regardless of completion order — observation
 `i` always answers request `i`. `max_parallel=1` is plain sequential
 execution and remains the default; non-positive or non-int bounds are
-static errors. A batch carrying a `memory_bound_mb` request stays
-sequential even under `max_parallel>1`: the bound is applied through
-`preexec_fn`, whose fork+exec spawn path can deadlock in a
+static errors. `AttemptRunner` applies a declared `memory_bound_mb`
+through a `prlimit` exec wrapper when `prlimit` is available, so
+memory-bound probes stay parallel-safe there; `preexec_fn` remains
+only as the fallback on hosts without `prlimit`, and on such a host a
+batch carrying a bound request still falls back to sequential
+execution because the fork+exec spawn path can deadlock in a
 multithreaded process before timeout accounting starts. Retry policy
 and Evidence acceptance remain open.
 

@@ -409,7 +409,105 @@ def test_run_memory_bound_failure_reports_failed(monkeypatch):
     def boom(limit):
         raise OSError("rlimit refused")
 
+    # Force the preexec fallback so the refused rlimit surfaces
+    # as a spawn failure rather than a wrapped prlimit exit.
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
     monkeypatch.setattr(runner_mod.resource, "setrlimit", boom)
     result = AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
     assert result.record.state == "failed"
     assert result.stdout == b""
+
+
+def test_run_memory_bound_prefers_prlimit_wrapper(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            spawned["preexec_fn"] = kw.get("preexec_fn")
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    result = AttemptRunner().run(
+        request(), argv("pass"), memory_bound_mb=64
+    )
+    assert result.record.state == "failed"
+    assert spawned["args"][:3] == [
+        "/usr/bin/prlimit",
+        "--as=67108864",
+        "--",
+    ]
+    assert spawned["args"][3:] == list(argv("pass"))
+    assert spawned["preexec_fn"] is None
+
+
+def test_run_memory_bound_falls_back_to_preexec(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            spawned["preexec_fn"] = kw.get("preexec_fn")
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
+    assert spawned["args"] == list(argv("pass"))
+    assert spawned["preexec_fn"] is not None
+
+
+def test_run_memory_bound_missing_target_reports_failed():
+    # Under prlimit, a target the wrapper cannot exec would exit
+    # 127 — masquerading as the target's own exit. The runner
+    # leaves the argv unwrapped instead so the plain spawn reports
+    # a real failure.
+    result = AttemptRunner().run(
+        request(), ("/nonexistent-mumei-probe-binary",), memory_bound_mb=64
+    )
+    assert result.record.state == "failed"
+
+
+def test_run_memory_bound_wraps_target_found_via_empty_path(
+    tmp_path, monkeypatch
+):
+    # `shutil.which` treats PATH="" as no directories while execvp
+    # searches the working directory — the wrapper must still apply
+    # the bound for a command only the working directory provides.
+    import agent.attempt_runner as runner_mod
+
+    probe = tmp_path / "probe"
+    probe.write_text("#!/bin/sh\nexit 0\n")
+    probe.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    spawned = {}
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            spawned["args"] = list(args)
+            raise OSError("stop before spawn")
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", FakePopen)
+    AttemptRunner().run(request(), ("probe",), memory_bound_mb=64)
+    assert spawned["args"] == [
+        "/usr/bin/prlimit",
+        "--as=67108864",
+        "--",
+        "probe",
+    ]
+
+
+def test_memory_bound_spawn_thread_safe(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", "/usr/bin/prlimit")
+    assert runner_mod.memory_bound_spawn_thread_safe()
+    monkeypatch.setattr(runner_mod, "_PRLIMIT", None)
+    assert not runner_mod.memory_bound_spawn_thread_safe()
