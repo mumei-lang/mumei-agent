@@ -1055,3 +1055,34 @@ def test_review2_check_output_cannot_overwrite_inputs(tmp_path):
         assert out.returncode == 2
         assert "output_overwrites_source" in out.stdout
     assert src.read_text() == "fn f(x: u64) -> u64 { x }"
+
+
+def test_review5_mut_ref_rebind_keeps_param_write():
+    # `let q = p` moves the `&mut` reference — writes through `q`
+    # reach the caller's pointee, so `p`'s param slot must record
+    # them. (post-merge review on f60e4c50)
+    s = _fn(
+        """struct P { v: u64 }
+impl P { fn set(&mut self, x: u64) { self.v = x; } }
+fn f(p: &mut P, v: u64) { let q = p; q.set(v); }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "state_writes"
+    # `q`'s dep (0 — it binds `p`) plus `v` (1) both reach the slot.
+    assert s.param_writes.get(0) == frozenset({0, 1})
+
+
+def test_review5_field_read_does_not_inherit_receiver_type():
+    # `let q = a.inner` binds the field's own type — `q.get(k)`
+    # must not resolve `A`'s impl method and drop `k`'s dep.
+    # (post-merge review on f60e4c50)
+    s = _fn(
+        """struct A { inner: B }
+struct B;
+impl A { fn get(&self, k: u64) -> u64 { 7 } }
+fn f(a: A, k: u64) -> u64 { let q = a.inner; q.get(k) }""",
+        "f",
+    )
+    assert s.available
+    assert 1 in s.return_dependencies

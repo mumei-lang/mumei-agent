@@ -274,6 +274,30 @@ def _is_mut_ref(node):
     )
 
 
+def _is_mut_ref_type(tnode):
+    """A `&mut T` parameter type — a slot the callee may write through."""
+    return (
+        tnode is not None
+        and tnode.type == "reference_type"
+        and any(c.type == "mutable_specifier" for c in _children(tnode))
+    )
+
+
+def _ref_inner(node):
+    """`&e`/`&mut e` → the inner expression node; else None."""
+    if node is None or node.type != "reference_expression":
+        return None
+    return next(
+        (
+            c
+            for c in _children(node)
+            if c.type not in _TYPE_NAMES
+            and c.type != "mutable_specifier"
+        ),
+        None,
+    )
+
+
 def _arg_root(node):
     """Innermost identifier under reference/member/index
     wrappers — the slot a `&mut` argument writes through."""
@@ -368,6 +392,7 @@ class _Builder:
         self.mut_globals: set = set()
         self._in_progress: set = set()
         self._type_envs: list = []
+        self._mut_ref_params: list = []
 
     # -- unit scan -------------------------------------------------
 
@@ -467,6 +492,7 @@ class _Builder:
         self._in_progress.add(name)
         self._writes.append(set())
         self._decls.append(set())
+        self._mut_ref_params.append(set())
         types: dict = {}
         self._type_envs.append(types)
         try:
@@ -483,6 +509,12 @@ class _Builder:
                         locals_["self"] = frozenset({idx})
                         if self_type is not None:
                             types["self"] = self_type
+                        if (
+                            p.text.decode()
+                            .replace(" ", "")
+                            .startswith("&mut")
+                        ):
+                            self._mut_ref_params[-1].add("self")
                         idx += 1
                         continue
                     if p.type not in ("parameter", "variadic_parameter"):
@@ -499,6 +531,10 @@ class _Builder:
                         locals_[pname] = frozenset({idx})
                         if ptype is not None:
                             types[pname] = ptype
+                        if _is_mut_ref_type(
+                            p.child_by_field_name("type")
+                        ):
+                            self._mut_ref_params[-1].add(pname)
                     elif pat is not None:
                         # Destructured `(a, b)` / `S { x }` patterns —
                         # bind each identifier inside to the dep index.
@@ -544,6 +580,7 @@ class _Builder:
             return summary
         finally:
             self._type_envs.pop()
+            self._mut_ref_params.pop()
             self._writes.pop()
             self._decls.pop()
             self._in_progress.discard(name)
@@ -581,13 +618,41 @@ class _Builder:
                     "unsupported_statement", _span(st)
                 )
             ltype = _type_name(st.child_by_field_name("type"))
-            if ltype is None and val is not None:
+            type_root = None
+            write_root = None
+            if val is not None:
                 # `let q = p` / `let q = &mut p` — no annotation:
                 # inherit the source binding's type so `q.m()`
-                # still resolves the impl's method.
-                root = _arg_root(val)
-                if root is not None and self._type_envs:
-                    ltype = self._type_envs[-1].get(root)
+                # still resolves the impl's method. A field/index
+                # read (`let q = p.v`) binds the field's own type —
+                # inheriting `p`'s would resolve the wrong impl, so
+                # only transparent identifier/reference vals count.
+                if val.type in {"identifier", "self"}:
+                    type_root = val.text.decode()
+                    # A moved `&mut` param: writes via `q` reach `p`.
+                    write_root = type_root
+                elif val.type == "reference_expression":
+                    inner = _ref_inner(val)
+                    if (
+                        inner is not None
+                        and inner.type in {"identifier", "self"}
+                    ):
+                        type_root = inner.text.decode()
+                    elif _is_mut_ref(val) and inner is not None:
+                        # `let q = &mut *p` / `let q = &mut p.v` —
+                        # writes through `q` reach `p`'s pointee.
+                        write_root = _arg_root(inner)
+                if (
+                    type_root is not None
+                    and ltype is None
+                    and self._type_envs
+                ):
+                    ltype = self._type_envs[-1].get(type_root)
+            mut_params = (
+                self._mut_ref_params[-1]
+                if self._mut_ref_params
+                else frozenset()
+            )
             for bname in bound:
                 locals_[bname] = deps
                 if self._writes:
@@ -596,6 +661,14 @@ class _Builder:
                     self._decls[-1].add(bname)
                 if ltype is not None and self._type_envs:
                     self._type_envs[-1][bname] = ltype
+                if (
+                    write_root is not None
+                    and write_root in mut_params
+                    and write_root in param_index
+                ):
+                    # `let q = p` re-binds a `&mut` parameter —
+                    # writes rooted at `q` are writes through `p`.
+                    param_index[bname] = param_index[write_root]
             return None
         if t == "return_expression":
             val = next(
