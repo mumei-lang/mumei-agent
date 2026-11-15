@@ -3408,6 +3408,24 @@ name. The returned `accept` document is the acceptance decision;
 the summary inside remains a conservative report, not a proof.
 
 
+### C06 declared summary attempt routes as MCP tools
+
+`ts_summaries_attempt`, `rust_summaries_attempt` and
+`sol_summaries_attempt` expose the declared attempt routes over
+MCP. Each module's lifecycle is shared through
+`run_attempt(source_path, raw, attempt_timeout, memory_bound_mb)`:
+the same `AttemptSequence` keyed to the request fingerprint, the
+same `dispatch_attempt` observation and the same drift gate — an
+`exited` run's captured stdout becomes the selected result only
+when every declared input byte is unchanged after the observed
+run. The CLI route and the tool emit the identical
+`mumei.<lang>-summaries-attempt-report/v1` document — the
+canonical lineage, never an accepted manifest. Declared arguments
+are validated the same way (single-line `source_path`, positive
+`attempt_timeout_ms`, positive `memory_bound_mb` when set) and the
+source is read under the route's byte bound.
+
+
 ### C06 declared summary MCP tool (go_summaries)
 
 The MCP surface exposes the produce route as `go_summaries(

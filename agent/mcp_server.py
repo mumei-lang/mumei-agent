@@ -3094,6 +3094,179 @@ def sol_summaries_reuse(source_path: str, manifest_path: str) -> str:
     )
 
 
+def _summaries_attempt_tool(
+    source_path: str,
+    attempt_timeout_ms,
+    memory_bound_mb,
+    module,
+) -> str:
+    """Shared body for the `*_summaries_attempt` MCP tools.
+
+    The same declared inputs as the CLI route: a validated
+    `source_path` read under the module's `MAX_SOURCE_BYTES` bound,
+    a required positive `attempt_timeout_ms` and an optional
+    positive `memory_bound_mb`. The report comes from the module's
+    `run_attempt` — the identical C11 lifecycle the CLI route runs.
+    Declared failures surface as `error` with the declared path
+    basename-redacted.
+    """
+    declared_paths = [source_path]
+    if not _valid_declared_path(source_path):
+        return _err("source_path must be a nonempty single-line path")
+    if (
+        not isinstance(attempt_timeout_ms, int)
+        or isinstance(attempt_timeout_ms, bool)
+        or attempt_timeout_ms <= 0
+    ):
+        return _err("attempt_timeout_ms must be a positive integer")
+    if memory_bound_mb is not None and (
+        not isinstance(memory_bound_mb, int)
+        or isinstance(memory_bound_mb, bool)
+        or memory_bound_mb <= 0
+    ):
+        return _err(
+            "memory_bound_mb must be a positive integer when set"
+        )
+    try:
+        with open(source_path, "rb") as handle:
+            raw = handle.read(module.MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    if len(raw) > module.MAX_SOURCE_BYTES:
+        return _err(
+            f"source_path exceeds the {module.MAX_SOURCE_BYTES}-byte "
+            "declared bound"
+        )
+    try:
+        report = module.run_attempt(
+            source_path,
+            raw,
+            attempt_timeout_ms,
+            memory_bound_mb=memory_bound_mb,
+        )
+    except Exception as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
+def ts_summaries_attempt(
+    source_path: str,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the ts-summaries produce route as one declared attempt.
+
+    The same wiring as `ts-summaries-attempt`: the declared source
+    is read under the 64 KiB bound and the produce route runs
+    through the C11 dispatch lifecycle — an `exited` run's captured
+    stdout becomes the selected result only when every declared
+    input byte is unchanged after the observed run. The returned
+    report is the canonical lineage — not an accepted manifest.
+
+    Args:
+        source_path: Declared TypeScript/JavaScript source (64 KiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.ts-summaries-attempt-report/v1` document — or `error`
+        on a declared failure.
+    """
+    try:
+        import agent.ts_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_attempt_tool(
+        source_path,
+        attempt_timeout_ms,
+        memory_bound_mb or None,
+        mod,
+    )
+
+
+@mcp.tool()
+def rust_summaries_attempt(
+    source_path: str,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the rust-summaries produce route as one declared attempt.
+
+    The same wiring as `rust-summaries-attempt`: the declared source
+    is read under the 64 KiB bound and the produce route runs
+    through the C11 dispatch lifecycle — an `exited` run's captured
+    stdout becomes the selected result only when every declared
+    input byte is unchanged after the observed run. The returned
+    report is the canonical lineage — not an accepted manifest.
+
+    Args:
+        source_path: Declared Rust source (64 KiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.rust-summaries-attempt-report/v1` document — or
+        `error` on a declared failure.
+    """
+    try:
+        import agent.rust_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_attempt_tool(
+        source_path,
+        attempt_timeout_ms,
+        memory_bound_mb or None,
+        mod,
+    )
+
+
+@mcp.tool()
+def sol_summaries_attempt(
+    source_path: str,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the sol-summaries produce route as one declared attempt.
+
+    The same wiring as `sol-summaries-attempt`: the declared source
+    is read under the 256 KiB bound and the produce route runs
+    through the C11 dispatch lifecycle — an `exited` run's captured
+    stdout becomes the selected result only when every declared
+    input byte is unchanged after the observed run. The returned
+    report is the canonical lineage — not an accepted manifest.
+
+    Args:
+        source_path: Declared Solidity source (256 KiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.sol-summaries-attempt-report/v1` document — or
+        `error` on a declared failure.
+    """
+    try:
+        import agent.sol_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_attempt_tool(
+        source_path,
+        attempt_timeout_ms,
+        memory_bound_mb or None,
+        mod,
+    )
+
+
 @mcp.tool()
 def ts_summaries_accept(
     source_path: str,

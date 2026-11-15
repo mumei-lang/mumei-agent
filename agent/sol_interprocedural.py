@@ -3148,6 +3148,72 @@ def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
     ).hexdigest()
 
 
+def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
+    """Run the produce route as one declared attempt → report dict.
+
+    Shared by ``sol-summaries-attempt`` and the
+    ``sol_summaries_attempt`` MCP tool so both run the identical
+    C11 lifecycle: a fresh ``AttemptSequence`` keyed to the request
+    fingerprint (the declared source's bytes), one reserved attempt
+    observed by ``dispatch_attempt`` under ``attempt_timeout``,
+    reconcile and compare-and-set publication — an ``exited`` run's
+    captured stdout becomes the selected result only when every
+    declared input byte is unchanged after the observed run.
+    Returns the ``mumei.sol-summaries-attempt-report/v1`` document;
+    raises ``ValueError`` on a lifecycle failure.
+    """
+    import sys
+    from pathlib import Path
+
+    from agent.attempt_runner import dispatch_attempt
+    from agent.verification_attempt import (
+        AttemptSequence,
+        AttemptSequenceStore,
+    )
+
+    fingerprint = _attempt_fingerprint(source_path, raw)
+    argv = (
+        sys.executable,
+        "-m",
+        "agent",
+        "sol-summaries",
+        source_path,
+    )
+    sequence = AttemptSequence(fingerprint, attempt_timeout)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    current = store.current
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        memory_bound_mb=memory_bound_mb,
+    )
+    try:
+        drifted = (
+            _attempt_fingerprint(
+                source_path, Path(source_path).read_bytes()
+            )
+            != fingerprint
+        )
+    except OSError:
+        drifted = True
+    if dispatch.run.record.state == "exited" and not drifted:
+        updated = dispatch.sequence.select_result(
+            dispatch.captured_output()
+        )
+    else:
+        updated = dispatch.sequence
+    published = store.compare_and_set(current, updated)
+    report = {
+        "schema_version": ATTEMPT_REPORT_PROFILE,
+        "sequence": published.to_dict(),
+        "normalized": dispatch.run.normalized().to_dict(),
+    }
+    if published.selected_result is not None:
+        report["candidate"] = published.evidence_candidate().to_dict()
+    return report
+
+
 def main_attempt(args=None) -> None:
     """Run the produce route as one declared attempt.
 
@@ -3166,7 +3232,6 @@ def main_attempt(args=None) -> None:
     """
     import json
     import sys
-    from pathlib import Path
 
     if args is None:
         args = build_attempt_parser().parse_args()
@@ -3174,46 +3239,13 @@ def main_attempt(args=None) -> None:
         args.output, [args.source], ATTEMPT_REPORT_PROFILE
     )
     raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
-    from agent.attempt_runner import dispatch_attempt
-    from agent.verification_attempt import (
-        AttemptSequence,
-        AttemptSequenceStore,
-    )
-
-    fingerprint = _attempt_fingerprint(args.source, raw)
-    argv = (
-        sys.executable,
-        "-m",
-        "agent",
-        "sol-summaries",
-        args.source,
-    )
     try:
-        sequence = AttemptSequence(fingerprint, args.attempt_timeout)
-        store = AttemptSequenceStore()
-        store.publish(sequence)
-        current = store.current
-        dispatch = dispatch_attempt(
-            current.begin_attempt(),
-            argv,
+        report = run_attempt(
+            args.source,
+            raw,
+            args.attempt_timeout,
             memory_bound_mb=args.memory_bound_mb,
         )
-        try:
-            drifted = (
-                _attempt_fingerprint(
-                    args.source, Path(args.source).read_bytes()
-                )
-                != fingerprint
-            )
-        except OSError:
-            drifted = True
-        if dispatch.run.record.state == "exited" and not drifted:
-            updated = dispatch.sequence.select_result(
-                dispatch.captured_output()
-            )
-        else:
-            updated = dispatch.sequence
-        published = store.compare_and_set(current, updated)
     except ValueError as exc:
         _emit(
             {
@@ -3222,13 +3254,6 @@ def main_attempt(args=None) -> None:
             },
             2,
         )
-    report = {
-        "schema_version": ATTEMPT_REPORT_PROFILE,
-        "sequence": published.to_dict(),
-        "normalized": dispatch.run.normalized().to_dict(),
-    }
-    if published.selected_result is not None:
-        report["candidate"] = published.evidence_candidate().to_dict()
     document = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
