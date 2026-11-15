@@ -2169,6 +2169,227 @@ def go_summaries_attempt(
     return _ok({"report": report})
 
 
+def _go_summaries_consume_args(
+    source_files: str,
+    go_types: str,
+    manifest_path: str,
+    imports_json: str,
+    timeout_s,
+    extra_fields: dict,
+) -> tuple:
+    """Shared declared-input handling for the go check/reuse/accept
+    MCP tools.
+
+    Returns ``(args, declared_paths, error)``: the parsed argparse
+    namespace the shared route functions consume, the declared path
+    list for error redaction, and a model-facing error string when
+    validation fails.
+    """
+    from argparse import Namespace
+
+    from agent.go_summaries import MAX_IMPORTS
+
+    declared_paths = [go_types, manifest_path]
+    if not _valid_declared_path(go_types):
+        return None, declared_paths, (
+            "go_types must be a nonempty single-line path"
+        )
+    if not _valid_declared_path(manifest_path):
+        return None, declared_paths, (
+            "manifest_path must be a nonempty single-line path"
+        )
+    try:
+        paths, specs = _go_summaries_declared_args(
+            source_files, imports_json, MAX_IMPORTS
+        )
+    except ValueError as exc:
+        return None, declared_paths, str(exc)
+    declared_paths.extend(paths)
+    declared_paths.extend(s.split("=", 1)[1] for s in specs)
+    if (
+        not isinstance(timeout_s, int)
+        or isinstance(timeout_s, bool)
+        or timeout_s <= 0
+    ):
+        return None, declared_paths, (
+            "timeout_s must be a positive integer"
+        )
+    args = Namespace(
+        source=paths,
+        go_types=go_types,
+        timeout=timeout_s,
+        imports=specs,
+        manifest=manifest_path,
+        output=None,
+        **extra_fields,
+    )
+    return args, declared_paths, None
+
+
+@mcp.tool()
+def go_summaries_check(
+    source_files: str,
+    go_types: str,
+    manifest_path: str,
+    target_arch: str = "amd64",
+    imports_json: str = "{}",
+    timeout_s: int = 30,
+) -> str:
+    """Run the manifest reuse check for declared Go summaries.
+
+    The same wiring as `go-summaries-check`: the declared manifest is
+    restored through the strict `from_dict` boundary, a fresh helper
+    report re-derives every binding, and the partition lands as
+    `context_match` plus `reusable`/`stale`/`missing`. Detection only.
+
+    Args:
+        source_files: JSON array of Go source file paths — same
+            declared shape as `go_summaries`.
+        go_types: Path to the provisioned go-types helper binary.
+        manifest_path: Declared `mumei.go-scalar-parameter-deps/v1`
+            manifest to check.
+        target_arch: `gc` target the report is validated against.
+        imports_json: JSON object mapping an import path to a file or
+            an array of files of that importable unit.
+        timeout_s: Bound on the helper spawn, in seconds.
+
+    Returns:
+        JSON with `check` — the `mumei.go-summary-check/v1`
+        document — or `error` on a declared failure.
+    """
+    args, declared_paths, error = _go_summaries_consume_args(
+        source_files, go_types, manifest_path, imports_json, timeout_s,
+        {},
+    )
+    if error is not None:
+        return _err(error)
+    args.target_arch = target_arch
+    try:
+        from agent.go_summaries import summary_check_document
+        from agent.go_type_snapshot import SnapshotError
+        check = summary_check_document(args)
+    except ImportError as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    except (SnapshotError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"check": check})
+
+
+@mcp.tool()
+def go_summaries_reuse(
+    source_files: str,
+    go_types: str,
+    manifest_path: str,
+    target_arch: str = "amd64",
+    imports_json: str = "{}",
+    timeout_s: int = 30,
+) -> str:
+    """Emit a merged manifest reusing a declared manifest's
+    unchanged Go summaries.
+
+    The same wiring as `go-summaries-reuse`: a manifest function
+    whose identity survives in the fresh report and that
+    `stale_dependents` does not flag is reused verbatim, every other
+    live function is freshly derived and a `missing` entry is
+    dropped — keyed to the fresh context, the weaker per-function
+    freshness merge, never the strict gate.
+
+    Args:
+        source_files: JSON array of Go source file paths — same
+            declared shape as `go_summaries`.
+        go_types: Path to the provisioned go-types helper binary.
+        manifest_path: Declared `mumei.go-scalar-parameter-deps/v1`
+            manifest to merge.
+        target_arch: `gc` target the report is validated against —
+            must match the manifest's derivation arch.
+        imports_json: JSON object mapping an import path to a file or
+            an array of files of that importable unit.
+        timeout_s: Bound on the helper spawn, in seconds.
+
+    Returns:
+        JSON with `manifest` — the merged
+        `mumei.go-scalar-parameter-deps/v1` document — or `error` on
+        a declared failure.
+    """
+    args, declared_paths, error = _go_summaries_consume_args(
+        source_files, go_types, manifest_path, imports_json, timeout_s,
+        {},
+    )
+    if error is not None:
+        return _err(error)
+    args.target_arch = target_arch
+    try:
+        from agent.go_summaries import summary_reuse_set
+        from agent.go_type_snapshot import SnapshotError
+        merged = summary_reuse_set(args)
+    except ImportError as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    except (SnapshotError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"manifest": merged.to_dict()})
+
+
+@mcp.tool()
+def go_summaries_accept(
+    source_files: str,
+    go_types: str,
+    manifest_path: str,
+    binding: str,
+    target_arch: str = "amd64",
+    imports_json: str = "{}",
+    timeout_s: int = 30,
+) -> str:
+    """Accept one declared Go summary under the strict whole-set
+    gate.
+
+    The same wiring as `go-summaries-accept`: `accepted` is true
+    only when the manifest's declared context key matches the fresh
+    derivation and the named `binding` survives in the fresh
+    report — and the emitted summary is the freshly derived record,
+    never the declared one.
+
+    Args:
+        source_files: JSON array of Go source file paths — same
+            declared shape as `go_summaries`.
+        go_types: Path to the provisioned go-types helper binary.
+        manifest_path: Declared `mumei.go-scalar-parameter-deps/v1`
+            manifest to accept from.
+        binding: Binding identity (`sha256:<digest>:<start>:<line>:<len>`)
+            of the function whose summary is accepted.
+        target_arch: `gc` target the report is validated against.
+        imports_json: JSON object mapping an import path to a file or
+            an array of files of that importable unit.
+        timeout_s: Bound on the helper spawn, in seconds.
+
+    Returns:
+        JSON with `accept` — the `mumei.go-summary-accept/v1`
+        document — or `error` on a declared failure.
+    """
+    if (
+        not isinstance(binding, str)
+        or not binding
+        or "\n" in binding
+        or "\r" in binding
+    ):
+        return _err("binding must be a nonempty single-line identity")
+    args, declared_paths, error = _go_summaries_consume_args(
+        source_files, go_types, manifest_path, imports_json, timeout_s,
+        {"binding": binding},
+    )
+    if error is not None:
+        return _err(error)
+    args.target_arch = target_arch
+    try:
+        from agent.go_summaries import summary_accept_document
+        from agent.go_type_snapshot import SnapshotError
+        accept = summary_accept_document(args)
+    except ImportError as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    except (SnapshotError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"accept": accept})
+
+
 @mcp.tool()
 def evidence_identity_check(evidence_path: str, source_path: str) -> str:
     """Compare a stored Evidence record's bound source digest to a file.

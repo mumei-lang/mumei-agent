@@ -551,21 +551,9 @@ def main_check(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_check_parser().parse_args()
     try:
-        restored = _read_manifest(args.manifest)
-        _sources, live, report = _run_declared(args)
-        reusable, stale_ids, missing = _reuse_partition(restored, live, report)
         document = (
             json.dumps(
-                {
-                    "schema_version": CHECK_PROFILE,
-                    "context_match": restored.context_key
-                    == live.context_key,
-                    "reusable": sorted(reusable),
-                    "stale": sorted(stale_ids),
-                    "missing": sorted(missing),
-                },
-                indent=2,
-                sort_keys=True,
+                summary_check_document(args), indent=2, sort_keys=True
             )
             + "\n"
         )
@@ -574,6 +562,24 @@ def main_check(args: argparse.Namespace | None = None) -> int:
         print(f"go-summaries-check: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0
+
+
+def summary_check_document(args: argparse.Namespace) -> dict:
+    """Build the ``mumei.go-summary-check/v1`` document.
+
+    Shared by ``go-summaries-check`` and the ``go_summaries_check``
+    MCP tool so both emit the identical partition.
+    """
+    restored = _read_manifest(args.manifest)
+    _sources, live, report = _run_declared(args)
+    reusable, stale_ids, missing = _reuse_partition(restored, live, report)
+    return {
+        "schema_version": CHECK_PROFILE,
+        "context_match": restored.context_key == live.context_key,
+        "reusable": sorted(reusable),
+        "stale": sorted(stale_ids),
+        "missing": sorted(missing),
+    }
 
 
 def main_reuse(args: argparse.Namespace | None = None) -> int:
@@ -589,29 +595,38 @@ def main_reuse(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_reuse_parser().parse_args()
     try:
-        restored = _read_manifest(args.manifest)
-        if restored.target_arch != args.target_arch:
-            raise SnapshotError(
-                "declared manifest was derived for a different "
-                "target architecture"
-            )
-        _sources, live, report = _run_declared(args)
-        reusable, _, _ = _reuse_partition(restored, live, report)
-        by_id = {f.binding_id: f for f in restored.functions}
-        merged = GoSummarySet(
-            live.context_key,
-            tuple(
-                by_id[f.binding_id] if f.binding_id in reusable else f
-                for f in live.functions
-            ),
-            live.target_arch,
-        )
+        merged = summary_reuse_set(args)
         document = json.dumps(merged.to_dict(), indent=2, sort_keys=True) + "\n"
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"go-summaries-reuse: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0
+
+
+def summary_reuse_set(args: argparse.Namespace) -> "GoSummarySet":
+    """Build the merged manifest ``go-summaries-reuse`` emits.
+
+    Shared by the CLI route and the ``go_summaries_reuse`` MCP tool
+    so both emit the identical per-function freshness merge.
+    """
+    restored = _read_manifest(args.manifest)
+    if restored.target_arch != args.target_arch:
+        raise SnapshotError(
+            "declared manifest was derived for a different "
+            "target architecture"
+        )
+    _sources, live, report = _run_declared(args)
+    reusable, _, _ = _reuse_partition(restored, live, report)
+    by_id = {f.binding_id: f for f in restored.functions}
+    return GoSummarySet(
+        live.context_key,
+        tuple(
+            by_id[f.binding_id] if f.binding_id in reusable else f
+            for f in live.functions
+        ),
+        live.target_arch,
+    )
 
 
 def main_accept(args: argparse.Namespace | None = None) -> int:
@@ -629,40 +644,52 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_accept_parser().parse_args()
     try:
-        restored = _read_manifest(args.manifest)
-        _sources, live, report = _run_declared(args)
-        context_match = restored.context_key == live.context_key
-        by_id = {f.binding_id: f for f in restored.functions}
-        live_by_id = {f.binding_id: f for f in live.functions}
-        entry = by_id.get(args.binding)
-        accepted = (
-            context_match
-            and entry is not None
-            and entry.binding_id in live_by_id
-        )
-        report_dict: dict[str, object] = {
-            "schema_version": ACCEPT_PROFILE,
-            "accepted": accepted,
-            "binding_id": args.binding,
-            "context_match": context_match,
-        }
-        if not context_match:
-            report_dict["reason"] = "context_mismatch"
-        elif entry is None or entry.binding_id not in live_by_id:
-            report_dict["reason"] = "unknown_binding"
-        if accepted:
-            # The strict gate checks the manifest's context key, not its
-            # records: emit the freshly derived summary — identical for
-            # an honest manifest, immune to a tampered declared record.
-            report_dict["summary"] = live_by_id[entry.binding_id].to_dict()
         document = (
-            json.dumps(report_dict, indent=2, sort_keys=True) + "\n"
+            json.dumps(
+                summary_accept_document(args), indent=2, sort_keys=True
+            )
+            + "\n"
         )
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"go-summaries-accept: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0
+
+
+def summary_accept_document(args: argparse.Namespace) -> dict:
+    """Build the ``mumei.go-summary-accept/v1`` document.
+
+    Shared by ``go-summaries-accept`` and the ``go_summaries_accept``
+    MCP tool so both apply the identical strict whole-set gate.
+    """
+    restored = _read_manifest(args.manifest)
+    _sources, live, report = _run_declared(args)
+    context_match = restored.context_key == live.context_key
+    by_id = {f.binding_id: f for f in restored.functions}
+    live_by_id = {f.binding_id: f for f in live.functions}
+    entry = by_id.get(args.binding)
+    accepted = (
+        context_match
+        and entry is not None
+        and entry.binding_id in live_by_id
+    )
+    report_dict: dict[str, object] = {
+        "schema_version": ACCEPT_PROFILE,
+        "accepted": accepted,
+        "binding_id": args.binding,
+        "context_match": context_match,
+    }
+    if not context_match:
+        report_dict["reason"] = "context_mismatch"
+    elif entry is None or entry.binding_id not in live_by_id:
+        report_dict["reason"] = "unknown_binding"
+    if accepted:
+        # The strict gate checks the manifest's context key, not its
+        # records: emit the freshly derived summary — identical for
+        # an honest manifest, immune to a tampered declared record.
+        report_dict["summary"] = live_by_id[entry.binding_id].to_dict()
+    return report_dict
 
 
 ATTEMPT_REQUEST_PROFILE = "mumei.go-summaries-attempt-request/v1"
