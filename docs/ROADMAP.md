@@ -2676,6 +2676,52 @@ process, confirms delivery or proves a stop; dispatch and stop
 observation remain host duties. C11 stays partial; Evidence
 acceptance remains open.
 
+### C11 bounded probe outcome history
+
+`agent.adapter_probe.AdapterProbeHistory` is a frozen record of probe
+outcomes bound to one declared request fingerprint:
+`AdapterProbeHistory.start(request)` binds the request's execution
+fingerprint, and `record(request, outcome)` re-derives that fingerprint
+from each new request and appends the next ordinal — a replayed,
+reordered or foreign outcome fails statically instead of contaminating
+the history. `MAX_PROBE_HISTORY` (8) bounds the record.
+
+The history is replay evidence only: it says nothing about adapter
+health, authorizes nothing and never retries. C11 stays partial;
+Evidence acceptance remains open.
+
+### C11 bounded probe-driven planning
+
+`agent.adapter_probe.plan_with_probes(registry, request, policy,
+observations, stamp=..., rounds=1)` runs the observe → re-plan loop:
+`plan()`, `probe_requests_for`, `observe_probes`, then `plan()` again
+with the accumulated observations — incrementing the stamp each round
+so the registry's freshness check accepts them. `rounds` is bounded by
+`MAX_PLAN_ROUNDS` (4); the loop stops early when a candidate is
+selected or a scheduling round emits no requests. The result,
+`AdapterProbePlan(plan, observations)`, hands the caller the final
+plan and the new observations to chain further planning.
+
+The driver never authorizes, retries beyond `rounds`, or accepts
+Evidence — it only schedules and observes declared probes. C11 stays
+partial; concurrency across probes remains open.
+
+### C11 history-bounded probe retry scheduling
+
+`agent.adapter_probe.probe_retry_requests(registry, request, policy,
+observations, histories, stamp=..., max_attempts=...)` emits the next
+attempt for every still-excluded declared candidate: an adapter with no
+recorded history starts at attempt 1, otherwise the request carries
+`attempt_number = attempt_count + 1`, and the adapter is skipped once
+its `AdapterProbeHistory` reaches `max_attempts` (bounded by
+`MAX_PROBE_HISTORY`). A history whose fingerprint does not re-derive
+from the scheduled request — changed argv or stamp — fails statically
+rather than authorizing a retry on stale evidence.
+
+Scheduling stays declarative: it runs nothing, invents no candidate the
+observation rules did not exclude, and retries only inside the declared
+bound. Concurrency and Evidence acceptance remain open.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
