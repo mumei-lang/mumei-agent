@@ -29,6 +29,11 @@ from agent.go_type_snapshot import (
     load_go_snapshot,
 )
 
+# Mirrors `maxRequest` in tools/go-types/main.go — the helper rejects
+# any JSON request larger than 512 KiB, so the route checks the same
+# declared bound before spawning instead of reporting a helper failure.
+MAX_REQUEST_BYTES = 512 * 1024
+
 
 def build_parser(
     parser: argparse.ArgumentParser | None = None,
@@ -99,13 +104,13 @@ def _read_sources(paths: list[str]) -> dict[str, str]:
     return sources
 
 
-def _run_helper(binary: str, request: dict, timeout: int) -> bytes:
+def _run_helper(binary: str, payload: bytes, timeout: int) -> bytes:
     if timeout <= 0:
         raise SnapshotError("declared helper timeout must be positive")
     try:
         completed = subprocess.run(
             [binary],
-            input=json.dumps(request).encode(),
+            input=payload,
             capture_output=True,
             timeout=timeout,
         )
@@ -139,6 +144,12 @@ def main(args: argparse.Namespace | None = None) -> int:
         args = build_parser().parse_args()
     try:
         sources = _read_sources(args.source)
+        if args.output is not None and Path(args.output).resolve() in {
+            Path(raw).resolve() for raw in args.source
+        }:
+            raise SnapshotError(
+                "declared output path would overwrite a declared source"
+            )
         if len(sources) == 1:
             request = {
                 "source": next(iter(sources.values())),
@@ -152,8 +163,14 @@ def main(args: argparse.Namespace | None = None) -> int:
                 ],
                 "target_arch": args.target_arch,
             }
-        payload = _run_helper(args.go_types, request, args.timeout)
-        manifest = _summarize(sources, payload, args.target_arch).to_dict()
+        payload = json.dumps(request).encode()
+        if len(payload) > MAX_REQUEST_BYTES:
+            raise SnapshotError(
+                f"declared request exceeds the {MAX_REQUEST_BYTES}-byte "
+                "helper bound"
+            )
+        report = _run_helper(args.go_types, payload, args.timeout)
+        manifest = _summarize(sources, report, args.target_arch).to_dict()
         document = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         if args.output:
             Path(args.output).write_text(document, encoding="utf-8")

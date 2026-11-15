@@ -179,6 +179,28 @@ def test_unwritable_output_fails_closed(tmp_path, capsys):
     assert code == 1 and out == "" and err.startswith("go-summaries: ")
 
 
+def test_output_equal_to_a_declared_source_fails(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    code, out, err = _run(
+        capsys, _args(helper, source, extra=["--output", str(source)])
+    )
+    assert code == 1 and out == "" and "overwrite" in err
+    assert source.read_text() == SOURCE
+
+
+def test_request_over_the_helper_bound_fails(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    paths = [
+        _write_source(
+            tmp_path, f"part{i}.go", "package p\n// " + "x" * (60 * 1024)
+        )
+        for i in range(9)
+    ]
+    code, out, err = _run(capsys, _args(helper, *paths))
+    assert code == 1 and out == "" and "helper bound" in err
+
+
 def test_missing_helper_fails_closed(tmp_path, capsys):
     source = _write_source(tmp_path, "main.go", SOURCE)
     code, out, err = _run(
