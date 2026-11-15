@@ -2783,6 +2783,179 @@ def sol_summaries(source_path: str) -> str:
     return _ok({"manifest": live.to_dict()})
 
 
+def _summaries_check_tool(
+    source_path: str,
+    manifest_path: str,
+    module,
+    summary_set_cls,
+    summarize_kwargs,
+) -> str:
+    """Shared body for the `*_summaries_check` MCP tools.
+
+    Bounded reads identical to the CLI routes (the module's
+    `MAX_SOURCE_BYTES` / `MAX_MANIFEST_BYTES`), a strict `from_dict`
+    manifest restore, a fresh derivation and the shared
+    `summary_check_document` — both sides emit the identical
+    partition. Detection only; no manifest is accepted.
+    """
+    declared_paths = [source_path, manifest_path]
+    for name, path in (
+        ("source_path", source_path),
+        ("manifest_path", manifest_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    try:
+        with open(source_path, "rb") as handle:
+            raw = handle.read(module.MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    if len(raw) > module.MAX_SOURCE_BYTES:
+        return _err(
+            f"source_path exceeds the {module.MAX_SOURCE_BYTES}-byte "
+            "declared bound"
+        )
+    try:
+        with open(manifest_path, "rb") as handle:
+            blob = handle.read(module.MAX_MANIFEST_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    if len(blob) > module.MAX_MANIFEST_BYTES:
+        return _err(
+            f"manifest_path exceeds the {module.MAX_MANIFEST_BYTES}"
+            "-byte declared bound"
+        )
+    try:
+        declared = summary_set_cls.from_dict(json.loads(blob))
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    try:
+        live = summarize_kwargs(raw)
+    except Exception as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    return _ok(
+        {"check": module.summary_check_document(declared, live)}
+    )
+
+
+@mcp.tool()
+def ts_summaries_check(
+    source_path: str,
+    manifest_path: str,
+    resolve_modules: bool = False,
+) -> str:
+    """Check a declared TS manifest against a fresh derivation (C06/C07).
+
+    The same wiring as `ts-summaries-check`: both declared inputs are
+    read under the route's byte bounds, the manifest is restored
+    through the strict `from_dict` gate, and the fresh summary set is
+    compared by `summary_check_document` — `context_match` plus the
+    `reusable`/`stale`/`missing` partition. Detection only.
+
+    Args:
+        source_path: Declared TypeScript/JavaScript source (64 KiB).
+        manifest_path: Declared
+            `mumei.ts-scalar-parameter-deps/v1` manifest (8 MiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
+
+    Returns:
+        JSON with `check` — the `mumei.ts-summary-check/v1`
+        document — or `error` on a declared failure.
+    """
+    try:
+        import agent.ts_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_check_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.TsSummarySet,
+        lambda raw: mod.summarize_typescript(
+            raw,
+            resolver=(
+                mod._fs_resolver(source_path)
+                if resolve_modules
+                else None
+            ),
+            source_path=source_path,
+        ),
+    )
+
+
+@mcp.tool()
+def rust_summaries_check(source_path: str, manifest_path: str) -> str:
+    """Check a declared Rust manifest against a fresh derivation.
+
+    The same wiring as `rust-summaries-check`: both declared inputs
+    are read under the route's byte bounds, the manifest is restored
+    through the strict `from_dict` gate, and the fresh summary set is
+    compared by `summary_check_document` — `context_match` plus the
+    `reusable`/`stale`/`missing` partition. Detection only.
+
+    Args:
+        source_path: Declared Rust source (64 KiB).
+        manifest_path: Declared
+            `mumei.rust-scalar-parameter-deps/v1` manifest (8 MiB).
+
+    Returns:
+        JSON with `check` — the `mumei.rust-summary-check/v1`
+        document — or `error` on a declared failure.
+    """
+    try:
+        import agent.rust_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_check_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.RustSummarySet,
+        mod.summarize_rust,
+    )
+
+
+@mcp.tool()
+def sol_summaries_check(source_path: str, manifest_path: str) -> str:
+    """Check a declared Solidity manifest against a fresh derivation.
+
+    The same wiring as `sol-summaries-check`: both declared inputs
+    are read under the route's byte bounds, the manifest is restored
+    through the strict `from_dict` gate, and the fresh summary set is
+    compared by `summary_check_document` — `context_match` plus the
+    `reusable`/`stale`/`missing` partition. Detection only.
+
+    Args:
+        source_path: Declared Solidity source (256 KiB).
+        manifest_path: Declared
+            `mumei.sol-scalar-parameter-deps/v1` manifest (8 MiB).
+
+    Returns:
+        JSON with `check` — the `mumei.sol-summary-check/v1`
+        document — or `error` on a declared failure.
+    """
+    try:
+        import agent.sol_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_check_tool(
+        source_path,
+        manifest_path,
+        mod,
+        mod.SolSummarySet,
+        mod.summarize_solidity,
+    )
+
+
 @mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.

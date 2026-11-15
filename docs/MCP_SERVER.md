@@ -81,6 +81,9 @@ Exported tools:
 | `ts_summaries(source_path, resolve_modules=false)` | Emit the `mumei.ts-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `ts-summaries`); optional relative-import resolution — a conservative report, not a proof |
 | `rust_summaries(source_path)` | Emit the `mumei.rust-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `rust-summaries`) — a conservative report, not a proof |
 | `sol_summaries(source_path)` | Emit the `mumei.sol-scalar-parameter-deps/v1` manifest for one declared source under the 256 KiB bound (same wiring as `sol-summaries`) — a conservative report, not a proof |
+| `ts_summaries_check(source_path, manifest_path, resolve_modules=false)` | Compare a declared `mumei.ts-scalar-parameter-deps/v1` manifest against a fresh derivation (same wiring as `ts-summaries-check`) and return `mumei.ts-summary-check/v1` (`context_match` + `reusable`/`stale`/`missing`); detection only |
+| `rust_summaries_check(source_path, manifest_path)` | Same wiring as `rust-summaries-check` — returns `mumei.rust-summary-check/v1` |
+| `sol_summaries_check(source_path, manifest_path)` | Same wiring as `sol-summaries-check` — returns `mumei.sol-summary-check/v1` |
 | `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
@@ -158,6 +161,9 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `ts_summaries` | `source_path: str, resolve_modules: bool = False` | `manifest` |
 | `rust_summaries` | `source_path: str` | `manifest` |
 | `sol_summaries` | `source_path: str` | `manifest` |
+| `ts_summaries_check` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `check` |
+| `rust_summaries_check` | `source_path: str, manifest_path: str` | `check` |
+| `sol_summaries_check` | `source_path: str, manifest_path: str` | `check` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
 | `suggest_mm_migration` | `code_file: str, language: str, issues_json: str = '[]'` | `migration_hints` |
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |

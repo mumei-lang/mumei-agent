@@ -1942,6 +1942,25 @@ def _reuse_partition(declared, live):
     return reusable, stale, missing
 
 
+def summary_check_document(declared, live) -> dict:
+    """The ``mumei.rust-summary-check/v1`` comparison document.
+
+    Shared by ``rust-summaries-check`` and the ``rust_summaries_check``
+    MCP tool so both emit the identical partition: `context_match`
+    (the strict whole-context gate) plus the name-level
+    `reusable`/`stale`/`missing` sets. Detection only — what to
+    recompute is the host's call.
+    """
+    reusable, stale, missing = _reuse_partition(declared, live)
+    return {
+        "schema_version": CHECK_PROFILE,
+        "context_match": declared.context_key == live.context_key,
+        "reusable": sorted(reusable),
+        "stale": sorted(stale),
+        "missing": sorted(missing),
+    }
+
+
 def main_check(args=None) -> None:
     """Check a declared manifest against a fresh summary set.
 
@@ -1964,16 +1983,8 @@ def main_check(args=None) -> None:
         CHECK_PROFILE,
     )
     live = _summarize_declared(raw, CHECK_PROFILE)
-    reusable, stale, missing = _reuse_partition(declared, live)
     document = json.dumps(
-        {
-            "schema_version": CHECK_PROFILE,
-            "context_match": declared.context_key == live.context_key,
-            "reusable": sorted(reusable),
-            "stale": sorted(stale),
-            "missing": sorted(missing),
-        },
-        sort_keys=True,
+        summary_check_document(declared, live), sort_keys=True
     )
     if getattr(args, "output", None):
         with open(args.output, "w") as handle:

@@ -470,3 +470,132 @@ def test_mcp_summaries_tools_reject_oversize(tmp_path, tool):
     out = json.loads(getattr(mcp_server, tool)(str(big)))
     assert out["status"] == "error"
     assert str(big) not in out["error"]
+
+
+def test_mcp_ts_summaries_check_reusable(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+    import agent.ts_interprocedural as ts
+
+    src = tmp_path / "f.ts"
+    src.write_text("function f(x: number): number { return x; }")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            ts.summarize_typescript(
+                "function f(x: number): number { return x; }"
+            ).to_dict()
+        )
+    )
+    out = json.loads(
+        mcp_server.ts_summaries_check(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    check = out["check"]
+    assert check["schema_version"] == "mumei.ts-summary-check/v1"
+    assert check["context_match"] is True
+    assert check["reusable"] == ["f"]
+    assert check["stale"] == [] and check["missing"] == []
+
+
+def test_mcp_ts_summaries_check_marks_stale_and_missing(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    from agent import mcp_server
+    import agent.ts_interprocedural as ts
+
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            ts.summarize_typescript(
+                "function f(x: number): number { return x; }\n"
+                "function g(x: number): number { return x; }"
+            ).to_dict()
+        )
+    )
+    src = tmp_path / "f.ts"
+    src.write_text(
+        "function f(y: number): number { return y; }"
+    )
+    out = json.loads(
+        mcp_server.ts_summaries_check(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    check = out["check"]
+    assert check["context_match"] is False
+    assert check["stale"] == ["f"]
+    assert check["missing"] == ["g"]
+
+
+def test_mcp_rust_summaries_check_reusable(tmp_path):
+    from agent import mcp_server
+    import agent.rust_interprocedural as rust
+
+    src_text = "fn f(x: u64) -> u64 { x }"
+    src = tmp_path / "f.rs"
+    src.write_text(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(rust.summarize_rust(src_text).to_dict())
+    )
+    out = json.loads(
+        mcp_server.rust_summaries_check(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    assert out["check"]["context_match"] is True
+    assert out["check"]["reusable"] == ["f"]
+
+
+def test_mcp_sol_summaries_check_reusable(tmp_path):
+    from agent import mcp_server
+    import agent.sol_interprocedural as sol
+
+    src_text = (
+        "contract C { function f(uint x) public returns (uint) "
+        "{ return x; } }"
+    )
+    src = tmp_path / "c.sol"
+    src.write_text(src_text)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(sol.summarize_solidity(src_text).to_dict())
+    )
+    out = json.loads(
+        mcp_server.sol_summaries_check(str(src), str(manifest))
+    )
+    assert out["status"] == "ok"
+    assert out["check"]["context_match"] is True
+
+
+@pytest.mark.parametrize(
+    "tool", ["ts_summaries_check", "rust_summaries_check", "sol_summaries_check"]
+)
+def test_mcp_summaries_check_validates_declared_paths(tmp_path, tool):
+    from agent import mcp_server
+
+    fn = getattr(mcp_server, tool)
+    assert json.loads(fn("", "m.json"))["status"] == "error"
+    assert json.loads(fn("a\nb", "m.json"))["status"] == "error"
+    assert json.loads(fn("s.ts", "a\nb"))["status"] == "error"
+    assert (
+        json.loads(fn(str(tmp_path / "missing"), "m.json"))["status"]
+        == "error"
+    )
+    src = tmp_path / "s.src"
+    src.write_text("x")
+    out = json.loads(fn(str(src), str(tmp_path / "missing.json")))
+    assert out["status"] == "error"
+    assert str(tmp_path) not in out["error"]
+
+
+@pytest.mark.parametrize(
+    "tool", ["ts_summaries_check", "rust_summaries_check", "sol_summaries_check"]
+)
+def test_mcp_summaries_check_rejects_malformed_manifest(tmp_path, tool):
+    from agent import mcp_server
+
+    src = tmp_path / "s.src"
+    src.write_text("x")
+    manifest = tmp_path / "m.json"
+    manifest.write_text("{not json")
+    out = json.loads(getattr(mcp_server, tool)(str(src), str(manifest)))
+    assert out["status"] == "error"

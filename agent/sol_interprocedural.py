@@ -2971,6 +2971,25 @@ def _reuse_partition(declared, live):
     return reusable, stale, missing
 
 
+def summary_check_document(declared, live) -> dict:
+    """The ``mumei.sol-summary-check/v1`` comparison document.
+
+    Shared by ``sol-summaries-check`` and the ``sol_summaries_check``
+    MCP tool so both emit the identical partition: `context_match`
+    (the strict whole-context gate) plus the name-level
+    `reusable`/`stale`/`missing` sets. Detection only — what to
+    recompute is the host's call.
+    """
+    reusable, stale, missing = _reuse_partition(declared, live)
+    return {
+        "schema_version": CHECK_PROFILE,
+        "context_match": declared.context_key == live.context_key,
+        "reusable": sorted(reusable),
+        "stale": sorted(stale),
+        "missing": sorted(missing),
+    }
+
+
 def main_check(args=None) -> None:
     """Check a declared manifest against a fresh summary set.
 
@@ -2993,16 +3012,8 @@ def main_check(args=None) -> None:
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     live = summarize_solidity(raw)
-    reusable, stale, missing = _reuse_partition(declared, live)
     document = json.dumps(
-        {
-            "schema_version": CHECK_PROFILE,
-            "context_match": declared.context_key == live.context_key,
-            "reusable": sorted(reusable),
-            "stale": sorted(stale),
-            "missing": sorted(missing),
-        },
-        sort_keys=True,
+        summary_check_document(declared, live), sort_keys=True
     )
     if getattr(args, "output", None):
         with open(args.output, "w") as handle:
