@@ -2274,3 +2274,19 @@ contract D is B {
     # the shared overload group — `B.g` would keep `D.g` as a
     # candidate for later lookups (including `super.g()`).
     assert b._overload_groups["B.g"] == ["B.g"]
+
+
+
+def test_review_modifier_sync_skips_shadowed_state_name():
+    src = """contract C {
+  uint256 public s;
+  modifier m() { s = 7; _; }
+  function f(uint256 s) public m returns (uint256) {
+    return s;
+  }
+}"""
+    s = _fn(src, "f")
+    # The param `s` shadows the state var — syncing the
+    # modifier's `s = 7` slot back must not clobber the
+    # parameter's deps.
+    assert s.return_dependencies == frozenset({0})

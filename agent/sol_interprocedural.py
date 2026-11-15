@@ -862,11 +862,19 @@ class _Builder:
                 # `_;` — the wrapped body inherits the state
                 # slots the modifier wrote (function params are
                 # invisible to a modifier, so only state vars
-                # sync back).
+                # sync back). A name shadowed by a parameter or
+                # local declaration refers to the inner
+                # binding, not the state variable.
                 for sv in self._state_vars_of(
                     self._current_contract
                 ):
-                    if sv in mlocals and sv in locals_:
+                    shadowed = (
+                        sv in param_index
+                        or any(
+                            sv in frame for frame in self._decls
+                        )
+                    )
+                    if not shadowed and sv in mlocals:
                         locals_[sv] = mlocals[sv]
                 return self._run_body(
                     body, locals_, param_index, summary, rest
