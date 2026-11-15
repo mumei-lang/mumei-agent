@@ -62,7 +62,7 @@ import hashlib
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agent.attempt_runner import (
     MAX_MEMORY_BOUND_MB,
@@ -527,3 +527,71 @@ def plan_with_probes(
         observed = tuple(by_id.values())
         plan = registry.plan(request, policy, observed)
     return AdapterProbePlan(plan, tuple(seen.values()))
+
+
+def probe_retry_requests(
+    registry: AdapterRegistry,
+    request: RouteRequirements,
+    policy: PlannerPolicy,
+    observations: tuple[RuntimeObservation, ...] = (),
+    histories: tuple[AdapterProbeHistory, ...] = (),
+    *,
+    stamp: int,
+    max_attempts: int = MAX_PROBE_HISTORY,
+    tool_version: str | None = None,
+) -> tuple[AdapterProbeRequest, ...]:
+    """Retry scheduling for declared probes, bounded by history.
+
+    Emits the next attempt for every still-excluded declared
+    candidate: an adapter with no recorded history starts at
+    attempt 1; otherwise its request carries
+    `attempt_number = attempt_count + 1` and the adapter is skipped
+    once the history reaches `max_attempts`. A history whose
+    fingerprint does not re-derive from the scheduled request —
+    changed argv or stamp — fails statically: stale evidence must
+    not silently authorize another attempt.
+
+    Scheduling stays declarative: this runs nothing, never invents
+    a candidate the observation rules did not exclude, and retries
+    only inside the declared bound. Concurrency and Evidence
+    acceptance remain open.
+    """
+    if type(max_attempts) is not int or not (
+        1 <= max_attempts <= MAX_PROBE_HISTORY
+    ):
+        raise ValueError("probe retry bound out of range")
+    if type(histories) is not tuple or any(
+        type(h) is not AdapterProbeHistory for h in histories
+    ):
+        raise ValueError("probe retries require probe histories")
+    by_id: dict[str, AdapterProbeHistory] = {}
+    for h in histories:
+        if h.adapter_id in by_id:
+            raise ValueError("duplicate probe history")
+        by_id[h.adapter_id] = h
+    first = probe_requests_for(
+        registry,
+        request,
+        policy,
+        observations,
+        stamp=stamp,
+        attempt_number=1,
+        tool_version=tool_version,
+    )
+    out: list[AdapterProbeRequest] = []
+    for req in first:
+        hist = by_id.get(req.adapter_id)
+        if hist is None:
+            out.append(req)
+            continue
+        if (
+            hist.request_fingerprint
+            != req.execution_request().request_fingerprint
+        ):
+            raise ValueError("probe retry history fingerprint mismatch")
+        if hist.attempt_count >= max_attempts:
+            continue
+        out.append(
+            replace(req, attempt_number=hist.attempt_count + 1)
+        )
+    return tuple(out)
