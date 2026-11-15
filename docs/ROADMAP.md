@@ -348,6 +348,39 @@ audit/CLI/MCP route is added. C11 stays partial; Core meaning and
 acceptance, C12's demand gate and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 
+### C11 declared evidence-check outcomes
+
+`AttemptSequence.evidence_check(candidate, outcome)` records a
+host-declared representation-check outcome for the candidate as an
+`AttemptEvidenceCheck`: the request fingerprint, the attempt ordinal,
+the output manifest fingerprint and one declared `outcome` from
+`EVIDENCE_CHECK_OUTCOMES` — `"valid"` (Core returned the known v1
+diagnostic for the delivered bytes), `"failed"` (the check produced no
+accepted diagnostic — an invalid representation, a malformed diagnostic
+and a spawn/I/O failure are indistinguishable by design) or
+`"cancelled"`. The `candidate` must equal the sequence's
+`evidence_candidate()`; a stale or foreign descriptor and any outcome
+outside the vocabulary are static errors, not recorded checks.
+
+```python
+selected = sequence.select_result(output)
+check = selected.evidence_check(
+    selected.evidence_candidate(), "valid"
+)
+assert check.outcome == "valid"
+```
+
+This is a **check record, not Evidence**: `"valid"` only means Core's
+representation check passed for the bytes the host delivered — the
+record carries no bytes, performs no check itself and asserts no truth,
+freshness, authenticity, correspondence or grade promotion, which remain
+unassessed host/Core duties. The value serializes as detached metadata
+under `mumei.verifier-evidence-check/v1`. No I/O, clocks, plugins,
+runner/scheduler, Evidence normalization/acceptance, external verifier,
+dependency or default audit/CLI/MCP route is added. C11 stays partial;
+Core meaning and acceptance, C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

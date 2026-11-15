@@ -24,6 +24,7 @@ EVENT_KINDS = frozenset(
 )
 STREAM_KINDS = frozenset({"stdout"})
 TERMINAL_STATES = frozenset({"exited", "failed", "timed_out", "cancelled"})
+EVIDENCE_CHECK_OUTCOMES = frozenset({"valid", "failed", "cancelled"})
 _TRANSITIONS = {
     ("ready", "started"): "running",
     ("running", "cancel_requested"): "cancelling",
@@ -478,6 +479,39 @@ class AttemptSequence:
             self.selected_result[1],
         )
 
+    def evidence_check(
+        self, candidate: "AttemptEvidenceCandidate", outcome: str
+    ) -> "AttemptEvidenceCheck":
+        """Record a declared representation-check outcome for the candidate.
+
+        `candidate` must equal this value's `evidence_candidate()` — a stale
+        or foreign descriptor is a static error, not a recorded check. The
+        declared `outcome` is one of `EVIDENCE_CHECK_OUTCOMES`: `"valid"`
+        (Core returned the known v1 diagnostic for the delivered bytes),
+        `"failed"` (the check produced no accepted diagnostic — an invalid
+        representation, malformed diagnostic and spawn/I/O failure are
+        indistinguishable by design) or `"cancelled"`.
+
+        Recording is a host declaration, not acceptance: `"valid"` only means
+        Core's representation check passed; truth, freshness, authenticity,
+        correspondence and grade promotion stay unassessed host/Core duties.
+        """
+        if type(outcome) is not str or outcome not in EVIDENCE_CHECK_OUTCOMES:
+            raise ValueError("invalid evidence check outcome")
+        if (
+            type(candidate) is not AttemptEvidenceCandidate
+            or candidate != self.evidence_candidate()
+        ):
+            raise ValueError(
+                "evidence check candidate does not match the selected result"
+            )
+        return AttemptEvidenceCheck(
+            candidate.request_fingerprint,
+            candidate.attempt_number,
+            candidate.output_fingerprint,
+            outcome,
+        )
+
     def to_dict(self) -> dict:
         result = {
             "schema_version": "mumei.verifier-attempt-sequence/v1",
@@ -665,6 +699,53 @@ class AttemptEvidenceCandidate:
             "request_fingerprint": self.request_fingerprint,
             "attempt_number": self.attempt_number,
             "output_fingerprint": self.output_fingerprint,
+        }
+
+
+@dataclass(frozen=True)
+class AttemptEvidenceCheck:
+    """Detached record of a declared representation-check outcome; not Evidence.
+
+    Binds a host-declared check result to a handoff candidate: the request
+    fingerprint, the attempt ordinal, the output manifest fingerprint and
+    one declared `outcome` — `"valid"` (Core returned the known v1
+    diagnostic for the delivered bytes), `"failed"` (the check produced
+    no accepted diagnostic — an invalid representation, a malformed
+    diagnostic and a spawn/I/O failure are indistinguishable by design)
+    or `"cancelled"`.
+
+    Recording is a host declaration, not acceptance: `"valid"` only means
+    Core's representation check passed for the bytes the host delivered.
+    The record carries no bytes, performs no check itself and asserts no
+    truth, freshness, authenticity, correspondence or grade promotion —
+    those remain unassessed host/Core duties.
+    """
+
+    request_fingerprint: str
+    attempt_number: int
+    output_fingerprint: str
+    outcome: str
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.request_fingerprint)
+        _counter(self.attempt_number, positive=True)
+        if type(self.output_fingerprint) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.output_fingerprint
+        ):
+            raise ValueError("invalid output fingerprint")
+        if (
+            type(self.outcome) is not str
+            or self.outcome not in EVIDENCE_CHECK_OUTCOMES
+        ):
+            raise ValueError("invalid evidence check outcome")
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": "mumei.verifier-evidence-check/v1",
+            "request_fingerprint": self.request_fingerprint,
+            "attempt_number": self.attempt_number,
+            "output_fingerprint": self.output_fingerprint,
+            "outcome": self.outcome,
         }
 
 
