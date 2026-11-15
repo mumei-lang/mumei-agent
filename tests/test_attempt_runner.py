@@ -15,6 +15,7 @@ from agent.attempt_runner import (
     AttemptDispatch,
     AttemptRunner,
     AttemptRunResult,
+    dispatch_and_publish,
     dispatch_attempt,
     dispatch_next_attempt,
     publish_dispatch,
@@ -1068,3 +1069,67 @@ def test_run_memory_bound_sh_probe_failure_falls_back_to_preexec(
     )
     assert run.stdout == b"ok"
     assert run.record.state == "exited"
+
+
+def test_dispatch_and_publish_runs_and_publishes_end_to_end():
+    sequence = AttemptSequence(FINGERPRINT, 10_000)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    dispatch = dispatch_and_publish(
+        store, argv("import sys; sys.stdout.write('ok')")
+    )
+    assert dispatch.run.record.state == "exited"
+    assert store.current is not dispatch.sequence
+    assert store.current.selected_result is not None
+    assert store.current.current.attempt_number == 1
+    output = dispatch.captured_output()
+    assert store.current.selected_result[1] == output.to_dict()[
+        "output_fingerprint"
+    ]
+
+
+def test_dispatch_and_publish_retries_after_a_terminal_run():
+    sequence = AttemptSequence(FINGERPRINT, 10_000)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    first = dispatch_and_publish(
+        store, ("/FAKE_PRIVATE_missing_executable_9f31",)
+    )
+    assert first.run.record.state == "failed"
+    assert store.current.selected_result is None
+    second = dispatch_and_publish(store, argv("pass"))
+    assert second.sequence.current.attempt_number == 2
+
+
+def test_dispatch_and_publish_records_failure_without_selection():
+    sequence = AttemptSequence(FINGERPRINT, 10_000)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    dispatch = dispatch_and_publish(
+        store, ("/FAKE_PRIVATE_missing_executable_9f31",)
+    )
+    assert dispatch.run.record.state == "failed"
+    assert store.current.current.state == "failed"
+    assert store.current.selected_result is None
+
+
+def test_dispatch_and_publish_rejects_foreign_stores():
+    with pytest.raises(
+        ValueError, match="requires a sequence store"
+    ):
+        dispatch_and_publish("store", argv("pass"))
+    store = AttemptSequenceStore()
+    with pytest.raises(ValueError, match="requires a lineage"):
+        dispatch_and_publish(store, argv("pass"))
+
+
+def test_dispatch_and_publish_rejects_a_closed_lineage():
+    sequence = AttemptSequence(FINGERPRINT, 10_000)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    first = dispatch_and_publish(store, argv("pass"))
+    assert store.current.selected_result is not None
+    with pytest.raises(
+        ValueError, match="a selected result closes the attempt sequence"
+    ):
+        dispatch_and_publish(store, argv("pass"))

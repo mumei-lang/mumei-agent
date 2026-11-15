@@ -385,6 +385,33 @@ publication, Evidence normalization/acceptance, external verifier,
 dependency or default audit/CLI/MCP route is added. C11 stays partial;
 Core meaning and acceptance are unchanged.
 
+### C11 end-to-end dispatch-and-publish driver
+
+`agent.attempt_runner.dispatch_and_publish(store, argv, *, runner=None,
+cancel_event=None, memory_bound_mb=None, report_stamp=None)` closes the
+attempt lifecycle loop: `store.current` supplies the lineage (an empty
+store is a static error), `begin_attempt` reserves the next record,
+`dispatch_attempt` runs it and reconciles the observation, and
+`publish_dispatch` publishes the terminal lineage through
+compare-and-set against the pre-run store value — a store another
+writer touched mid-run fails statically instead of clobbering. The
+canonical lineage, including any `selected_result` the publish added,
+is the store's current value; the returned `AttemptDispatch` pairs the
+reconciled sequence with the observed run.
+
+```python
+from agent.attempt_runner import dispatch_and_publish
+
+dispatch = dispatch_and_publish(store, argv)
+assert store.current is not None  # terminal lineage published
+```
+
+A CAS rejection after a completed run surfaces the store's error — the
+process still ran and recovering it is a host decision. The driver adds
+no arbitration across writers, retry policy, durability or Evidence
+acceptance — it composes the declared boundaries only. C11 stays
+partial; Core meaning and acceptance are unchanged.
+
 ### C11 evidence-candidate handoff descriptors
 
 `AttemptSequence.evidence_candidate()` returns an `AttemptEvidenceCandidate`
