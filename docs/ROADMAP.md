@@ -2666,6 +2666,20 @@ availability/stamp/tool_version cross the boundary into observations,
 so probe stdout or exit detail cannot leak into a routing decision.
 Concurrency, retry policy and Evidence acceptance remain open.
 
+### C11 bounded probe outcome history
+
+`agent.adapter_probe.AdapterProbeHistory` is a frozen record of probe
+outcomes bound to one declared request fingerprint:
+`AdapterProbeHistory.start(request)` binds the request's execution
+fingerprint, and `record(request, outcome)` re-derives that fingerprint
+from each new request and appends the next ordinal — a replayed,
+reordered or foreign outcome fails statically instead of contaminating
+the history. `MAX_PROBE_HISTORY` (8) bounds the record.
+
+The history is replay evidence only: it says nothing about adapter
+health, authorizes nothing and never retries. C11 stays partial;
+Evidence acceptance remains open.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
