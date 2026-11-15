@@ -14,6 +14,7 @@ gaps), not a verification verdict or evidence acceptance.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -149,6 +150,45 @@ def build_reuse_parser(
         elif action.dest == "output":
             action.help = (
                 "Write the merged manifest JSON here instead of stdout."
+            )
+    return parser
+
+
+def build_attempt_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """Parser for ``go-summaries-attempt``: the produce route's declared
+    inputs plus the attempt's own declared timeout and optional memory
+    bound. The child inherits the caller's environment."""
+    parser = build_parser(parser)
+    parser.description = (
+        "Run the go-summaries produce route as one declared attempt "
+        "and emit the reconciled lineage descriptors."
+    )
+    parser.add_argument(
+        "--attempt-timeout",
+        type=int,
+        required=True,
+        metavar="<MS>",
+        help=(
+            "Declared attempt bound in milliseconds (required). The "
+            "inner helper's own --timeout stays a separate bound."
+        ),
+    )
+    parser.add_argument(
+        "--memory-bound-mb",
+        type=int,
+        default=None,
+        metavar="<MB>",
+        help=(
+            "Optional declared POSIX RLIMIT_AS ceiling applied to the "
+            "attempt child's whole address space."
+        ),
+    )
+    for action in parser._actions:
+        if action.dest == "output":
+            action.help = (
+                "Write the attempt report JSON here instead of stdout."
             )
     return parser
 
@@ -575,5 +615,117 @@ def main_accept(args: argparse.Namespace | None = None) -> int:
         _emit(document, args.output)
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
         print(f"go-summaries-accept: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return 0
+
+
+ATTEMPT_REQUEST_PROFILE = "mumei.go-summaries-attempt-request/v1"
+ATTEMPT_REPORT_PROFILE = "mumei.go-summaries-attempt-report/v1"
+
+
+def _file_sha256(path: str) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _attempt_fingerprint(args: argparse.Namespace) -> str:
+    """Bind the request's declared inputs into one request identity.
+
+    The fingerprint covers the provisioned helper's bytes, every
+    declared source/import file's bytes, the target architecture and
+    the inner helper bound — what the produce route would consume.
+    The attempt's own timeout_ms is the sequence's separate declared
+    field, not part of request identity.
+    """
+    request = {
+        "schema_version": ATTEMPT_REQUEST_PROFILE,
+        "go_types": _file_sha256(args.go_types),
+        "sources": [
+            {"path": path, "sha256": _file_sha256(path)}
+            for path in sorted(args.source)
+        ],
+        "imports": [
+            {"spec": spec, "sha256": _file_sha256(spec.partition("=")[2])}
+            for spec in sorted(args.imports)
+        ],
+        "target_arch": args.target_arch,
+        "timeout_seconds": args.timeout,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            request, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+
+
+def main_attempt(args: argparse.Namespace | None = None) -> int:
+    """Run the produce route as one declared attempt.
+
+    Spawns ``python -m agent go-summaries`` with the same declared
+    inputs through the C11 dispatch lifecycle: a fresh
+    ``AttemptSequence`` keyed to the request fingerprint (the helper
+    binary's bytes plus every declared input file's bytes), one
+    reserved attempt observed by ``AttemptRunner``, reconcile and
+    compare-and-set publication — an ``exited`` run's captured stdout
+    becomes the sequence's selected result, and failed, timed-out or
+    cancelled runs publish the terminal lineage with no selection.
+
+    Emits ``mumei.go-summaries-attempt-report/v1``: the canonical
+    lineage, the normalized run-result descriptor and — only when a
+    result was selected — the ``mumei.verifier-evidence-candidate/v1``
+    handoff descriptor. The report carries no manifest bytes; the
+    child's manifest is only observed through its bounded capture
+    claim. A nonzero observed exit is still a completed observation —
+    outcomes live in the report, not this route's own exit status.
+    """
+    if args is None:
+        args = build_attempt_parser().parse_args()
+    try:
+        from agent.attempt_runner import dispatch_and_publish
+        from agent.verification_attempt import (
+            AttemptSequence,
+            AttemptSequenceStore,
+        )
+
+        fingerprint = _attempt_fingerprint(args)
+        argv = (
+            sys.executable,
+            "-m",
+            "agent",
+            "go-summaries",
+            "--go-types",
+            args.go_types,
+            "--target-arch",
+            args.target_arch,
+            "--timeout",
+            str(args.timeout),
+        ) + tuple(
+            arg
+            for path in args.source
+            for arg in ("--source", path)
+        ) + tuple(
+            arg
+            for spec in args.imports
+            for arg in ("--import", spec)
+        )
+        sequence = AttemptSequence(fingerprint, args.attempt_timeout)
+        store = AttemptSequenceStore()
+        store.publish(sequence)
+        dispatch = dispatch_and_publish(
+            store, argv, memory_bound_mb=args.memory_bound_mb
+        )
+        published = store.current
+        report: dict[str, object] = {
+            "schema_version": ATTEMPT_REPORT_PROFILE,
+            "sequence": published.to_dict(),
+            "normalized": dispatch.run.normalized().to_dict(),
+        }
+        if published.selected_result is not None:
+            report["candidate"] = (
+                published.evidence_candidate().to_dict()
+            )
+        document = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        _emit(document, args.output)
+    except (SnapshotError, OSError, UnicodeDecodeError) as exc:
+        print(f"go-summaries-attempt: {exc}", file=sys.stderr)
         sys.exit(1)
     return 0

@@ -16,12 +16,15 @@ import pytest
 
 from agent.go_summaries import (
     build_accept_parser,
+    build_attempt_parser,
     build_check_parser,
     build_parser,
+    build_attempt_parser,
     build_reuse_parser,
     main,
     main_accept,
     main_check,
+    main_attempt,
     main_reuse,
 )
 from agent.go_type_snapshot import PACKAGE_PROFILE, TARGETS
@@ -906,3 +909,89 @@ def test_real_helper_import_round_trip(tmp_path, capsys, real_go_types):
         for call in entry["calls"]
     ]
     assert calls and any(call.get("imported") for call in calls)
+
+
+# --- go-summaries-attempt ----------------------------------------------------
+
+
+def _run_attempt(capsys, argv: list[str]):
+    try:
+        code = main_attempt(build_attempt_parser().parse_args(argv))
+    except SystemExit as exc:
+        code = exc.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def _attempt_args(helper: Path, *sources: Path, extra=()):
+    return _args(
+        helper, *sources, extra=["--attempt-timeout", "30000", *extra]
+    )
+
+
+def test_attempt_emits_lineage_normalized_and_candidate(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    code, out, err = _run_attempt(capsys, _attempt_args(helper, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["schema_version"] == "mumei.go-summaries-attempt-report/v1"
+    seq = report["sequence"]
+    assert seq["schema_version"] == "mumei.verifier-attempt-sequence/v1"
+    assert seq["selected_result"] is not None
+    norm = report["normalized"]
+    assert norm["schema_version"] == "mumei.verifier-run-result/v1"
+    assert norm["outcome"] == "exited" and norm["exit_code"] == 0
+    assert norm["request_fingerprint"] == seq["request_fingerprint"]
+    assert (
+        report["candidate"]["schema_version"]
+        == "mumei.verifier-evidence-candidate/v1"
+    )
+
+
+def test_attempt_timeout_records_no_selection(tmp_path, capsys):
+    helper = tmp_path / "go-types-slow"
+    helper.write_text("#!/bin/sh\nsleep 5\n")
+    helper.chmod(
+        helper.stat().st_mode
+        | stat.S_IXUSR
+        | stat.S_IXGRP
+        | stat.S_IXOTH
+    )
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    code, out, _ = _run_attempt(
+        capsys,
+        _args(
+            helper,
+            source,
+            extra=["--attempt-timeout", "200", "--timeout", "1"],
+        ),
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["normalized"]["outcome"] == "timed_out"
+    assert "selected_result" not in report["sequence"]
+    assert "candidate" not in report
+
+
+def test_attempt_binds_declared_input_bytes(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    code, out, _ = _run_attempt(capsys, _attempt_args(helper, source))
+    assert code == 0
+    fp = json.loads(out)["sequence"]["request_fingerprint"]
+    other = _write_source(tmp_path, "g.go", SOURCE + "// changed\n")
+    code, out2, _ = _run_attempt(capsys, _attempt_args(helper, other))
+    assert code == 0
+    fp2 = json.loads(out2)["sequence"]["request_fingerprint"]
+    assert fp != fp2
+
+
+def test_attempt_rejects_missing_helper(tmp_path, capsys):
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    code, _, err = _run_attempt(
+        capsys,
+        _attempt_args(tmp_path / "nonexistent-bin", source),
+    )
+    assert code == 1
+    assert "go-summaries-attempt" in err
