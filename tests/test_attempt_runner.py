@@ -15,6 +15,7 @@ from agent.attempt_runner import (
     AttemptRunner,
     AttemptRunResult,
     dispatch_attempt,
+    publish_dispatch,
 )
 from agent.verification_attempt import (
     MAX_STDOUT_BYTES,
@@ -23,6 +24,7 @@ from agent.verification_attempt import (
     AttemptOutput,
     AttemptRecord,
     AttemptSequence,
+    AttemptSequenceStore,
 )
 
 FINGERPRINT = "a" * 64
@@ -741,3 +743,79 @@ def test_dispatch_captured_output_rejects_non_exited_runs():
     assert dispatch.run.record.state == "failed"
     with pytest.raises(ValueError, match="exited"):
         dispatch.captured_output()
+
+
+def test_publish_dispatch_selects_and_publishes_an_exited_run():
+    sequence = ready_sequence()
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    dispatch = dispatch_attempt(
+        sequence, argv("import sys; sys.stdout.write('payload')")
+    )
+    published = publish_dispatch(store, dispatch, expected=sequence)
+    assert published is store.current
+    assert published.selected_result is not None
+    candidate = published.evidence_candidate()
+    output = dispatch.captured_output()
+    assert candidate.output_fingerprint == output.to_dict()[
+        "output_fingerprint"
+    ]
+
+
+def test_publish_dispatch_records_terminal_failures_without_selection():
+    sequence = ready_sequence()
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    dispatch = dispatch_attempt(
+        sequence, ("/FAKE_PRIVATE_missing_executable_9f31",)
+    )
+    published = publish_dispatch(store, dispatch, expected=sequence)
+    assert published.current.state == "failed"
+    assert published.selected_result is None
+
+
+def test_publish_dispatch_first_publication_needs_no_expected():
+    store = AttemptSequenceStore()
+    dispatch = dispatch_attempt(ready_sequence(), argv("pass"))
+    published = publish_dispatch(store, dispatch)
+    assert published is store.current
+
+
+@pytest.mark.parametrize(
+    "store,dispatch,expected,message",
+    [
+        (None, "dispatch", None, "sequence store"),
+        ("store", None, None, "attempt dispatch"),
+        ("store", "dispatch", "expected", "expected sequence"),
+    ],
+    ids=["foreign-store", "foreign-dispatch", "foreign-expected"],
+)
+def test_publish_dispatch_rejects_foreign_inputs(
+    store, dispatch, expected, message
+):
+    if store == "store":
+        store = AttemptSequenceStore()
+    if dispatch == "dispatch":
+        dispatch = dispatch_attempt(ready_sequence(), argv("pass"))
+    with pytest.raises(ValueError, match=message):
+        publish_dispatch(store, dispatch, expected)
+
+
+def test_publish_dispatch_requires_expected_on_a_populated_store():
+    sequence = ready_sequence()
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    dispatch = dispatch_attempt(sequence, argv("pass"))
+    with pytest.raises(
+        ValueError, match="dispatch publication requires an expected sequence"
+    ):
+        publish_dispatch(store, dispatch)
+
+
+def test_publish_dispatch_rejects_a_stale_expected():
+    sequence = ready_sequence()
+    store = AttemptSequenceStore()
+    store.publish(dispatch_attempt(sequence, argv("pass")).sequence)
+    dispatch = dispatch_attempt(ready_sequence(), argv("pass"))
+    with pytest.raises(ValueError, match="compare failed"):
+        publish_dispatch(store, dispatch, expected=sequence)

@@ -26,6 +26,7 @@ from agent.verification_attempt import (
     AttemptOutput,
     AttemptRecord,
     AttemptSequence,
+    AttemptSequenceStore,
 )
 
 try:  # POSIX-only; a declared memory bound is unavailable elsewhere.
@@ -410,3 +411,35 @@ def dispatch_attempt(
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run
     )
+
+
+def publish_dispatch(
+    store: AttemptSequenceStore,
+    dispatch: AttemptDispatch,
+    expected: "AttemptSequence | None" = None,
+) -> AttemptSequence:
+    """Publish one dispatch's terminal lineage through the canonical store.
+
+    An `exited` run first binds its captured stdout as the sequence's
+    selected result; failed, timed-out or cancelled runs publish the
+    reconciled terminal lineage without a selection — a recorded failure
+    is still canonical history. `expected` names the host's stored value:
+    a mismatch or a non-extension is a static error and changes nothing,
+    while an empty store publishes `updated` as the first canonical
+    value. This composes existing boundaries only — it adds no
+    arbitration across sequences, no durability and no Evidence.
+    """
+    if type(store) is not AttemptSequenceStore:
+        raise ValueError("dispatch publication requires a sequence store")
+    if type(dispatch) is not AttemptDispatch:
+        raise ValueError("dispatch publication requires an attempt dispatch")
+    if expected is not None and type(expected) is not AttemptSequence:
+        raise ValueError("dispatch publication requires an expected sequence")
+    updated = dispatch.sequence
+    if dispatch.run.record.state == "exited":
+        updated = updated.select_result(dispatch.captured_output())
+    if store.current is None:
+        return store.publish(updated)
+    if expected is None:
+        raise ValueError("dispatch publication requires an expected sequence")
+    return store.compare_and_set(expected, updated)
