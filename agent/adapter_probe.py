@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from dataclasses import dataclass
 
@@ -347,3 +348,77 @@ def observe_probes(
         outcome = run_probe(req, runner=runner, cancel_event=cancel_event)
         out.append(outcome.observation)
     return tuple(out)
+
+# Bound on recorded probe attempts per adapter request — mirrors
+# `MAX_ATTEMPTS` for attempt sequences: a history is replay
+# evidence, not a retry scheduler, so it stays small.
+MAX_PROBE_HISTORY = 8
+
+
+@dataclass(frozen=True)
+class AdapterProbeHistory:
+    """Bounded record of probe outcomes for one declared request.
+
+    Every entry must bind the same request fingerprint, and each
+    `record()` call appends the next ordinal — a replayed, reordered
+    or foreign outcome fails statically instead of contaminating the
+    history. This is replay evidence only: it says nothing about
+    adapter health, authorizes nothing, and never retries.
+    """
+
+    adapter_id: str
+    request_fingerprint: str
+    outcomes: tuple[AttemptNormalizedResult, ...] = ()
+
+    def __post_init__(self) -> None:
+        _label(self.adapter_id)
+        if type(self.request_fingerprint) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.request_fingerprint
+        ):
+            raise ValueError("invalid probe history fingerprint")
+        if (
+            type(self.outcomes) is not tuple
+            or len(self.outcomes) > MAX_PROBE_HISTORY
+            or any(
+                type(o) is not AttemptNormalizedResult
+                for o in self.outcomes
+            )
+        ):
+            raise ValueError("probe history requires bounded results")
+
+    @classmethod
+    def start(cls, request: "AdapterProbeRequest") -> "AdapterProbeHistory":
+        """Bind a history to a declared probe request's fingerprint."""
+        if type(request) is not AdapterProbeRequest:
+            raise ValueError("probe history requires a probe request")
+        return cls(request.adapter_id, request.execution_request().request_fingerprint)
+
+    @property
+    def attempt_count(self) -> int:
+        return len(self.outcomes)
+
+    def record(
+        self,
+        request: "AdapterProbeRequest",
+        outcome: AdapterProbeOutcome,
+    ) -> "AdapterProbeHistory":
+        """Append an observed outcome; the request must re-derive the
+        bound fingerprint and the outcome must be the request's own."""
+        if type(request) is not AdapterProbeRequest:
+            raise ValueError("probe history requires a probe request")
+        if request.adapter_id != self.adapter_id:
+            raise ValueError("probe history adapter mismatch")
+        if (
+            request.execution_request().request_fingerprint
+            != self.request_fingerprint
+        ):
+            raise ValueError("probe history fingerprint mismatch")
+        if type(outcome) is not AdapterProbeOutcome:
+            raise ValueError("probe history requires a probe outcome")
+        if len(self.outcomes) >= MAX_PROBE_HISTORY:
+            raise ValueError("probe history attempt bound reached")
+        return AdapterProbeHistory(
+            self.adapter_id,
+            self.request_fingerprint,
+            self.outcomes + (outcome.result,),
+        )

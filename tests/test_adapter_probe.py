@@ -6,8 +6,10 @@ import threading
 import pytest
 
 from agent.adapter_probe import (
+    AdapterProbeHistory,
     AdapterProbeOutcome,
     AdapterProbeRequest,
+    MAX_PROBE_HISTORY,
     PROBE_SCHEMA,
     observe_probes,
     probe_request_for,
@@ -404,3 +406,56 @@ def test_observe_probes_missing_keeps_excluded():
     obs = observe_probes(reqs)
     assert obs[0].availability == "missing"
     assert registry.plan(_route(), policy, obs).selected is None
+
+
+def test_probe_history_records_outcomes():
+    req = _req()
+    hist = AdapterProbeHistory.start(req)
+    assert hist.attempt_count == 0
+    out = run_probe(req)
+    hist = hist.record(req, out)
+    assert hist.attempt_count == 1
+    assert hist.outcomes[0].outcome == "exited"
+    hist = hist.record(req, run_probe(req))
+    assert hist.attempt_count == 2
+
+
+def test_probe_history_rejects_fingerprint_mismatch():
+    hist = AdapterProbeHistory.start(_req())
+    other = _req(argv=(sys.executable, "-c", "pass"))
+    with pytest.raises(ValueError, match="fingerprint"):
+        hist.record(other, run_probe(other))
+
+
+def test_probe_history_rejects_adapter_mismatch():
+    hist = AdapterProbeHistory.start(_req())
+    other = AdapterProbeRequest(
+        "zendingsol.host.other",
+        (sys.executable, "-c", "pass"),
+        timeout_ms=30_000,
+        stamp=1,
+    )
+    with pytest.raises(ValueError, match="adapter"):
+        hist.record(other, run_probe(other))
+
+
+def test_probe_history_bound():
+    req = _req()
+    hist = AdapterProbeHistory.start(req)
+    out = run_probe(req)
+    for _ in range(MAX_PROBE_HISTORY):
+        hist = hist.record(req, out)
+    with pytest.raises(ValueError, match="bound"):
+        hist.record(req, out)
+
+
+def test_probe_history_validation():
+    with pytest.raises(ValueError):
+        AdapterProbeHistory.start(object())
+    hist = AdapterProbeHistory.start(_req())
+    with pytest.raises(ValueError):
+        hist.record(_req(), object())
+    with pytest.raises(ValueError):
+        AdapterProbeHistory(
+            "zendingsol.host.lean_scaffold", "nothex"
+        )
