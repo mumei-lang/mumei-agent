@@ -24,16 +24,18 @@ drifted mid-run it skips the selection, claims no recheck outcome
 (the observed exit code applies to bytes outside the declared
 request) and reports ``inputs_changed``.
 
-A ``consistent`` outcome also discharges two of the six semantic
+A ``consistent`` outcome also discharges three of the six semantic
 acceptance checks at representation level: the record still binds the
 declared source bytes' fresh same-profile query, so it is CURRENT
-(``freshness``) and its claims still correspond to the source's
-verified semantics (``semantic_correspondence``). ``claim_truth``
-stays unassessed — consistency with a fresh verdict is not itself a
-truth receipt — along with ``file_identity`` and
-``producer_authenticity`` (their own declared routes) and
-``artifact_semantics`` (the C09 artifact layer). A non-consistent run
-discharges nothing.
+(``freshness``), its claims still correspond to the source's verified
+semantics (``semantic_correspondence``) and those claims were
+re-established within the declared profile (``claim_truth`` — a
+``consistent`` recheck re-proves the record's bound claims, the
+strongest truth receipt the pipeline emits). ``file_identity`` and
+``producer_authenticity`` stay with their own declared routes (an
+equivalent-but-different source can still be consistent) and
+``artifact_semantics`` belongs to the C09 artifact layer. A
+non-consistent run discharges nothing.
 
 The report carries a ``recheck`` field naming the terminal outcome
 only when the exit code is unambiguous: ``"consistent"`` (0) or
@@ -85,8 +87,9 @@ RECHECK_OUTCOMES = {0: "consistent", 3: "inconclusive"}
 
 # The six semantic acceptance checks of the C02 contract. A consistent
 # recheck proves the saved record still binds the declared source's
-# fresh same-profile verdict — current (freshness) and corresponding
-# to the source's verified semantics (semantic_correspondence).
+# fresh same-profile verdict — current (freshness), corresponding to
+# the source's verified semantics (semantic_correspondence) and
+# re-established within the declared profile (claim_truth).
 CHECK_VOCABULARY = frozenset(
     {
         "claim_truth",
@@ -102,7 +105,9 @@ CHECK_VOCABULARY = frozenset(
 class DischargedChecks:
     """Semantic checks a terminal recheck outcome discharges."""
 
-    CONSISTENT = frozenset({"freshness", "semantic_correspondence"})
+    CONSISTENT = frozenset(
+        {"claim_truth", "freshness", "semantic_correspondence"}
+    )
 
 DEFAULT_SOLVER_TIMEOUT_MS = "5000"
 DEFAULT_SOLVER_RESOURCE_LIMIT = "1000000"

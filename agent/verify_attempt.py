@@ -30,19 +30,22 @@ normalized run-result descriptor, and — only when selected — the
 its acceptance. The report carries no evidence bytes; the child's
 output is only observed through its bounded capture claim. Recording
 stays a host declaration: ``"valid"`` is representation-level only and
-acceptance is not claim truth, freshness or semantic correspondence.
+the ``acceptance`` descriptor itself asserts no semantic duty — the
+discharge claims below are the report-level declaration instead.
 
 A selected run (``EstablishedWithinProfile``, no input drift) also
-discharges four of the six C02 semantic checks for the produced
+discharges five of the six C02 semantic checks for the produced
 record at representation level: ``file_identity`` (the record's
 ``subject.sha256`` was computed over the declared source bytes),
 ``producer_authenticity`` (its provenance binds the pinned Core
-executable), ``freshness`` (the record was produced in this run) and
+executable), ``freshness`` (the record was produced in this run),
 ``semantic_correspondence`` (the verifier established its claims
-within the declared profile). ``claim_truth`` stays a deeper duty —
-establishment is not a truth receipt — and ``artifact_semantics``
-belongs to the compiled-artifact layer ``native-recheck`` covers;
-both stay in ``checks_not_performed``.
+within the declared profile) and ``claim_truth`` — the verifier's
+``established`` verdict is the strongest truth receipt the pipeline
+emits: the record's claims are exactly the postconditions proven
+within the declared profile. ``artifact_semantics`` belongs to the
+compiled-artifact layer ``native-recheck`` covers and stays in
+``checks_not_performed``.
 """
 
 from __future__ import annotations
@@ -70,11 +73,13 @@ DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000
 # `EstablishedWithinProfile` run produces the evidence record in this
 # very run — discharging `file_identity` (subject.sha256 computed over
 # the declared bytes), `producer_authenticity` (provenance binds the
-# pinned executable), `freshness` (just produced) and
+# pinned executable), `freshness` (just produced),
 # `semantic_correspondence` (the claims were established within the
-# declared profile). `claim_truth` stays a deeper duty — an
-# EstablishedWithinProfile verdict is not a truth receipt — and
-# `artifact_semantics` belongs to the compiled-artifact layer.
+# declared profile) and `claim_truth` (the verifier's `established`
+# verdict is the strongest truth receipt the pipeline emits: the bound
+# claims are exactly the postconditions proven within the declared
+# profile). `artifact_semantics` belongs to the compiled-artifact
+# layer and stays unperformed.
 CHECK_VOCABULARY = frozenset(
     {
         "claim_truth",
@@ -92,6 +97,7 @@ class DischargedChecks:
 
     ESTABLISHED = frozenset(
         {
+            "claim_truth",
             "file_identity",
             "freshness",
             "producer_authenticity",

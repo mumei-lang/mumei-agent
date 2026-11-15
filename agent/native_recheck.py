@@ -43,11 +43,12 @@ only when equivalent — the ``mumei.verifier-evidence-candidate/v1``
 handoff for the produced evidence report. The report carries no bundle
 or record bytes; the child's output is only observed through its
 bounded capture claim. An ``equivalent`` outcome also discharges
-``artifact_semantics`` at representation level — the bundle's
-user-body LLVM corresponds to the declared source's verified
-semantics — while the other five checks stay in
-``checks_not_performed`` (linker, runtime and binary correctness
-remain outside the profile).
+``artifact_semantics`` — the bundle's user-body LLVM corresponds to
+the declared source's verified semantics — and ``claim_truth`` — the
+envelope's fresh source postcondition was re-established within the
+declared profile — both at representation level. The other four
+checks stay in ``checks_not_performed`` (linker, runtime and binary
+correctness remain outside the profile).
 """
 
 from __future__ import annotations
@@ -84,8 +85,10 @@ RECHECK_OUTCOMES = {0: "equivalent", 3: "inconclusive"}
 # The six semantic acceptance checks of the C02 contract. An
 # `equivalent` recheck proves the pinned bundle's user-body LLVM
 # corresponds to the declared source's verified semantics — the
-# artifact-semantics duty at the deepest layer the pipeline covers
-# (linker, runtime and binary correctness stay out of the profile).
+# artifact-semantics duty at the deepest layer the pipeline covers —
+# and re-establishes the fresh source postcondition within the
+# declared profile (claim_truth). Linker, runtime and binary
+# correctness stay out of the profile.
 CHECK_VOCABULARY = frozenset(
     {
         "claim_truth",
@@ -101,7 +104,7 @@ CHECK_VOCABULARY = frozenset(
 class DischargedChecks:
     """Semantic checks a terminal recheck outcome discharges."""
 
-    EQUIVALENT = frozenset({"artifact_semantics"})
+    EQUIVALENT = frozenset({"artifact_semantics", "claim_truth"})
 
 DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000
 

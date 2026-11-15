@@ -90,12 +90,12 @@ def test_consistent_recheck_selects_diagnostic(tmp_path, capsys):
     assert "evidence_check" not in report
     assert "acceptance" not in report
     assert report["discharged_checks"] == [
+        "claim_truth",
         "freshness",
         "semantic_correspondence",
     ]
     assert report["checks_not_performed"] == [
         "artifact_semantics",
-        "claim_truth",
         "file_identity",
         "producer_authenticity",
     ]
