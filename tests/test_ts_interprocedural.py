@@ -2441,3 +2441,49 @@ def test_assign_destructure_augmented_closes():
         " return a; }"
     ).functions
     assert all(s.name != "f" for s in summaries)
+
+
+# --- slice 19: for-loop pattern bindings
+
+
+def test_for_of_object_pattern():
+    s = _fn(
+        "function f(x: number): number {"
+        " const rows = [{a: x}];"
+        " for (const {a} of rows) { x = a; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_for_of_array_pattern():
+    s = _fn(
+        "function f(x: number): number {"
+        " const rows = [[x, x + 1]];"
+        " for (const [p, q] of rows) { x = p; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_for_in_pattern_binds_nothing():
+    # `for (const {a} in o)` — keys are dep-free strings; `x`'s
+    # zero-trip value survives the may-write join.
+    s = _fn(
+        "function f(x: number): number {"
+        " const o = {k: x};"
+        " for (const {a} in o) { x = a; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_for_of_bare_pattern_assigns():
+    s = _fn(
+        "function f(x: number): number {"
+        " let a: number = 0;"
+        " const rows = [{a: x}];"
+        " for ({a} of rows) {}"
+        " return a; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})

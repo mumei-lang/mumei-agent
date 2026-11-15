@@ -2747,6 +2747,18 @@ Boundaries: `for ({a} of ...)` pattern loop bindings still
 close; augmented destructuring isn't valid JS and closes at
 parse.
 
+### C06 TypeScript for-loop pattern bindings (slice 19)
+
+`for (const {a, b} of rows)` / `for (const [p, q] of rows)` —
+the loop element destructures through `_destructure` with the
+may-write flag: declared names land in the loop scope and
+restore at its end; a bare `for ({a} of rows)` pattern assigns
+through `_write_scope`. `for (const {a} in o)` iterates keys —
+dep-free, so sub-names bind nothing.
+
+Boundaries: the iterated right-hand side still must be a
+composite (`_Composite`) — iterating a scalar stays closed.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

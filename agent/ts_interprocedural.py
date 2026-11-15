@@ -141,7 +141,9 @@ Admitted:
   binds `q` to element 2. The same walk drives assignment
   destructuring `({a} = o)` / `[x] = arr` — leaves write
   existing bindings via `_write_scope` and member targets
-  (`{a: o.f} = src`) via `_member_store`.
+  (`{a: o.f} = src`) via `_member_store`, and `for` loop
+  patterns `for (const {a} of rows)` — declared names land in
+  the loop scope, a bare pattern assigns.
 * Spread members in object/array literals — `{...o}` copies the
   source composite's fields (a fresh instance — writes don't
   reach `o`), `[...a]` appends its positional fields; a scalar
@@ -169,7 +171,7 @@ Closed with declared gaps: `import`/`export` and ambient/`declare`
 declarations close the whole unit (`unsupported_unit`); classes,
 `this`, getters/setters,
 generators, `any`/composite/missing parameter
-types, `for`-loop pattern bindings,
+types,
 `new` and generator/tagged-template function values stay
 closed (`unsupported_signature` / `unsupported_statement` /
 `unsupported_expression` / `binding_unavailable` / `call_unresolved`).
@@ -1153,7 +1155,11 @@ class _Builder:
                 or right is None
                 or op is None
                 or body is None
-                or left.type != "identifier"
+                or left.type not in {
+                    "identifier",
+                    "object_pattern",
+                    "array_pattern",
+                }
                 or (kind_node is not None and kind_node.type not in {
                     "let", "const", "var",
                 })
@@ -1167,12 +1173,29 @@ class _Builder:
                 element = frozenset()
             else:
                 element = _scalar_of(iterated)
-            kname = left.text.decode()
             is_var = kind_node is not None and kind_node.type == "var"
             for_saved: dict[str, object] = {}
             self.block_stack.append(for_saved)
             try:
-                if kind_node is not None:
+                if left.type in {"object_pattern", "array_pattern"}:
+                    # `for (const {a, b} of rows)` — each iteration
+                    # destructures the element; declared names land
+                    # in the loop scope (`_declare_name` records the
+                    # block restore itself), a bare pattern assigns.
+                    self._destructure(
+                        left,
+                        element,
+                        params,
+                        scope,
+                        transfers,
+                        count,
+                        is_var,
+                        True,
+                        _span(left),
+                        declare=kind_node is not None,
+                    )
+                elif kind_node is not None:
+                    kname = left.text.decode()
                     if is_var:
                         self.var_names.add(kname)
                     else:
@@ -1181,6 +1204,7 @@ class _Builder:
                 else:
                     # `for (k in o)` — an assignment target: the loop
                     # may not run, so the bind is a may-write.
+                    kname = left.text.decode()
                     target = self._write_scope(kname, scope, params)
                     if target is None:
                         raise _Unsupported(
