@@ -698,6 +698,33 @@ no Core and no fresh query — it is the byte-level staleness
 companion of `verify-recheck`, which discharges freshness by
 re-running the source query. C02 stays partial.
 
+### C02 declared evidence producer-identity route (evidence-producer-check)
+
+`python -m agent evidence-producer-check --evidence <path> --tool <name>
+--adapter <id> [--tool-version <v>] [--adapter-version <v>]` discharges
+the `producer_authenticity` duty at representation level: it reads a
+declared `mumei.verification-evidence/v1` record's `provenance` block —
+fail-closed on a missing block, a foreign schema or a shape outside the
+closed `adapter{id, version, protocol_version}` /
+`tool{name, version}` / `configuration_fingerprint` contract — then
+emits `mumei.evidence-producer-identity/v1` comparing each declared
+expectation against the record's fields. `identity` is `"match"` or
+`"mismatch"` with `mismatched` naming the compared fields that
+differed; a mismatch is data, not an error. Versions are pinned only
+when declared — an omitted `--tool-version`/`--adapter-version` is
+never compared, so a host can pin identity without pinning a release.
+
+A match only means the record DECLARES these producer values: it is
+producer pinning, not cryptographic attestation — nothing proves the
+named tool actually produced the record, and the other five checks
+(`claim_truth`, `file_identity`, `freshness`,
+`semantic_correspondence`, `artifact_semantics`) stay in
+`checks_not_performed`. The route runs no Core and no fresh query.
+`evidence_producer_check` is the same wiring over MCP: expectations
+arrive as tool arguments (`tool_version`/`adapter_version` empty means
+unpinned) and declared-path failures redact to basenames. C02 stays
+partial.
+
 ### C02 declared evidence routes as MCP tools
 
 The MCP server exposes the two spawn-free consume routes so a model can

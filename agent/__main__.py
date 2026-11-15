@@ -53,6 +53,7 @@ _SUBCOMMANDS = {
     "evidence-check-accept",
     "evidence-compare",
     "evidence-identity-check",
+    "evidence-producer-check",
     "verify-attempt",
     "verify-recheck",
     "native-attempt",
@@ -670,6 +671,25 @@ def main() -> None:
         evidence_identity_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_identity_main(args))
+    elif command == "evidence-producer-check":
+        import argparse
+        from agent.evidence_producer import (
+            build_producer_parser as evidence_producer_build_parser,
+            main_producer as evidence_producer_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-producer-check",
+            description=(
+                "Check a declared evidence record's provenance "
+                "against declared producer expectations and emit "
+                "the representation-level producer-identity "
+                "descriptor."
+            ),
+        )
+        evidence_producer_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_producer_main(args))
     elif command == "evidence-compare":
         import argparse
         from agent.evidence_compare import (
