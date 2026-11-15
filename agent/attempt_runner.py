@@ -45,19 +45,20 @@ def _memory_bound_preexec(bound_mb: int):
 
 
 # `prlimit` applies the same RLIMIT_AS as `preexec_fn` but through a
-# plain exec, so bounded spawns stay on the posix_spawn path and are
-# safe inside a multithreaded process. `preexec_fn` remains only as
-# the fallback for POSIX hosts without prlimit (e.g. macOS).
+# plain exec, so a bounded spawn avoids `preexec_fn` entirely — the
+# mechanism CPython docs warn can deadlock in a multithreaded
+# process. `preexec_fn` remains only as the fallback for POSIX hosts
+# without prlimit (e.g. macOS).
 _PRLIMIT = shutil.which("prlimit")
 
 
 def memory_bound_spawn_thread_safe() -> bool:
     """Whether a memory-bound spawn avoids `preexec_fn`.
 
-    `preexec_fn` forces the fork+exec spawn path, which can deadlock
-    in a multithreaded process. With `prlimit` present the bound is
-    applied by an exec wrapper instead, making bounded spawns
-    thread-safe."""
+    `preexec_fn` forces the unsafe fork+exec spawn path, which can
+    deadlock in a multithreaded process. With `prlimit` present the
+    bound is applied by an exec wrapper instead, making bounded
+    spawns thread-safe."""
     return _PRLIMIT is not None
 
 
@@ -210,12 +211,17 @@ class AttemptRunner:
         preexec = None
         if memory_bound_mb is not None:
             if _PRLIMIT is not None:
-                spawn_argv = [
-                    _PRLIMIT,
-                    f"--as={memory_bound_mb * 1_048_576}",
-                    "--",
-                    *spawn_argv,
-                ]
+                if shutil.which(spawn_argv[0]) is not None:
+                    spawn_argv = [
+                        _PRLIMIT,
+                        f"--as={memory_bound_mb * 1_048_576}",
+                        "--",
+                        *spawn_argv,
+                    ]
+                # A target prlimit cannot exec makes it exit 127 —
+                # which would masquerade as the target's own exit.
+                # Leave argv unwrapped so a missing target still
+                # reports a spawn failure.
             else:
                 preexec = _memory_bound_preexec(memory_bound_mb)
         try:

@@ -462,6 +462,17 @@ def test_run_memory_bound_falls_back_to_preexec(monkeypatch):
     assert spawned["preexec_fn"] is not None
 
 
+def test_run_memory_bound_missing_target_reports_failed():
+    # Under prlimit, a target the wrapper cannot exec would exit
+    # 127 — masquerading as the target's own exit. The runner
+    # leaves the argv unwrapped instead so the plain spawn reports
+    # a real failure.
+    result = AttemptRunner().run(
+        request(), ("/nonexistent-mumei-probe-binary",), memory_bound_mb=64
+    )
+    assert result.record.state == "failed"
+
+
 def test_memory_bound_spawn_thread_safe(monkeypatch):
     import agent.attempt_runner as runner_mod
 
