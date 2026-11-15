@@ -299,3 +299,111 @@ def test_sol_summaries_descriptor_is_valid_and_in_process():
         ),
     )
     assert result.selected.adapter_id == "agent.sol-summaries"
+
+
+def test_mcp_summaries_plan_selects_under_declared_pin(tmp_path):
+    from agent import mcp_server
+
+    out = json.loads(
+        mcp_server.summaries_plan(
+            GO_SUMMARY_PROFILE, 11, tool_version="1.0.0"
+        )
+    )
+    assert out["status"] == "ok"
+    assert out["schema_version"] == "mumei.summaries-plan/v1"
+    assert out["plan"]["selected"]["adapter_id"] == "agent.go-summaries"
+    assert out["histories"][0]["schema_version"] == (
+        "mumei.adapter-probe-history/v1"
+    )
+
+
+def test_mcp_summaries_plan_resumes_histories(tmp_path):
+    from agent import mcp_server
+
+    first = json.loads(
+        mcp_server.summaries_plan(
+            GO_SUMMARY_PROFILE, 11, tool_version="1.0.0"
+        )
+    )
+    histories_file = tmp_path / "histories.json"
+    histories_file.write_text(json.dumps(first["histories"]))
+    second = json.loads(
+        mcp_server.summaries_plan(
+            GO_SUMMARY_PROFILE,
+            11,
+            tool_version="1.0.0",
+            histories_path=str(histories_file),
+        )
+    )
+    hist = [
+        h for h in second["histories"]
+        if h["adapter_id"] == "agent.go-summaries"
+    ]
+    assert [o["attempt_number"] for o in hist[0]["outcomes"]] == [1, 2]
+
+
+def test_mcp_summaries_plan_unpinned_selects_nothing():
+    from agent import mcp_server
+
+    out = json.loads(mcp_server.summaries_plan(GO_SUMMARY_PROFILE, 11))
+    assert out["status"] == "ok"
+    assert out["plan"]["selected"] is None
+    go = [
+        d for d in out["plan"]["decisions"]
+        if d["adapter_id"] == "agent.go-summaries"
+    ]
+    assert "tool_version_unknown" in go[0]["reasons"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"profile": ""},
+        {"profile": "a\nb"},
+        {"profile": GO_SUMMARY_PROFILE, "stamp": 0},
+        {"profile": GO_SUMMARY_PROFILE, "stamp": "11"},
+        {"profile": GO_SUMMARY_PROFILE, "stamp": 11, "tool_version": "a\nb"},
+        {"profile": GO_SUMMARY_PROFILE, "stamp": 11, "rounds": 0},
+        {"profile": GO_SUMMARY_PROFILE, "stamp": 11, "max_parallel": 0},
+        {
+            "profile": GO_SUMMARY_PROFILE,
+            "stamp": 11,
+            "histories_path": "bad\npath",
+        },
+    ],
+)
+def test_mcp_summaries_plan_rejects_bad_declarations(kwargs):
+    from agent import mcp_server
+
+    kwargs.setdefault("profile", GO_SUMMARY_PROFILE)
+    kwargs.setdefault("stamp", 11)
+    out = json.loads(mcp_server.summaries_plan(**kwargs))
+    assert out["status"] == "error"
+
+
+def test_mcp_summaries_plan_redacts_histories_path(tmp_path):
+    from agent import mcp_server
+
+    bad = tmp_path / "unique-checkout-dir" / "histories.json"
+    bad.mkdir(parents=True)
+    out = json.loads(
+        mcp_server.summaries_plan(
+            GO_SUMMARY_PROFILE, 11, histories_path=str(bad)
+        )
+    )
+    assert out["status"] == "error"
+    assert str(bad) not in out["error"]
+    assert bad.name in out["error"]
+
+
+def test_mcp_summaries_plan_reports_malformed_histories(tmp_path):
+    from agent import mcp_server
+
+    bad = tmp_path / "histories.json"
+    bad.write_text("{not json")
+    out = json.loads(
+        mcp_server.summaries_plan(
+            GO_SUMMARY_PROFILE, 11, histories_path=str(bad)
+        )
+    )
+    assert out["status"] == "error"

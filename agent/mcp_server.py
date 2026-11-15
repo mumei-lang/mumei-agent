@@ -2554,6 +2554,78 @@ def native_attempt(
 
 
 @mcp.tool()
+def summaries_plan(
+    profile: str,
+    stamp: int,
+    tool_version: str = "",
+    histories_path: str = "",
+    rounds: int = 1,
+    max_parallel: int = 1,
+) -> str:
+    """Plan a summary route through the C11 probe boundary (C06/C11).
+
+    The same wiring as the `summaries-plan` CLI route: declared
+    adapters excluded on unknown availability or tool version get
+    their `probe_argv` run through `AttemptRunner`, and the plan is
+    re-derived with the fresh observations. A selected adapter is a
+    routing decision, not an accepted manifest.
+
+    Args:
+        profile: Summary-derivation profile to plan for (for example
+            `mumei.go-scalar-parameter-deps/v1`).
+        stamp: Host-assigned monotonically increasing base stamp for
+            the probe observations this pass records.
+        tool_version: Optional declared tool version the planner pins
+            against (empty means no pin — nothing selects).
+        histories_path: Optional path to a JSON array of persisted
+            `mumei.adapter-probe-history/v1` records this pass resumes
+            (empty means a fresh pass).
+        rounds: Maximum observe-and-replan rounds.
+        max_parallel: Maximum probes run concurrently per round.
+
+    Returns:
+        JSON with `status: ok` carrying the `mumei.summaries-plan/v1`
+        document (`plan`, `observations`, `histories`), or `error` on
+        a declared failure.
+    """
+    try:
+        from agent.summaries_adapters import run_plan
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    if type(profile) is not str or not profile.strip() or "\n" in profile:
+        return _err("profile must be a nonempty single-line identifier")
+    if type(stamp) is not int or stamp < 1:
+        return _err("stamp must be a positive integer")
+    if type(tool_version) is not str or "\n" in tool_version:
+        return _err("tool_version must be a single-line version string")
+    if type(rounds) is not int or rounds < 1:
+        return _err("rounds must be a positive integer")
+    if type(max_parallel) is not int or max_parallel < 1:
+        return _err("max_parallel must be a positive integer")
+    if histories_path and not _valid_declared_path(histories_path):
+        return _err("histories_path must be a nonempty single-line path")
+
+    args = argparse.Namespace(
+        profile=profile,
+        stamp=stamp,
+        tool_version=tool_version or None,
+        histories=histories_path or None,
+        rounds=rounds,
+        max_parallel=max_parallel,
+    )
+    try:
+        document = run_plan(args)
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [histories_path] if histories_path else []
+            )
+        )
+    return _ok(document)
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 
