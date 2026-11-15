@@ -1375,3 +1375,36 @@ function f(uint x) public returns (uint) {
     assert s.available
     assert s.effects == "unknown"
     assert s.return_dependencies == frozenset({0})
+
+
+def test_review3_callee_write_not_shadowed_by_caller_local():
+    r = _summarize(
+        """contract C { uint s;
+function f(uint x) public { uint s = 1; g(); }
+function g() internal { s = 1; } }"""
+    )
+    g = next(s2 for s2 in r.functions if s2.name.endswith(".g"))
+    assert g.available and g.effects == "state_writes"
+
+
+def test_review3_cond_write_on_loop_local_not_state_write():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    for (uint s = 0; (s = x) < 5; ) { }
+} }""",
+        "f",
+    )
+    assert s.available
+    assert s.effects == "none_in_supported_fragment"
+
+
+def test_review3_cond_write_on_state_var_still_marks():
+    s = _fn(
+        """contract C { uint s;
+function f(uint x) public {
+    for (uint i = 0; (s = x) < 5; ) { }
+} }""",
+        "f",
+    )
+    assert s.available and s.effects == "state_writes"

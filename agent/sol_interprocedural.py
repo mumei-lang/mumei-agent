@@ -540,7 +540,11 @@ class _Builder:
             if c.type == "modifier_invocation"
         ]
         self._writes.append(set())
-        self._decls.append(set())
+        # `_decls` is per-function: an inlined callee's shadow
+        # checks consult only its own frames — the caller's
+        # locals never shadow this function's state writes.
+        prev_decls = self._decls
+        self._decls = [set()]
         try:
             try:
                 rets = self._run_body(
@@ -551,7 +555,7 @@ class _Builder:
                 return summary
         finally:
             self._writes.pop()
-            self._decls.pop()
+            self._decls = prev_decls
         if rets is None and ret is None:
             # No `returns` clause — the function produces no
             # results; a missing `return` is fine.
@@ -1052,6 +1056,7 @@ class _Builder:
         inner = dict(locals_)
         self._writes.append(set())
         self._decls.append(set())
+        merged = frozenset()
         try:
             if init is not None:
                 self._statement(
@@ -1066,18 +1071,18 @@ class _Builder:
                 self._assign_or_call(
                     update, inner, param_index, summary
                 )
+            if cond is not None:
+                # Loop-init names (`i`) live in `inner`, not
+                # the outer scope; the decls frame is still
+                # live so init-declared writes shadow state.
+                merged |= self._expr(
+                    cond, inner, param_index, summary
+                )
         finally:
             touched = self._writes.pop()
             # Loop-init decls (`for (uint i = 0; ...)`)
             # stay scoped to the loop.
             self._decls.pop()
-        merged = frozenset()
-        if cond is not None:
-            # Loop-init names (`i`) live in `inner`, not the
-            # outer scope.
-            merged |= self._expr(
-                cond, inner, param_index, summary
-            )
         for name in list(locals_):
             deps = inner.get(name, frozenset())
             if deps != locals_[name] or name in touched:
