@@ -537,7 +537,11 @@ record still carries no bytes and asserts no acceptance.
 `AttemptEvidenceCandidate.from_dict(data)` restores the handoff
 descriptor under the same discipline (`mumei.verifier-evidence-candidate/v1`),
 so a stored candidate and its check record both survive a declared
-round trip.
+round trip. `AttemptNormalizedResult.from_dict(data)` restores the
+`mumei.verifier-run-result/v1` record the candidate binds: the exact
+key set, the conditional `exit_code` member and the `stdout`
+sub-record's optional `complete: false` are all re-checked, so a
+stored run result round-trips under the same declared discipline.
 
 `agent.core_evidence.evaluate_evidence_check(sequence, check)` normalizes
 a declared record into an acceptance descriptor

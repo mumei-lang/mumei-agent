@@ -995,6 +995,63 @@ class AttemptNormalizedResult:
             manifest["stdout"]["complete"] = False
         return manifest
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptNormalizedResult":
+        """Rebuild a declared run-result record; the constructor
+        re-validates it.
+
+        The record is a host declaration: restoration re-checks the
+        exact key set and schema — `exit_code` may appear only as the
+        constructor allows (an `exited` outcome carries it, nothing
+        else does), `stdout` holds exactly `sha256` + `size_bytes` plus
+        an optional `complete: false`, and a foreign schema, unknown
+        keys or malformed members are static errors."""
+        if (
+            type(data) is not dict
+            or data.get("schema_version") != "mumei.verifier-run-result/v1"
+        ):
+            raise ValueError(
+                "normalized result requires its declared record schema"
+            )
+        required = {
+            "request_fingerprint",
+            "attempt_number",
+            "timeout_ms",
+            "outcome",
+            "elapsed_ms",
+            "stdout",
+        }
+        if not required <= set(data) or not set(data) <= required | {
+            "schema_version",
+            "exit_code",
+        }:
+            raise ValueError(
+                "normalized result record has unknown or missing keys"
+            )
+        stdout = data["stdout"]
+        if (
+            type(stdout) is not dict
+            or not {"sha256", "size_bytes"} <= set(stdout)
+            or not set(stdout) <= {"sha256", "size_bytes", "complete"}
+        ):
+            raise ValueError("normalized result record has malformed stdout")
+        if "complete" in stdout and stdout["complete"] is not False:
+            raise ValueError(
+                "normalized result record carries an invalid completeness"
+                " declaration"
+            )
+        return cls(
+            data["request_fingerprint"],
+            data["attempt_number"],
+            data["timeout_ms"],
+            data["outcome"],
+            data["elapsed_ms"],
+            data.get("exit_code"),
+            stdout["size_bytes"],
+            stdout["sha256"],
+            stdout.get("complete", True),
+        )
+
 
 @dataclass(frozen=True)
 class AttemptOutput:
