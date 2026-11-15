@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 import agent.sol_interprocedural as sol
 
 
@@ -1446,3 +1450,84 @@ function f(uint x) public returns (uint) {
     )
     assert s.available
     assert s.return_dependencies == {0}
+
+
+def test_manifest_round_trip_restores_the_summary_set():
+    s = sol.summarize_solidity(
+        "contract C {"
+        " uint256 s;"
+        " function f(uint256 x, uint256 y) public returns (uint256) {"
+        "   return g(x) + y;"
+        " }"
+        " function g(uint256 v) internal returns (uint256) { return v + 1; }"
+        "}"
+    )
+    restored = sol.SolSummarySet.from_dict(
+        json.loads(json.dumps(s.to_dict()))
+    )
+    assert restored == s
+
+
+def test_manifest_restoration_rejects_a_wrong_schema():
+    s = sol.summarize_solidity(
+        "contract C { function f(uint256 x) public returns (uint256) {"
+        " return x; } }"
+    )
+    bad = s.to_dict()
+    bad["schema_version"] = "mumei.other/v1"
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(bad)
+
+
+def test_manifest_restoration_rejects_unknown_and_missing_keys():
+    s = sol.summarize_solidity(
+        "contract C { function f(uint256 x) public returns (uint256) {"
+        " return x; } }"
+    )
+    good = s.to_dict()
+    bad = dict(good, extra_key=1)
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(bad)
+    bad = dict(good)
+    del bad["context_key"]
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(bad)
+
+
+def test_manifest_restoration_rejects_a_contradictory_available_flag():
+    s = sol.summarize_solidity(
+        "contract C { function f(uint256 x) public returns (uint256) {"
+        " return x; } }"
+    )
+    good = s.to_dict()
+    forged = dict(good)
+    forged["functions"] = [
+        dict(good["functions"][0], available=False)
+    ]
+    # `available: false` alongside a derived result claims the
+    # record has a gap it does not declare — malformed.
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(forged)
+
+
+def test_manifest_restoration_rejects_wrong_types():
+    s = sol.summarize_solidity(
+        "contract C { function f(uint256 x) public returns (uint256) {"
+        " return x; } }"
+    )
+    good = s.to_dict()
+    bad = dict(good, context_key=123)
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(bad)
+    fn = dict(good["functions"][0])
+    fn["calls"] = [
+        {
+            "byte": 0,
+            "callee": "g",
+            "arguments": [["x"]],
+            "result": [0],
+        }
+    ]
+    bad = dict(good, functions=[fn])
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(bad)
