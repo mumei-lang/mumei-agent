@@ -3514,6 +3514,18 @@ invoke-depth-bounded call still may-writes composite
 actuals' fields. `module.exports = exports` re-aliases the
 live table instead of detaching it.
 
+### C06 TypeScript review round 2 — hoists, defaults, chains (slice 64)
+
+A `var` declarator re-using a parameter name no longer seeds
+an empty binding over the argument's deps. A destructured
+parameter's default (`({a} = {a: x})`) fills missing actual
+properties via the `"*"` bucket, which `_pattern_read` now
+falls back to. Derived classes inherit the parent's
+`dyn_field_deps`/`opaque_extends`, and a computed member's
+key expression deps join the seed (`[k] = 1` makes `new C().a`
+depend on `k`). `m.set(a, x).set(b, y)` mutates the chained
+result in place instead of closing on the non-name base.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

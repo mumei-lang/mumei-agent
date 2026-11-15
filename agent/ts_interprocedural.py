@@ -2058,10 +2058,13 @@ class _Builder:
             self._register_nested_functions(inner_decl, params, locals_)
         # `var` declarations hoist to function scope — seed the
         # name set and an `undefined` (∅) binding so reads and
-        # writes before the declarator see the name.
+        # writes before the declarator see the name. A `var`
+        # name that is also a parameter shares its slot —
+        # seeding ∅ would shadow the argument's deps.
         for vname in self._hoist_var_names(body):
             self.var_names.add(vname)
-            locals_.setdefault(vname, frozenset())
+            if vname not in params:
+                locals_.setdefault(vname, frozenset())
         self.frames = []
         saw_return = [False]
         saved_yields, self.yield_deps = self.yield_deps, []
@@ -2371,9 +2374,13 @@ class _Builder:
     @staticmethod
     def _pattern_read(value, key):
         """Field `key` of a destructured composite — a scalar source
-        over-approximates every sub-name to the whole union."""
+        over-approximates every sub-name to the whole union. A
+        missing key falls back to the `"*"` bucket — a defaulted
+        destructured parameter seeds it with the default's deps."""
         if isinstance(value, _Composite):
-            return value.fields.get(key, frozenset())
+            return value.fields.get(
+                key, value.fields.get("*", frozenset())
+            )
         return value
 
     @staticmethod
@@ -4157,9 +4164,22 @@ class _Builder:
                 # `_destructure` once `inner` becomes the live
                 # frame; a scalar actual over-approximates each
                 # sub-name to the whole union.
-                destructured_params.append(
-                    (pnode, aval if aval is not None else deps)
-                )
+                psrc = aval if aval is not None else deps
+                if (
+                    dnode is not None
+                    and isinstance(psrc, _Composite)
+                ):
+                    # `({a} = {a: x})` on a composite actual — a
+                    # property the actual lacks falls back to the
+                    # default's deps. Seed a copy's `"*"` bucket so
+                    # `_pattern_read` carries them without
+                    # mutating the caller's object.
+                    seeded = _Composite(dict(psrc.fields), psrc.klass)
+                    seeded.fields["*"] = seeded.fields.get(
+                        "*", frozenset()
+                    ) | deps
+                    psrc = seeded
+                destructured_params.append((pnode, psrc))
                 continue
             if aval is not None and not isinstance(aval, frozenset):
                 # A value-typed actual (a `_Callable`/`_Composite`
@@ -4488,7 +4508,7 @@ class _Builder:
                         raise _Unsupported(
                             "unsupported_expression", _span(member)
                         )
-                    self.expression(
+                    key_deps = self.expression(
                         key_node, params, locals_, [], [0]
                     )
                     init = member.child_by_field_name("value")
@@ -4506,15 +4526,17 @@ class _Builder:
                         if lit is not None:
                             statics[lit] = deps
                         else:
-                            captured |= deps
+                            captured |= key_deps | deps
                     elif lit is not None:
                         field_inits[lit] = init
                     elif init is not None:
-                        dyn_field_deps |= _scalar_of(
+                        dyn_field_deps |= key_deps | _scalar_of(
                             self._eval(
                                 init, params, locals_, [], [0]
                             )
                         )
+                    else:
+                        dyn_field_deps |= key_deps
                     continue
                 if fname.type not in {
                     "property_identifier",
@@ -4645,6 +4667,13 @@ class _Builder:
             isetters = dict(parent.setters)
             isetters.update(setters)
             setters = isetters
+            # Dynamic/computed fields and an opaque heritage
+            # chain propagate to derived instances — a read of
+            # a never-named field on `new D()` must still carry
+            # the parent's seed deps.
+            dyn_field_deps |= (
+                parent.dyn_field_deps | parent.opaque_extends
+            )
             if ctor is None:
                 # A derived class without a ctor defaults to one
                 # that runs the parent's.
@@ -5185,33 +5214,82 @@ class _Builder:
                 )
                 if tpath and any(k is None for k in tpath):
                     raise _Unsupported("unsupported_expression", span)
-                target = self._write_scope(tbase, locals_, params)
-                if target is None:
-                    raise _Unsupported("binding_unavailable", span)
-                old = target.get(tbase)
-                if not isinstance(old, _Composite):
-                    raise _Unsupported("unsupported_expression", span)
-                added = dict(old.fields)
-                for key in list(added):
-                    added[key] = _merge_vals(added[key], actual_union)
-                if prop in {"set", "add"}:
-                    stored = actual[1] if len(actual) > 1 else actual_union
-                    if lit_key is not None:
-                        added[lit_key] = _merge_vals(
-                            added.get(lit_key, frozenset()), stored
+                if isinstance(tbase, str):
+                    target = self._write_scope(tbase, locals_, params)
+                    if target is None:
+                        raise _Unsupported("binding_unavailable", span)
+                else:
+                    target = None
+                if target is None or not isinstance(tbase, str):
+                    # A non-name base (`m.set(a, x).set(b, y)`) —
+                    # the result composite IS the live object;
+                    # mutating it in place propagates the write
+                    # through every alias, matching reference
+                    # semantics for a container value.
+                    old = base_val
+                    if not isinstance(old, _Composite):
+                        raise _Unsupported(
+                            "unsupported_expression", span
                         )
-                    else:
-                        added["*"] = added.get("*", frozenset()) | stored
-                new = (
-                    _composite_set(
-                        old, tpath + ["*"], actual_union, True, span
+                    added = dict(old.fields)
+                    for key in list(added):
+                        added[key] = _merge_vals(
+                            added[key], actual_union
+                        )
+                    if prop in {"set", "add"}:
+                        stored = (
+                            actual[1]
+                            if len(actual) > 1
+                            else actual_union
+                        )
+                        if lit_key is not None:
+                            added[lit_key] = _merge_vals(
+                                added.get(lit_key, frozenset()),
+                                stored,
+                            )
+                        else:
+                            added["*"] = (
+                                added.get("*", frozenset()) | stored
+                            )
+                    old.fields.clear()
+                    old.fields.update(added)
+                    new = old
+                else:
+                    old = target.get(tbase)
+                    if not isinstance(old, _Composite):
+                        raise _Unsupported(
+                            "unsupported_expression", span
+                        )
+                    added = dict(old.fields)
+                    for key in list(added):
+                        added[key] = _merge_vals(
+                            added[key], actual_union
+                        )
+                    if prop in {"set", "add"}:
+                        stored = (
+                            actual[1]
+                            if len(actual) > 1
+                            else actual_union
+                        )
+                        if lit_key is not None:
+                            added[lit_key] = _merge_vals(
+                                added.get(lit_key, frozenset()),
+                                stored,
+                            )
+                        else:
+                            added["*"] = (
+                                added.get("*", frozenset()) | stored
+                            )
+                    new = (
+                        _composite_set(
+                            old, tpath + ["*"], actual_union, True, span
+                        )
+                        if tpath
+                        else _Composite(added, klass=old.klass)
                     )
-                    if tpath
-                    else _Composite(added, klass=old.klass)
-                )
-                for name, val in locals_.items():
-                    if val is old:
-                        locals_[name] = new
+                    for name, val in locals_.items():
+                        if val is old:
+                            locals_[name] = new
                 if prop in {"set", "add"}:
                     # `m.set(k, v)`/`s.add(v)` return the
                     # collection itself — chaining must keep

@@ -5753,3 +5753,43 @@ def test_module_exports_realias_keeps_exports_writes():
     )
     fn = next(fn for fn in s.functions if fn.name == "f")
     assert fn.available and fn.return_dependencies == frozenset({0})
+
+
+def test_var_redeclaration_does_not_shadow_param():
+    s = _fn("function f(x: number) { return x; var x = 1; }")
+    assert s.available and s.return_dependencies == frozenset({0})
+    s2 = _fn("function f(x: number) { return x; var x; }")
+    assert s2.available and s2.return_dependencies == frozenset({0})
+
+
+def test_destructured_param_default_fills_missing_field():
+    s = _fn(
+        "function f(x: number) {"
+        " let g = ({ a } = { a: x }) => a; return g({}); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_derived_instance_inherits_dynamic_field_deps():
+    s = _fn(
+        "function f(x: number, k: string) {"
+        " class C { [k] = x; } class D extends C {}"
+        " return new D().a + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_chained_map_set_keeps_entry_table():
+    s = _fn(
+        "function f(x: number, y: number) { let m = new Map();"
+        " return m.set('a', x).set('b', y).get('b'); }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_dynamic_computed_key_deps_seed_fields():
+    s = _fn(
+        "class C { [k] = 1; }"
+        " function f(x: number, k: string) { return new C().a + x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
