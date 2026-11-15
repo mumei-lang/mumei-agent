@@ -2019,6 +2019,22 @@ def go_summaries(
     if len(imports_doc) > MAX_IMPORTS:
         return _err(f"imports_json declares more than {MAX_IMPORTS} units")
 
+    def _redact_paths(text: str) -> str:
+        # Failure text goes to a model: declared checkout-local
+        # paths stay out of it — basenames only.
+        declared = [go_types, *paths]
+        declared.extend(s.split("=", 1)[1] for s in specs)
+        for p in declared:
+            if not p:
+                continue
+            base = os.path.basename(p) or "<path>"
+            try:
+                text = text.replace(str(Path(p).resolve()), base)
+            except OSError:
+                pass
+            text = text.replace(p, base)
+        return text
+
     try:
         sources = _read_sources(paths)
         imports = _read_imports(specs)
@@ -2030,7 +2046,7 @@ def go_summaries(
             timeout=timeout_s,
         )
     except (SnapshotError, OSError, UnicodeDecodeError) as exc:
-        return _err(str(exc))
+        return _err(_redact_paths(str(exc)))
     return _ok({"manifest": summary.to_dict()})
 
 

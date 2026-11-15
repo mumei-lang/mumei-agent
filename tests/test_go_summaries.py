@@ -1096,3 +1096,19 @@ def test_mcp_tool_rejects_bad_declarations(tmp_path):
     assert "error" in _json.loads(
         mcp_server.go_summaries(_json.dumps([str(src)]), str(missing))
     )
+
+
+def test_mcp_tool_error_redacts_declared_paths(tmp_path):
+    """Model-facing errors carry basenames, never checkout-local paths."""
+    import json as _json
+    from agent import mcp_server
+
+    src = _write_source(tmp_path, "main.go", SOURCE)
+    missing = tmp_path / "no-such-binary"
+    out = _json.loads(
+        mcp_server.go_summaries(_json.dumps([str(src)]), str(missing))
+    )
+    assert "error" in out
+    assert str(missing) not in out["error"]
+    assert str(src) not in out["error"]
+    assert str(tmp_path) not in out["error"]
