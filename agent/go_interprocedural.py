@@ -329,8 +329,20 @@ class FunctionSummary:
 
     @property
     def call_targets(self) -> frozenset[str]:
-        """Callee identities the recorded calls were resolved against."""
-        return frozenset(call.target for call in self.calls)
+        """Callee identities the recorded calls were resolved against.
+
+        Synthetic `<binding_id>/pointee` targets are excluded: they
+        name an unnamed pointee no declaration can redeclare, so
+        keeping one here would flag its summary stale forever —
+        `stale_dependents` treats any target outside `known` as
+        missing. (A real binding id is `sha256:<digest>:…`, never
+        slash-suffixed.)
+        """
+        return frozenset(
+            call.target
+            for call in self.calls
+            if not call.target.endswith("/pointee")
+        )
 
     def to_dict(self) -> dict:
         """Detached declared metadata only — no bytes, no acceptance claim.
@@ -1856,12 +1868,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         binding = self.bindings.get(ref.binding_id)
-        if (
-            binding is None
-            or binding.type.kind != "pointer"
-            or not binding.type.type_id
-        ):
+        if binding is None or binding.type.kind != "pointer":
             return None
+        if not binding.type.type_id:
+            # A `p := &x` alias binds an unnamed `*int64` — no member
+            # identity classifies the pointee, so the pointer fact's
+            # own `elem` carries its kind. Scalar-or-pointer pointees
+            # admit; composite shapes (`*[]int64`, `*struct{...}`)
+            # stay closed, as does a fact recorded before `elem` was
+            # emitted. The returned identity is per-binding — nothing
+            # declared can ever redeclare it, so `stale_dependents`
+            # can never falsely flag it.
+            elem = binding.type.elem
+            if (
+                elem is None
+                or elem.kind not in {"integer", "boolean", "pointer"}
+            ):
+                return None
+            return f"{ref.binding_id}/pointee"
         target = self.members.get(binding.type.type_id)
         if (
             target is None
@@ -1889,10 +1913,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # identity because nothing else marks the external read. The
         # pointee must resolve to a scalar
         # or pointer shape: a named pointee is scalar when the `type`
-        # member it names is. An unnamed pointee (`*int64`,
-        # `*struct{...}`) cannot be classified — the fact records no
-        # identity for it — so it stays closed. Any other operand — a
-        # computed pointer or a nested deref — stays closed too:
+        # member it names is; an unnamed one (`*int64`) classifies by
+        # the pointer fact's own `elem`, and composite shapes
+        # (`*[]int64`, `*struct{...}`) stay closed. Any other operand
+        # — a computed pointer or a nested deref — stays closed too:
         # dep sets track binding indices, not
         # pointee contents.
         # Comments appear among a node's named children; they are not
@@ -1935,6 +1959,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ):
                     member = candidate
         bound_ref = None
+        # A synthetic `<binding>/pointee` identity classifies an
+        # unnamed pointee — no member lookup applies to it.
+        named_pointee = True
         if member is not None:
             if member.kind != "var" or member.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
@@ -1973,28 +2000,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 raise _Unsupported("non_parameter_reference", _span(node))
             binding = self.bindings.get(bound_ref.binding_id)
-            if (
-                binding is None
-                or binding.type.kind != "pointer"
-                or not binding.type.type_id
-            ):
-                # A `p := &x` alias produces an unnamed `*int64`
-                # binding — no identity to classify, matching the
-                # `*t = v` write side and the unnamed-pointee member
-                # read.
+            if binding is None or binding.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
             pointee_id = binding.type.type_id
-        target = self.members.get(pointee_id)
-        if (
-            pointee_id
-            and (
-                target is None
-                or target.kind != "type"
-                or target.type.kind
-                not in {"integer", "boolean", "pointer"}
-            )
-        ):
-            raise _Unsupported("non_parameter_reference", _span(node))
+            if not pointee_id:
+                # A `p := &x` alias produces an unnamed `*int64`
+                # binding — classify the pointee by the pointer
+                # fact's `elem` (scalar-or-pointer admits, matching
+                # the named path; composite/absent pointees stay
+                # closed). The synthetic per-binding identity below
+                # can never be pinned nor redeclared, which is what
+                # the write side does too.
+                elem = binding.type.elem
+                if (
+                    elem is None
+                    or elem.kind
+                    not in {"integer", "boolean", "pointer"}
+                ):
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
+                pointee_id = f"{bound_ref.binding_id}/pointee"
+                named_pointee = False
+        if named_pointee:
+            target = self.members.get(pointee_id)
+            if (
+                pointee_id
+                and (
+                    target is None
+                    or target.kind != "type"
+                    or target.type.kind
+                    not in {"integer", "boolean", "pointer"}
+                )
+            ):
+                raise _Unsupported("non_parameter_reference", _span(node))
         if bound_ref is not None:
             # The pointee read touches memory outside the fragment —
             # record it like an imported member read so `effects`
