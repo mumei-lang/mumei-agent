@@ -3722,15 +3722,18 @@ planner-facing consumable over `plan_summary_route`: it plans the
 summary route for a declared profile through the probe boundary and
 prints `mumei.summaries-plan/v1` — the resulting
 `mumei.verification-plan/v1` document, the `RuntimeObservation`s the
-pass recorded, and the updated `AdapterProbeHistory` records.
+pass recorded, the updated `AdapterProbeHistory` records, and a
+`mumei.probe-history-evaluation/v1` descriptor per history so a host
+reads ordering and decisiveness checks rather than assuming them.
 
 `--tool-version` declares the host's observed adapter version (without
 it the adapter stays excluded as `tool_version_unknown`), `--rounds`
 and `--max-parallel` bound the observe-and-replan loop, and
 `--histories <file>` resumes a JSON array of persisted
-`mumei.adapter-probe-history/v1` records so retries continue from the
-host's saved attempt counts. `AdapterProbeHistory.to_dict()` /
-`from_dict()` is the declared record schema for that persistence.
+`mumei.adapter-probe-history` records (v2 emitted, v1 restored) so
+retries continue from the host's saved attempt counts.
+`AdapterProbeHistory.to_dict()` / `from_dict()` is the declared
+record schema for that persistence.
 Routing only — a selected adapter is a routing decision, not an
 accepted manifest.
 

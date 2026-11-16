@@ -920,3 +920,20 @@ def test_mcp_summaries_check_rejects_malformed_manifest(tmp_path, tool):
     manifest.write_text("{not json")
     out = json.loads(getattr(mcp_server, tool)(str(src), str(manifest)))
     assert out["status"] == "error"
+
+
+def test_summaries_plan_route_reports_evaluations(capsys, tmp_path):
+    from agent.summaries_adapters import main_plan
+
+    assert main_plan(_plan_args(tmp_path)) == 0
+    report = json.loads(capsys.readouterr().out)
+    evaluations = report["evaluations"]
+    assert len(evaluations) == len(report["histories"])
+    first = evaluations[0]
+    assert first["schema_version"] == "mumei.probe-history-evaluation/v1"
+    assert first["adapter_id"] == "agent.go-summaries"
+    assert first["outcome_count"] == len(
+        report["histories"][0]["outcomes"]
+    )
+    assert first["ordered"] is True
+    assert "evidence_acceptance" in first["checks_not_performed"]
