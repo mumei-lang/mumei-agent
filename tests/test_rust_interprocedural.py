@@ -1601,3 +1601,69 @@ def test_resolved_module_paths_reject_output_overwrite(tmp_path):
     with pytest.raises(SystemExit) as exc:
         rust._reject_overwrite(str(b), resolved, "p")
     assert exc.value.code == 2
+
+
+def test_use_imported_mut_static_write_marks_unknown():
+    # `use b::STATE` binds the name authoritatively — a write
+    # through it mutates imported state like a same-module
+    # `static mut` write.
+    src = (
+        "mod b;\nuse b::STATE;\n"
+        "fn af(x: u64) { unsafe { STATE = x; } }\n"
+    )
+    b = "pub static mut STATE: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects == "unknown"
+
+
+def test_unresolved_mod_keeps_resolved_path_listing():
+    # An unresolvable `mod` caches `None` — resolved-path
+    # collection must skip it rather than crash.
+    resolved = set()
+    r = summarize_rust(
+        _A_SRC, resolver=_set_resolver({}), resolved_paths=resolved
+    )
+    assert resolved == set()
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+
+
+def test_shared_parent_path_cache_hit(tmp_path):
+    # Two parents resolving to the same Path share the child
+    # cache — a cached pathless child still scans under each
+    # parent's own prefix without needing `module_ref` bound.
+    shared = tmp_path / "shared.rs"
+    shared.write_text("mod c;\n")
+    table = {
+        ("root.rs", "a"): shared,
+        ("root.rs", "d"): shared,
+        (str(shared), "c"): "fn cf(x: u64) -> u64 { x }\n",
+    }
+    src = "mod a;\nmod d;\nfn f(x: u64) -> u64 { x }\n"
+    r = summarize_rust(
+        src, resolver=_path_resolver(table), source_path="root.rs"
+    )
+    names = {f.name for f in r.functions}
+    assert "a.c.cf" in names and "d.c.cf" in names
+
+
+def test_identical_content_modules_are_not_cycles(tmp_path):
+    # Different paths with identical bytes are different files —
+    # the byte-identity cycle guard only applies to pathless
+    # resolutions, so `a.inner.inner.f` still registers.
+    (tmp_path / "a" / "inner").mkdir(parents=True)
+    (tmp_path / "a" / "inner" / "inner.rs").write_text(
+        "fn f(x: u64) -> u64 { x }\n"
+    )
+    same = "pub mod inner;\n"
+    (tmp_path / "a" / "mod.rs").write_text(same)
+    (tmp_path / "a" / "inner" / "mod.rs").write_text(same)
+    root = tmp_path / "main.rs"
+    root.write_text("mod a;\n")
+    r = summarize_rust(
+        root.read_bytes(),
+        resolver=rust._fs_resolver,
+        source_path=str(root),
+    )
+    assert "a.inner.inner.f" in {f.name for f in r.functions}

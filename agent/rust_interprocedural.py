@@ -499,9 +499,9 @@ class _Builder:
                 )
         if self.resolved_paths is not None:
             self.resolved_paths.update(
-                path
-                for _, path in self.module_cache.values()
-                if path
+                entry[1]
+                for entry in self.module_cache.values()
+                if entry and entry[1]
             )
         # The context key folds every resolved module's bytes with
         # the root source — a changed module invalidates reuse.
@@ -643,6 +643,14 @@ class _Builder:
         # entry and recurse `a.a.a...` forever.
         if rkey in self.resolving:
             return
+        # `module_ref` feeds both the digest key (fresh
+        # resolutions) and the pathless child's importer identity
+        # (cache hits) — compute it before either branch.
+        module_ref = (
+            f"{importer_path}\x00{mname}"
+            if importer_path is not None
+            else mname
+        )
         if rkey in self.module_cache:
             child = self.module_cache[rkey]
         else:
@@ -654,15 +662,6 @@ class _Builder:
                     else self.resolver(mname)
                 )
                 child_path = None
-                # Importer-aware resolvers distinguish same-named
-                # `mod c;` under different parents — the digest key
-                # must too, or a change to one parent's `c` reads as
-                # unchanged for the other's.
-                module_ref = (
-                    f"{importer_path}\x00{mname}"
-                    if importer_path is not None
-                    else mname
-                )
                 from pathlib import Path as _P
 
                 if isinstance(raw, _P):
@@ -686,10 +685,17 @@ class _Builder:
         if child is None:
             return
         raw, child_path = child
-        if hashlib.sha256(raw).hexdigest() in self.resolving_bytes:
-            # The resolved bytes are an ancestor's own source —
-            # the cycle guard keyed on (importer, spec) cannot
-            # see this through a pathless identity.
+        if (
+            child_path is None
+            and hashlib.sha256(raw).hexdigest()
+            in self.resolving_bytes
+        ):
+            # Pathless resolution can't name the module file, so a
+            # resolver feeding a module its own bytes recurses
+            # under a fresh synthetic importer every level — byte
+            # identity is the only cycle witness there. Distinct
+            # `Path` resolutions with equal content are different
+            # files, not a cycle.
             return
         self.resolving.add(rkey)
         # A pathless (bytes/str) resolution still needs a unique
@@ -699,9 +705,10 @@ class _Builder:
         importer_for_child = (
             child_path if child_path is not None else module_ref
         )
-        self.resolving_bytes.add(
-            hashlib.sha256(raw).hexdigest()
-        )
+        if child_path is None:
+            self.resolving_bytes.add(
+                hashlib.sha256(raw).hexdigest()
+            )
         try:
             self._scan_module(
                 _children(self._parse(raw)),
@@ -712,9 +719,10 @@ class _Builder:
             )
         finally:
             self.resolving.discard(rkey)
-            self.resolving_bytes.discard(
-                hashlib.sha256(raw).hexdigest()
-            )
+            if child_path is None:
+                self.resolving_bytes.discard(
+                    hashlib.sha256(raw).hexdigest()
+                )
 
     # -- `use` bindings and path resolution ------------------------
 
@@ -866,7 +874,12 @@ class _Builder:
     def _global_of(self, name, table):
         """Bare `NAME` resolves module-local `const`/`static`
         first, then ancestors', then the crate root's — sibling
-        scopes stay invisible."""
+        scopes stay invisible. A `use` binding is authoritative:
+        `use b::STATE` makes `STATE` mean `b.STATE` and nothing
+        else."""
+        bound = self._cur_use_map.get(name)
+        if bound is not None:
+            return bound if bound in table else None
         mp = self._cur_mod_path
         while mp:
             key = f"{mp}.{name}"
