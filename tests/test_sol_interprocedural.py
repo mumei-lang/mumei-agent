@@ -2908,3 +2908,112 @@ def test_mcp_sol_summaries_accepts_cli_resolved_manifest(tmp_path):
         )
     )
     assert check["check"]["context_match"] is True
+
+
+def test_import_same_content_different_files_scan_per_location(tmp_path):
+    # `a/b.sol` and `c/b.sol` carry identical bytes but are two
+    # files — `./d.sol` inside each binds per location. Content-
+    # keyed module identity would scan only the first and miss
+    # `c/d.sol` entirely.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "c").mkdir()
+    shared = (
+        'import "./d.sol";\n'
+        "function fb(uint256 x) returns (uint256) { return fd(x); }\n"
+    )
+    (tmp_path / "a" / "b.sol").write_text(shared)
+    (tmp_path / "c" / "b.sol").write_text(shared)
+    (tmp_path / "a" / "d.sol").write_text(
+        "function fd(uint256 x) returns (uint256) { return x; }\n"
+    )
+    (tmp_path / "c" / "d.sol").write_text(
+        "function fd(uint256 x) returns (uint256) { return x + 1; }\n"
+    )
+    src = (
+        'import {fb as f1} from "a/b.sol";\n'
+        'import {fb as f2} from "c/b.sol";\n'
+        "function run(uint256 x) returns (uint256) {\n"
+        "  return f1(x) + f2(x);\n"
+        "}\n"
+    )
+    resolved = set()
+    s = sol.summarize_solidity(
+        src,
+        resolver=sol._fs_resolver,
+        source_path=str(tmp_path / "main.sol"),
+        resolved_paths=resolved,
+    )
+    names = {fn.name for fn in s.functions}
+    assert {"b.fb", "b#2.fb", "d.fd", "d#2.fd"} <= names
+    fb1 = next(fn for fn in s.functions if fn.name == "b.fb")
+    fb2 = next(fn for fn in s.functions if fn.name == "b#2.fb")
+    assert fb1.available and fb2.available
+    # Both directories' `d.sol` were actually resolved — under
+    # content-keyed identity `c/d.sol` was never scanned.
+    assert resolved == {
+        str(tmp_path / "a" / "b.sol"),
+        str(tmp_path / "c" / "b.sol"),
+        str(tmp_path / "a" / "d.sol"),
+        str(tmp_path / "c" / "d.sol"),
+    }
+
+
+def test_import_nested_resolution_uses_unsuffixed_reference():
+    # One specifier serving different bytes per importer gets a
+    # display ref (`./b.sol#@<digest>`) — nested imports inside
+    # that module must still query the resolver with the
+    # reference it understands, or its dependencies never
+    # resolve.
+    b_one = "function fb(uint256 a) returns (uint256) { return a; }"
+    d_mod = "function fd(uint256 a) returns (uint256) { return a + 1; }"
+    b_two = (
+        'import "./d.sol";\n'
+        "function fg(uint256 a) returns (uint256) { return fd(a); }"
+    )
+    a_mod = (
+        'import "./b.sol";\n'
+        "function fa(uint256 x) returns (uint256) { return fb(x); }"
+    )
+    c_mod = (
+        'import "./b.sol";\n'
+        "function fc(uint256 x) returns (uint256) { return fg(x); }"
+    )
+    root = (
+        'import "./a.sol";\n'
+        'import "./c.sol";\n'
+        "function run(uint256 x) returns (uint256) { return fc(x); }"
+    )
+
+    def resolver(spec, importer_path=None):
+        if spec == "./d.sol" and importer_path == "./b.sol":
+            return d_mod
+        if spec == "./b.sol" and importer_path == "./c.sol":
+            return b_two
+        return {
+            "./a.sol": a_mod,
+            "./c.sol": c_mod,
+            "./b.sol": b_one,
+        }.get(spec)
+
+    s = sol.summarize_solidity(root, resolver=resolver)
+    names = {fn.name for fn in s.functions}
+    assert {"b.fb", "b#2.fg", "d.fd"} <= names
+    fg = next(fn for fn in s.functions if fn.name == "b#2.fg")
+    assert fg.available
+    assert fg.return_dependencies == frozenset({0})
+
+
+def test_import_same_named_struct_different_decls_is_ambiguous():
+    # `struct SB` from the import and a locally declared `struct
+    # SB` are different declarations — the name collides rather
+    # than re-binding, so using it stays unresolved.
+    src = """import "./b.sol";
+struct SB { uint256 w; }
+function af(uint256 x) returns (uint256) {
+  SB memory s = SB(x);
+  return s.w;
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD})
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert not af.available
+    assert af.gaps

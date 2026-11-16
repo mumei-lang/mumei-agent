@@ -77,7 +77,7 @@ MAX_MODULE_DEPTH = 8
 _EMPTY_SCOPE = {
     "contracts": {},
     "free": {},
-    "structs": set(),
+    "structs": {},
     "namespaces": {},
     "ambiguous": set(),
 }
@@ -476,12 +476,23 @@ class _Builder:
         # module, installed as `_cur_scope` during `_summarize`.
         self._fn_scope: dict[str, dict] = {}
         self._cur_scope: dict = _EMPTY_SCOPE
-        # Resolved module content digest -> module token: one file
-        # maps to one internal-name prefix however many specifiers
-        # reach it, and two files never share one — a specifier
-        # resolving to different bytes for different importers
-        # keeps both modules rather than wrong-picking.
-        self._digest_tok: dict[str, str] = {}
+        # Resolved module identity -> module token: one resolved
+        # file maps to one internal-name prefix however many
+        # specifiers reach it, and two files never share one. The
+        # identity is the resolved reference for path resolvers
+        # (same path is one module; two paths never merge even
+        # with identical bytes — relative imports bind per
+        # location), and the content digest for pathless
+        # resolvers (`ref == spec` — identical bytes are the only
+        # notion of "same module" such a resolver offers).
+        self._id_tok: dict[str, str] = {}
+        # Final reference -> module identity / resolver-facing
+        # reference. `mod_id` is what `_mod_token` keys on;
+        # `resolve_key` is the pre-suffix reference a resolver
+        # was queried with — the `#@` display suffix never
+        # reaches the resolver.
+        self._mod_id: dict[str, str] = {}
+        self._resolve_key: dict[str, str] = {}
         # Tokens whose `_scan_module` frame is on the stack. A
         # cached resolution can reach a mid-scan module (the cache
         # stores resolutions, not scan state) — re-entering it
@@ -541,27 +552,30 @@ class _Builder:
 
     # -- module scan --------------------------------------------------
 
-    def _mod_token(self, spec, digest):
+    def _mod_token(self, spec, identity):
         """Stable internal-name prefix for a resolved module: the
         specifier's basename (`./lib/b.sol` -> `b`), deduplicated
         (`b#2`) when distinct resolved files share it. The module
-        content digest pins one file to one token however many
-        specifiers reach it — `./b.sol` and `b.sol` naming the
-        same bytes merge once, while one specifier serving
+        identity — resolved path for path resolvers, content
+        digest for pathless ones — pins one file to one token
+        however many specifiers reach it: `./b.sol` and `b.sol`
+        naming the same file merge once, `a/b.sol` and `c/b.sol`
+        with identical bytes stay two modules (their relative
+        imports bind per location), and one specifier serving
         different bytes to different importers keeps both
         modules."""
-        if digest in self._digest_tok:
-            return self._digest_tok[digest]
+        if identity in self._id_tok:
+            return self._id_tok[identity]
         base = spec.rsplit("/", 1)[-1]
         stem = base[:-4] if base.endswith(".sol") else base
         stem = stem or "module"
         tok = stem
-        taken = set(self._digest_tok.values()) | {""}
+        taken = set(self._id_tok.values()) | {""}
         n = 1
         while tok in taken:
             n += 1
             tok = f"{stem}#{n}"
-        self._digest_tok[digest] = tok
+        self._id_tok[identity] = tok
         return tok
 
     def _parse_import(self, node):
@@ -651,6 +665,7 @@ class _Builder:
 
         if isinstance(out, Path):
             ref = str(out)
+            path_resolved = True
             try:
                 src = out.read_bytes()
             except OSError:
@@ -658,9 +673,11 @@ class _Builder:
                 return None
         elif isinstance(out, str):
             ref = spec
+            path_resolved = False
             src = out.encode()
         elif isinstance(out, (bytes, bytearray)):
             ref = spec
+            path_resolved = False
             src = bytes(out)
         else:
             self.module_cache[key] = None
@@ -669,12 +686,24 @@ class _Builder:
             self.module_cache[key] = None
             return None
         digest = hashlib.sha256(src).hexdigest()
+        resolve_key = ref
         if ref in self.module_digests and self.module_digests[ref] != digest:
             # One specifier serving different bytes to different
             # importers (a pathless resolver returns `ref == spec`
             # for every file) — the reference must stay unique or
             # the second module would ride the first's identity.
             ref = f"{ref}#@{digest[:12]}"
+        # Module identity: the resolved path for path resolvers —
+        # `a/b.sol` and `c/b.sol` are two modules even with
+        # identical bytes, since relative imports bind per
+        # location — and the content digest for pathless
+        # resolvers, where identical bytes are the only notion of
+        # "same module".
+        self._mod_id[ref] = ref if path_resolved else digest
+        # Nested resolution queries the resolver with the
+        # reference it understands, not the `#@`-suffixed display
+        # form.
+        self._resolve_key[ref] = resolve_key
         if digest in self.resolving_bytes:
             # A pathless resolver feeding a module its own
             # source — treat like a cycle.
@@ -706,22 +735,18 @@ class _Builder:
             # Idempotent re-merge: importing one file through two
             # specifiers (`import "./b.sol"` + `import "b.sol"`)
             # or overlapping star/named directives binds the same
-            # internal name twice — not a collision.
-            if kind == "structs":
-                if name in scope["structs"]:
-                    return
-            elif scope[kind].get(name) == value:
+            # internal name with the same declaration identity
+            # twice — not a collision. Two declarations sharing a
+            # name compare different identities and collide.
+            if name in scope[kind] and scope[kind][name] == value:
                 return
             scope["contracts"].pop(name, None)
             scope["free"].pop(name, None)
-            scope["structs"].discard(name)
+            scope["structs"].pop(name, None)
             scope["namespaces"].pop(name, None)
             scope["ambiguous"].add(name)
             return
-        if kind == "structs":
-            scope["structs"].add(name)
-        else:
-            scope[kind][name] = value
+        scope[kind][name] = value
 
     def _scan_module(self, source, tok, importer_path):
         """Register one module's top-level declarations under
@@ -734,7 +759,7 @@ class _Builder:
         stays unresolved."""
         root = self._parse(source)
         tops = list(_children(root))
-        own = {"contracts": {}, "free": {}, "structs": set()}
+        own = {"contracts": {}, "free": {}, "structs": {}}
         decls = []
         for top in tops:
             if top.type in {
@@ -765,7 +790,8 @@ class _Builder:
                     None,
                 )
                 if sname is not None:
-                    own["structs"].add(sname.text.decode())
+                    sraw = sname.text.decode()
+                    own["structs"][sraw] = self._qual(tok, sraw)
             elif top.type == "function_definition":
                 fname = top.child_by_field_name("name") or next(
                     (
@@ -786,7 +812,7 @@ class _Builder:
         merged = {
             "contracts": {},
             "free": {},
-            "structs": set(),
+            "structs": {},
             "namespaces": {},
             "ambiguous": set(),
         }
@@ -802,7 +828,9 @@ class _Builder:
                 continue
             src, ref = resolved
             digest = hashlib.sha256(src).hexdigest()
-            mtok = self._mod_token(spec, digest)
+            mtok = self._mod_token(
+                spec, self._mod_id.get(ref, digest)
+            )
             if mtok in self._scanning:
                 # Reached while its own scan is still on the stack
                 # (a cached resolution bypassed the digest guard)
@@ -814,7 +842,11 @@ class _Builder:
                 self.resolving.add((importer_path, spec))
                 self.resolving_bytes.add(digest)
                 try:
-                    self._scan_module(src, mtok, ref)
+                    self._scan_module(
+                        src,
+                        mtok,
+                        self._resolve_key.get(ref, ref),
+                    )
                 finally:
                     self._scanning.discard(mtok)
                     self.resolving.discard((importer_path, spec))
@@ -847,14 +879,14 @@ class _Builder:
                     renames.get(fname, fname),
                     ukeys,
                 )
-            for sname in child_own["structs"]:
+            for sname, internal in child_own["structs"].items():
                 if wanted is not None and sname not in wanted:
                     continue
                 self._merge_names(
                     merged,
                     "structs",
                     renames.get(sname, sname),
-                    None,
+                    internal,
                 )
         # Own names overlay the imports; a name contributed by an
         # import and declared locally is ambiguous — never a
@@ -865,8 +897,8 @@ class _Builder:
             # `[]` is a placeholder — registration rebinds the
             # name to its ukey group below.
             self._merge_names(merged, "free", name, [])
-        for name in own["structs"]:
-            self._merge_names(merged, "structs", name, None)
+        for name, internal in own["structs"].items():
+            self._merge_names(merged, "structs", name, internal)
         self._mod_own[tok] = own
         self._scopes[tok] = merged
         # Register contents into the shared registries under
@@ -1040,8 +1072,11 @@ class _Builder:
                     if (
                         sraw not in scope["contracts"]
                         and sraw not in scope["free"]
+                        and sraw not in scope["structs"]
                     ):
-                        scope["structs"].add(sraw)
+                        scope["structs"][sraw] = (
+                            f"{contract}.{sraw}"
+                        )
         for c in _children(node):
             if c.type == "inheritance_specifier":
                 anc = c.child_by_field_name("ancestor")
