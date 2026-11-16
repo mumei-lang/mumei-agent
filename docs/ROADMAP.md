@@ -2068,15 +2068,21 @@ analysis rather than supplying an effect-free or dependency-free result.
 C07 is **partially delivered**, not done. Fixed-point joins, bounded
 loop bodies, `&x` escape folds, `*p` stores/reads (named *and*
 unnamed scalar pointees), scalar package-level `var` reads/writes,
-struct-typed local values (conflated dep sets), multi-file package
+struct-typed local values (conflated dep sets), composite package
+globals (named-type struct/array/map/pointer `var`s admit
+field/index/deref reads and writes under the same external-state
+model — the var's own binding identity records each mutation and
+`stale_dependents` stays honest; an anonymous `struct{...}` var's
+fields carry no resolvable identities and stay closed), multi-file
+package
 units and audit wiring
 (`--enable-summaries`) have all landed
 since this line was written — the honest residuals are composite-
 pointee state tracking (`*[]T`, `*struct{...}`; dep sets still union
 every escaped binding rather than track which pointee a write may
 hit), the remaining
-resource-state semantics (composite package globals,
-channels, constructors, bound closures), per-statement (rather than
+resource-state semantics (channels, constructors, bound closures),
+per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
 TS's host-declared `--resolve-modules` relative-import resolution
 (Rust/Sol stay per-file); existing function-local dataflow stays
@@ -2333,8 +2339,11 @@ form.
 
 The acceptance criterion that interprocedural fixtures cover aliasing
 and resource state is exercised as negative coverage: pointer
-parameters and `&x` aliases, slice/map/channel resource state, package
-globals read or written by a callee, `new`/`make`-style constructor
+parameters and `&x` aliases, slice/map/channel resource state
+(package-level `var`s now *do* admit — scalar and composite — under
+the external-state transfer model; the still-closed shapes are
+channel/constructor/closure state),
+`new`/`make`-style constructor
 state, bound function values and literal closures all fail closed —
 every one lands as a declared gap (`unsupported_signature`,
 `unsupported_operator`, `unsupported_expression`,

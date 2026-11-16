@@ -10093,3 +10093,317 @@ def test_local_struct_value_interface_field_type_does_not_hide_fields(
     assert result.available
     assert result.return_dependencies == frozenset({0})
     assert result.effects != "unknown"
+
+
+def test_package_composite_var_field_read_records_transfer(
+    go_types_helper,
+):
+    # `G.V` on a package-level struct var reads external state like
+    # `lib.V` — dep-free for the value, and the imported transfer
+    # marks `effects` unknown. The target is the *field's* identity.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64; W int64 }\nvar G P\n"
+        "func F(x int64) int64 { return x + G.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert len(result.calls) == 1 and result.calls[0].imported
+    v_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "V" and b.kind == "variable"
+    )
+    assert result.calls[0].target == v_id
+
+
+def test_package_composite_var_bare_read_records_transfer(
+    go_types_helper,
+):
+    # A bare `G` read of a composite package var is dep-free like a
+    # scalar one — the var's own identity is the transfer target.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\nvar G P\n"
+        "func F(x int64) int64 { _ = G; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    g_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "G" and b.kind == "variable"
+    )
+    assert result.calls[0].target == g_id
+
+
+def test_package_composite_var_writes_record_transfers(
+    go_types_helper,
+):
+    # `G.V = v`, `G.A.N = v`, and `G = P{...}` all mutate package
+    # state: the stored deps drop and the var's identity records the
+    # mutation — nested selects resolve to the same var binding.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ N int64 }\ntype P struct{ A Q; V int64 }\n"
+        "var G P\n"
+        "func F(x int64) int64 {\n"
+        "\tG.V = x\n\tG.A.N = x\n\tG = P{V: x}\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    g_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "G" and b.kind == "variable"
+    )
+    assert len(result.calls) == 3
+    assert all(c.imported and c.target == g_id for c in result.calls)
+
+
+def test_package_container_var_index_write_and_read(
+    go_types_helper,
+):
+    # `GA[i] = v` stores into package state (deps drop, var identity
+    # records); `GA[i]` reads it (dep-free, same target).
+    files = {
+        "a.go": "package p\nvar GA [4]int64\n"
+        "func F(x int64) int64 { GA[1] = x; return x }\n"
+        "func G(x int64) int64 { return GA[1] + x }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    f = named_package(files, snapshot, summaries, "F")
+    g = named_package(files, snapshot, summaries, "G")
+    ga_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "GA" and b.kind == "variable"
+    )
+    assert f.available and f.effects == "unknown"
+    assert f.calls[0].target == ga_id and f.calls[0].imported
+    assert g.available and g.return_dependencies == frozenset({0})
+    assert g.calls[0].target == ga_id and g.calls[0].imported
+
+
+def test_package_map_var_index_write_evaluates_key(
+    go_types_helper,
+):
+    # `GM[K(x)] = v` — the index expression is evaluated like the
+    # imported path's extras: K's own transfer still records.
+    files = {
+        "a.go": "package p\nvar GM map[int64]int64\nvar GC int64\n"
+        "func K(v int64) int64 { GC = v; return v }\n"
+        "func F(x int64) int64 { GM[K(x)] = x; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    k_id = next(
+        f.binding_id for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "K"
+    )
+    assert any(c.target == k_id for c in result.calls)
+
+
+def test_package_pointer_var_deref_write_and_read(
+    go_types_helper,
+):
+    # `*GP = v` may aim at any escaped binding — the write folds the
+    # stored deps through the alias fold like `*lib.PV = v`, and the
+    # var identity records the mutation. `*GP` reads through package
+    # state the same way.
+    files = {
+        "a.go": "package p\nvar GP *int64\n"
+        "func F(x int64) int64 { *GP = x; return x }\n"
+        "func G(x int64) int64 { return *GP + x }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    f = named_package(files, snapshot, summaries, "F")
+    g = named_package(files, snapshot, summaries, "G")
+    assert f.available and f.effects == "unknown"
+    assert g.available and g.return_dependencies == frozenset({0})
+    assert g.effects == "unknown"
+
+
+def test_package_composite_var_inc_dec_records_transfer(
+    go_types_helper,
+):
+    # `G.V++` / `G[i]++` — provenance-preserving mutations of package
+    # state: only the external mutation records.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\nvar G P\nvar GA [4]int64\n"
+        "func F(x int64) int64 { G.V++; GA[0]++; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    assert len(result.calls) == 2
+
+
+def test_package_container_var_range_binds_dep_free(
+    go_types_helper,
+):
+    # `for i := range GA` / `for k, v := range GM` — iterating
+    # package state yields dep-free values while the read records
+    # the imported transfer against the var's identity.
+    files = {
+        "a.go": "package p\nvar GA [4]int64\nvar GM map[int64]int64\n"
+        "func F(x int64) int64 {\n"
+        "\tfor i := range GA { x += int64(i) }\n"
+        "\tfor k, v := range GM { x += k + v }\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    assert len(result.calls) == 2
+    assert all(c.imported for c in result.calls)
+
+
+def test_local_composite_write_is_not_a_package_write(
+    go_types_helper,
+):
+    # `st.V = x` on a function-local composite still takes the local
+    # accumulate path — the package-var gate never admits it, so no
+    # external mutation records (`effects` stays clean).
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64) int64 { st := P{}; st.V = x; return st.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+    assert not result.calls
+
+
+def test_local_struct_promoted_read_through_pointer_stays_closed(
+    go_types_helper,
+):
+    # `st.V` where `V` promotes through embedded `*Q` reads caller
+    # memory the conflated dep set cannot represent — a dep-free
+    # answer would report `effects` dishonestly, so it stays closed
+    # like the write side.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\ntype P struct{ *Q }\n"
+        "func F(q *Q) int64 { st := P{Q: q}; return st.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_package_var_index_expression_read_records_transfer(
+    go_types_helper,
+):
+    # `GA[GI] = x` — GI's read inside the index records its own
+    # imported transfer, so redeclaring `GI` flags the summary.
+    files = {
+        "a.go": "package p\nvar GA [4]int64\nvar GI int64\n"
+        "func F(x int64) int64 { GA[GI] = x; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    gi_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "GI" and b.kind == "variable"
+    )
+    assert any(c.target == gi_id and c.imported for c in result.calls)
+
+
+def test_map_literal_key_evaluates_before_value(
+    go_types_helper,
+):
+    # `M[K(x): *p]` — the key runs first, so K's side effects are
+    # recorded before the value's evaluation: the key call's
+    # transfer precedes the value's deref read.
+    files = {
+        "a.go": "package p\nvar GM map[int64]int64\n"
+        "func K(v int64) int64 { return v }\n"
+        "func F(p *int64, x int64) int64 {\n"
+        "\t_ = map[int64]int64{K(x): *p}\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    k_id = next(
+        f.binding_id for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "K"
+    )
+    targets = [c.target for c in result.calls]
+    assert targets.index(k_id) < len(targets) - 1
+
+
+def test_package_pointer_field_deref_write_records_transfer(
+    go_types_helper,
+):
+    # `*G.P = x` dereferences the field's pointer, not the var —
+    # admits like `*GP = v`, recording the mutation on G's identity
+    # and folding the stored deps through the alias fold.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ P *int64 }\nvar G P\n"
+        "func F(x int64) int64 { *G.P = x; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    g_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "G" and b.kind == "variable"
+    )
+    assert any(c.target == g_id for c in result.calls)
+
+
+def test_package_pointer_intermediate_field_write_folds(
+    go_types_helper,
+):
+    # `G.P.V = x` on `P *Q` crosses P's pointer — the store may land
+    # in any escaped binding, so the stored deps must fold back: an
+    # escaped `x` keeps the write's deps visible on a later read.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\ntype P struct{ P *Q }\nvar G P\n"
+        "func F(x int64) int64 {\n"
+        "\tp := &x\n\tG.P.V = 7\n\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
