@@ -522,14 +522,23 @@ class AdapterProbeHistory:
     from each new request, requires the outcome to bind the request's
     own execution fingerprint, and appends the next ordinal — a
     replayed, reordered or foreign outcome fails statically instead of
-    contaminating the history. This is replay evidence only: it says
-    nothing about adapter health, authorizes nothing, and never
-    retries.
+    contaminating the history. Each recorded outcome carries the
+    observation stamp of the request that produced it: a record whose
+    stamps regress — a replayed older observation — fails statically
+    (equal stamps stay ordered by their attempt ordinals). This is
+    replay evidence only: it says nothing about adapter health,
+    authorizes nothing, and never retries.
+
+    `stamps[i]` is the declared observation stamp of `outcomes[i]`;
+    `None` marks a restored v1 record's undeclared stamp (a v1 record
+    never claimed ordering). A `None` may only precede real stamps —
+    ordering evidence once declared cannot be undeclared later.
     """
 
     adapter_id: str
     command_fingerprint: str
     outcomes: tuple[AttemptNormalizedResult, ...] = ()
+    stamps: tuple[int | None, ...] = ()
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -552,6 +561,25 @@ class AdapterProbeHistory:
         for i, o in enumerate(self.outcomes):
             if o.attempt_number != i + 1:
                 raise ValueError("probe history attempt ordinal mismatch")
+        if (
+            type(self.stamps) is not tuple
+            or len(self.stamps) != len(self.outcomes)
+            or any(
+                s is not None
+                and (type(s) is not int or not 1 <= s <= MAX_STAMP)
+                for s in self.stamps
+            )
+        ):
+            raise ValueError("probe history requires parallel stamps")
+        declared = [s for s in self.stamps if s is not None]
+        # `None` (a v1-restored undeclared stamp) may only form a
+        # prefix: the first declared stamp must sit exactly after it.
+        if declared and self.stamps.index(declared[0]) != len(
+            self.stamps
+        ) - len(declared):
+            raise ValueError("probe history stamp ordering violation")
+        if any(b < a for a, b in zip(declared, declared[1:])):
+            raise ValueError("probe history stamp ordering violation")
 
     @classmethod
     def start(cls, request: "AdapterProbeRequest") -> "AdapterProbeHistory":
@@ -570,7 +598,11 @@ class AdapterProbeHistory:
         outcome: AdapterProbeOutcome,
     ) -> "AdapterProbeHistory":
         """Append an observed outcome; the request must re-derive the
-        bound fingerprint and the outcome must be the request's own."""
+        bound fingerprint and the outcome must be the request's own.
+        The request's stamp must not regress below the last declared
+        stamp — a replayed older observation fails statically; a
+        `None` tail (a v1-restored record) carries no declared stamp
+        to compare."""
         if type(request) is not AdapterProbeRequest:
             raise ValueError("probe history requires a probe request")
         if request.adapter_id != self.adapter_id:
@@ -590,18 +622,26 @@ class AdapterProbeHistory:
             raise ValueError("probe history attempt ordinal mismatch")
         if len(self.outcomes) >= MAX_PROBE_HISTORY:
             raise ValueError("probe history attempt bound reached")
+        last = next(
+            (s for s in reversed(self.stamps) if s is not None),
+            None,
+        )
+        if last is not None and request.stamp < last:
+            raise ValueError("probe history stamp ordering violation")
         return AdapterProbeHistory(
             self.adapter_id,
             self.command_fingerprint,
             self.outcomes + (result,),
+            self.stamps + (request.stamp,),
         )
 
     def to_dict(self) -> dict:
         return {
-            "schema_version": "mumei.adapter-probe-history/v1",
+            "schema_version": "mumei.adapter-probe-history/v2",
             "adapter_id": self.adapter_id,
             "command_fingerprint": self.command_fingerprint,
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],
+            "stamps": list(self.stamps),
         }
 
     @classmethod
@@ -609,13 +649,22 @@ class AdapterProbeHistory:
         """Rebuild a declared probe-history record; the constructor
         re-validates it.
 
-        The record is a host declaration: restoration re-checks the
-        exact key set and schema, and each outcome is restored through
-        ``AttemptNormalizedResult.from_dict`` — a foreign schema,
-        unknown keys or malformed members are static errors."""
+        Both record schemas restore: v1 carries no `stamps` key, so
+        each outcome restores with `None` — the record never declared
+        their ordering. v2 carries `stamps` parallel to `outcomes`,
+        each entry a declared stamp or `null`; the constructor
+        re-checks that no real stamp follows a `None` and that the
+        declared run is strictly increasing, so a reordered record
+        never restores. Foreign schemas, unknown keys or malformed
+        members are static errors."""
         if (
             type(data) is not dict
-            or data.get("schema_version") != "mumei.adapter-probe-history/v1"
+            or type(data.get("schema_version")) is not str
+            or data["schema_version"]
+            not in {
+                "mumei.adapter-probe-history/v1",
+                "mumei.adapter-probe-history/v2",
+            }
         ):
             raise ValueError(
                 "probe history requires its declared record schema"
@@ -625,6 +674,8 @@ class AdapterProbeHistory:
             "command_fingerprint",
             "outcomes",
         }
+        if data["schema_version"] == "mumei.adapter-probe-history/v2":
+            required = required | {"stamps"}
         if not required <= set(data) or not set(data) <= required | {
             "schema_version",
         }:
@@ -634,12 +685,27 @@ class AdapterProbeHistory:
         outcomes = data["outcomes"]
         if type(outcomes) is not list:
             raise ValueError("probe history record has malformed outcomes")
+        stamps = data.get("stamps")
+        if data["schema_version"] == "mumei.adapter-probe-history/v2":
+            if type(stamps) is not list:
+                raise ValueError(
+                    "probe history record has malformed stamps"
+                )
+        elif stamps is not None:
+            raise ValueError(
+                "probe history record has malformed stamps"
+            )
         return cls(
             data["adapter_id"],
             data["command_fingerprint"],
             tuple(
                 AttemptNormalizedResult.from_dict(outcome)
                 for outcome in outcomes
+            ),
+            (
+                tuple(stamps)
+                if stamps is not None
+                else (None,) * len(outcomes)
             ),
         )
 

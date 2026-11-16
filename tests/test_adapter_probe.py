@@ -1079,3 +1079,64 @@ def test_probe_acceptance_rejects_foreign_adapter():
     ):
         with pytest.raises(ValueError, match="acceptance evaluation"):
             evaluate_probe_acceptance(bad_req, bad_out)
+
+
+def test_probe_history_records_outcome_stamps():
+    hist = AdapterProbeHistory.start(_req(stamp=3))
+    first = _req(stamp=3)
+    hist = hist.record(first, run_probe(first))
+    # Same-stamp re-attempt orders by ordinal.
+    second = _req(stamp=3, attempt_number=2)
+    hist = hist.record(second, run_probe(second))
+    assert hist.stamps == (3, 3)
+    third = _req(stamp=5, attempt_number=3)
+    hist = hist.record(third, run_probe(third))
+    assert hist.stamps == (3, 3, 5)
+
+
+def test_probe_history_rejects_regressed_stamp():
+    hist = AdapterProbeHistory.start(_req(stamp=9))
+    first = _req(stamp=9)
+    hist = hist.record(first, run_probe(first))
+    older = _req(stamp=3, attempt_number=2)
+    with pytest.raises(ValueError, match="stamp ordering"):
+        hist.record(older, run_probe(older))
+
+
+def test_probe_history_v1_record_restores_undeclared_stamps():
+    req = _req(stamp=4)
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    v1 = hist.to_dict()
+    v1["schema_version"] = "mumei.adapter-probe-history/v1"
+    del v1["stamps"]
+    restored = AdapterProbeHistory.from_dict(v1)
+    assert restored.stamps == (None,)
+    # A v1-restored record appends normally — the undeclared tail
+    # carries no ordering to compare against.
+    nxt = _req(stamp=2, attempt_number=2)
+    restored = restored.record(nxt, run_probe(nxt))
+    assert restored.stamps == (None, 2)
+
+
+def test_probe_history_v2_round_trip_and_rejects_reordered():
+    req = _req(stamp=4)
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    data = hist.to_dict()
+    assert data["schema_version"] == "mumei.adapter-probe-history/v2"
+    assert data["stamps"] == [4]
+    assert AdapterProbeHistory.from_dict(data) == hist
+    # A declared stamp followed by null is a smuggled un-ordering.
+    data["outcomes"].append(
+        run_probe(_req(stamp=5, attempt_number=2)).result.to_dict()
+    )
+    data["stamps"].append(None)
+    with pytest.raises(ValueError, match="ordering"):
+        AdapterProbeHistory.from_dict(data)
+    # Regressing declared stamps never restore.
+    data["stamps"] = [7, 2]
+    with pytest.raises(ValueError, match="ordering"):
+        AdapterProbeHistory.from_dict(data)
+    # A v2 record must carry a stamps list — null is malformed.
+    data["stamps"] = None
+    with pytest.raises(ValueError, match="stamps"):
+        AdapterProbeHistory.from_dict(data)

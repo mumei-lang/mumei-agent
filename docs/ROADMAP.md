@@ -4013,10 +4013,10 @@ safe because registry stamps are per adapter id.
 Scheduling stays declarative: it decides which declared probes would
 make excluded candidates observable — it runs nothing itself, keeps the
 argv host-declared verbatim text, and the emitted request still goes
-through `run_probe` for actual execution. Retry policy, concurrency,
-probe ordering across stamps and Evidence acceptance remain open
-(the declared probe-outcome acceptance descriptor is covered by its
-own section below).
+through `run_probe` for actual execution. Retry policy, concurrency
+and Evidence acceptance remain open (probe ordering across stamps
+and the declared probe-outcome acceptance descriptor are covered by
+their own sections below).
 
 ### C11 probe execution driver
 
@@ -4164,6 +4164,25 @@ nothing here is a verdict, an adapter-health claim or a routing
 authority — `plan()` consumes observations unchanged and no route
 surface is added. C11 stays partial; Evidence acceptance of
 selected attempt outputs remains a Core duty.
+
+### C11 declared probe-history stamp ordering
+
+`AdapterProbeHistory` now records each outcome's observation stamp
+beside it and emits `mumei.adapter-probe-history/v2` — the same
+record shape plus a `stamps` array parallel to `outcomes`.
+`record()` fails statically when the request's stamp regresses below
+the last declared stamp (equal stamps stay ordered by their attempt
+ordinals), and `__post_init__` applies the same check to restored
+records, so a replayed or reordered stamp is a `ValueError`, never a
+silently re-sorted history.
+
+Persisted v1 records (`summaries-plan --histories`, MCP
+`summaries_plan`) still resume: `from_dict` restores them with each
+stamp `None` — undeclared, not fabricated — and a v2 record whose
+`stamps` run contains a `None` after a declared stamp, a wrong
+length, or a regressing pair is rejected on restore. Ordering is
+per `command_fingerprint` only; cross-adapter ordering stays the
+registry stamp's job, and probe acceptance remains open.
 
 ## Roadmap authority and vocabulary
 

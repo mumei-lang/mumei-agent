@@ -605,7 +605,7 @@ Plan the summary-derivation route for a declared profile through the C11 probe b
 | `--tool-version` | `<TOOL_VERSION>` | no | — | Optional declared tool version the planner pins against. |
 | `--rounds` | `<ROUNDS>` | no | 1 | Maximum observe-and-replan rounds (default 1). |
 | `--max-parallel` | `<MAX_PARALLEL>` | no | 1 | Maximum probes run concurrently per round (default 1). |
-| `--histories` | `<PATH>` | no | — | Optional JSON array of persisted mumei.adapter-probe-history/v1 records this pass resumes. |
+| `--histories` | `<PATH>` | no | — | Optional JSON array of persisted mumei.adapter-probe-history records this pass resumes (v1 records restore with undeclared outcome stamps; v2 records carry them). |
 
 
 ## `mumei-agent go-summaries-attempt`
