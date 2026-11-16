@@ -135,3 +135,27 @@ def test_unhashable_field_types_never_raise(tmp_path):
         evaluation = evaluate_core_acceptance(weird)
         assert evaluation["descriptor_match"] is False
         assert evaluation["accepted"] is False
+
+
+def test_optional_evidence_fingerprint_field(tmp_path):
+    # Core acceptance descriptors may carry evidence_fingerprint — the
+    # SHA-256 hex of the accepted record's bytes. A valid one keeps the
+    # match; a malformed one breaks it like a foreign field.
+    good = evaluate_core_acceptance(
+        _descriptor(evidence_fingerprint="a" * 64)
+    )
+    assert good["descriptor_match"] is True
+    assert good["accepted"] is True
+
+    for bad in ("A" * 64, "abc", 123, None, ["a" * 64]):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(evidence_fingerprint=bad)
+        )
+        assert evaluation["descriptor_match"] is False
+        assert evaluation["accepted"] is False
+
+    # Unknown extra fields still break the match.
+    foreign = evaluate_core_acceptance(
+        _descriptor(evidence_fingerprint="b" * 64, foreign_field=1)
+    )
+    assert foreign["descriptor_match"] is False

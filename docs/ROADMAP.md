@@ -4219,7 +4219,11 @@ family (`acceptance: "evaluated"`, a Boolean `accepted`, a non-empty
 `scope` and two string check lists); a foreign or malformed document
 never counts, and a well-formed descriptor that itself declared
 non-acceptance matches but credits nothing. `accepted` holds only
-when the descriptor matches AND declared `accepted: true`.
+when the descriptor matches AND declared `accepted: true`. Core may
+attach the optional `evidence_fingerprint` field (the 64-char
+lowercase-hex SHA-256 of the accepted record's bytes) — it stays
+inside the closed shape; a malformed fingerprint breaks the match
+like a foreign field, and the fold reports but does not re-verify it.
 
 This is representation-level evaluation, not Evidence acceptance
 credit: anonymous Core descriptors bind no request or attempt, so

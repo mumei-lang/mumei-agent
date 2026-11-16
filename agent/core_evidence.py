@@ -304,7 +304,7 @@ CORE_ACCEPTANCE_SCHEMAS = frozenset(
     }
 )
 
-_CORE_ACCEPTANCE_FIELDS = frozenset(
+_CORE_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
     {
         "schema_version",
         "acceptance",
@@ -315,9 +315,20 @@ _CORE_ACCEPTANCE_FIELDS = frozenset(
     }
 )
 
+# Optional descriptor fields Core may emit on top of the required shape.
+_CORE_ACCEPTANCE_OPTIONAL_FIELDS = frozenset({"evidence_fingerprint"})
+
 
 def _string_list(value: object) -> bool:
     return type(value) is list and all(type(item) is str for item in value)
+
+
+def _is_fingerprint(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def evaluate_core_acceptance(descriptor: dict) -> dict:
@@ -329,14 +340,19 @@ def evaluate_core_acceptance(descriptor: dict) -> dict:
     `accepted`, a non-empty `scope` string and two string-list check
     fields — a foreign or malformed document never counts. `accepted`
     holds only when the descriptor matches AND itself declared
-    `accepted: true`. This is representation-level evaluation only:
+    `accepted: true`. Core may add the optional `evidence_fingerprint`
+    field — a 64-char lowercase-hex SHA-256 of the accepted record's
+    bytes; a malformed fingerprint breaks the match like any foreign
+    field. This is representation-level evaluation only:
     anonymous descriptors bind no request or attempt, so nothing here
     credits acceptance to a selected output; `checks_not_performed`
     names what the fold leaves unassessed."""
     if type(descriptor) is not dict:
         raise ValueError("unsupported core acceptance evaluation request")
+    fields = frozenset(descriptor)
     match = (
-        frozenset(descriptor) == _CORE_ACCEPTANCE_FIELDS
+        _CORE_ACCEPTANCE_REQUIRED_FIELDS <= fields
+        and fields <= _CORE_ACCEPTANCE_REQUIRED_FIELDS | _CORE_ACCEPTANCE_OPTIONAL_FIELDS
         and type(descriptor["schema_version"]) is str
         and descriptor["schema_version"] in CORE_ACCEPTANCE_SCHEMAS
         and type(descriptor["acceptance"]) is str
@@ -346,6 +362,10 @@ def evaluate_core_acceptance(descriptor: dict) -> dict:
         and descriptor["scope"] != ""
         and _string_list(descriptor["checks_performed"])
         and _string_list(descriptor["checks_not_performed"])
+        and (
+            "evidence_fingerprint" not in descriptor
+            or _is_fingerprint(descriptor["evidence_fingerprint"])
+        )
     )
     return {
         "schema_version": "mumei.core-acceptance-evaluation/v1",
