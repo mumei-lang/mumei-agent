@@ -5296,6 +5296,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         iter(function_node.named_children), None
                     )
                 name = function_node.text if function_node is not None else b""
+                if name == b"new":
+                    # `new(T)` — a pure allocation of a `*T`: its
+                    # argument is a type expression, never evaluated,
+                    # so the result carries no dependencies and no
+                    # transfer records. Pinning the argument's named
+                    # identities keeps `stale_dependents` honest; the
+                    # pointer's own use-site gates (`*p`, `(*p)[i]`)
+                    # classify what the pointee admits. `make` stays
+                    # opaque — its result is a composite value, which
+                    # the fragment's binding model cannot hold.
+                    if len(arguments) != 1 or not self._pin_type_node(
+                        arguments[0]
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    return frozenset()
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
                 if not arguments:
@@ -5755,6 +5772,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         else frozenset({params[ref.binding_id]})
                     )
                     locals_[ref.binding_id] = base | stored
+            elif arg_node.type == "identifier":
+                # `G(p)` hands the callee a pointer binding — the
+                # callee's `*q` stores write caller memory, so every
+                # argument's dependencies fold into the indirect-write
+                # set (a later `*p` read observes them) and into each
+                # escaped binding (`p := &x` may have aimed at any of
+                # them) — the same approximation a `*p = v` store
+                # uses.
+                ref = self.references.get(self.node_key(arg_node))
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None
+                    else None
+                )
+                if binding is not None and binding.type.kind == "pointer":
+                    self.indirect_writes |= stored
+                    for escaped_id in self.escaped:
+                        self._store(
+                            locals_, params, escaped_id, stored, True
+                        )
 
 
 def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
