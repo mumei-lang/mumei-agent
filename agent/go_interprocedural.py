@@ -4419,6 +4419,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # a literal index carries none, like the read's own
                 # `lib.VM["k"]` rule.
                 field_index_deps = frozenset()
+                field_index_nodes: set[Any] = set()
                 operand = node.child_by_field_name("operand")
                 while (
                     operand is not None
@@ -4466,6 +4467,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "raw_string_literal",
                         }:
                             continue
+                        field_index_nodes.add(self.node_key(idx))
                         field_index_deps |= self.expression(
                             idx, fn, params, locals_, transfers, count,
                             depth + 1,
@@ -4583,15 +4585,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
+                    # The index selects which slot the field comes
+                    # from — `(*GA[i]).V` depends on `i` exactly like
+                    # `GA[i]` does. Indexes the `lib.VSM[k].F`
+                    # pre-scan already evaluated contribute their
+                    # deps via `field_index_deps`; the rest (inside
+                    # a deref operand) evaluate here, once.
+                    deps = field_index_deps
                     for extra in reversed(extras):
-                        if self._index_extra_effects(
-                            extra, locals_, params
-                        ):
-                            self.expression(
-                                extra, fn, params, locals_,
-                                transfers, count, 0,
-                            )
-                    return frozenset()
+                        if self.node_key(extra) in field_index_nodes:
+                            continue
+                        deps |= self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    return deps
             if (
                 member is None
                 or member.kind != "const"

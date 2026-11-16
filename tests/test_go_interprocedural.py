@@ -10788,3 +10788,42 @@ def test_package_indexed_pointer_element_deref_field_write(
         if b.name == "GA" and b.kind == "variable"
     )
     assert any(c.target == ga_id for c in result.calls)
+
+
+def test_package_indexed_deref_field_read_depends_on_index(
+    go_types_helper,
+):
+    # `(*GA[i]).V` selects the slot through `i` — the read carries
+    # the index's dependencies exactly like `GA[i]` does.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\nvar GA []*Q\n"
+        "func F(i int64) int64 {\n"
+        "\treturn (*GA[i]).V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_package_nested_index_field_read_depends_on_index(
+    go_types_helper,
+):
+    # `G.A[i].N` — the same slot-selection dependency through a
+    # nested field's array; the `lib.VSM[k].F` pre-scan already
+    # evaluates the index, so it must not double-record.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ N int64 }\ntype P struct{ A [4]Q }\nvar G P\n"
+        "func F(i int64) int64 {\n"
+        "\treturn G.A[i].N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
