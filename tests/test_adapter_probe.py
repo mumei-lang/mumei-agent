@@ -3,6 +3,7 @@
 import sys
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -1037,6 +1038,28 @@ def test_probe_acceptance_stale_outcome_does_not_match():
     out = evaluate_probe_acceptance(later, outcome)
     assert out["request_match"] is False
     assert out["accepted"] is False
+
+
+def test_probe_acceptance_rejects_inconsistent_outcome():
+    req = _req(
+        argv=(sys.executable, "-c", "import time; time.sleep(10)"),
+        timeout_ms=150,
+    )
+    outcome = run_probe(req)
+    assert outcome.observation.availability == "unknown"
+    # A host-built outcome claiming `available` over the timed-out
+    # result is an inconsistent declaration — it fails statically
+    # instead of accepting an inconclusive attempt.
+    lying = replace(
+        outcome,
+        observation=RuntimeObservation(
+            req.adapter_id,
+            availability="available",
+            stamp=req.stamp,
+        ),
+    )
+    with pytest.raises(ValueError, match="inconsistent"):
+        evaluate_probe_acceptance(req, lying)
 
 
 def test_probe_acceptance_rejects_foreign_adapter():

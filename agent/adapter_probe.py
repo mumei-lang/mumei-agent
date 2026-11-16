@@ -891,6 +891,10 @@ def evaluate_probe_acceptance(
     `cancelled` one answers `unknown` — an inconclusive attempt that
     accepts nothing.
 
+    An outcome whose observation disagrees with its own result's
+    declared mapping — e.g. `available` over a `timed_out` run —
+    fails statically rather than accepting an inconclusive attempt.
+
     This is declaration-level acceptance, not Evidence: the
     descriptor lists every semantic check left unassessed in
     `checks_not_performed` (stdout interpretation, tool-version
@@ -907,6 +911,11 @@ def evaluate_probe_acceptance(
     if outcome.observation.adapter_id != request.adapter_id:
         raise ValueError("probe acceptance adapter mismatch")
     result = outcome.result
+    if outcome.observation.availability != _map_outcome(result):
+        # The declaration is internally inconsistent — an outcome
+        # claiming `available` over a `timed_out` result must fail
+        # statically, not accept an inconclusive attempt.
+        raise ValueError("inconsistent probe outcome")
     match = (
         result.request_fingerprint
         == request.execution_request().request_fingerprint
