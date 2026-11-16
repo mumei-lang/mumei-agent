@@ -401,6 +401,7 @@ class _Builder:
         module_cache=None,
         module_digests=None,
         source_path=None,
+        resolved_paths=None,
     ):
         self.source = source
         self.count = [0]
@@ -427,12 +428,21 @@ class _Builder:
         # cycle guard; `module_cache` shares resolved-module bytes
         # across the unit; `module_digests` feeds `context_key`.
         self.resolving = set(resolving)
+        # Ancestor resolved-byte digests — a pathless resolver
+        # that feeds a module its own source would otherwise
+        # synthesize a fresh importer identity each level and
+        # defeat the `resolving` key check.
+        self.resolving_bytes: set = set()
         self.module_cache = (
             module_cache if module_cache is not None else {}
         )
         self.module_digests = (
             module_digests if module_digests is not None else {}
         )
+        # Out-param: the filesystem paths of every resolved
+        # module — routes refuse `--output` targets that would
+        # overwrite one.
+        self.resolved_paths = resolved_paths
         self.source_path = source_path
         if resolver is not None:
             import inspect
@@ -487,6 +497,12 @@ class _Builder:
                         effects="unknown",
                     )
                 )
+        if self.resolved_paths is not None:
+            self.resolved_paths.update(
+                path
+                for _, path in self.module_cache.values()
+                if path
+            )
         # The context key folds every resolved module's bytes with
         # the root source — a changed module invalidates reuse.
         ctx = hashlib.sha256(self.source)
@@ -512,9 +528,11 @@ class _Builder:
         path (`"b.c"`) used for `self`/`super` and same-module
         resolution. `use_map` collects this module's `use`
         bindings; every registered function records `(use_map,
-        mod_path)` in `mod_scopes`. `methods` and `globals` stay
-        root-file scopes — receiver dispatch and compile-time
-        constants do not cross files."""
+        mod_path)` in `mod_scopes`. `methods` registers every
+        module's impls — dispatch filters candidates to the
+        caller's scope. `globals`/`mut_globals` register under the
+        module's `prefix`; read/write sites resolve ancestor-first
+        so sibling scopes stay invisible."""
         for top in items:
             if top.type == "use_declaration":
                 self._scan_use(top, use_map, mod_path)
@@ -551,7 +569,11 @@ class _Builder:
                             importer_path, mtext
                         ),
                     )
-                else:
+                elif not _has_path_attr(top):
+                    # `#[path = "..."]` locates the module file
+                    # outside the resolver contract — the
+                    # declaration stays opaque rather than
+                    # resolving the wrong bytes.
                     self._resolve_mod(
                         mtext,
                         f"{prefix}{mtext}.",
@@ -562,13 +584,14 @@ class _Builder:
             if top.type in {"const_item", "static_item"}:
                 gname = top.child_by_field_name("name")
                 if gname is not None:
-                    self.globals.add(gname.text.decode())
+                    gtext = gname.text.decode()
+                    self.globals.add(f"{prefix}{gtext}")
                     if any(
                         c.type == "mutable_specifier"
                         for c in top.children
                     ):
                         self.mut_globals.add(
-                            gname.text.decode()
+                            f"{prefix}{gtext}"
                         )
                 continue
             if top.type != "impl_item":
@@ -592,8 +615,7 @@ class _Builder:
                     ukey = f"{prefix}{tname}.{base}#{n}"
                 self.functions[ukey] = item
                 self.mod_scopes[ukey] = (use_map, mod_path)
-                if not mod_path:
-                    self.methods.setdefault(base, set()).add(ukey)
+                self.methods.setdefault(base, set()).add(ukey)
 
     def _child_importer(self, importer_path, mname):
         """Synthetic importer for an inline `mod` body: `mod b
@@ -632,7 +654,15 @@ class _Builder:
                     else self.resolver(mname)
                 )
                 child_path = None
-                module_ref = mname
+                # Importer-aware resolvers distinguish same-named
+                # `mod c;` under different parents — the digest key
+                # must too, or a change to one parent's `c` reads as
+                # unchanged for the other's.
+                module_ref = (
+                    f"{importer_path}\x00{mname}"
+                    if importer_path is not None
+                    else mname
+                )
                 from pathlib import Path as _P
 
                 if isinstance(raw, _P):
@@ -656,17 +686,35 @@ class _Builder:
         if child is None:
             return
         raw, child_path = child
+        if hashlib.sha256(raw).hexdigest() in self.resolving_bytes:
+            # The resolved bytes are an ancestor's own source —
+            # the cycle guard keyed on (importer, spec) cannot
+            # see this through a pathless identity.
+            return
         self.resolving.add(rkey)
+        # A pathless (bytes/str) resolution still needs a unique
+        # importer identity for its own `mod` declarations —
+        # `None` would collide every pathless parent's same-named
+        # `mod` in `module_cache` and the digest key.
+        importer_for_child = (
+            child_path if child_path is not None else module_ref
+        )
+        self.resolving_bytes.add(
+            hashlib.sha256(raw).hexdigest()
+        )
         try:
             self._scan_module(
                 _children(self._parse(raw)),
                 prefix,
                 {},
                 mod_path,
-                child_path,
+                importer_for_child,
             )
         finally:
             self.resolving.discard(rkey)
+            self.resolving_bytes.discard(
+                hashlib.sha256(raw).hexdigest()
+            )
 
     # -- `use` bindings and path resolution ------------------------
 
@@ -796,7 +844,12 @@ class _Builder:
         cands = []
         bound = self._cur_use_map.get(segs[0])
         if bound is not None:
-            cands.append(".".join([bound] + segs[1:]))
+            # A `use` binding is authoritative: `use std::fs`
+            # makes `fs::read` mean `std::fs::read` and nothing
+            # else — falling through to a same-named internal
+            # item would mis-resolve an external path.
+            cand = ".".join([bound] + segs[1:])
+            return cand if cand in self.functions else None
         key = self._path_key(segs, self._cur_mod_path)
         if key is not None:
             cands.append(key)
@@ -809,6 +862,18 @@ class _Builder:
             if cand in self.functions:
                 return cand
         return None
+
+    def _global_of(self, name, table):
+        """Bare `NAME` resolves module-local `const`/`static`
+        first, then ancestors', then the crate root's — sibling
+        scopes stay invisible."""
+        mp = self._cur_mod_path
+        while mp:
+            key = f"{mp}.{name}"
+            if key in table:
+                return key
+            mp = mp.rpartition(".")[0]
+        return name if name in table else None
 
     # -- per-function summary --------------------------------------
 
@@ -1382,7 +1447,8 @@ class _Builder:
             and left.type == "identifier"
             and (
                 left.text.decode() in locals_
-                or left.text.decode() in self.mut_globals
+                or self._global_of(left.text.decode(), self.mut_globals)
+                is not None
             )
         ):
             deps = (
@@ -1396,7 +1462,7 @@ class _Builder:
             locals_[name] = deps
             if self._writes:
                 self._writes[-1].add(name)
-            if name in self.mut_globals:
+            if self._global_of(name, self.mut_globals) is not None:
                 # `static mut` writes are observable —
                 # unknown effects.
                 summary.effects = "unknown"
@@ -1443,7 +1509,7 @@ class _Builder:
                     # opaque effect is not downgraded.
                     if summary.effects != "unknown":
                         summary.effects = "state_writes"
-                if root in self.mut_globals:
+                if self._global_of(root, self.mut_globals) is not None:
                     # `static mut` writes are observable.
                     summary.effects = "unknown"
             return deps
@@ -1465,7 +1531,7 @@ class _Builder:
             )
             if self._writes:
                 self._writes[-1].add(root)
-            if root in self.mut_globals:
+            if self._global_of(root, self.mut_globals) is not None:
                 summary.effects = "unknown"
             if root in param_index:
                 pw = getattr(summary, "param_writes", None)
@@ -1565,6 +1631,15 @@ class _Builder:
                 ukeys = self.methods.get(
                     fld.text.decode(), set()
                 )
+                # Impls from other modules never answer a call in
+                # this scope — `t.m()` inside `mod b` resolves
+                # `b`'s impls only, so a same-named root impl is
+                # never mis-picked.
+                ukeys = {
+                    k for k in ukeys
+                    if self.mod_scopes.get(k, ({}, ""))[1]
+                    == self._cur_mod_path
+                }
                 if len(ukeys) == 1:
                     cand = next(iter(ukeys))
                     # `T.m` — resolve `x.m()` only when the
@@ -1581,7 +1656,9 @@ class _Builder:
                         if recv_root is not None and self._type_envs
                         else None
                     )
-                    if recv_type == req:
+                    if recv_type is not None and recv_type.replace(
+                        "::", "."
+                    ) in {req, req.rsplit(".", 1)[-1]}:
                         name = cand
                         actual.insert(0, recv_deps)
                         actual_t = tuple(actual)
@@ -1694,7 +1771,7 @@ class _Builder:
             )
             if self._writes:
                 self._writes[-1].add(rname)
-            if rname in self.mut_globals:
+            if self._global_of(rname, self.mut_globals) is not None:
                 summary.effects = "unknown"
             if rname in param_index:
                 if summary.effects != "unknown":
@@ -1727,7 +1804,7 @@ class _Builder:
             name = node.text.decode()
             if name in locals_:
                 return locals_[name]
-            if name in self.globals:
+            if self._global_of(name, self.globals) is not None:
                 return frozenset()
             raise _Unsupported("binding_unavailable", _span(node))
         if t in {
@@ -1915,6 +1992,7 @@ def summarize_rust(
     resolver=None,
     source_path=None,
     module_digests=None,
+    resolved_paths=None,
 ) -> RustSummarySet:
     if isinstance(source, str):
         source = source.encode()
@@ -1925,7 +2003,20 @@ def summarize_rust(
         resolver=resolver,
         source_path=source_path,
         module_digests=module_digests,
+        resolved_paths=resolved_paths,
     ).build()
+
+
+def _has_path_attr(item):
+    """A `#[path = "..."]` attribute on the item — bodiless
+    `mod` declarations only, where it redirects the compiler's
+    file lookup outside the resolver contract."""
+    sib = item.prev_named_sibling
+    while sib is not None and sib.type == "attribute_item":
+        if sib.text.replace(b" ", b"").startswith(b"#[path="):
+            return True
+        sib = sib.prev_named_sibling
+    return False
 
 
 def _mod_base(importer_path):
@@ -2235,11 +2326,14 @@ def _read_declared_manifest(path, schema=ACCEPT_PROFILE):
 
 
 def _summarize_declared(
-    raw, schema, resolver=None, source_path=None
+    raw, schema, resolver=None, source_path=None, resolved=None
 ):
     try:
         return summarize_rust(
-            raw, resolver=resolver, source_path=source_path
+            raw,
+            resolver=resolver,
+            source_path=source_path,
+            resolved_paths=resolved,
         )
     except _Unsupported as exc:
         _emit(
@@ -2414,11 +2508,16 @@ def main_check(args=None) -> None:
         (args.source, args.manifest),
         CHECK_PROFILE,
     )
+    resolved: set = set()
     live = _summarize_declared(
         raw,
         CHECK_PROFILE,
         resolver=_resolver_for(args),
         source_path=args.source,
+        resolved=resolved,
+    )
+    _reject_overwrite(
+        getattr(args, "output", None), resolved, CHECK_PROFILE
     )
     document = json.dumps(
         summary_check_document(declared, live), sort_keys=True
@@ -2473,11 +2572,16 @@ def main_reuse(args=None) -> None:
         (args.source, args.manifest),
         CHECK_PROFILE,
     )
+    resolved: set = set()
     live = _summarize_declared(
         raw,
         CHECK_PROFILE,
         resolver=_resolver_for(args),
         source_path=args.source,
+        resolved=resolved,
+    )
+    _reject_overwrite(
+        getattr(args, "output", None), resolved, CHECK_PROFILE
     )
     document = json.dumps(
         summary_reuse_set(declared, live).to_dict(),

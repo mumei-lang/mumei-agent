@@ -1475,3 +1475,129 @@ def test_cli_resolve_modules_route(tmp_path):
     out = __import__("json").loads(buf.getvalue())
     names = {f["name"] for f in out["functions"]}
     assert "b.bf" in names
+
+
+def test_path_attr_mod_stays_opaque():
+    # `#[path = "..."]` redirects the compiler's file lookup —
+    # outside the resolver contract, the declaration stays opaque
+    # even when the default `b` resolution exists.
+    src = '#[path = "alt.rs"]\nmod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n'
+    r = summarize_rust(src, resolver=_set_resolver({"b": _B_SRC}))
+    assert "b.bf" not in {f.name for f in r.functions}
+
+
+def test_use_external_head_stays_opaque():
+    # `use std::fs` is authoritative: `fs::read` resolves
+    # `std::fs::read` or nothing — never a same-named internal
+    # item. The internal `fs.read` returns a constant, so a
+    # mis-resolution would drop `x`'s dep.
+    src = (
+        "use std::fs;\n"
+        "mod fs {\n"
+        "    pub fn read(x: u64) -> u64 { 0 }\n"
+        "}\n"
+        "fn af(x: u64) -> u64 { fs::read(x) }\n"
+    )
+    r = summarize_rust(src)
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.return_dependencies == frozenset({0})
+    assert not any(c.name == "fs.read" for c in s.calls)
+
+
+def test_method_call_scoped_to_caller_module():
+    # `t.m()` inside `mod b` resolves `b`'s impl only — the
+    # same-named root impl (dep-free `0`) must not be picked.
+    src = (
+        "struct T;\n"
+        "impl T { fn m(&self, x: u64) -> u64 { 0 } }\n"
+        "mod b {\n"
+        "    pub struct T;\n"
+        "    impl T { pub fn m(&self, x: u64) -> u64 { x } }\n"
+        "    pub fn caller(t: T, x: u64) -> u64 { t.m(x) }\n"
+        "}\n"
+    )
+    r = summarize_rust(src)
+    s = next(f for f in r.functions if f.name == "b.caller")
+    assert s.return_dependencies == frozenset({1})
+    assert any(c.name == "b.T.m" for c in s.calls)
+
+
+def test_child_static_does_not_taint_root_effects():
+    # `b`'s `static mut STATE` stays scoped — a root function's
+    # same-named local assignment is not an observable write, and
+    # `b`'s own write still marks unknown.
+    src = (
+        "mod b;\n"
+        "fn af(x: u64) -> u64 { let mut STATE = x; STATE += 1; STATE }\n"
+    )
+    b = "static mut STATE: u64 = 0;\nfn bf(x: u64) { STATE = x; }\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    sa = next(f for f in r.functions if f.name == "af")
+    sb = next(f for f in r.functions if f.name == "b.bf")
+    assert sa.effects != "unknown"
+    assert sb.effects == "unknown"
+
+
+def test_pathless_child_importers_stay_distinct():
+    # Bytes-resolved modules carry a unique importer identity —
+    # `a`'s `mod c` and `d`'s `mod c` resolve their own bytes,
+    # never each other's (a shared `None` importer would serve the
+    # first resolution to both).
+    src = "mod a;\nmod d;\nfn f(x: u64) -> u64 { x }\n"
+    a = "mod c;\nfn af(x: u64) -> u64 { c::cf(x) }\n"
+    d = "mod c;\nfn df(x: u64) -> u64 { c::cf(x) }\n"
+    table = {
+        ("root.rs", "a"): a,
+        ("root.rs", "d"): d,
+        ("root.rs\x00a", "c"): "fn cf(x: u64) -> u64 { x }\n",
+        ("root.rs\x00d", "c"): "fn cf(x: u64) -> u64 { 0 }\n",
+    }
+    r = summarize_rust(
+        src, resolver=_path_resolver(table), source_path="root.rs"
+    )
+    sa = next(f for f in r.functions if f.name == "a.af")
+    sd = next(f for f in r.functions if f.name == "d.df")
+    assert sa.return_dependencies == frozenset({0})
+    assert sd.return_dependencies == frozenset()
+
+
+def test_pathless_digest_keys_stay_distinct():
+    # The context key must see each parent's `mod c` — a bare
+    # `c` digest key would overwrite one with the other.
+    src = "mod a;\nmod d;\n"
+    table = {
+        ("root.rs", "a"): "mod c;\n",
+        ("root.rs", "d"): "mod c;\n",
+        ("root.rs\x00a", "c"): "fn cf(x: u64) -> u64 { x }\n",
+        ("root.rs\x00d", "c"): "fn cf(x: u64) -> u64 { 0 }\n",
+    }
+    digs = {}
+    summarize_rust(
+        src,
+        resolver=_path_resolver(table),
+        source_path="root.rs",
+        module_digests=digs,
+    )
+    assert "root.rs\x00a\x00c" in digs
+    assert "root.rs\x00d\x00c" in digs
+
+
+def test_resolved_module_paths_reject_output_overwrite(tmp_path):
+    # A `--output` pointing at a resolved child module is refused —
+    # the report write would destroy bytes the report describes.
+    (tmp_path / "a").mkdir()
+    b = tmp_path / "a" / "b.rs"
+    b.write_text("fn bf(x: u64) -> u64 { x }\n")
+    a = tmp_path / "a.rs"
+    a.write_text("mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n")
+    resolved = set()
+    summarize_rust(
+        a.read_bytes(),
+        resolver=rust._fs_resolver,
+        source_path=str(a),
+        resolved_paths=resolved,
+    )
+    assert str(b.resolve()) in resolved
+    with pytest.raises(SystemExit) as exc:
+        rust._reject_overwrite(str(b), resolved, "p")
+    assert exc.value.code == 2
