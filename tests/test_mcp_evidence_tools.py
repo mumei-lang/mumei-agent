@@ -363,7 +363,13 @@ class TestNativeRecheckTool:
         bundle = tmp_path / "bundle"
         bundle.mkdir()
         record = bundle / "native-bundle.json"
-        record.write_text('{"schema_version": "mumei.native-bundle/v1"}', encoding="utf-8")
+        record.write_text(json.dumps({
+            "schema": "mumei.native-bundle/v1",
+            "files": {
+                "llvm_ir": {}, "object": {},
+                "certificate": {}, "executable": {},
+            },
+        }), encoding="utf-8")
         for name in ("program.ll", "program.o", "proof-cert.json", "program"):
             (bundle / name).write_text("x", encoding="utf-8")
         return bundle, hashlib.sha256(record.read_bytes()).hexdigest()
@@ -496,10 +502,18 @@ class TestNativeAttemptTool:
                           build_exit: int = 0):
         names = ("native-bundle.json", "program.ll", "program.o",
                  "proof-cert.json", "program")
-        members = "\n".join(
-            f'    printf %s "{n}-bytes" > "$out/{n}"'
-            for n in (names if complete else names[:-1])
+        record = (
+            '{"schema": "mumei.native-bundle/v1", "files": {'
+            '"llvm_ir": {}, "object": {}, "certificate": {}, '
+            '"executable": {}}}'
         )
+        lines = []
+        for n in (names if complete else names[:-1]):
+            if n == "native-bundle.json":
+                lines.append(f"    printf %s '{record}' > \"$out/{n}\"")
+            else:
+                lines.append(f'    printf %s "{n}-bytes" > "$out/{n}"')
+        members = "\n".join(lines)
         py = (
             "import hashlib,sys;"
             'print(hashlib.sha256(open(sys.argv[1],"rb").read())'

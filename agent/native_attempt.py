@@ -16,7 +16,9 @@ the ``mumei.native-bundle/v1`` directory — `native-bundle.json`,
 a `Build ID: <sha256>` line. The route therefore selects on three
 post-conditions, not on the exit code alone: an ``exited`` run with
 ``exit_code == 0``, a parseable Build ID line in the bounded captured
-stdout, and every declared bundle member present after the run.
+stdout, and every member the produced record declares present after
+the run (the component files plus, for a multifile record, each
+``sources/`` member — an unparseable record is incomplete).
 
 The route re-hashes every declared input after the observed run; when
 any byte drifted mid-run it skips the selection, claims no outcome and
@@ -44,6 +46,8 @@ import re
 import sys
 from pathlib import Path
 
+from agent.native_bundle import MAX_RECORD_BYTES, declared_members
+
 NATIVE_ATTEMPT_REQUEST_PROFILE = "mumei.native-attempt-request/v1"
 NATIVE_ATTEMPT_REPORT_PROFILE = "mumei.native-attempt-report/v1"
 
@@ -56,8 +60,11 @@ MAX_SOURCE_BYTES = 65_536
 # `native-recheck --expected-build-id` call pins.
 RECORD_FILE = "native-bundle.json"
 
-# The five members a produced bundle must hold — the same set
-# native-recheck fingerprints when consuming the directory.
+# The members every produced bundle must hold — the component files
+# plus the record itself. A produced record may declare additional
+# members (a multifile bundle's `sources/` members); `_bundle_complete`
+# verifies every member the produced record declares, not just this
+# fixed set.
 BUNDLE_MEMBERS = (
     RECORD_FILE,
     "program.ll",
@@ -165,7 +172,27 @@ def _parse_build_id(captured: bytes) -> str | None:
 
 
 def _bundle_complete(bundle: Path) -> bool:
-    return all(bundle.joinpath(name).is_file() for name in BUNDLE_MEMBERS)
+    """Every member the produced record declares must exist on disk.
+
+    The fixed member set is the fast pre-check; the produced record is
+    then enumerated the same way the consumer routes
+    (`native-recheck`, `native-accept`) enumerate it, so a multifile
+    bundle missing a declared `sources/` member is not a selectable
+    production either. An unparseable record fails the enumeration —
+    such a bundle is incomplete by definition.
+    """
+    if not all(
+        bundle.joinpath(name).is_file() for name in BUNDLE_MEMBERS
+    ):
+        return False
+    record_path = bundle.joinpath(RECORD_FILE)
+    try:
+        if os.path.getsize(record_path) > MAX_RECORD_BYTES:
+            return False
+        members = declared_members(bundle)
+    except (OSError, ValueError):
+        return False
+    return all(bundle.joinpath(member).is_file() for member in members)
 
 
 def build_attempt_parser(

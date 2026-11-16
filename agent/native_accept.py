@@ -73,77 +73,17 @@ import os
 import sys
 from pathlib import Path
 
+from agent.native_bundle import (
+    FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
+    MAX_RECORD_BYTES,
+    MAX_SOURCE_BYTES,
+    RECORD_FILE,
+    declared_members as _declared_members,
+    member_bound_bytes,
+)
+
 NATIVE_ACCEPT_REQUEST_PROFILE = "mumei.native-accept-request/v1"
 NATIVE_ACCEPT_REPORT_PROFILE = "mumei.native-accept-report/v1"
-
-# Mirrors of the Core side's read bounds (src/commands/native_bundle.rs):
-# the pinned record is read under 1 MiB, every component member under
-# 32 MiB, each source member under 64 KiB. A declared input the Core
-# cannot even read is a static error, not a run.
-RECORD_FILE = "native-bundle.json"
-MAX_RECORD_BYTES = 1_048_576
-MAX_COMPONENT_BYTES = 33_554_432
-MAX_SOURCE_BYTES = 65_536
-
-# The `files` map's snake_case keys to bundle-relative names — the same
-# table as Core's BundleFile::file_name. An unknown key fails closed:
-# the record's member set is the honest enumeration of what the Core
-# reads.
-FILE_MEMBERS = {
-    "llvm_ir": "program.ll",
-    "object": "program.o",
-    "certificate": "proof-cert.json",
-    "executable": "program",
-}
-
-# Member-name grammar mirror (mumei-core native_bundle::member_name):
-# `/`-separated nonempty segments, none dot-prefixed, no `\\` or `:`,
-# at most 16 segments. `.` and `..` segments are covered by the
-# dot-prefix rule, so a record cannot steer reads outside `sources/`.
-MAX_MEMBER_SEGMENTS = 16
-
-
-def _valid_member_name(name: str) -> bool:
-    stem = name[:-3] if name.endswith(".mm") else name
-    segments = stem.split("/")
-    return bool(stem) and len(segments) <= MAX_MEMBER_SEGMENTS and all(
-        segment
-        and not segment.startswith(".")
-        and "\\" not in segment
-        and ":" not in segment
-        for segment in segments
-    )
-
-
-def _bundle_member_paths(record: dict) -> list[str]:
-    """Enumerate the bundle-relative member paths a record declares.
-
-    The `files` map enumerates component members; a `sources` map (the
-    multifile family) enumerates original member texts consumed by the
-    merge re-derivation. Fail-closed on shapes outside the record
-    contract — a record the agent cannot enumerate is a static error
-    before any attempt is dispatched.
-    """
-    files = record.get("files")
-    if not isinstance(files, dict) or not files:
-        raise ValueError("native-bundle.json declares no files map")
-    members = []
-    for key in sorted(files):
-        name = FILE_MEMBERS.get(key)
-        if name is None:
-            raise ValueError(f"native-bundle.json declares unknown member {key!r}")
-        members.append(name)
-    sources = record.get("sources")
-    if sources is not None:
-        if not isinstance(sources, dict):
-            raise ValueError("native-bundle.json sources is not a map")
-        for name in sorted(sources):
-            if not _valid_member_name(name):
-                raise ValueError(
-                    f"native-bundle.json declares invalid member {name!r}"
-                )
-            members.append(f"sources/{name}")
-    return members
 
 
 # Terminal exit-code mapping mirrors the native accept-artifact
@@ -183,18 +123,6 @@ DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000
 
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _declared_members(bundle: Path) -> list[str]:
-    """Parse the pinned record and enumerate its declared members."""
-    record_bytes = (bundle / RECORD_FILE).read_bytes()
-    try:
-        record = json.loads(record_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
-        raise ValueError(f"cannot parse {RECORD_FILE}: {exc}") from exc
-    if not isinstance(record, dict):
-        raise ValueError(f"{RECORD_FILE} is not a JSON object")
-    return [RECORD_FILE] + _bundle_member_paths(record)
 
 
 def _declared_files(args: argparse.Namespace, members: list[str]) -> list[Path]:
@@ -266,13 +194,7 @@ def _check_request(args: argparse.Namespace) -> list[str]:
     members = _declared_members(bundle)
     for member in members:
         path = bundle / member
-        bound = (
-            MAX_RECORD_BYTES
-            if member == RECORD_FILE
-            else MAX_SOURCE_BYTES
-            if member.startswith("sources/")
-            else MAX_COMPONENT_BYTES
-        )
+        bound = member_bound_bytes(member)
         try:
             size = os.path.getsize(path)
         except OSError as exc:

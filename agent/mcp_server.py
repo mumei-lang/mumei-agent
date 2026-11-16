@@ -2874,9 +2874,10 @@ def native_recheck(
 
     Args:
         core_path: Absolute path to the mumei Core executable.
-        bundle_dir: Absolute path to the declared `mumei.native-bundle/v1`
-            directory (native-bundle.json, program.ll, program.o,
-            proof-cert.json, program).
+        bundle_dir: Absolute path to the declared bundle directory —
+            native-bundle.json plus every member it declares (the
+            component files and, for a multifile record, each
+            `sources/` member the merge is re-derived from).
         source_path: Absolute path to the declared .mm source file (at
             most 64 KiB); the bundle's own labels/paths are never read.
         expected_build_id: SHA-256 of native-bundle.json obtained

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from agent.native_bundle import FILE_MEMBERS
 from agent.native_recheck import (
-    BUNDLE_MEMBERS,
     RECORD_FILE,
     build_recheck_parser,
     main_recheck,
@@ -30,6 +30,21 @@ SOURCE = (
 )
 
 BUILD_ID = "a" * 64
+
+RECORD = {
+    "schema": "mumei.native-bundle/v1",
+    "files": {key: {} for key in FILE_MEMBERS},
+}
+
+MULTIFILE_RECORD = {
+    "schema": "mumei.native-multifile-bundle/v1",
+    "files": {key: {} for key in FILE_MEMBERS},
+    "sources": {
+        "app.mm": {},
+        "dep.mm": {},
+        "sub/extra.mm": {},
+    },
+}
 
 
 def _write_core(tmp_path: Path, recheck_exit: int = 0) -> Path:
@@ -51,12 +66,20 @@ def _write_core(tmp_path: Path, recheck_exit: int = 0) -> Path:
     return core
 
 
-def _write_bundle(tmp_path: Path) -> Path:
+def _write_bundle(tmp_path: Path, record: dict | None = None) -> Path:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    (bundle / RECORD_FILE).write_text(json.dumps({"record": True}))
-    for name in BUNDLE_MEMBERS:
+    record = RECORD if record is None else record
+    (bundle / RECORD_FILE).write_text(json.dumps(record))
+    for key in record["files"]:
+        if key not in FILE_MEMBERS:
+            continue
+        name = FILE_MEMBERS[key]
         (bundle / name).write_text(f"bytes of {name}")
+    for member in record.get("sources", {}):
+        member_path = bundle / "sources" / member
+        member_path.parent.mkdir(parents=True, exist_ok=True)
+        member_path.write_text(f"bytes of {member}")
     return bundle
 
 
@@ -181,6 +204,154 @@ def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
     assert report["sequence"].get("selected_result") is None
 
 
+def test_multifile_bundle_rechecks_clean(tmp_path, capsys):
+    """A multifile record's `sources/` members are bound into the
+    fingerprint — an untouched bundle rechecks clean."""
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path, record=MULTIFILE_RECORD)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["recheck"] == "equivalent"
+    assert report["sequence"]["selected_result"] is not None
+
+
+def test_mid_run_sources_member_drift_claims_no_outcome(tmp_path, capsys):
+    """A child that mutates a `sources/` member mid-run: those bytes
+    are fingerprinted (the merge is re-derived from them), so drift
+    must surface."""
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "native-bundle" ] && [ "$2" = "recheck-llvm" ]; then\n'
+        '    printf "tampered" > "$6/sources/app.mm"\n'
+        f"    printf '%s' '{json.dumps(REPORT)}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    bundle = _write_bundle(tmp_path, record=MULTIFILE_RECORD)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "recheck" not in report
+    assert "candidate" not in report
+
+
+def test_mid_run_record_swap_declaring_new_member_is_drift(tmp_path, capsys):
+    """A record swapped mid-run can declare members the pre-run
+    enumeration never fingerprinted — the drift check re-enumerates
+    from the CURRENT record."""
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "native-bundle" ] && [ "$2" = "recheck-llvm" ]; then\n'
+        f"    printf '%s' '{json.dumps(MULTIFILE_RECORD)}' > \"$6/native-bundle.json\"\n"
+        "    mkdir -p \"$6/sources/sub\"\n"
+        '    printf "atom body" > "$6/sources/app.mm"\n'
+        '    printf "atom body" > "$6/sources/dep.mm"\n'
+        '    printf "atom body" > "$6/sources/sub/extra.mm"\n'
+        f"    printf '%s' '{json.dumps(REPORT)}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    # Pre-run record declares no sources at all.
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "recheck" not in report
+
+
+def test_record_swap_inside_validation_window_is_drift(tmp_path, capsys, monkeypatch):
+    """A record swapped between member enumeration and fingerprinting
+    declares members the fingerprint never bound. Without re-enumerating
+    the post-run member set the run's consumed-but-unbound bytes pass
+    undetected — the drift check must enumerate the CURRENT record."""
+    import agent.native_recheck as native_recheck
+
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)  # record declares no `sources`
+    source = _write_source(tmp_path)
+
+    original = native_recheck._attempt_fingerprint
+    swapped = {"done": False}
+
+    def swap_then_fingerprint(args, members):
+        if not swapped["done"]:
+            swapped["done"] = True
+            (bundle / RECORD_FILE).write_text(json.dumps(MULTIFILE_RECORD))
+            (bundle / "sources" / "sub").mkdir(parents=True)
+            for member in MULTIFILE_RECORD["sources"]:
+                (bundle / "sources" / member).write_text("atom body")
+        return original(args, members)
+
+    monkeypatch.setattr(
+        native_recheck, "_attempt_fingerprint", swap_then_fingerprint
+    )
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "recheck" not in report
+
+
+def test_deeply_nested_record_rejected_without_traceback(tmp_path, capsys):
+    """json.loads raises RecursionError on ~1200-deep nesting — a
+    static ValueError, not an unhandled traceback."""
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    depth = 2000
+    (bundle / RECORD_FILE).write_text(
+        '{"a":' * depth + "0" + "}" * depth
+    )
+    source = _write_source(tmp_path)
+    code, _, err = _run(capsys, _args(core, bundle, source))
+    assert code == 1
+    assert "Traceback" not in err
+
+
+def test_invalid_sources_member_rejected(tmp_path, capsys):
+    """A hand-crafted record declaring a member outside the grammar
+    fails closed before any attempt — `../` never joins a path."""
+    core = _write_core(tmp_path)
+    source = _write_source(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    for member in ("../outside.mm", "sub//dep.mm", "/abs.mm", "a\\b.mm"):
+        record = dict(RECORD)
+        record["sources"] = {member: {}}
+        (bundle / RECORD_FILE).write_text(json.dumps(record))
+        code, _, _ = _run(capsys, _args(core, bundle, source))
+        assert code == 1, member
+
+
+def test_unknown_files_key_rejected(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    source = _write_source(tmp_path)
+    record = dict(RECORD)
+    record["files"] = {**RECORD["files"], "mystery": {}}
+    bundle = _write_bundle(tmp_path, record=record)
+    code, _, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 1
+
+
+def test_unparseable_record_rejected(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    (bundle / RECORD_FILE).write_text("{not json")
+    source = _write_source(tmp_path)
+    code, _, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 1
+
+
 def test_relative_core_path_rejected_before_run(tmp_path, capsys):
     core = _write_core(tmp_path)
     bundle = _write_bundle(tmp_path)
@@ -216,7 +387,7 @@ def test_output_may_not_overwrite_declared_inputs(tmp_path, capsys):
     source = _write_source(tmp_path)
     for declared in (
         bundle / RECORD_FILE,
-        *(bundle / name for name in BUNDLE_MEMBERS),
+        *(bundle / name for name in FILE_MEMBERS.values()),
         source,
     ):
         code, out, _ = _run(
@@ -224,6 +395,23 @@ def test_output_may_not_overwrite_declared_inputs(tmp_path, capsys):
         )
         assert code == 1
     assert (bundle / "program.ll").read_text() == "bytes of program.ll"
+
+
+def test_output_may_not_overwrite_sources_member(tmp_path, capsys):
+    """`--output` onto a declared `sources/` member would corrupt a
+    fingerprinted input."""
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path, record=MULTIFILE_RECORD)
+    source = _write_source(tmp_path)
+    code, _, _ = _run(
+        capsys,
+        _args(
+            core, bundle, source,
+            extra=["--output", str(bundle / "sources" / "app.mm")],
+        ),
+    )
+    assert code == 1
+    assert (bundle / "sources" / "app.mm").read_text() == "bytes of app.mm"
 
 
 def test_oversize_source_rejected(tmp_path, capsys):
@@ -240,6 +428,17 @@ def test_oversize_record_rejected(tmp_path, capsys):
     bundle = _write_bundle(tmp_path)
     source = _write_source(tmp_path)
     (bundle / RECORD_FILE).write_text("x" * 1_100_000)
+    code, _, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 1
+
+
+def test_oversize_sources_member_rejected(tmp_path, capsys):
+    """A `sources/` member over the 64 KiB source bound is a static
+    error — the Core could not read it either."""
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path, record=MULTIFILE_RECORD)
+    (bundle / "sources" / "app.mm").write_text("x" * 70_000)
+    source = _write_source(tmp_path)
     code, _, _ = _run(capsys, _args(core, bundle, source))
     assert code == 1
 

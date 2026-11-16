@@ -756,7 +756,7 @@ Run a declared Core native consumer recheck as one attempt and emit the reconcil
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle recheck-llvm`. |
-| `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json, program.ll, program.o, proof-cert.json and program. |
+| `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json and its declared members (the component files plus any `sources/` members a multifile record pins). |
 | `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
 | `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel. |
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
