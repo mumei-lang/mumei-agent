@@ -15,12 +15,12 @@ from agent.adapter_probe import (
     MAX_PLAN_ROUNDS,
     PROBE_SCHEMA,
     evaluate_probe_acceptance,
+    evaluate_probe_history,
     observe_probes,
     plan_with_probes,
     probe_request_for,
     probe_requests_for,
     probe_retry_requests,
-    probe_requests_for,
     run_probe,
 )
 from agent.verification_planner import RuntimeObservation
@@ -1140,3 +1140,56 @@ def test_probe_history_v2_round_trip_and_rejects_reordered():
     data["stamps"] = None
     with pytest.raises(ValueError, match="stamps"):
         AdapterProbeHistory.from_dict(data)
+
+
+def test_probe_history_evaluation_empty_history():
+    req = _req()
+    out = evaluate_probe_history(AdapterProbeHistory.start(req))
+    assert out["schema_version"] == "mumei.probe-history-evaluation/v1"
+    assert out["outcome_count"] == 0
+    assert out["latest_attempt"] == 0
+    assert out["latest_kind"] is None
+    assert out["latest_availability"] is None
+    assert out["ordered"] is True
+    assert out["decisive"] is False
+    assert "evidence_acceptance" in out["checks_not_performed"]
+
+
+def test_probe_history_evaluation_records_latest():
+    req = _req()
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    out = evaluate_probe_history(hist)
+    assert out["outcome_count"] == 1
+    assert out["latest_attempt"] == 1
+    assert out["latest_kind"] == "exited"
+    assert out["latest_availability"] == "available"
+    assert out["ordered"] is True
+    assert out["decisive"] is True
+
+
+def test_probe_history_evaluation_inconclusive_latest():
+    req = _req(argv=("sleep", "2"), timeout_ms=50)
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    out = evaluate_probe_history(hist)
+    assert out["latest_kind"] == "timed_out"
+    assert out["latest_availability"] == "unknown"
+    assert out["decisive"] is False
+
+
+def test_probe_history_evaluation_rejects_bad_input():
+    with pytest.raises(ValueError, match="history evaluation"):
+        evaluate_probe_history(object())
+
+
+def test_probe_history_evaluation_restored_v1_is_ordered():
+    req = _req(stamp=4)
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    v1 = hist.to_dict()
+    v1["schema_version"] = "mumei.adapter-probe-history/v1"
+    del v1["stamps"]
+    restored = AdapterProbeHistory.from_dict(v1)
+    out = evaluate_probe_history(restored)
+    # Nothing declared to violate — the check reports ordered, not
+    # assumed.
+    assert out["ordered"] is True
+    assert out["decisive"] is True

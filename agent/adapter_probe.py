@@ -1005,3 +1005,69 @@ def evaluate_probe_acceptance(
             "producer_authenticity",
         ],
     }
+
+
+def evaluate_probe_history(
+    history: AdapterProbeHistory,
+) -> dict:
+    """Fold a declared probe history into an evaluation descriptor.
+
+    Emits ``mumei.probe-history-evaluation/v1``. The record itself
+    carries the binding — every recorded outcome already bound its
+    request's execution fingerprint and ordinal at `record()` time
+    — so the fold needs no presented request: a history is
+    evaluated for the command it recorded, never against a
+    candidate it did not answer.
+
+    The descriptor reports what the record proves:
+    `outcome_count`/`latest_attempt`/`latest_kind`,
+    `latest_availability` re-derived from the last result through
+    the same mapping `evaluate_probe_acceptance` uses, `ordered`
+    (the declared stamps never regress — enforced by construction
+    for a validated history, reported here so the check is visible
+    rather than assumed), and `decisive` (the latest outcome
+    answers `available`/`missing` rather than `unknown`).
+
+    An empty history evaluates honestly (`outcome_count` 0, no
+    latest kind or availability, `decisive` false). Acceptance is
+    not emitted at history level — it belongs to a single outcome
+    bound to a presented request (`evaluate_probe_acceptance`).
+
+    This is declaration-level evaluation, not Evidence: the
+    descriptor lists every check left unassessed in
+    `checks_not_performed` (freshness beyond the last stamp,
+    cross-adapter ordering, stdout interpretation, tool-version
+    truth, availability semantics, producer authenticity, Evidence
+    acceptance). Nothing here is a verdict, an adapter-health
+    claim or a routing authority.
+    """
+    if type(history) is not AdapterProbeHistory:
+        raise ValueError("unsupported probe history evaluation")
+    latest = history.outcomes[-1] if history.outcomes else None
+    declared = [s for s in history.stamps if s is not None]
+    ordered = all(b >= a for a, b in zip(declared, declared[1:]))
+    return {
+        "schema_version": "mumei.probe-history-evaluation/v1",
+        "adapter_id": history.adapter_id,
+        "command_fingerprint": history.command_fingerprint,
+        "outcome_count": len(history.outcomes),
+        "latest_attempt": latest.attempt_number if latest else 0,
+        "latest_kind": latest.outcome if latest else None,
+        "latest_availability": (
+            _map_outcome(latest) if latest is not None else None
+        ),
+        "ordered": ordered,
+        "decisive": (
+            latest is not None
+            and latest.outcome in {"exited", "failed"}
+        ),
+        "checks_not_performed": [
+            "freshness_beyond_last_stamp",
+            "cross_adapter_ordering",
+            "stdout_interpretation",
+            "tool_version_truth",
+            "availability_semantics",
+            "producer_authenticity",
+            "evidence_acceptance",
+        ],
+    }
