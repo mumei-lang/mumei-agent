@@ -263,6 +263,11 @@ def _write_stub_core(tmp_path, exits: dict):
         'elif [ "$1" = "native-bundle" ] && [ "$2" = "recheck-llvm" ]; then\n'
         f'    printf \'%s\' \'{{"schema_version":"mumei.native-consumer-evidence/v1"}}\'\n'
         f'    exit {exits.get("recheck-llvm", 0)}\n'
+        'elif [ "$1" = "native-bundle" ] && [ "$2" = "accept-artifact" ]; then\n'
+        f'    if [ {exits.get("accept-artifact", 0)} -eq 0 ]; then\n'
+        '        printf \'%s\' \'{"schema_version":"mumei.native-evidence-acceptance/v1","accepted":true}\'\n'
+        "    fi\n"
+        f'    exit {exits.get("accept-artifact", 0)}\n'
         "fi\n"
         "exit 2\n"
     )
@@ -381,6 +386,59 @@ class TestNativeRecheckTool:
         src.write_text(SOURCE, encoding="utf-8")
         out = json.loads(
             mcp_server.native_recheck(str(core), str(bundle), str(src), "zz" * 32)
+        )
+        assert out["status"] == "error"
+
+
+class TestNativeAcceptTool:
+    def _bundle(self, tmp_path):
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        record = bundle / "native-bundle.json"
+        record.write_text(json.dumps({
+            "schema": "mumei.native-bundle/v1",
+            "files": {
+                "llvm_ir": {}, "object": {},
+                "certificate": {}, "executable": {},
+            },
+        }), encoding="utf-8")
+        for name in ("program.ll", "program.o", "proof-cert.json", "program"):
+            (bundle / name).write_text("x", encoding="utf-8")
+        return bundle, hashlib.sha256(record.read_bytes()).hexdigest()
+
+    def test_accepted_outcome(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"accept-artifact": 0})
+        bundle, build_id = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.native_accept(str(core), str(bundle), str(src), build_id)
+        )
+        assert out["status"] == "ok"
+        assert out["report"]["acceptance"] == "accepted"
+        assert "candidate" not in out["report"]
+
+    def test_bad_build_id_is_error(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        bundle, _ = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.native_accept(str(core), str(bundle), str(src), "zz" * 32)
+        )
+        assert out["status"] == "error"
+
+    def test_record_without_files_map_is_error(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        (bundle / "native-bundle.json").write_text("{}\n", encoding="utf-8")
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.native_accept(
+                str(core), str(bundle), str(src), "a" * 64
+            )
         )
         assert out["status"] == "error"
 

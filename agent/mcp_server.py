@@ -2923,6 +2923,76 @@ def native_recheck(
 
 
 @mcp.tool()
+def native_accept(
+    core_path: str,
+    bundle_dir: str,
+    source_path: str,
+    expected_build_id: str,
+    attempt_timeout_ms: int = 60000,
+) -> str:
+    """Evaluate native artifact acceptance on a declared bundle (C02/C10).
+
+    Runs `native-bundle accept-artifact` as one declared attempt — the
+    same wiring as the `native-accept` CLI route. `acceptance` is
+    claimed only for uniquely-mapped exit codes (0 `accepted`,
+    3 `inconclusive`); mid-run drift reports `inputs_changed` with no
+    claimed outcome. An `accepted` run reports `discharged_checks` —
+    `artifact_semantics` and `claim_truth` — with the remaining checks
+    in `checks_not_performed`. The produced acceptance descriptor is
+    anonymous, so no evidence candidate is emitted.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        bundle_dir: Absolute path to the declared bundle directory —
+            native-bundle.json plus every member it declares (the
+            component files and, for a multifile record, each
+            `sources/` member the merge is re-derived from).
+        source_path: Absolute path to the declared .mm source file (at
+            most 64 KiB); the bundle's own labels/paths are never read.
+        expected_build_id: SHA-256 of native-bundle.json obtained
+            through a separately trusted channel (64 lowercase hex).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the `mumei.native-accept-report/v1`
+        document — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.native_accept import run_accept
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("bundle_dir", bundle_dir),
+        ("source_path", source_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        bundle=bundle_dir,
+        source=source_path,
+        expected_build_id=expected_build_id,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_accept(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, bundle_dir, source_path]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def native_attempt(
     core_path: str,
     source_path: str,

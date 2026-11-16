@@ -59,6 +59,7 @@ _SUBCOMMANDS = {
     "verify-recheck",
     "native-attempt",
     "native-recheck",
+    "native-accept",
 }
 
 
@@ -798,6 +799,24 @@ def main() -> None:
         native_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_attempt_main(args))
+    elif command == "native-accept":
+        import argparse
+        from agent.native_accept import (
+            build_accept_parser as native_accept_build_parser,
+            main_accept as native_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-accept",
+            description=(
+                "Run a declared Core native artifact acceptance as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared acceptance outcome."
+            ),
+        )
+        native_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_accept_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
