@@ -2157,8 +2157,10 @@ selector/computed callees, function-typed parameters and
 package-level `var Alias = Id` callables stay closed),
 per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
-TS's host-declared `--resolve-modules` relative-import resolution
-(Rust/Sol stay per-file); existing function-local dataflow stays
+the TS-style host-declared resolver contract — Rust now resolves
+`mod NAME;` declarations and `use` bindings through the same
+`summarize_rust(source, resolver, source_path)`/`--resolve-modules`
+shape (Sol stays per-file); existing function-local dataflow stays
 authoritative.
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
@@ -3594,6 +3596,30 @@ production verification path:
 `summary_derivation` descriptor — declaring only `filesystem.read`,
 since the derivation spawns no process — so `summary_descriptors()`,
 `summary_registry()` and `plan_summary_route` cover it the same way.
+
+`summarize_rust(source, resolver=None, source_path=None)` accepts
+the same resolver contract TypeScript pioneered: `resolver(spec)`
+(or `resolver(spec, importer_path)` for filesystem resolvers) maps
+a `mod NAME;` declaration to source bytes/text or a resolved Path,
+and the builder registers the module's functions under its dotted
+path (`b.f`, `b.c.f`, `b.T.f` for `impl` methods). `use`
+declarations bind local names to normalized registry keys —
+`use b::f`, `use b::{f, g as h}`, and `crate`/`self`/`super`-headed
+paths — and call sites resolve in order: locals shadow, then `use`
+bindings, then a same-module item, then the crate root. Resolved
+module bytes fold into `context_key`, so a changed module
+invalidates reuse; chains are bounded (`MAX_MODULE_DEPTH`), an
+ancestor (importer, spec) check stops degenerate self-resolving
+declarations, and anything unresolvable stays opaque — resolution
+only ever sharpens. `rust-summaries --resolve-modules` resolves
+through the filesystem (`<base>/NAME.rs`, `<base>/NAME/mod.rs`,
+confined to the importer's base tree); the flag is shared across
+produce/check/reuse/accept so a resolved manifest's context key
+matches, and `rust-summaries-attempt` refuses it — the attempt
+fingerprint cannot bind undeclared bytes. Receiver dispatch
+(`self.methods`) and compile-time globals stay root-file scopes;
+`pub use` re-exports, glob `use b::*`, `#[path]` attributes and
+macro-generated callables stay closed.
 
 
 ### C06 declared summary adapter descriptor
