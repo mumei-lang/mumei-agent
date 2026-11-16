@@ -680,6 +680,42 @@ in `checks_not_performed` (linker, runtime and binary correctness
 stay outside the profile).
 C02/C10 stay partial.
 
+### C02/C10 declared native-accept route (native-accept)
+
+`python -m agent native-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares a native
+artifact acceptance as one attempt: `<core> native-bundle
+accept-artifact --expected-build-id <id> --json <bundle> <source>`
+under a `mumei.native-accept-request/v1` fingerprint binding the Core
+executable's bytes, every bundle member the record declares — the
+component files plus, for `mumei.native-multifile-bundle/v1`, each
+`sources/<member>` the merge is re-derived from, enumerated from
+`native-bundle.json` and validated against the member grammar before
+joining so a hand-crafted record cannot steer the fingerprint's file
+reads outside the bundle — the source's bytes and the trusted-channel
+build ID. Where `native-recheck` stops at the LLVM snapshot,
+`accept-artifact` additionally rebuilds the pinned object from the
+pinned IR and relinks the pinned executable, comparing both
+byte-for-byte. Only an `exited` run with `exit_code == 0` selects the
+produced `mumei.native-evidence-acceptance/v1` descriptor.
+`acceptance` names only `0 → accepted` and `3 → inconclusive`; exit 1
+conflates a failed reproduction with every static failure, and mid-run
+drift reports `inputs_changed` with no claimed outcome. No evidence
+candidate is emitted: the descriptor is anonymous by design — it binds
+no subject, digest or provenance — so there is no handoff; the captured
+bytes enter the lineage through the selection itself. An `accepted`
+outcome discharges `artifact_semantics` — the bundle's user-body LLVM
+AND its pinned object/executable bytes correspond to the declared
+source's verified semantics under the recorded toolchain, the deepest
+layer the pipeline covers — and `claim_truth`, both at representation
+level and reported in `discharged_checks` with the other four checks in
+`checks_not_performed` (producer authenticity, historical execution and
+runtime/OS semantics stay outside the profile; the link
+argument-vector is recorded-but-not-reproduced inside Core and adds no
+claim). The route is also the `native_accept` MCP tool (same
+`run_accept` report production, declared-path validation and basename
+redaction as the other spawn tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-attempt route (native-attempt)
 
 `python -m agent native-attempt --core <path> --source <path>
