@@ -292,3 +292,67 @@ def _run_check(
         if process.poll() is None:
             process.kill()
         process.wait(timeout=1)
+
+
+# Core acceptance descriptor schemas the fold recognizes; each names a
+# distinct Core-verified scope, so membership is checked rather than the
+# scope string reinterpreted.
+CORE_ACCEPTANCE_SCHEMAS = frozenset(
+    {
+        "mumei.source-evidence-acceptance/v1",
+        "mumei.native-evidence-acceptance/v1",
+    }
+)
+
+_CORE_ACCEPTANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "acceptance",
+        "accepted",
+        "scope",
+        "checks_performed",
+        "checks_not_performed",
+    }
+)
+
+
+def _string_list(value: object) -> bool:
+    return type(value) is list and all(type(item) is str for item in value)
+
+
+def evaluate_core_acceptance(descriptor: dict) -> dict:
+    """Fold a restored Core acceptance descriptor into an evaluation.
+
+    Emits ``mumei.core-acceptance-evaluation/v1``: `descriptor_match`
+    holds only for a closed-shape descriptor naming a known Core
+    acceptance schema with `acceptance: "evaluated"`, a Boolean
+    `accepted`, a non-empty `scope` string and two string-list check
+    fields — a foreign or malformed document never counts. `accepted`
+    holds only when the descriptor matches AND itself declared
+    `accepted: true`. This is representation-level evaluation only:
+    anonymous descriptors bind no request or attempt, so nothing here
+    credits acceptance to a selected output; `checks_not_performed`
+    names what the fold leaves unassessed."""
+    if type(descriptor) is not dict:
+        raise ValueError("unsupported core acceptance evaluation request")
+    match = (
+        frozenset(descriptor) == _CORE_ACCEPTANCE_FIELDS
+        and descriptor["schema_version"] in CORE_ACCEPTANCE_SCHEMAS
+        and descriptor["acceptance"] == "evaluated"
+        and type(descriptor["accepted"]) is bool
+        and type(descriptor["scope"]) is str
+        and descriptor["scope"] != ""
+        and _string_list(descriptor["checks_performed"])
+        and _string_list(descriptor["checks_not_performed"])
+    )
+    return {
+        "schema_version": "mumei.core-acceptance-evaluation/v1",
+        "descriptor_match": match,
+        "accepted": match and descriptor["accepted"],
+        "checks_not_performed": [
+            "attempt_binding",
+            "descriptor_authenticity",
+            "descriptor_freshness",
+            "unperformed_check_recovery",
+        ],
+    }

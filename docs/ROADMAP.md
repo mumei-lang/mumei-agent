@@ -4207,6 +4207,30 @@ interpretation, tool-version truth, availability semantics,
 producer authenticity, Evidence acceptance) — declaration-level
 evaluation, not a verdict or routing authority.
 
+### C11 declared Core-acceptance evaluation
+
+`agent.core_evidence.evaluate_core_acceptance(descriptor)` and the
+`evidence-acceptance-eval` route restore one declared Core acceptance
+descriptor — `mumei.source-evidence-acceptance/v1` or
+`mumei.native-evidence-acceptance/v1`, emitted by the Core `accept-*`
+commands — and fold it into `mumei.core-acceptance-evaluation/v1`.
+`descriptor_match` holds only for a closed-shape member of that known
+family (`acceptance: "evaluated"`, a Boolean `accepted`, a non-empty
+`scope` and two string check lists); a foreign or malformed document
+never counts, and a well-formed descriptor that itself declared
+non-acceptance matches but credits nothing. `accepted` holds only
+when the descriptor matches AND declared `accepted: true`.
+
+This is representation-level evaluation, not Evidence acceptance
+credit: anonymous Core descriptors bind no request or attempt, so
+`accepted` says only that some Core run accepted within its declared
+scope — `checks_not_performed` names `attempt_binding`,
+`descriptor_authenticity`, `descriptor_freshness` and
+`unperformed_check_recovery` (the fold re-runs nothing the descriptor
+left unassessed). plan() consumes nothing new; C11 stays partial —
+binding a descriptor to a selected attempt output remains a Core-side
+contract question.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
