@@ -5669,9 +5669,10 @@ def test_local_struct_pointer_field_read_is_admitted(
     go_types_helper, expression
 ):
     # `p.V`/`(*p).V` on `p *P` where `P` is a package-local struct —
-    # the field read touches caller state like `lib.VS.F`: dep-free
-    # plus an imported transfer against the field's real binding
-    # identity, `effects` unknown.
+    # the field read touches caller state like `lib.VS.F`: the root
+    # pointer's provenance plus every indirect store, an imported
+    # transfer against the field's real binding identity, `effects`
+    # unknown.
     files = {
         "a.go": "package p\ntype P struct{ V int64; W bool }\n"
         f"func F(p *P) int64 {{ return {expression} }}\n"
@@ -5681,7 +5682,7 @@ def test_local_struct_pointer_field_read_is_admitted(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
 
 
@@ -5701,7 +5702,7 @@ def test_local_nested_pointer_field_read_is_admitted(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
 
 
@@ -5841,6 +5842,84 @@ def test_local_container_pointee_whole_store(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.effects == "unknown"
+
+
+def test_pointee_store_flows_into_field_read(
+    go_types_helper,
+):
+    # `*p = P{V: x}` folds x into `indirect_writes` — a later `p.V`
+    # read must observe it: the bound field read unions the root's
+    # provenance with indirect stores, never returns dep-free.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\t*p = P{V: x}\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_field_write_flows_into_same_pointer_read(
+    go_types_helper,
+):
+    # `p.V = x` accumulates x into the base binding — a later `p.V`
+    # read sees it through the root's own deps.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tp.V = x\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_field_write_flows_into_aliased_pointer_read(
+    go_types_helper,
+):
+    # `q := p; q.V = x; return p.V` — a field store through a bound
+    # pointer also broadcasts into `indirect_writes`, so a read
+    # through a DIFFERENT aliased pointer observes it.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tq := p\n\tq.V = x\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_pointee_store_pins_declared_type(
+    go_types_helper,
+):
+    # `*p = MyInt(x)` — the resolved pointee fact pins `MyInt`, so
+    # redeclaring the named pointee flags `stale_dependents`.
+    files = {
+        "a.go": "package p\ntype MyInt int64\n"
+        "func F(p *MyInt, x int64) int64 {\n"
+        "\t*p = MyInt(x)\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    myint_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "MyInt" and b.kind == "type"
+    )
+    assert myint_id in result.pinned
 
 
 def test_local_struct_value_field_read_is_admitted(
@@ -8672,9 +8751,9 @@ def test_imported_field_read_method_member_stays_closed(go_types_helper):
 
 
 def test_bound_base_field_read_is_admitted(go_types_helper):
-    # `t.N` — a scalar field read through a bound `*S2` is dep-free
-    # caller state like `lib.VS2.N`: the transfer records the field's
-    # identity and `effects` reports `unknown`.
+    # `t.N` — a scalar field read through a bound `*S2` is caller
+    # state like `lib.VS2.N`: the root pointer's provenance deps, an
+    # imported transfer on the field's identity, `effects` unknown.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { return t.N }\n"
@@ -8684,7 +8763,7 @@ def test_bound_base_field_read_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
     members = {m.name: m for m in snapshot.imported_members}
     calls = [c for c in result.calls if c.imported]
@@ -8724,7 +8803,8 @@ def test_bound_base_field_read_parenthesized_base_is_admitted(
 
 
 def test_bound_base_field_read_local_pointer_is_admitted(go_types_helper):
-    # `q := t; q.N` — a bound local `*S2` admits the same way.
+    # `q := t; q.N` — a bound local `*S2` admits the same way,
+    # reporting the copied pointer's provenance deps.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { q := t\n\treturn q.N }\n"
@@ -8734,13 +8814,14 @@ def test_bound_base_field_read_local_pointer_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_base_field_read_no_escaped_union(go_types_helper):
     # A `*S` pointee is a struct — it can never alias a tracked
     # scalar binding, so escaped bindings do NOT union into the
-    # dep-free result (unlike `*t` scalar derefs).
+    # result (unlike `*t` scalar derefs): only the root's own
+    # provenance and indirect stores apply.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2, x lib.T, y lib.T) int64 {\n"
@@ -8751,7 +8832,7 @@ def test_bound_base_field_read_no_escaped_union(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_base_field_read_flags_stale_dependents(go_types_helper):
@@ -8793,7 +8874,7 @@ def test_bound_base_field_read_deref_base_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
 
 
@@ -8814,7 +8895,7 @@ def test_bound_base_field_read_double_deref_stays_closed(go_types_helper):
 def test_bound_base_field_read_nested_is_admitted(go_types_helper):
     # `t.W.N` — the operand `t.W` resolves to field `W`'s `*W2`
     # member, so `N` resolves one level deeper on `W2`. Both `S2`
-    # and `W2` pin; the read stays dep-free.
+    # and `W2` pin; the read reports the root pointer's provenance.
     lib = {
         "lib": {
             "m.go": "package lib\ntype T int64\n"
@@ -8836,7 +8917,7 @@ def test_bound_base_field_read_nested_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
     # Every member the chain traverses pins — redeclaring `W` itself
     # (say to a struct value) must flag the summary, so the

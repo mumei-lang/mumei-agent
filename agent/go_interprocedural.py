@@ -1817,18 +1817,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         if bound_pointer is not None:
             # `(*p)[i]` — the loaded element also depends on where
-            # the pointer was aimed (its own deps), on every escaped
-            # binding it could alias, and on every earlier indirect
-            # store — the same union a bare `*p` deref read applies.
+            # the pointer was aimed (its own deps) and on every
+            # earlier indirect store. An escaped binding can never be
+            # this pointee (a bound pointer cannot alias a local
+            # composite — `&s`/`&st` stay closed), so unlike a bare
+            # `*p` scalar deref no escaped union applies.
             base = self.expression(
                 bound_operand, fn, params, locals_, transfers, count,
                 depth + 1,
             )
-            for escaped_id in self.escaped:
-                if escaped_id in locals_:
-                    base |= locals_[escaped_id]
-                elif escaped_id in params:
-                    base |= {params[escaped_id]}
             deps |= base | self.indirect_writes
         return deps
 
@@ -2743,10 +2740,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # can never falsely flag it.
             if binding.type.elem is None:
                 return None
+            # The pointee's element type can name declared
+            # identities (`*[]lib.T`) that the synthetic
+            # `/pointee` target cannot carry — pin them so a
+            # redeclaration flags `stale_dependents`.
+            self._pin_fact_identities(binding.type.elem)
             return f"{ref.binding_id}/pointee"
         target = self._pointee_type(binding.type.type_id)
         if target is None:
             return None
+        # Same pin on the named pointee's resolved fact — its
+        # element/key `type_id`s (`type S = []lib.T`) ride under
+        # the `type_id` the transfer records.
+        self._pin_fact_identities(target.type)
         return binding.type.type_id
 
     def _imported_pointer_deref(
@@ -3496,7 +3502,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # later `t.M()` may observe it — so the RHS's
                     # dependencies accumulate into the base binding
                     # rather than replacing them or being discarded.
-                    refs.append((ref, True))
+                    # A bound-pointer base (a declared `type_id`) also
+                    # broadcasts the store into `indirect_writes`: the
+                    # field lives in external memory like `*q = v`, so
+                    # a read through a DIFFERENT aliased pointer
+                    # (`q.F = v; return p.F`) must observe it too. A
+                    # local composite (empty `type_id`) keeps the
+                    # precise accumulate-only fold.
+                    refs.append((ref, True, bool(type_id)))
                     continue
                 # An imported member write — `lib.V = v`,
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
@@ -3636,11 +3649,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     continue
                 accumulating = compound
+                broadcast = False
                 if isinstance(ref, tuple):
                     # A `t.f = v` opaque write target: the pointee's
                     # contents gain the RHS's dependencies on top of
-                    # whatever they already tracked.
-                    ref, accumulating = ref
+                    # whatever they already tracked. A bound-pointer
+                    # base marks the tuple so the store also reaches
+                    # `indirect_writes` — other aliased pointers'
+                    # field reads observe it.
+                    broadcast = len(ref) == 3 and ref[2]
+                    ref, accumulating = ref[0], ref[1]
                 if accumulating:
                     # `x op= e` reads the old value too — the result unions
                     # the binding's current dependencies with the RHS's.
@@ -3654,6 +3672,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._store(
                     locals_, params, ref.binding_id, value, conditional,
                 )
+                if broadcast:
+                    self.indirect_writes |= value
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
@@ -4370,7 +4390,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # or the field's type flags the summary.
                 bound = self._bound_field_read(node, locals_, params)
                 if bound is not None:
-                    pointees, field_member, _root_ref = bound
+                    pointees, field_member, root_ref = bound
                     self.pinned.update(p.id for p in pointees)
                     self._pin_member_type(field_member)
                     transfers.append(
@@ -4386,7 +4406,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    return frozenset()
+                    # The field's value may carry whatever earlier
+                    # stores aimed at this memory: the root pointer's
+                    # own deps (a `t.F = v` write accumulates into it)
+                    # and every indirect store — an escaped binding
+                    # can never be this pointee (`&st` stays closed),
+                    # so unlike a bare `*p` scalar deref no escaped
+                    # union applies.
+                    deps = (
+                        locals_.get(root_ref.binding_id)
+                        if root_ref.binding_id in locals_
+                        else (
+                            frozenset({params[root_ref.binding_id]})
+                            if root_ref.binding_id in params
+                            else frozenset()
+                        )
+                    )
+                    return deps | self.indirect_writes
                 # `st.V` / `st.A.B` — a field of a tracked local
                 # composite: the binding's dep set conflates every
                 # field, so the read returns it whole. Local state —
