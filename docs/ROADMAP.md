@@ -2082,8 +2082,11 @@ remaining composite-pointee surfaces (index-element reads and
 assignments through bound pointers to containers and whole-pointee
 stores admit under the external-state model — `(*p)[i]`/`p[i]` and
 `(*p)[i] = v` on `p *[]T`/`*map`/`*[N]T`, `*p = v` on any
-resolvable pointee; element-field reads (`(*p)[i].F`), `for range
-*p`, `(*p)[i]++`/`+=`, anonymous `*struct{...}` pointees and
+resolvable pointee; element-field reads admit too — `(*p)[i].F`/
+`p[i].F` on a named-struct element and `GA[i].V`/`M["k"].V` on a
+package container `var` — while nested element fields
+(`(*p)[i].F.G`), element-field stores (`(*p)[i].F = v`), `for
+range *p`, `(*p)[i]++`/`+=`, anonymous `*struct{...}` pointees and
 nested `**p` derefs still stay closed), the remaining
 resource-state semantics (channels, constructors, bound closures),
 per-statement (rather than

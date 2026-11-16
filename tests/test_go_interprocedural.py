@@ -10847,3 +10847,157 @@ def test_package_nested_map_field_read_literal_key(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_container_pointee_indexed_element_field_read(
+    go_types_helper,
+):
+    # `(*p)[i].V` on `p *[]Q` — a field of the element the index
+    # selects: caller memory like `(*p)[i]` itself, so the deps
+    # union the pointer's own (param 0), the index's (param 1), and
+    # earlier indirect stores; the field's identity records the
+    # read and the element type pins.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\treturn (*p)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+    v_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "V" and b.kind == "variable" and b.scope is None
+    )
+    q_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "Q" and b.kind == "type"
+    )
+    assert any(c.target == v_id and c.imported for c in result.calls)
+    assert q_id in result.pinned
+
+
+def test_bound_array_pointee_sugar_indexed_element_field_read(
+    go_types_helper,
+):
+    # `p[i].V` on `p *[8]Q` — the auto-deref sugar spells the same
+    # read as `(*p)[i].V`.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[8]Q, i int64) int64 {\n"
+        "\treturn p[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_pointer_elem_indexed_element_field_read(
+    go_types_helper,
+):
+    # `(*p)[i].V` on `p *[]*Q` — the field select auto-derefs the
+    # pointer element: external state either way.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[]*Q, i int64) int64 {\n"
+        "\treturn (*p)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_pointee_indexed_field_read_observes_indirect_store(
+    go_types_helper,
+):
+    # `(*p)[i].V` must see an earlier indirect store: `(*q).W = x`
+    # lands in caller memory the field read cannot rule out, so `x`
+    # and `q`'s own deps join the result through `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64; W int64 }\n"
+        "func F(p *[]Q, q *Q, i, x int64) int64 {\n"
+        "\t(*q).W = x\n\treturn (*p)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1, 2, 3})
+
+
+def test_bound_pointee_indexed_nested_element_field_read_closed(
+    go_types_helper,
+):
+    # `(*p)[i].V.G` — a field on the element's own struct field
+    # traverses a second level and stays closed.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V S }\ntype S struct{ G int64 }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\treturn (*p)[i].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_package_container_var_indexed_element_field_read(
+    go_types_helper,
+):
+    # `GA[i].V` on `var GA []Q` — the container var's indexed
+    # element's field reads external package state: dep-free apart
+    # from the index's own dependencies, recorded on the field's
+    # identity like `G.A[i].N`.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\nvar GA []Q\n"
+        "func F(i int64) int64 {\n"
+        "\treturn GA[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    v_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "V" and b.kind == "variable" and b.scope is None
+    )
+    assert any(c.target == v_id and c.imported for c in result.calls)
+
+
+def test_package_map_var_indexed_element_field_read(
+    go_types_helper,
+):
+    # `M["k"].V` on `var M map[string]Q` — a literal key carries no
+    # deps; the field read admits like the slice root's.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\nvar M map[string]Q\n"
+        "func F(x int64) int64 {\n"
+        "\treturn M[\"k\"].V + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
