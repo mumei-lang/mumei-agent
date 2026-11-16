@@ -2157,11 +2157,11 @@ selector/computed callees, function-typed parameters and
 package-level `var Alias = Id` callables stay closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
-statement — see its own section below), and cross-file dependencies beyond
-the TS-style host-declared resolver contract — Rust now resolves
-`mod NAME;` declarations and `use` bindings through the same
-`summarize_rust(source, resolver, source_path)`/`--resolve-modules`
-shape (Sol stays per-file); existing function-local dataflow stays
+statement — see its own section below), and cross-file dependencies
+beyond the TS-style host-declared resolver contract — Rust resolves
+`mod`/`use` and Sol resolves `import` directives through the same
+`summarize_*(source, resolver, source_path)`/`--resolve-modules`
+shape; existing function-local dataflow stays
 authoritative.
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
@@ -3638,6 +3638,40 @@ fingerprint cannot bind undeclared bytes. Receiver dispatch
 (`self.methods`) and compile-time globals stay root-file scopes;
 `pub use` re-exports, glob `use b::*`, `#[path]` attributes and
 macro-generated callables stay closed.
+
+
+`summarize_solidity(source, resolver=None, source_path=None)`
+accepts the same resolver contract: `resolver(spec)` (or
+`resolver(spec, importer_path)`) maps an `import` directive's path
+specifier to source text or a resolved Path. Imported modules
+register under a basename-derived prefix (`b.f`, `b.C.f`); the
+root module keeps bare names, so a resolver-free unit is
+byte-identical to before. A module's visible scope is its own
+top-level names merged with each resolved import's own names —
+imports do not re-export — and a name contributed by more than
+one source (two imports, or an import and a local declaration)
+is ambiguous: every visibility lookup treats it as unresolved
+rather than risking a wrong pick. Star imports bind all own
+symbols, `import {f, C as C2}` binds only the listed names, and
+`import "x" as D` / `import * as D` expose the module's own free
+functions as `D.f(...)`. Ancestor and `using` targets resolve
+through the declaring module's scope, so `contract A is Base`
+and `x.dbl()` under `using L` work across files. Resolved module
+bytes fold into `context_key` so a changed module invalidates
+reuse; `MAX_MODULE_DEPTH` bounds chains, an ancestor
+(importer, spec) plus a resolved-bytes digest guard stops cycles
+and self-feeding resolvers, and anything unresolvable stays
+opaque — resolution only ever sharpens.
+`sol-summaries --resolve-modules` resolves paths against the
+importing file's directory, confined to its tree and the source
+cap; the flag is shared across produce/check/reuse/accept so a
+resolved manifest's context key matches, and
+`sol-summaries-attempt` refuses it — the attempt fingerprint
+cannot bind undeclared bytes. Remappings, `D.C.m()` member calls
+through a namespace, `using for` declared outside a contract
+body, and cyclic imports stay closed; a modifier body inlined
+into a caller keeps the caller's visible scope for any free-name
+lookups it performs.
 
 
 ### C06 declared summary adapter descriptor

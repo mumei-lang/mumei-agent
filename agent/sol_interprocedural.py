@@ -40,8 +40,14 @@ The fragment is deliberately small:
   options, named-return slots and multi-return tuples
   (position-insensitive — every slot reads the union), free
   functions and overloads are modelled. `assembly`,
-  `function` pointers, `var` decls and multi-file imports
-  stay closed — a gap records why.
+  `function` pointers and `var` decls stay closed — a gap
+  records why. `import` directives stay opaque unless a host
+  resolver is supplied: `resolver(spec)` (or
+  `resolver(spec, importer_path)`) maps the directive's path to
+  source text or a resolved Path, imported modules register
+  under a basename-derived prefix (`b.f`, `b.C.f`), and a name
+  contributed by more than one source stays unresolved rather
+  than wrong-picking.
 
 This is a conservative dependency analysis, not value
 evaluation, correctness or proof. `effects` is
@@ -62,6 +68,19 @@ PROFILE = "mumei.sol-scalar-parameter-deps/v1"
 MAX_NODES = 20000
 MAX_FUNCTIONS = 128
 MAX_INLINE_DEPTH = 48
+# Bound on `import` resolution depth — same role as the Rust
+# builder's guard.
+MAX_MODULE_DEPTH = 8
+# Visible-scope shape shared by every module: own top-level
+# names merged with each resolved import's own names;
+# `ambiguous` holds names contributed by more than one source.
+_EMPTY_SCOPE = {
+    "contracts": {},
+    "free": {},
+    "structs": set(),
+    "namespaces": {},
+    "ambiguous": set(),
+}
 
 _BINARY_OPS = {
     "+", "-", "*", "/", "%", "**",
@@ -379,7 +398,17 @@ def _return_scalar(fn) -> bool:
 
 
 class _Builder:
-    def __init__(self, source: bytes):
+    def __init__(
+        self,
+        source: bytes,
+        resolver=None,
+        source_path=None,
+        resolving=frozenset(),
+        resolving_bytes=frozenset(),
+        module_cache=None,
+        module_digests=None,
+        resolved_paths=None,
+    ):
         self.source = source
         self.count = [0]
         self.functions: dict[str, object] = {}
@@ -402,59 +431,76 @@ class _Builder:
         self._free_fns: dict[str, list[str]] = {}
         self._struct_names: set[str] = set()
         self._all_state_vars: dict[str, set[str]] = {}
+        # Optional module resolver — the same contract as the TS
+        # and Rust builders: maps an `import` directive's path
+        # specifier to source text (bytes/str) or a resolved Path;
+        # None is both "no resolver" and "unresolvable" (imported
+        # names stay opaque).
+        self.resolver = resolver
+        self.source_path = source_path
+        # Cycle guards and the shared module byte cache — the same
+        # roles as the Rust builder's (`resolving` keys ancestor
+        # (importer_path, spec) declarations; `resolving_bytes`
+        # stops a pathless resolver feeding a module its own
+        # source; `module_digests` feeds `context_key`).
+        self.resolving = set(resolving)
+        self.resolving_bytes = set(resolving_bytes)
+        self.module_cache = (
+            module_cache if module_cache is not None else {}
+        )
+        self.module_digests = (
+            module_digests if module_digests is not None else {}
+        )
+        # Out-param: resolved filesystem paths — routes refuse
+        # `--output` targets that would overwrite one.
+        self.resolved_paths = resolved_paths
+        if resolver is not None:
+            import inspect
+
+            try:
+                self._resolver_importer = (
+                    len(inspect.signature(resolver).parameters) > 1
+                )
+            except (TypeError, ValueError):
+                self._resolver_importer = False
+        else:
+            self._resolver_importer = False
+        # Module token -> its own top-level names (contracts,
+        # free functions, structs); a module's *visible* scope is
+        # `_scopes[mod]` = own names merged with its imports, plus
+        # `ambiguous` — names contributed by more than one source
+        # that must never resolve to a wrong pick.
+        self._mod_own: dict[str, dict] = {}
+        self._scopes: dict[str, dict] = {}
+        # Function key -> the visible scope of its declaring
+        # module, installed as `_cur_scope` during `_summarize`.
+        self._fn_scope: dict[str, dict] = {}
+        self._cur_scope: dict = _EMPTY_SCOPE
+        # Resolved-file reference -> module token so one file maps
+        # to one internal-name prefix however often it is
+        # imported.
+        self._ref_tok: dict[str, str] = {}
 
     # -- unit scan ----------------------------------------------------
 
-    def build(self) -> SolSummarySet:
+    def _parse(self, source):
         from tree_sitter import Language, Parser
         import tree_sitter_solidity
 
         parser = Parser(
             Language(tree_sitter_solidity.language())
         )
-        tree = parser.parse(self.source)
-        root = tree.root_node
-        for top in _children(root):
-            if top.type in {
-                "contract_declaration",
-                "interface_declaration",
-                "library_declaration",
-            }:
-                self._register_contract(top)
-            elif top.type == "struct_declaration":
-                sname = top.child_by_field_name("name") or next(
-                    (
-                        c
-                        for c in _children(top)
-                        if c.type == "identifier"
-                    ),
-                    None,
-                )
-                if sname is not None:
-                    self._struct_names.add(sname.text.decode())
-            elif top.type == "function_definition":
-                fname = top.child_by_field_name("name") or next(
-                    (
-                        c
-                        for c in _children(top)
-                        if c.type == "identifier"
-                    ),
-                    None,
-                )
-                if fname is None:
-                    continue
-                base = fname.text.decode()
-                # Overloaded free functions register under
-                # unique keys (`f`, `f#2`, ...) grouped by the
-                # bare name — matching contract overloads.
-                n = len(self._free_fns.get(base, []))
-                ukey = base if n == 0 else f"{base}#{n + 1}"
-                self._free_fns.setdefault(
-                    base, []
-                ).append(ukey)
-                self.functions[ukey] = top
-                self.contracts[ukey] = ""
+        return parser.parse(source).root_node
 
+    @staticmethod
+    def _qual(tok, name):
+        """Internal registry name — the root module keeps bare
+        names (`f`, `C.f`) so single-file output is unchanged;
+        imported modules prefix theirs (`b.f`, `b.C.f`)."""
+        return f"{tok}.{name}" if tok else name
+
+    def build(self) -> SolSummarySet:
+        self._scan_module(self.source, "", self.source_path)
         if len(self.functions) > MAX_FUNCTIONS:
             raise _Unsupported("analysis_limit", 0)
         summaries = []
@@ -472,12 +518,402 @@ class _Builder:
                         gaps=[SolGap("analysis_limit", _span(fn_node))],
                     )
                 )
-        key = hashlib.sha256(
-            self.source + PROFILE.encode()
-        ).hexdigest()
+        if self.resolved_paths is not None:
+            self.resolved_paths.update(
+                ref
+                for (_src, ref) in self.module_cache.values()
+                if ref
+            )
+        # The context key folds every resolved module's bytes with
+        # the root source — a changed module invalidates reuse. A
+        # resolver-free unit hashes exactly as before.
+        ctx = hashlib.sha256(self.source + PROFILE.encode())
+        for ref, digest in sorted(self.module_digests.items()):
+            ctx.update(ref.encode())
+            ctx.update(b"\x00")
+            ctx.update(digest.encode())
+            ctx.update(b"\x00")
         return SolSummarySet(
-            context_key=f"{PROFILE}:{key}", functions=summaries
+            context_key=f"{PROFILE}:{ctx.hexdigest()}",
+            functions=summaries,
         )
+
+    # -- module scan --------------------------------------------------
+
+    def _mod_token(self, spec, ref):
+        """Stable internal-name prefix for a resolved module: the
+        path basename (`./lib/b.sol` -> `b`), deduplicated (`b#2`)
+        when distinct resolved files share it. The resolved
+        reference pins one file to one token however many
+        specifiers reach it."""
+        if ref in self._ref_tok:
+            return self._ref_tok[ref]
+        base = spec.rsplit("/", 1)[-1]
+        stem = base[:-4] if base.endswith(".sol") else base
+        stem = stem or "module"
+        tok = stem
+        taken = set(self._ref_tok.values()) | {""}
+        n = 1
+        while tok in taken:
+            n += 1
+            tok = f"{stem}#{n}"
+        self._ref_tok[ref] = tok
+        return tok
+
+    def _parse_import(self, node):
+        """One `import_directive` -> (kind, spec, names, alias).
+
+        `star` binds every top-level name of the target;
+        `named` binds only the listed identifiers, each with an
+        optional `as` rename ((imported, local) pairs); `alias`
+        (`import "x" as D` / `import * as D from "x"`) exposes the
+        target module's own free functions as `D.f(...)`."""
+        # `node.children` — not `_children`, which drops the
+        # anonymous `import`/`{`/`as`/`from` tokens that
+        # discriminate the directive's form.
+        texts = [
+            c for c in node.children if c.type != ";"
+        ]
+        spec_node = next(
+            (c for c in texts if c.type == "string"), None
+        )
+        if spec_node is None:
+            return None
+        spec = spec_node.text.decode().strip("\"'")
+        kinds = [c.type for c in texts]
+        if "{" in kinds:
+            names = []
+            i = 0
+            while i < len(texts):
+                c = texts[i]
+                if c.type != "identifier":
+                    i += 1
+                    continue
+                imported = c.text.decode()
+                local = imported
+                if (
+                    i + 2 < len(texts)
+                    and texts[i + 1].type == "as"
+                    and texts[i + 2].type == "identifier"
+                ):
+                    local = texts[i + 2].text.decode()
+                    i += 3
+                else:
+                    i += 1
+                names.append((imported, local))
+            return ("named", spec, names, None)
+        if "as" in kinds:
+            as_at = kinds.index("as")
+            if (
+                as_at + 1 < len(texts)
+                and texts[as_at + 1].type == "identifier"
+            ):
+                return (
+                    "alias",
+                    spec,
+                    None,
+                    texts[as_at + 1].text.decode(),
+                )
+        return ("star", spec, None, None)
+
+    def _resolve_import(self, spec, importer_path):
+        """`(spec, importer_path)` -> `(source_bytes, ref)` or None.
+
+        None is fail-closed: the directive's symbols simply do not
+        exist downstream. Depth and ancestry guards bound the
+        recursion; resolved bytes feed `module_digests` so the
+        context key covers them."""
+        key = (importer_path, spec)
+        if key in self.module_cache:
+            return self.module_cache[key]
+        if (
+            self.resolver is None
+            or key in self.resolving
+            or len(self.resolving) >= MAX_MODULE_DEPTH
+        ):
+            return None
+        try:
+            out = (
+                self.resolver(spec, importer_path)
+                if self._resolver_importer
+                else self.resolver(spec)
+            )
+        except Exception:
+            return None
+        if out is None:
+            self.module_cache[key] = None
+            return None
+        from pathlib import Path
+
+        if isinstance(out, Path):
+            ref = str(out)
+            try:
+                src = out.read_bytes()
+            except OSError:
+                self.module_cache[key] = None
+                return None
+        elif isinstance(out, str):
+            ref = spec
+            src = out.encode()
+        elif isinstance(out, (bytes, bytearray)):
+            ref = spec
+            src = bytes(out)
+        else:
+            self.module_cache[key] = None
+            return None
+        if len(src) > MAX_SOURCE_BYTES:
+            self.module_cache[key] = None
+            return None
+        digest = hashlib.sha256(src).hexdigest()
+        if digest in self.resolving_bytes:
+            # A pathless resolver feeding a module its own
+            # source — treat like a cycle.
+            self.module_cache[key] = None
+            return None
+        self.module_cache[key] = (src, ref)
+        self.module_digests[ref] = digest
+        return src, ref
+
+    def _merge_names(self, scope, kind, name, value):
+        """Merge `name -> value` into scope[kind]; a name already
+        bound by a different source becomes ambiguous instead of
+        silently shadowing."""
+        if name in scope["ambiguous"]:
+            return
+        bucket = scope[kind]
+        if name in bucket:
+            del bucket[name]
+            scope["ambiguous"].add(name)
+            return
+        bucket[name] = value
+
+    def _scan_module(self, source, tok, importer_path):
+        """Register one module's top-level declarations under
+        `tok`-prefixed internal names, then build its visible
+        scope (own names merged with its imports' own names).
+
+        Solidity has no re-export — an importer sees the module's
+        own symbols only — and own-file names shadow imports,
+        while a name contributed by two sources is ambiguous and
+        stays unresolved."""
+        root = self._parse(source)
+        tops = list(_children(root))
+        own = {"contracts": {}, "free": {}, "structs": set()}
+        decls = []
+        for top in tops:
+            if top.type in {
+                "contract_declaration",
+                "interface_declaration",
+                "library_declaration",
+            }:
+                nnode = top.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(top)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if nnode is not None:
+                    own["contracts"][nnode.text.decode()] = (
+                        self._qual(tok, nnode.text.decode())
+                    )
+                decls.append(("contract", top))
+            elif top.type == "struct_declaration":
+                sname = top.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(top)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if sname is not None:
+                    own["structs"].add(sname.text.decode())
+            elif top.type == "function_definition":
+                fname = top.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(top)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                if fname is not None:
+                    # Register the name now — the collision guard
+                    # below needs every own top-level name before
+                    # imports merge; ukeys fill in at registration.
+                    own["free"].setdefault(fname.text.decode(), [])
+                    decls.append(("free", top))
+        # Imports first: a module's scope merges its own names
+        # with every resolved import's own names.
+        merged = {
+            "contracts": {},
+            "free": {},
+            "structs": set(),
+            "namespaces": {},
+            "ambiguous": set(),
+        }
+        for top in tops:
+            if top.type != "import_directive":
+                continue
+            got = self._parse_import(top)
+            if got is None:
+                continue
+            kind, spec, names, alias = got
+            resolved = self._resolve_import(spec, importer_path)
+            if resolved is None:
+                continue
+            src, ref = resolved
+            mtok = self._mod_token(spec, ref)
+            if mtok not in self._mod_own:
+                self.resolving.add((importer_path, spec))
+                digest = self.module_digests[ref]
+                self.resolving_bytes.add(digest)
+                try:
+                    self._scan_module(src, mtok, ref)
+                finally:
+                    self.resolving.discard((importer_path, spec))
+                    self.resolving_bytes.discard(digest)
+            child_own = self._mod_own.get(mtok)
+            if child_own is None:
+                continue
+            if kind == "alias":
+                if alias in merged["namespaces"]:
+                    merged["ambiguous"].add(alias)
+                    del merged["namespaces"][alias]
+                elif alias not in merged["ambiguous"]:
+                    merged["namespaces"][alias] = mtok
+                continue
+            wanted = None if kind == "star" else {n for n, _l in names}
+            renames = dict(names or [])
+            for cname, internal in child_own["contracts"].items():
+                if wanted is not None and cname not in wanted:
+                    continue
+                self._merge_names(
+                    merged,
+                    "contracts",
+                    renames.get(cname, cname),
+                    internal,
+                )
+            for fname, ukeys in child_own["free"].items():
+                if wanted is not None and fname not in wanted:
+                    continue
+                self._merge_names(
+                    merged,
+                    "free",
+                    renames.get(fname, fname),
+                    ukeys,
+                )
+            for sname in child_own["structs"]:
+                if wanted is not None and sname not in wanted:
+                    continue
+                local = renames.get(sname, sname)
+                if (
+                    local in merged["structs"]
+                    or local in merged["contracts"]
+                    or local in merged["free"]
+                ):
+                    merged["ambiguous"].add(local)
+                    merged["structs"].discard(local)
+                    merged["contracts"].pop(local, None)
+                    merged["free"].pop(local, None)
+                elif local not in merged["ambiguous"]:
+                    merged["structs"].add(local)
+        # Own names overlay the imports; a name contributed by an
+        # import and declared locally is ambiguous — never a
+        # wrong pick.
+        for name, internal in own["contracts"].items():
+            if name in merged["contracts"] or name in merged["free"]:
+                merged["ambiguous"].add(name)
+                merged["contracts"].pop(name, None)
+                merged["free"].pop(name, None)
+            elif name not in merged["ambiguous"]:
+                merged["contracts"][name] = internal
+        for name, _ukeys in own["free"].items():
+            if name in merged["contracts"] or name in merged["free"]:
+                merged["ambiguous"].add(name)
+                merged["contracts"].pop(name, None)
+                merged["free"].pop(name, None)
+            elif name not in merged["ambiguous"]:
+                merged["free"][name] = []
+        for name in own["structs"]:
+            if (
+                name in merged["structs"]
+                or name in merged["contracts"]
+                or name in merged["free"]
+            ):
+                merged["ambiguous"].add(name)
+                merged["structs"].discard(name)
+                merged["contracts"].pop(name, None)
+                merged["free"].pop(name, None)
+            elif name not in merged["ambiguous"]:
+                merged["structs"].add(name)
+        self._mod_own[tok] = own
+        self._scopes[tok] = merged
+        # Register contents into the shared registries under
+        # internal (tok-prefixed) names so every downstream map —
+        # `_parents`, `_usings`, `_state_vars`, overload groups —
+        # stays consistent for imported contracts.
+        for kind, node in decls:
+            if kind == "contract":
+                self._register_contract(node, tok, merged)
+            elif kind == "free":
+                fname = node.child_by_field_name("name") or next(
+                    (
+                        c
+                        for c in _children(node)
+                        if c.type == "identifier"
+                    ),
+                    None,
+                )
+                base = fname.text.decode()
+                group = own["free"].setdefault(base, [])
+                n = len(group)
+                ukey = self._qual(
+                    tok, base if n == 0 else f"{base}#{n + 1}"
+                )
+                group.append(ukey)
+                if tok == "":
+                    self._free_fns.setdefault(
+                        base, []
+                    ).append(ukey)
+                self.functions[ukey] = node
+                self.contracts[ukey] = ""
+                self._fn_scope[ukey] = merged
+                # An own name colliding with an import is already
+                # in `ambiguous` — re-binding it here would undo
+                # the collision guard.
+                if base not in merged["ambiguous"]:
+                    merged["free"][base] = group
+
+    def _scope(self):
+        return self._cur_scope
+
+    def _visible_contract(self, name):
+        s = self._scope()
+        if name in s["ambiguous"]:
+            return None
+        return s["contracts"].get(name)
+
+    def _visible_free(self, name):
+        s = self._scope()
+        if name in s["ambiguous"]:
+            return ()
+        return tuple(s["free"].get(name, ()))
+
+    def _visible_struct(self, name):
+        s = self._scope()
+        return name in s["structs"] and name not in s["ambiguous"]
+
+    def _visible_ns(self, name):
+        s = self._scope()
+        if name in s["ambiguous"]:
+            return None
+        return s["namespaces"].get(name)
+
+    def _visible_contracts(self):
+        return tuple(self._scope()["contracts"].values())
 
     def _hierarchy(self, contract):
         # Linearized-ish: contract first, then ancestors in
@@ -544,7 +980,8 @@ class _Builder:
                 return self._overload_groups[key]
         return []
 
-    def _register_contract(self, node) -> None:
+    def _register_contract(self, node, tok="", scope=None) -> None:
+        scope = scope if scope is not None else _EMPTY_SCOPE
         name_node = node.child_by_field_name("name") or next(
             (c for c in _children(node) if c.type == "identifier"),
             None,
@@ -552,6 +989,12 @@ class _Builder:
         contract = (
             name_node.text.decode() if name_node is not None else "?"
         )
+        # Internal name — `C` in the root module, `m.C` in an
+        # imported one. Every derived key (`_parents`, `_usings`,
+        # `_state_vars`, member ukeys) uses it, so call-site
+        # resolution only translates the *visible* source name
+        # through the caller's module scope.
+        contract = self._qual(tok, contract)
         self._contract_names.add(contract)
         body = next(
             (c for c in _children(node) if c.type == "contract_body"),
@@ -570,7 +1013,17 @@ class _Builder:
                     None,
                 )
                 if sname is not None:
-                    self._struct_names.add(sname.text.decode())
+                    sraw = sname.text.decode()
+                    self._struct_names.add(sraw)
+                    # Contract-scoped structs join the module's
+                    # visible names unless the name is already
+                    # bound — an own-file declaration wins over
+                    # an import, two imports collide.
+                    if (
+                        sraw not in scope["contracts"]
+                        and sraw not in scope["free"]
+                    ):
+                        scope["structs"].add(sraw)
         for c in _children(node):
             if c.type == "inheritance_specifier":
                 anc = c.child_by_field_name("ancestor")
@@ -583,9 +1036,17 @@ class _Builder:
                     None,
                 )
                 if aname is not None:
+                    araw = aname.text.decode()
+                    resolved = (
+                        None
+                        if araw in scope["ambiguous"]
+                        else scope["contracts"].get(araw)
+                    )
                     self._parents.setdefault(
                         contract, []
-                    ).append(aname.text.decode())
+                    ).append(
+                        resolved if resolved is not None else araw
+                    )
         for member in _children(body):
             if member.type == "using_directive":
                 alias = next(
@@ -605,9 +1066,17 @@ class _Builder:
                     None,
                 )
                 if lname is not None:
+                    lraw = lname.text.decode()
+                    resolved = (
+                        None
+                        if lraw in scope["ambiguous"]
+                        else scope["contracts"].get(lraw)
+                    )
                     self._usings.setdefault(
                         contract, []
-                    ).append(lname.text.decode())
+                    ).append(
+                        resolved if resolved is not None else lraw
+                    )
                 continue
             if member.type == "state_variable_declaration":
                 tnode = next(
@@ -647,6 +1116,7 @@ class _Builder:
                 ukey = f"{contract}.{kw}"
                 self.functions[ukey] = member
                 self.contracts[ukey] = contract
+                self._fn_scope[ukey] = scope
                 continue
             if member.type == "modifier_definition":
                 mname = member.child_by_field_name("name") or next(
@@ -680,6 +1150,7 @@ class _Builder:
             group.append(ukey)
             self.functions[ukey] = member
             self.contracts[ukey] = contract
+            self._fn_scope[ukey] = scope
 
     # -- per-function summary ----------------------------------------
 
@@ -739,6 +1210,9 @@ class _Builder:
             None,
         )
         self._current_contract = self.contracts[key]
+        # Call sites resolve visible names through the declaring
+        # module's scope (its own names merged with its imports).
+        self._cur_scope = self._fn_scope.get(key, _EMPTY_SCOPE)
         self._effects_touched = False
         locals_: dict[str, frozenset[int]] = {
             n: frozenset({i}) for n, i in param_index.items()
@@ -2124,11 +2598,13 @@ class _Builder:
             if ext_member is not None and (
                 obase is not None
                 and obase.type == "identifier"
-                and obase.text.decode() in self._contract_names
+                and self._visible_contract(obase.text.decode())
+                is not None
             ):
                 # `L.f(...)` on a declared contract/library —
-                # qualified dispatch into that contract.
-                qualified = obase.text.decode()
+                # qualified dispatch into that contract (an
+                # imported `import "b.sol"` contract included:
+                # the visible name maps to its `m.L` key).
                 fn_expr = prop
         args = [
             c
@@ -2200,10 +2676,15 @@ class _Builder:
             # result carries the arg deps.
             tn = fn_expr.child_by_field_name("name")
             cname = tn.text.decode() if tn is not None else None
+            cinternal = (
+                self._visible_contract(cname)
+                if cname is not None
+                else None
+            )
             ctor = (
-                f"{cname}.constructor"
-                if cname in self._contract_names
-                and f"{cname}.constructor" in self.functions
+                f"{cinternal}.constructor"
+                if cinternal is not None
+                and f"{cinternal}.constructor" in self.functions
                 else None
             )
             if ctor is not None:
@@ -2218,6 +2699,7 @@ class _Builder:
                     prev_contract = getattr(
                         self, "_current_contract", None
                     )
+                    prev_scope = self._cur_scope
                     prev_touch = self._effects_touched
                     try:
                         callee = self._summarize(
@@ -2226,6 +2708,7 @@ class _Builder:
                     finally:
                         self._ret_names = prev_ret
                         self._current_contract = prev_contract
+                        self._cur_scope = prev_scope
                         self._effects_touched = prev_touch
                         self._inline_depth -= 1
                     self.summaries[ctor] = callee
@@ -2345,13 +2828,30 @@ class _Builder:
                 and len(_children(obase)) == 1
                 else obase
             )
-            if (
+            qt = (
+                self._visible_contract(obase_in.text.decode())
+                if obase_in is not None
+                and obase_in.type == "identifier"
+                else None
+            )
+            if qt is not None:
+                targets = self._lookup_fns(qt, name)
+            elif (
                 obase_in is not None
                 and obase_in.type == "identifier"
-                and obase_in.text.decode() in self._contract_names
+                and (
+                    ns := self._visible_ns(obase_in.text.decode())
+                )
+                is not None
             ):
-                targets = self._lookup_fns(
-                    obase_in.text.decode(), name
+                # `D.f(...)` — `import "d.sol" as D` exposes the
+                # module's own free functions, so the target list
+                # comes straight from its `own` registry entry
+                # (tok-prefixed ukeys).
+                targets = list(
+                    self._mod_own.get(ns, {})
+                    .get("free", {})
+                    .get(name, ())
                 )
             else:
                 # `x.f(a)` under `using L for T` — the receiver
@@ -2402,16 +2902,16 @@ class _Builder:
                         if cand not in targets:
                             targets.append(cand)
         if not targets and ext_member is None:
-            targets = list(self._free_fns.get(name, ()))
+            targets = list(self._visible_free(name))
         if not targets and ext_member is None:
-            for cname in dict.fromkeys(self.contracts.values()):
+            for cname in self._visible_contracts():
                 if cname in self._hierarchy(current):
                     continue
                 base = f"{cname}.{name}"
                 if base in self._overload_groups:
                     targets = self._overload_groups[base]
                     break
-        if not targets and name in self._struct_names:
+        if not targets and self._visible_struct(name):
             # `S(a, b)` / `S({x: a})` — a struct literal is a
             # value construction, not a call: the result slot
             # carries every field's deps.
@@ -2422,7 +2922,7 @@ class _Builder:
                 )
             )
             return actual_union
-        if not targets and name in self._contract_names:
+        if not targets and self._visible_contract(name) is not None:
             # `IERC20(token)` — a contract cast; the wrapped
             # expression's deps flow through.
             summary.calls.append(
@@ -2525,6 +3025,7 @@ class _Builder:
                 prev_contract = getattr(
                     self, "_current_contract", None
                 )
+                prev_scope = self._cur_scope
                 prev_touch = self._effects_touched
                 try:
                     callee = self._summarize(
@@ -2533,6 +3034,7 @@ class _Builder:
                 finally:
                     self._ret_names = prev_ret
                     self._current_contract = prev_contract
+                    self._cur_scope = prev_scope
                     self._effects_touched = prev_touch
                     self._inline_depth -= 1
                 self.summaries[target] = callee
@@ -2611,11 +3113,30 @@ class _Builder:
         return result
 
 
-def summarize_solidity(source: str | bytes) -> SolSummarySet:
+def summarize_solidity(
+    source: str | bytes,
+    resolver=None,
+    source_path=None,
+    module_digests=None,
+    resolved_paths=None,
+) -> SolSummarySet:
     """Summarize a Solidity source string — see the module
-    docstring for the admitted fragment and its limits."""
+    docstring for the admitted fragment and its limits.
+
+    `resolver` opts into cross-file `import` resolution with the
+    same contract as the Rust builder: `(spec, importer_path)` or
+    `(spec)` -> source text (str/bytes) or a resolved Path; None
+    leaves the directive's symbols opaque. `module_digests` and
+    `resolved_paths` are out-params recording the resolved
+    modules' digests and filesystem paths."""
     data = source.encode() if isinstance(source, str) else source
-    builder = _Builder(data)
+    builder = _Builder(
+        data,
+        resolver=resolver,
+        source_path=source_path,
+        module_digests=module_digests,
+        resolved_paths=resolved_paths,
+    )
     try:
         return builder.build()
     except _Unsupported as exc:
@@ -2637,6 +3158,49 @@ def summarize_solidity(source: str | bytes) -> SolSummarySet:
                 for name in builder.functions
             ],
         )
+
+
+def _fs_resolver(spec, importer_path):
+    """Filesystem `import` resolver for `--resolve-modules`:
+    `spec` resolves against the importing file's directory,
+    confined to that directory tree and MAX_SOURCE_BYTES. The
+    resolved Path is returned so a child module's own imports
+    resolve against its own directory; None leaves the directive
+    opaque."""
+    if importer_path is None or not spec:
+        return None
+    from pathlib import Path
+
+    try:
+        base = Path(importer_path).resolve().parent
+    except OSError:
+        return None
+    try:
+        real = (base / spec).resolve()
+    except OSError:
+        return None
+    try:
+        inside = real.is_relative_to(base)
+    except ValueError:
+        inside = False
+    if not inside or not real.is_file():
+        return None
+    try:
+        if real.stat().st_size <= MAX_SOURCE_BYTES:
+            return real
+    except OSError:
+        pass
+    return None
+
+
+def _resolver_for(args):
+    """The filesystem resolver for `--resolve-modules` — shared
+    by every route that re-derives the live summary set so a
+    resolved manifest's context key matches across produce,
+    check, reuse and accept."""
+    if getattr(args, "resolve_modules", False):
+        return _fs_resolver
+    return None
 
 
 # Opt-in CLI routes — `python -m agent sol-summaries <file>` prints
@@ -2672,6 +3236,18 @@ def build_parser(parser=None):
         "source",
         help="Path to a single Solidity source file "
         "(at most 256 KiB).",
+    )
+    parser.add_argument(
+        "--resolve-modules",
+        action="store_true",
+        help=(
+            "Resolve `import` directives against the filesystem "
+            "(same contract as rust-summaries): paths stay inside "
+            "the importer's directory tree, each resolved file is "
+            "bounded by the source-size cap, and the context key "
+            "folds every resolved file's bytes. Unresolvable "
+            "directives keep their symbols opaque."
+        ),
     )
     return parser
 
@@ -2896,7 +3472,16 @@ def main(args=None) -> None:
     if args is None:
         args = build_parser().parse_args()
     raw = _read_declared_source(args.source, PROFILE)
-    print(json.dumps(summarize_solidity(raw).to_dict(), sort_keys=True))
+    print(
+        json.dumps(
+            summarize_solidity(
+                raw,
+                resolver=_resolver_for(args),
+                source_path=args.source,
+            ).to_dict(),
+            sort_keys=True,
+        )
+    )
 
 
 def summary_accept_document(declared, live, function) -> dict:
@@ -2956,7 +3541,11 @@ def main_accept(args=None) -> None:
         args = build_accept_parser().parse_args()
     declared = _read_declared_manifest(args.manifest)
     raw = _read_declared_source(args.source, ACCEPT_PROFILE)
-    live = summarize_solidity(raw)
+    live = summarize_solidity(
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+    )
     _emit(
         summary_accept_document(declared, live, args.function), 0
     )
@@ -3046,7 +3635,16 @@ def main_check(args=None) -> None:
     )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
-    live = summarize_solidity(raw)
+    resolved: set = set()
+    live = summarize_solidity(
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+        resolved_paths=resolved,
+    )
+    _reject_overwrite(
+        getattr(args, "output", None), resolved, CHECK_PROFILE
+    )
     document = json.dumps(
         summary_check_document(declared, live), sort_keys=True
     )
@@ -3079,7 +3677,16 @@ def main_reuse(args=None) -> None:
     )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
-    live = summarize_solidity(raw)
+    resolved: set = set()
+    live = summarize_solidity(
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+        resolved_paths=resolved,
+    )
+    _reject_overwrite(
+        getattr(args, "output", None), resolved, CHECK_PROFILE
+    )
     document = json.dumps(
         summary_reuse_set(declared, live).to_dict(),
         sort_keys=True,
@@ -3238,6 +3845,24 @@ def main_attempt(args=None) -> None:
     _reject_overwrite(
         args.output, [args.source], ATTEMPT_REPORT_PROFILE
     )
+    if getattr(args, "resolve_modules", False):
+        # The attempt route fingerprints only the declared source —
+        # implicit module inputs could not be bound into the
+        # fingerprint, so resolution stays refused here (the same
+        # boundary as rust-summaries-attempt).
+        _emit(
+            {
+                "schema_version": ATTEMPT_REPORT_PROFILE,
+                "error": {
+                    "reason": "resolve_modules_unsupported",
+                    "detail": (
+                        "--resolve-modules is not admitted on the "
+                        "attempt route"
+                    ),
+                },
+            },
+            2,
+        )
     raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
     try:
         report = run_attempt(

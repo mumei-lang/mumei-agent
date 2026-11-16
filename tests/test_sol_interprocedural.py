@@ -2457,3 +2457,265 @@ def test_review7_storage_rebind_retargets_pointer():
     assert s.available
     assert s.effects == "state_writes"
     assert 0 in s.return_dependencies
+
+
+# -- cross-file import resolution (`--resolve-modules` contract) ---------
+
+B_MOD = """library L {
+  function dbl(uint256 a) internal returns (uint256) {
+    return a + a;
+  }
+}
+function helper(uint256 a) returns (uint256) {
+  return a + dbl_local(a);
+}
+function dbl_local(uint256 a) returns (uint256) {
+  return a + a;
+}
+contract Base {
+  function bf(uint256 v) public returns (uint256) {
+    return v;
+  }
+}
+struct SB {
+  uint256 v;
+}"""
+
+C_MOD = """function helper(uint256 a) returns (uint256) {
+  return a + 2;
+}"""
+
+
+def _resolver(modules):
+    def resolve(spec, importer_path=None):
+        return modules.get(spec)
+
+    return resolve
+
+
+def _summarize_mods(root, modules, **kw):
+    return sol.summarize_solidity(
+        root, resolver=_resolver(modules), **kw
+    )
+
+
+def test_import_star_free_fn_and_library_and_ancestor():
+    src = """import "./b.sol";
+contract A is Base {
+  function f(uint256 x) public returns (uint256) {
+    return L.dbl(x) + helper(x) + bf(x);
+  }
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD})
+    f = next(fn for fn in s.functions if fn.name == "A.f")
+    assert f.available
+    assert f.return_dependencies == frozenset({0})
+    assert f.gaps == []
+    names = {fn.name for fn in s.functions}
+    assert "b.helper" in names
+    assert "b.B.bf" not in names  # Base, not B
+    assert "b.Base.bf" in names
+
+
+def test_import_named_binding_and_rename():
+    src = """import {helper as hh} from "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return hh(x);
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD})
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert af.available
+    assert af.return_dependencies == frozenset({0})
+    # Only the listed symbol is bound — `helper` itself is not.
+    src2 = """import {helper as hh} from "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s2 = _summarize_mods(src2, {"./b.sol": B_MOD})
+    af2 = next(fn for fn in s2.functions if fn.name == "af")
+    assert not af2.available
+    assert af2.gaps
+
+
+def test_import_alias_namespace_call():
+    for form in (
+        'import "./b.sol" as D;',
+        'import * as D from "./b.sol";',
+    ):
+        src = form + """
+function af(uint256 x) returns (uint256) {
+  return D.helper(x);
+}"""
+        s = _summarize_mods(src, {"./b.sol": B_MOD})
+        af = next(fn for fn in s.functions if fn.name == "af")
+        assert af.available, form
+        assert af.return_dependencies == frozenset({0})
+
+
+def test_import_ambiguous_name_stays_unresolved():
+    src = """import "./b.sol";
+import "./c.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s = _summarize_mods(
+        src, {"./b.sol": B_MOD, "./c.sol": C_MOD}
+    )
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert not af.available
+    assert af.gaps
+
+
+def test_import_unresolved_stays_opaque():
+    src = """import "./missing.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s = _summarize_mods(src, {})
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert not af.available
+    assert af.gaps
+
+
+def test_import_no_reexport():
+    # The importer sees the module's own symbols only — c.sol's
+    # names do not leak through b.sol.
+    b_reexport = """import "./c.sol";
+function bf(uint256 a) returns (uint256) {
+  return helper(a);
+}"""
+    src = """import "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s = _summarize_mods(
+        src, {"./b.sol": b_reexport, "./c.sol": C_MOD}
+    )
+    # b's own `bf` still resolves `helper` through b's scope.
+    bf = next(fn for fn in s.functions if fn.name == "b.bf")
+    assert bf.available
+    assert bf.return_dependencies == frozenset({0})
+    # The root module does not see c's `helper`.
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert not af.available
+    assert af.gaps
+
+
+def test_import_new_contract_and_ctor():
+    b_ctor = """contract P {
+  uint256 public n;
+  constructor(uint256 v) {
+    n = v;
+  }
+}"""
+    src = """import "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return new P(x).n();
+}"""
+    s = _summarize_mods(src, {"./b.sol": b_ctor})
+    af = next(fn for fn in s.functions if fn.name == "af")
+    # The ctor runs inline — the deployment call is recorded, not
+    # a gap.
+    assert af.gaps == []
+
+
+def test_import_using_for_across_files():
+    src = """import "./b.sol";
+contract A {
+  using L for uint256;
+  function f(uint256 x) public returns (uint256) {
+    return x.dbl();
+  }
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD})
+    f = next(fn for fn in s.functions if fn.name == "A.f")
+    assert f.available
+    assert f.return_dependencies == frozenset({0})
+
+
+def test_import_cycle_stays_opaque():
+    a_src = """import "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return bf(x);
+}"""
+    b_src = """import "./a.sol";
+function bf(uint256 x) returns (uint256) {
+  return af(x);
+}"""
+    s = _summarize_mods(
+        a_src, {"./b.sol": b_src, "./a.sol": a_src}
+    )
+    # No crash; the cyclic edge simply does not register names.
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert af is not None
+
+
+def test_import_context_key_covers_module_bytes():
+    src = """import "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    v1 = _summarize_mods(src, {"./b.sol": B_MOD})
+    v2 = _summarize_mods(src, {"./b.sol": C_MOD})
+    assert v1.context_key != v2.context_key
+    # A resolver-free derivation of the same root hashes exactly
+    # as before (back-compat).
+    plain = sol.summarize_solidity(src)
+    assert plain.context_key != v1.context_key
+
+
+def test_import_own_name_shadows_import():
+    src = """import "./b.sol";
+function helper(uint256 a) returns (uint256) {
+  return a;
+}
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD})
+    af = next(fn for fn in s.functions if fn.name == "af")
+    # `helper` is contributed by the import AND declared locally —
+    # ambiguous, so it stays unresolved rather than wrong-picking.
+    assert not af.available
+    assert af.gaps
+
+
+def test_import_fs_resolver(tmp_path):
+    (tmp_path / "b.sol").write_text(B_MOD)
+    (tmp_path / "a.sol").write_text(
+        """import "./b.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    )
+    root = (tmp_path / "a.sol").resolve()
+    s = sol.summarize_solidity(
+        (tmp_path / "a.sol").read_text(),
+        resolver=sol._fs_resolver,
+        source_path=str(root),
+    )
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert af.available
+    assert af.return_dependencies == frozenset({0})
+
+
+def test_import_fs_resolver_confined(tmp_path):
+    outside = tmp_path.parent / "outside_mod.sol"
+    outside.write_text(C_MOD)
+    (tmp_path / "a.sol").write_text(
+        """import "../outside_mod.sol";
+function af(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    )
+    try:
+        s = sol.summarize_solidity(
+            (tmp_path / "a.sol").read_text(),
+            resolver=sol._fs_resolver,
+            source_path=str((tmp_path / "a.sol").resolve()),
+        )
+        af = next(fn for fn in s.functions if fn.name == "af")
+        # `../` escapes the importer's tree — stays opaque.
+        assert not af.available
+    finally:
+        outside.unlink(missing_ok=True)
