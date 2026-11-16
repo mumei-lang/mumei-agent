@@ -2881,6 +2881,7 @@ def evidence_check(
     core_path: str,
     evidence_path: str,
     attempt_timeout_ms: int = 30000,
+    expected_adapter: str | None = None,
 ) -> str:
     """Run the Core representation check on a saved Evidence record.
 
@@ -2896,6 +2897,9 @@ def evidence_check(
             `mumei.verification-evidence/v1` record (at most 64 KiB).
         attempt_timeout_ms: Declared attempt bound in milliseconds
             (at most 60000).
+        expected_adapter: Optional declared producer adapter id the
+            record must name; declared identity only, not producer
+            authenticity.
 
     Returns:
         JSON with `report` — the `mumei.evidence-check-report/v1`
@@ -2919,6 +2923,7 @@ def evidence_check(
         core=core_path,
         evidence=evidence_path,
         attempt_timeout=attempt_timeout_ms,
+        expected_adapter=expected_adapter,
         memory_bound_mb=None,
         output=None,
     )
@@ -2936,6 +2941,7 @@ def evidence_check_list(
     core_path: str,
     evidence_path: str,
     attempt_timeout_ms: int = 30000,
+    expected_adapter: str | None = None,
 ) -> str:
     """Run the Core representation check on a saved Evidence list envelope.
 
@@ -2954,6 +2960,9 @@ def evidence_check_list(
             64 KiB).
         attempt_timeout_ms: Declared attempt bound in milliseconds
             (at most 60000).
+        expected_adapter: Optional declared producer adapter id every
+            record must name; declared identity only, not producer
+            authenticity.
 
     Returns:
         JSON with `report` — the `mumei.evidence-check-list-report/v1`
@@ -2977,6 +2986,7 @@ def evidence_check_list(
         core=core_path,
         evidence=evidence_path,
         attempt_timeout=attempt_timeout_ms,
+        expected_adapter=expected_adapter,
         memory_bound_mb=None,
         output=None,
     )
@@ -2994,6 +3004,7 @@ def evidence_check_consistency(
     core_path: str,
     evidence_path: str,
     attempt_timeout_ms: int = 30000,
+    expected_adapter: str | None = None,
 ) -> str:
     """Run the Core cross-record consistency check on a saved envelope.
 
@@ -3012,6 +3023,9 @@ def evidence_check_consistency(
             64 KiB).
         attempt_timeout_ms: Declared attempt bound in milliseconds
             (at most 60000).
+        expected_adapter: Optional declared producer adapter id every
+            record must name; declared identity only, not producer
+            authenticity.
 
     Returns:
         JSON with `report` — the
@@ -3036,6 +3050,7 @@ def evidence_check_consistency(
         core=core_path,
         evidence=evidence_path,
         attempt_timeout=attempt_timeout_ms,
+        expected_adapter=expected_adapter,
         memory_bound_mb=None,
         output=None,
     )

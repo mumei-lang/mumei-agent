@@ -45,10 +45,10 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
-| `evidence-check` | 5 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
-| `evidence-check-list` | 5 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
+| `evidence-check` | 6 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
+| `evidence-check-list` | 6 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
-| `evidence-check-consistency` | 5 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
+| `evidence-check-consistency` | 6 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
@@ -649,6 +649,7 @@ Run a declared Core Evidence representation check as one attempt and emit the re
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check`. |
 | `--evidence` | `<PATH>` | yes | — | Declared saved Evidence record (absolute path, a common mumei.verification-evidence/v1 JSON, at most 65536 bytes); its bytes are fed to the check on stdin. |
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--expected-adapter` | `<ID>` | no | — | Optional declared producer adapter id every record must name; declared identity only, not producer authenticity. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
 
@@ -664,6 +665,7 @@ Run a declared Core Evidence list-envelope representation check as one attempt a
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check-list`. |
 | `--evidence` | `<PATH>` | yes | — | Declared saved Evidence list envelope (absolute path, a mumei.verification-evidence-list/v1 JSON, at most 65536 bytes); its bytes are fed to the check on stdin. |
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--expected-adapter` | `<ID>` | no | — | Optional declared producer adapter id every record must name; declared identity only, not producer authenticity. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
 
@@ -692,6 +694,7 @@ Run a declared Core Evidence list cross-record consistency check as one attempt 
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check-consistency`. |
 | `--evidence` | `<PATH>` | yes | — | Declared saved Evidence list envelope (absolute path, a mumei.verification-evidence-list/v1 JSON, at most 65536 bytes); its bytes are fed to the check on stdin. |
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--expected-adapter` | `<ID>` | no | — | Optional declared producer adapter id every record must name; declared identity only, not producer authenticity. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
 

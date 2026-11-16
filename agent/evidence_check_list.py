@@ -60,6 +60,14 @@ CHECK_LIST_REPORT_PROFILE = "mumei.evidence-check-list-report/v1"
 # The list-envelope schema the Core's check-list diagnostic names.
 LIST_SCHEMA_VERSION = "mumei.verification-evidence-list/v1"
 
+# Mirrors the Core descriptor's gated checks_performed list (evidence
+# check-list --expected-adapter): the gate names the declared id match,
+# never producer authenticity, which stays not_performed.
+GATED_CHECKS_PERFORMED = [
+    "representation_gate",
+    "declared_producer_identity",
+]
+
 # Mirror of the Core side's read bound for evidence inputs
 # (mumei-core verification_evidence::MAX_INPUT_BYTES): a declared
 # envelope the Core cannot even read is a static error, not a run.
@@ -88,6 +96,8 @@ def _check_request(args: argparse.Namespace) -> None:
         raise ValueError(
             f"--attempt-timeout must be 1..{MAX_CHECK_TIMEOUT_MS} ms"
         )
+    if args.expected_adapter is not None and not args.expected_adapter:
+        raise ValueError("--expected-adapter must not be empty")
     try:
         size = os.path.getsize(args.evidence)
     except OSError as exc:
@@ -127,12 +137,19 @@ def _attempt_fingerprint(
             "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
         },
     }
+    if args.expected_adapter is not None:
+        # The declared producer expectation is part of the request
+        # identity: it joins the fingerprint only when given so an
+        # ungated request keeps its identity across versions.
+        request["expected_adapter"] = args.expected_adapter
     return hashlib.sha256(
         json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
-def _parse_diagnostic(captured: bytes) -> dict | None:
+def _parse_diagnostic(
+    captured: bytes, gated: bool
+) -> dict | None:
     """Recognise the Core's accepted list-envelope diagnostic, or None.
 
     Same ``mumei.evidence-representation-check/v1`` shape as the
@@ -170,6 +187,8 @@ def _parse_diagnostic(captured: bytes) -> dict | None:
             "cross_record_consistency",
         ],
     }
+    if gated:
+        expected["checks_performed"] = GATED_CHECKS_PERFORMED
     return document if document == expected else None
 
 
@@ -208,6 +227,15 @@ def build_check_list_parser(
         default=DEFAULT_ATTEMPT_TIMEOUT_MS,
         metavar="<MS>",
         help=f"Declared attempt bound in ms (max {MAX_CHECK_TIMEOUT_MS}).",
+    )
+    parser.add_argument(
+        "--expected-adapter",
+        default=None,
+        metavar="ID",
+        help=(
+            "Optional declared producer adapter id every record must "
+            "name; declared identity only, not producer authenticity."
+        ),
     )
     parser.add_argument(
         "--memory-bound-mb",
@@ -250,6 +278,8 @@ def run_check_list(args: argparse.Namespace) -> dict:
     evidence_bytes = Path(args.evidence).read_bytes()
     fingerprint = _attempt_fingerprint(args, evidence_bytes)
     argv = (args.core, "evidence", "check-list", "--stdin", "--json")
+    if args.expected_adapter is not None:
+        argv += ("--expected-adapter", args.expected_adapter)
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
     store.publish(sequence)
@@ -274,7 +304,9 @@ def run_check_list(args: argparse.Namespace) -> dict:
     if record.state == "exited" and record.events:
         exit_code = record.events[-1].exit_code
     diagnostic = (
-        _parse_diagnostic(dispatch.run.stdout)
+        _parse_diagnostic(
+            dispatch.run.stdout, args.expected_adapter is not None
+        )
         if exit_code == 0 and not inputs_changed
         else None
     )
@@ -301,6 +333,10 @@ def run_check_list(args: argparse.Namespace) -> dict:
     elif diagnostic is not None:
         report["representation"] = diagnostic["representation"]
         report["record_count"] = diagnostic["record_count"]
+        if "checks_performed" in diagnostic:
+            report["checks_performed"] = list(
+                diagnostic["checks_performed"]
+            )
         report["checks_not_performed"] = list(
             diagnostic["checks_not_performed"]
         )
