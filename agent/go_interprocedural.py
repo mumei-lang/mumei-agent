@@ -3912,11 +3912,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         else:
                             self.pointee_closures.discard(binding.id)
                         # `var cp = st` — a copied anonymous struct
-                        # shares st's anchor, like `cp := st`.
+                        # shares st's anchor, like `cp := st`. An
+                        # explicit `struct{...}` type on the spec
+                        # declares cp's own fields right after its
+                        # name instead, so the binding's default
+                        # span anchor already covers them — copying
+                        # st's would point the window at the wrong
+                        # literal's fields.
                         if (
                             binding.type.kind == "struct"
                             and not binding.type.type_id
                             and src_id is not None
+                            and spec.child_by_field_name("type") is None
                         ):
                             src_binding = self.bindings.get(src_id)
                             anchor = self.anon_struct_anchor.get(

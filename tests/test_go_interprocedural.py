@@ -12349,3 +12349,26 @@ def test_anonymous_struct_signature_positions_declare_gap(
     assert any(
         gap.reason == "unsupported_value_semantics" for gap in snapshot.gaps
     )
+
+
+def test_anonymous_struct_explicit_typed_var_copy_is_admitted(
+    go_types_helper,
+):
+    # `var cp struct{...} = st` — cp's fields live in its own
+    # explicit type (right after its name), not in st's literal:
+    # the default span anchor covers them, so the copy anchor must
+    # not overwrite it.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{V: x}\n"
+        "\tvar cp struct{ V int64 } = st\n"
+        "\tcp.V = x + 1\n"
+        "\treturn cp.V + st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
