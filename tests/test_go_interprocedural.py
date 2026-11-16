@@ -5619,16 +5619,144 @@ def test_member_pointer_deref_read_carries_escaped_pointee_deps(
     assert result.return_dependencies == frozenset({1})
 
 
-def test_bound_pointer_deref_read_local_pointee_stays_closed(
+def test_bound_pointer_deref_read_local_pointee_is_admitted(
     go_types_helper,
 ):
-    # `*p` on `p := &t` where `t` is a local `type T` — the
-    # pointee identity resolves only through `imported_members`, so
-    # a local named type never admits.
+    # `*p` on `p := &t` where `t` is a local `type LT int64` — the
+    # pointee identity resolves through the local `type` binding (a
+    # real identity in `known`, so `stale_dependents` stays honest),
+    # exactly like the imported-member path. The read records an
+    # imported transfer against `LT` and returns the pointer's
+    # provenance — `t`'s own (empty) dependency set here.
     files = {
         "a.go": "package p\nimport \"lib\"\ntype LT int64\n"
         "var _ = lib.V\n"
         "func F(x int64) int64 { var t LT; p := &t; return int64(*p) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_local_named_scalar_pointee_param_deref(
+    go_types_helper,
+):
+    # `*p` on a `p *MyInt` parameter — the local `type MyInt int64`
+    # names a scalar pointee, so the deref read admits and returns
+    # the pointer's provenance deps.
+    files = {
+        "a.go": "package p\ntype MyInt int64\n"
+        "func F(p *MyInt) int64 { return int64(*p) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["p.V", "(*p).V", "((p)).V"],
+)
+def test_local_struct_pointer_field_read_is_admitted(
+    go_types_helper, expression
+):
+    # `p.V`/`(*p).V` on `p *P` where `P` is a package-local struct —
+    # the field read touches caller state like `lib.VS.F`: dep-free
+    # plus an imported transfer against the field's real binding
+    # identity, `effects` unknown.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64; W bool }\n"
+        f"func F(p *P) int64 {{ return {expression} }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_local_nested_pointer_field_read_is_admitted(
+    go_types_helper,
+):
+    # `t.W.N` — the nested selection walks W's `*W2` member to the
+    # local `W2` type and resolves `N` there; every traversed local
+    # `type` binding pins.
+    files = {
+        "a.go": "package p\ntype W2 struct{ N int64 }\n"
+        "type W struct{ P2 *W2 }\n"
+        "func F(t *W) int64 { return t.P2.N }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_local_named_pointee_write_is_admitted(
+    go_types_helper,
+):
+    # `*p = v` on `p *MyInt` — the same pointee-identity gate the
+    # read uses now resolves local `type` bindings, matching the
+    # `p.V = x` field write that already admitted.
+    files = {
+        "a.go": "package p\ntype MyInt int64\n"
+        "func F(p *MyInt, x int64) int64 { *p = MyInt(x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "decl,expression",
+    [
+        # A non-scalar field type keeps the read closed.
+        ("type P struct{ V []int64 }", "p.V[0]"),
+        # A composite pointee (`*struct` of an unnamed literal is
+        # never named; `*[]T`/`*map` carry no local type identity).
+        ("type S []int64", "(*p)[0]"),
+    ],
+)
+def test_local_named_pointee_composites_stay_closed(
+    go_types_helper, decl, expression
+):
+    files = {
+        "a.go": f"package p\n{decl}\n"
+        f"func F(p *{decl.split()[1]}, x int64) int64 {{ "
+        f"_ = {expression}; return x }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_local_struct_value_still_stays_closed(
+    go_types_helper,
+):
+    # `st := P{...}` — a local struct VALUE is a different slice
+    # (declaration admission + a field-dep model); the pointer
+    # paths touched here never see it.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64) int64 { st := P{V: x}; return st.V }\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     result = named_package(

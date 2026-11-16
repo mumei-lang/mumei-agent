@@ -683,6 +683,37 @@ class _Builder:
         raw = self.raws.get(0)
         return raw is not None and scope.start == 0 and scope.end == len(raw)
 
+    def _pointee_type(self, type_id: str) -> Any | None:
+        """The named pointee a `type_id` names — an imported `type`
+        member, or a package-local `type` binding. Local type
+        declarations carry the same real identity (a file-digest
+        embedded binding id), so `stale_dependents` stays honest
+        either direction."""
+        member = self.members.get(type_id)
+        if member is not None and member.kind == "type":
+            return member
+        binding = self.bindings.get(type_id)
+        if binding is not None and binding.kind == "type":
+            return binding
+        return None
+
+    def _local_field(self, field_ref: Any) -> Any | None:
+        """The struct field a `kind == \"local\"` reference names — a
+        `variable` binding with `scope is None` (the field marker:
+        package vars carry the unit scope, function vars the
+        function's). Anything else — a method expression's receiver
+        or a misresolved name — stays closed."""
+        if field_ref is None or field_ref.kind != "local":
+            return None
+        binding = self.bindings.get(field_ref.binding_id)
+        if (
+            binding is not None
+            and binding.kind == "variable"
+            and binding.scope is None
+        ):
+            return binding
+        return None
+
     def _package_member(self, selector_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` selector names, or None.
 
@@ -828,7 +859,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         member to `W2`, then resolves `N` there) — every `type`
         member traversed is returned for pinning. The field resolves
         through its own `import` reference to a scalar-or-pointer
-        `var` member, like the imported-struct-var path. A promoted
+        `var` member, like the imported-struct-var path — or, for a
+        package-local struct type, through the field's `local`
+        reference to its `scope`-less `variable` binding. A promoted
         method's `func` member, a non-scalar field, a computed base,
         or any unresolvable name returns None.
         """
@@ -841,15 +874,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         pointees, root_ref = resolved
         field_ref = self.references.get(self.node_key(field))
-        field_member = (
-            self.members.get(field_ref.binding_id)
-            if field_ref is not None and field_ref.kind == "import"
-            else None
-        )
+        field_member = None
+        if field_ref is not None and field_ref.kind == "import":
+            field_member = self.members.get(field_ref.binding_id)
+        else:
+            field_member = self._local_field(field_ref)
         if (
             field_member is None
             or field_member.name.encode("utf-8") != field.text
-            or field_member.kind != "var"
+            or field_member.kind not in {"var", "variable"}
             or field_member.type.kind not in {"integer", "boolean", "pointer"}
         ):
             return None
@@ -866,7 +899,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
 
         A bound identifier (`t`) or one explicit dereference (`*t`,
         with parentheses either side) contributes its pointee `type`
-        member and supplies the root reference; a nested selection
+        member — or the local `type` binding it names — and supplies
+        the root reference; a nested selection
         (`t.W`) recurses through `_bound_field_read` and extends the
         chain with the field's own member — pinned so redeclaring
         `W` flags the summary — followed by the field's pointee
@@ -907,8 +941,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or not inner_field.type.type_id
             ):
                 return None
-            pointee = self.members.get(inner_field.type.type_id)
-            if pointee is None or pointee.kind != "type":
+            pointee = self._pointee_type(inner_field.type.type_id)
+            if pointee is None:
                 return None
             return (*inner_pointees, inner_field, pointee), root_ref
         if operand.type != "identifier" or operand.text == b"_":
@@ -925,8 +959,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or not binding.type.type_id
         ):
             return None
-        pointee = self.members.get(binding.type.type_id)
-        if pointee is None or pointee.kind != "type":
+        pointee = self._pointee_type(binding.type.type_id)
+        if pointee is None:
             return None
         return (pointee,), ref
 
@@ -1900,10 +1934,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 return None
             return f"{ref.binding_id}/pointee"
-        target = self.members.get(binding.type.type_id)
+        target = self._pointee_type(binding.type.type_id)
         if (
             target is None
-            or target.kind != "type"
             or target.type.kind not in {"integer", "boolean", "pointer"}
         ):
             return None
@@ -1927,7 +1960,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # identity because nothing else marks the external read. The
         # pointee must resolve to a scalar
         # or pointer shape: a named pointee is scalar when the `type`
-        # member it names is; an unnamed one (`*int64`) classifies by
+        # member — or the unit's own `type` binding — it names is;
+        # an unnamed one (`*int64`) classifies by
         # the pointer fact's own `elem`, and composite shapes
         # (`*[]int64`, `*struct{...}`) stay closed. Any other operand
         # — a computed pointer or a nested deref — stays closed too:
@@ -2037,12 +2071,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 pointee_id = f"{bound_ref.binding_id}/pointee"
                 named_pointee = False
         if named_pointee:
-            target = self.members.get(pointee_id)
+            target = self._pointee_type(pointee_id) if pointee_id else None
             if (
                 pointee_id
                 and (
                     target is None
-                    or target.kind != "type"
                     or target.type.kind
                     not in {"integer", "boolean", "pointer"}
                 )

@@ -2071,8 +2071,8 @@ unnamed scalar pointees), scalar package-level `var` reads/writes,
 multi-file package units and audit wiring
 (`--enable-summaries`) have all landed
 since this line was written — the honest residuals are composite-
-pointee state tracking (`*[]T`, `*struct{...}`, local named
-types; dep sets still union every escaped binding rather than track
+pointee state tracking (`*[]T`, `*struct{...}`, struct-typed local
+values; dep sets still union every escaped binding rather than track
 which pointee a write may hit), the remaining
 resource-state semantics (composite package globals,
 channels, constructors, bound closures), per-statement (rather than
@@ -2620,8 +2620,9 @@ could have pointed it there. The read also unions every dependency
 ever stored through a pointer write — `*t = v; return *t` reports
 `v`'s deps even when no `&x` escaped — because the store lands in
 untracked memory this read may observe. The pointee's
-identity resolves only through `imported_members`, so `*T` on a
-local `type T` stays closed too. An unnamed *scalar* pointee — a
+identity resolves through `imported_members` or — since the
+local-named-types slice — the unit's own `type` bindings, so `*T`
+on a local `type T` admits the same way. An unnamed *scalar* pointee — a
 `p := &x` binding on a builtin `int64` — admits the same way by
 classifying through the pointer fact's own `elem` (see the unnamed
 scalar pointees slice); composite unnamed pointees, a computed
@@ -2684,7 +2685,12 @@ each field is pointer-typed. The pointee is struct-typed, so it can
 never alias a tracked scalar binding — no escaped union is needed. A
 doubly-derefed base (`(**t).F`), a struct-valued intermediate
 (`t.A.B` on `A S3`), a method value (`t.PF`) and a composite-typed
-field stay closed.
+field stay closed. Package-local named types admit identically since
+the local-named-types slice: the pointee `type_id` falls back to the
+unit's own `type` bindings, and the selector's `field` resolves
+through its `local` reference to the field's `variable` binding
+(the `scope`-less field marker) — the identities are real, so
+`stale_dependents` stays honest in both directions.
 
 A field read through an index chain admits the same way:
 `lib.VSM[k].F` on `map[string]S` or `lib.VSS[i].F` on `[]S` reads a
@@ -2857,6 +2863,29 @@ dep-free. Package
 vars shadowing universe names (`var iota int64`, `var true bool`)
 admit the same way: the compiler resolves the use to the
 declaration, so the read is package state like any other.
+
+### C07 bound pointers to local named types
+
+The named-pointee paths previously resolved `type_id` and field
+references through `imported_members` exclusively, which left an
+asymmetry: `p.V = x` on a local `type P struct{...}` already
+admitted (the member-write path returns the pointer's `type_id`
+unvalidated) while `p.V`, `(*p).V`, `t.W.N` and `*p` on `p *MyInt`
+stayed closed. The three resolution sites now fall back to the
+unit's own bindings: the pointee `type_id` resolves to a `type`
+binding, and the selector's `field` resolves through its `local`
+reference to a `variable` binding with `scope is None` — the field
+marker (package vars carry the unit scope, function vars the
+function's). Dep semantics are verbatim the imported model: field
+reads are dep-free plus an imported transfer against the field's
+real binding identity, `*p` reads return the pointer's provenance,
+and writes keep the existing `_member_write`/pointee-identity
+contracts — `effects` reports `unknown` everywhere, and every
+resolved identity lives in `known`, so `stale_dependents` flags a
+redeclared `type T` or renamed field without any synthetic ids.
+Boundaries hold: struct-typed local values (`st := P{...}`),
+unnamed composites (`*[]T`, `*struct{...}`), nested derefs (`**t`)
+and non-scalar fields stay closed.
 
 ### C06 imported generic instantiations
 
