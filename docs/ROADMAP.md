@@ -4080,8 +4080,8 @@ bound. Concurrency and Evidence acceptance remain open.
 `probe_retry_requests(..., retry_on=frozenset({...}))` narrows which
 still-excluded candidates are re-asked: when the gate is given, an
 adapter whose **last recorded outcome kind** is outside the set is
-skipped — `retry_on={"timed_out"}` re-asks a probe that timed out but
-never one whose spawn `failed`. `PROBE_OUTCOME_KINDS`
+skipped — `retry_on=frozenset({"timed_out"})` re-asks a probe that
+timed out but never one whose spawn `failed`. `PROBE_OUTCOME_KINDS`
 (`{"exited", "failed", "timed_out", "cancelled"}`) bounds the
 vocabulary: anything else — an unknown kind, an empty set, or a
 non-frozenset — is a static `ValueError`, never a silently dropped
@@ -4091,7 +4091,9 @@ every scheduling round.
 First attempts are unaffected (no outcome exists to gate on) and
 `None` keeps the unfiltered behavior. The gate stays declarative — it
 emits or withholds requests; it runs nothing, invents no outcome,
-and accepts no Evidence. Evidence acceptance of probe outcomes
+and accepts no Evidence. The `summaries-plan` route surface is
+unchanged (the gate is an opt-in scheduling argument, like
+`max_attempts`). Evidence acceptance of probe outcomes
 remains open.
 
 ## Roadmap authority and vocabulary

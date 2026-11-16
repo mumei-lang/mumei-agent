@@ -814,10 +814,10 @@ def probe_retry_requests(
 
     `retry_on` is the declared retry gate: when given, an adapter
     whose last recorded outcome kind is not in the set is skipped
-    — a policy that retries `timed_out` only never re-asks an
-    adapter after a `failed` spawn. First attempts are unaffected
-    (no outcome exists to gate on), and `None` keeps the
-    unfiltered behavior.
+    — `retry_on=frozenset({"timed_out"})` re-asks a timed-out
+    probe but never one whose spawn `failed`. First attempts are
+    unaffected (no outcome exists to gate on), and `None` keeps
+    the unfiltered behavior.
 
     Scheduling stays declarative: this runs nothing, never invents
     a candidate the observation rules did not exclude, and retries
