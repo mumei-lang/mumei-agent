@@ -4540,15 +4540,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             for arg in args
                         )
-                        transfers.append(
-                            CallTransfer(
-                                call.span,
-                                call.target,
-                                actual,
-                                frozenset(),
-                                imported=True,
+                        if computed[2] != call.target:
+                            # The shared range transfer above already
+                            # records on `computed[2]`; when that is
+                            # the pointee identity (`*G()`), the call
+                            # itself needs its own transfer. For a
+                            # direct container result (`G()`) both
+                            # would land on `call.target` — record
+                            # once.
+                            transfers.append(
+                                CallTransfer(
+                                    call.span,
+                                    call.target,
+                                    actual,
+                                    frozenset(),
+                                    imported=True,
+                                )
                             )
-                        )
                         self._store_call_writes(
                             args,
                             frozenset().union(*actual)
