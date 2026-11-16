@@ -970,6 +970,7 @@ class _Builder:
                 None,
             )
         extras: list[Any] = []
+        fields: list[Any] = []
         saw_deref = False
         while cur is not None:
             if cur.type == "parenthesized_expression":
@@ -986,6 +987,7 @@ class _Builder:
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "selector_expression":
+                fields.append(cur.child_by_field_name("field"))
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "index_expression":
@@ -1008,15 +1010,42 @@ class _Builder:
                 or not self._package_level(binding)
             ):
                 return None
-            if saw_deref and (
-                binding.type is None
-                or binding.type.kind != "pointer"
+            resolved: list[Any] = []
+            for field in fields:
+                field_ref = (
+                    self.references.get(self.node_key(field))
+                    if field is not None
+                    else None
+                )
+                ident = self._field_identity(field_ref)
+                if (
+                    ident is None
+                    or field is None
+                    or ident.name.encode("utf-8") != field.text
+                ):
+                    return None
+                resolved.append(ident)
+            fold = saw_deref
+            if saw_deref:
+                # `*G.P` dereferences the outermost field's pointer,
+                # not the root var — `*GP = v` on a non-pointer var
+                # cannot compile, but rejecting anyway stops a
+                # tampered binding from smuggling a store past the
+                # gate.
+                derefed = (
+                    resolved[0].type if resolved else binding.type
+                )
+                if derefed is None or derefed.kind != "pointer":
+                    return None
+            if any(
+                ident.type is not None
+                and ident.type.kind == "pointer"
+                for ident in resolved[1:]
             ):
-                # `*GP = v` on a non-pointer var cannot compile —
-                # rejected anyway so a tampered binding cannot
-                # smuggle a store past the gate.
-                return None
-            return binding, tuple(extras), saw_deref
+                # `G.P.V = v` on `P *Q` crosses P's pointer — the
+                # store may land in any binding `G.P = p` aimed at.
+                fold = True
+            return binding, tuple(extras), fold
         return None
 
     def _package_member(self, selector_node: Any) -> PackageMember | None:
@@ -2172,6 +2201,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if node.type == "identifier":
             ref = self.references.get(self.node_key(node))
             if ref is not None and ref.kind == "import":
+                return True
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            if (
+                binding is not None
+                and binding.kind == "variable"
+                and self._package_level(binding)
+            ):
+                # `GA[GI]` — a package var's read inside the index
+                # records its own transfer; skipping the evaluation
+                # drops it, so the store's stale tracking could not
+                # flag a redeclared `GI`.
                 return True
         return any(
             self._index_extra_effects(c) for c in _children(node)
@@ -4001,7 +4045,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # no transfer records, nothing pins.
                 local = self._local_composite_base(node, locals_)
                 if local is not None:
-                    ref, _fields = local
+                    ref, resolved_fields = local
+                    if not self._direct_field_chain(
+                        ref, resolved_fields
+                    ):
+                        # `st.V` where `V` promotes through embedded
+                        # `*Q` reads caller memory the conflated set
+                        # cannot represent — a dep-free answer here
+                        # would also report `effects` dishonestly, so
+                        # promoted reads stay closed like promoted
+                        # writes.
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
                     return locals_.get(ref.binding_id, frozenset())
                 # `G.V` / `G.A.N` — a field of a package-level
                 # composite (or pointer) var: package state is
@@ -4070,10 +4126,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             value_node = node.child_by_field_name("value")
             if value_node is None:
                 raise _Unsupported("unsupported_expression", _span(node))
-            deps = self.expression(
-                value_node, fn, params, locals_, transfers, count,
-                depth + 1,
-            )
             key_node = node.child_by_field_name("key")
             while (
                 key_node is not None
@@ -4087,6 +4139,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ),
                     None,
                 )
+            key_deps: frozenset[int] = frozenset()
             if key_node is not None:
                 key_ref = (
                     self.references.get(self.node_key(key_node))
@@ -4094,11 +4147,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else None
                 )
                 if self._field_identity(key_ref) is None:
-                    deps |= self.expression(
+                    # `M[K(x): v]` runs K before V — evaluate the key
+                    # first so a side effect inside it is observed
+                    # by the value's evaluation order.
+                    key_deps = self.expression(
                         key_node, fn, params, locals_, transfers, count,
                         depth + 1,
                     )
-            return deps
+            deps = self.expression(
+                value_node, fn, params, locals_, transfers, count,
+                depth + 1,
+            )
+            return deps | key_deps
         if kind in {"binary_expression", "unary_expression"}:
             # `&x` is the one unary with pointer semantics: the result
             # inherits the operand's deps exactly like a `p := t` bind,

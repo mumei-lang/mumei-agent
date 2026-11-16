@@ -2069,10 +2069,12 @@ C07 is **partially delivered**, not done. Fixed-point joins, bounded
 loop bodies, `&x` escape folds, `*p` stores/reads (named *and*
 unnamed scalar pointees), scalar package-level `var` reads/writes,
 struct-typed local values (conflated dep sets), composite package
-globals (struct/array/map/pointer `var`s admit field/index/deref
-reads and writes under the same external-state model — the var's
-own binding identity records each mutation and `stale_dependents`
-stays honest), multi-file package
+globals (named-type struct/array/map/pointer `var`s admit
+field/index/deref reads and writes under the same external-state
+model — the var's own binding identity records each mutation and
+`stale_dependents` stays honest; an anonymous `struct{...}` var's
+fields carry no resolvable identities and stay closed), multi-file
+package
 units and audit wiring
 (`--enable-summaries`) have all landed
 since this line was written — the honest residuals are composite-
