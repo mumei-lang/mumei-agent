@@ -171,7 +171,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func G(){}; func F(x int64) int64 {go G(); return x}",
         "func F(x []int64) int64 {return x[0]}",
         "func F(x map[int64]int64) int64 {return x[0]}",
-        "func F(x chan int64) int64 {return <-x}",
         "type I interface{Get()int64}; func F(x I) int64 {return x.Get()}",
         "type T int64; func(t T)Get()int64{return int64(t)}; func F(x T)int64{return x.Get()}",
         "func G[T ~int64](x T)T{return x}; func F(x int64)int64{return G(x)}",
@@ -12500,16 +12499,10 @@ def test_local_channel_alias_binds_stay_closed(go_types_helper):
 
 
 def test_channel_boundaries_stay_closed(go_types_helper):
-    # A `chan` parameter sits outside the signature fragment; a
-    # send through a selector (`p.C <- x`) and `make([]T)` stay
-    # opaque; `select` cannot build a CFG.
-    param = named(
-        *unit(
-            go_types_helper,
-            "func F(ch chan int64) int64 { return <-ch }\n",
-        )
-    )
-    assert not param.available
+    # A send through a selector (`p.C <- x`) and `make([]T)` stay
+    # opaque; `select` cannot build a CFG. (`chan` parameters admit
+    # under the external sync-resource model — the admit tests
+    # below cover them.)
     files = {
         "a.go": "package p\n"
         "type Q struct{ C chan int64 }\n"
@@ -12596,3 +12589,110 @@ def test_channel_tuple_receive_cannot_alias(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_chan_parameter_send_recv_admitted(go_types_helper):
+    # A `chan T` parameter is a queue shared with the caller: the
+    # send's deps broadcast into indirect writes so the receive can
+    # observe them, and the receive also carries the parameter's
+    # own provenance.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, ch chan int64) int64 {\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_receive_only_carries_provenance(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\treturn <-ch + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_close_and_range_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range ch {\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\tclose(ch)\n"
+        "\treturn s + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_records_effects_and_staleness(go_types_helper):
+    # Sends, receives and closes on a channel parameter touch a
+    # caller-shared queue — they record imported transfers on the
+    # parameter's own binding identity, so `effects` stays unknown
+    # and redeclaring the parameter's type flags stale_dependents.
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_chan_parameter_boundaries_stay_closed(go_types_helper):
+    # Non-scalar elements, a channel result, an alias of the
+    # parameter, len/cap metadata and select all stay closed.
+    files = {
+        "a.go": "package p\n"
+        "func Ptr(ch chan *int64) int64 { return 0 }\n"
+        "func Res(x int64) chan int64 { return make(chan int64) }\n"
+        "func Alias(ch chan int64, x int64) int64 {\n"
+        "\tp := ch\n"
+        "\tp <- x\n"
+        "\treturn 0\n}\n"
+        "func Len(ch chan int64, x int64) int64 {\n"
+        "\tn := len(ch)\n"
+        "\t_ = n\n"
+        "\treturn x\n}\n"
+        "func Sel(ch chan int64, x int64) int64 {\n"
+        "\tselect {\n"
+        "\tcase v := <-ch:\n"
+        "\t\treturn v\n"
+        "\tdefault:\n"
+        "\t\treturn x\n"
+        "\t}\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in ("Ptr", "Res", "Alias", "Len", "Sel")
+    }
+    assert not results["Ptr"].available
+    assert not results["Res"].available
+    assert not results["Alias"].available
+    assert not results["Len"].available
+    assert not results["Sel"].available
