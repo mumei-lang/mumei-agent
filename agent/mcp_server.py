@@ -3119,7 +3119,7 @@ def ts_summaries(source_path: str, resolve_modules: bool = False) -> str:
 
 
 @mcp.tool()
-def rust_summaries(source_path: str) -> str:
+def rust_summaries(source_path: str, resolve_modules: bool = False) -> str:
     """Emit a declared Rust dependency summary manifest (C06/C07).
 
     The same wiring as the `rust-summaries` CLI route: one declared
@@ -3130,6 +3130,8 @@ def rust_summaries(source_path: str) -> str:
     Args:
         source_path: Absolute path to the declared Rust source file
             (at most 64 KiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `manifest` — the
@@ -3160,14 +3162,19 @@ def rust_summaries(source_path: str) -> str:
             "declared bound"
         )
     try:
-        live = summarize_rust(raw)
+        from agent.rust_interprocedural import _fs_resolver
+        live = summarize_rust(
+            raw,
+            resolver=_fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        )
     except _Unsupported as exc:
         return _err(f"analysis limit: {exc.reason}")
     return _ok({"manifest": live.to_dict()})
 
 
 @mcp.tool()
-def sol_summaries(source_path: str) -> str:
+def sol_summaries(source_path: str, resolve_modules: bool = False) -> str:
     """Emit a declared Solidity dependency summary manifest (C06/C07).
 
     The same wiring as the `sol-summaries` CLI route: one declared
@@ -3178,6 +3185,8 @@ def sol_summaries(source_path: str) -> str:
     Args:
         source_path: Absolute path to the declared Solidity source
             file (at most 256 KiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `manifest` — the
@@ -3207,7 +3216,12 @@ def sol_summaries(source_path: str) -> str:
             "declared bound"
         )
     try:
-        live = summarize_solidity(raw)
+        from agent.sol_interprocedural import _fs_resolver
+        live = summarize_solidity(
+            raw,
+            resolver=_fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        )
     except Exception as exc:
         return _err(
             _redact_declared_paths(str(exc), [source_path])
@@ -3329,7 +3343,11 @@ def ts_summaries_check(
 
 
 @mcp.tool()
-def rust_summaries_check(source_path: str, manifest_path: str) -> str:
+def rust_summaries_check(
+    source_path: str,
+    manifest_path: str,
+    resolve_modules: bool = False,
+) -> str:
     """Check a declared Rust manifest against a fresh derivation.
 
     The same wiring as `rust-summaries-check`: both declared inputs
@@ -3342,6 +3360,8 @@ def rust_summaries_check(source_path: str, manifest_path: str) -> str:
         source_path: Declared Rust source (64 KiB).
         manifest_path: Declared
             `mumei.rust-scalar-parameter-deps/v1` manifest (8 MiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `check` — the `mumei.rust-summary-check/v1`
@@ -3356,7 +3376,11 @@ def rust_summaries_check(source_path: str, manifest_path: str) -> str:
         manifest_path,
         mod,
         mod.RustSummarySet,
-        mod.summarize_rust,
+        lambda raw: mod.summarize_rust(
+            raw,
+            resolver=mod._fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        ),
         lambda declared, live: {
             "check": mod.summary_check_document(declared, live)
         },
@@ -3364,7 +3388,11 @@ def rust_summaries_check(source_path: str, manifest_path: str) -> str:
 
 
 @mcp.tool()
-def sol_summaries_check(source_path: str, manifest_path: str) -> str:
+def sol_summaries_check(
+    source_path: str,
+    manifest_path: str,
+    resolve_modules: bool = False,
+) -> str:
     """Check a declared Solidity manifest against a fresh derivation.
 
     The same wiring as `sol-summaries-check`: both declared inputs
@@ -3377,6 +3405,8 @@ def sol_summaries_check(source_path: str, manifest_path: str) -> str:
         source_path: Declared Solidity source (256 KiB).
         manifest_path: Declared
             `mumei.sol-scalar-parameter-deps/v1` manifest (8 MiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `check` — the `mumei.sol-summary-check/v1`
@@ -3391,7 +3421,11 @@ def sol_summaries_check(source_path: str, manifest_path: str) -> str:
         manifest_path,
         mod,
         mod.SolSummarySet,
-        mod.summarize_solidity,
+        lambda raw: mod.summarize_solidity(
+            raw,
+            resolver=mod._fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        ),
         lambda declared, live: {
             "check": mod.summary_check_document(declared, live)
         },
@@ -3451,7 +3485,11 @@ def ts_summaries_reuse(
 
 
 @mcp.tool()
-def rust_summaries_reuse(source_path: str, manifest_path: str) -> str:
+def rust_summaries_reuse(
+    source_path: str,
+    manifest_path: str,
+    resolve_modules: bool = False,
+) -> str:
     """Emit a manifest reusing a declared Rust manifest's unchanged
     summaries.
 
@@ -3466,6 +3504,8 @@ def rust_summaries_reuse(source_path: str, manifest_path: str) -> str:
         source_path: Declared Rust source (64 KiB).
         manifest_path: Declared
             `mumei.rust-scalar-parameter-deps/v1` manifest (8 MiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `manifest` — the merged
@@ -3481,7 +3521,11 @@ def rust_summaries_reuse(source_path: str, manifest_path: str) -> str:
         manifest_path,
         mod,
         mod.RustSummarySet,
-        mod.summarize_rust,
+        lambda raw: mod.summarize_rust(
+            raw,
+            resolver=mod._fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        ),
         lambda declared, live: {
             "manifest": mod.summary_reuse_set(declared, live).to_dict()
         },
@@ -3489,7 +3533,11 @@ def rust_summaries_reuse(source_path: str, manifest_path: str) -> str:
 
 
 @mcp.tool()
-def sol_summaries_reuse(source_path: str, manifest_path: str) -> str:
+def sol_summaries_reuse(
+    source_path: str,
+    manifest_path: str,
+    resolve_modules: bool = False,
+) -> str:
     """Emit a manifest reusing a declared Solidity manifest's
     unchanged summaries.
 
@@ -3504,6 +3552,8 @@ def sol_summaries_reuse(source_path: str, manifest_path: str) -> str:
         source_path: Declared Solidity source (256 KiB).
         manifest_path: Declared
             `mumei.sol-scalar-parameter-deps/v1` manifest (8 MiB).
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `manifest` — the merged
@@ -3519,7 +3569,11 @@ def sol_summaries_reuse(source_path: str, manifest_path: str) -> str:
         manifest_path,
         mod,
         mod.SolSummarySet,
-        mod.summarize_solidity,
+        lambda raw: mod.summarize_solidity(
+            raw,
+            resolver=mod._fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        ),
         lambda declared, live: {
             "manifest": mod.summary_reuse_set(declared, live).to_dict()
         },
@@ -3757,7 +3811,10 @@ def ts_summaries_accept(
 
 @mcp.tool()
 def rust_summaries_accept(
-    source_path: str, manifest_path: str, function: str
+    source_path: str,
+    manifest_path: str,
+    function: str,
+    resolve_modules: bool = False,
 ) -> str:
     """Run the strict whole-context accept gate for one declared
     Rust function.
@@ -3775,6 +3832,8 @@ def rust_summaries_accept(
             `mumei.rust-scalar-parameter-deps/v1` manifest (8 MiB).
         function: Declared function name to accept — an exact
             emitted name (`f`, `P.f`) or a bare member name.
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `accept` — the `mumei.rust-summary-accept/v1`
@@ -3791,7 +3850,11 @@ def rust_summaries_accept(
         manifest_path,
         mod,
         mod.RustSummarySet,
-        mod.summarize_rust,
+        lambda raw: mod.summarize_rust(
+            raw,
+            resolver=mod._fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        ),
         lambda declared, live: {
             "accept": mod.summary_accept_document(
                 declared, live, function
@@ -3802,7 +3865,10 @@ def rust_summaries_accept(
 
 @mcp.tool()
 def sol_summaries_accept(
-    source_path: str, manifest_path: str, function: str
+    source_path: str,
+    manifest_path: str,
+    function: str,
+    resolve_modules: bool = False,
 ) -> str:
     """Run the strict whole-context accept gate for one declared
     Solidity function.
@@ -3821,6 +3887,8 @@ def sol_summaries_accept(
         function: Declared function name to accept — an exact
             emitted name (`f`, `C.f`, `C.f#2`) or a bare member
             name.
+        resolve_modules: Opt-in relative-import resolution, same as
+            the CLI flag.
 
     Returns:
         JSON with `accept` — the `mumei.sol-summary-accept/v1`
@@ -3837,7 +3905,11 @@ def sol_summaries_accept(
         manifest_path,
         mod,
         mod.SolSummarySet,
-        mod.summarize_solidity,
+        lambda raw: mod.summarize_solidity(
+            raw,
+            resolver=mod._fs_resolver if resolve_modules else None,
+            source_path=source_path,
+        ),
         lambda declared, live: {
             "accept": mod.summary_accept_document(
                 declared, live, function
