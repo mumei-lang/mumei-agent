@@ -659,9 +659,16 @@ C02 stays partial.
 consumer recheck as one attempt: `<core> native-bundle recheck-llvm
 --expected-build-id <id> --json <bundle> <source>` under a
 `mumei.native-recheck-request/v1` fingerprint binding the Core
-executable's bytes, every bundle member the consumer reads
-(`native-bundle.json`, `program.ll`, `program.o`, `proof-cert.json`,
-`program`), the source's bytes and the trusted-channel build ID. Only
+executable's bytes, every bundle member the record declares — the
+`files` map's component members plus, for
+`mumei.native-multifile-bundle/v1`, each `sources/<member>` the merge
+is re-derived from, enumerated from `native-bundle.json` and
+validated against the member grammar before joining so a hand-crafted
+record cannot steer the fingerprint's reads outside the bundle — the
+source's bytes and the trusted-channel build ID. The post-run drift
+check re-enumerates members from the current record, so a record
+swapped mid-run that declares new members reports `inputs_changed`
+rather than claiming an outcome on unbound bytes. Only
 an `exited` run with `exit_code == 0` (`EquivalentWithinProfile`)
 selects the produced `mumei.native-consumer-evidence/v1` report (the
 three-record envelope: bundle identity, fresh source postcondition,
@@ -727,9 +734,10 @@ Where verify-attempt selects on a clean exit alone (the evidence
 record IS the stdout document), `native-bundle build` writes the
 `mumei.native-bundle/v1` directory as a side effect — so selection
 requires three post-conditions: an `exited` run with `exit_code == 0`,
-a parseable `Build ID: <sha256>` line in the bounded capture, and the
-full declared member set present (`native-bundle.json`,
-`program.ll`, `program.o`, `proof-cert.json`, `program`). The
+a parseable `Build ID: <sha256>` line in the bounded capture, and
+every member the produced record declares present — the component
+files plus, for a multifile record, each `sources/<member>` (an
+unparseable produced record is incomplete by definition). The
 reported `build_id` is the Core-computed SHA-256 of
 `native-bundle.json` — the exact identity a `native-recheck` call
 pins via `--expected-build-id`. Bundle bytes are outputs: they never

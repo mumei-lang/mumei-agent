@@ -21,6 +21,13 @@ SOURCE = (
 
 BUILD_ID = "b" * 64
 
+# Minimal real-shaped record a produced bundle carries — the bundle
+# completeness check enumerates its declared members.
+RECORD = (
+    '{"schema": "mumei.native-bundle/v1", "files": {'
+    '"llvm_ir": {}, "object": {}, "certificate": {}, "executable": {}}}'
+)
+
 
 def _write_core(tmp_path: Path, build_exit: int = 0,
                 complete: bool = True, build_id: str | None = None) -> Path:
@@ -29,10 +36,13 @@ def _write_core(tmp_path: Path, build_exit: int = 0,
     Build ID line (exit per `build_exit`). With `build_id=None` the
     stub computes the record's sha256 like the real Core; pass a
     literal to simulate a misbehaving Core."""
-    members = "\n".join(
-        f'    printf %s "{name}-bytes" > "$out/{name}"'
-        for name in (BUNDLE_MEMBERS if complete else BUNDLE_MEMBERS[:-1])
-    )
+    lines = []
+    for name in (BUNDLE_MEMBERS if complete else BUNDLE_MEMBERS[:-1]):
+        if name == "native-bundle.json":
+            lines.append(f"    printf %s '{RECORD}' > \"$out/{name}\"")
+        else:
+            lines.append(f'    printf %s "{name}-bytes" > "$out/{name}"')
+    members = "\n".join(lines)
     if build_id is None:
         # python3: required by the test suite on every POSIX host
         # (sha256sum is absent on macOS).
@@ -143,6 +153,47 @@ def test_exit_zero_with_incomplete_bundle_selects_nothing(
     report = json.loads(out)
     # The printed ID is claimable only once it verifies against the
     # record — an incomplete bundle pins nothing and selects nothing.
+    assert "build_id" not in report
+    assert report["sequence"].get("selected_result") is None
+    assert "candidate" not in report
+
+
+def test_multifile_record_missing_member_selects_nothing(tmp_path, capsys):
+    """A produced record declaring a `sources/` member that never
+    materialized is incomplete — the consumer routes would fingerprint
+    it, so it is not a selectable production."""
+    record = (
+        '{"schema": "mumei.native-multifile-bundle/v1", "files": {'
+        '"llvm_ir": {}, "object": {}, "certificate": {}, '
+        '"executable": {}}, "sources": {"app.mm": {}}}'
+    )
+    members = "\n".join(
+        f'    printf %s "{name}-bytes" > "$out/{name}"'
+        for name in BUNDLE_MEMBERS
+    )
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "native-bundle" ] && [ "$2" = "build" ]; then\n'
+        '    out="$5"\n'
+        "    mkdir -p \"$out\"\n"
+        f"{members}\n"
+        f"    printf %s '{record}' > \"$out/native-bundle.json\"\n"
+        '    printf "Build ID: %s\\n" '
+        f'"$(python3 -c \''
+        "import hashlib,sys;"
+        'print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())'
+        f"' \"$out/native-bundle.json\")\"\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    bundle = tmp_path / "bundle"
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
     assert "build_id" not in report
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report

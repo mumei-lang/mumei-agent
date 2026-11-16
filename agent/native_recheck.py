@@ -18,6 +18,18 @@ against an externally supplied bundle — and on success emits the
 ``mumei.verification-evidence/v1`` records: bundle identity, fresh
 source postcondition, source-to-LLVM user-body correspondence).
 
+The bundle members the Core consumes are enumerated from
+``native-bundle.json`` itself — the same enumeration `native-accept`
+uses: the ``files`` map's component members plus, for
+``mumei.native-multifile-bundle/v1`` records, every
+``sources/<member>`` the merge is re-derived from (a multifile
+`recheck-llvm` consumes them when it re-derives the merged text the
+snapshot was validated against). Each member name is validated
+against the Core member grammar before it joins a path, so a
+hand-crafted record cannot steer the fingerprint's file reads outside
+the bundle. Files present on disk but undeclared are never
+fingerprinted: the Core does not consume them either.
+
 Selection rule: only an ``exited`` run with ``exit_code == 0``
 (``EquivalentWithinProfile``) selects — `recheck-llvm --json` prints
 the consumer evidence on stdout only then. Different/UB/refuted runs
@@ -60,21 +72,16 @@ import os
 import sys
 from pathlib import Path
 
+from agent.native_bundle import (
+    MAX_RECORD_BYTES,
+    MAX_SOURCE_BYTES,
+    RECORD_FILE,
+    declared_members,
+    member_bound_bytes,
+)
+
 NATIVE_RECHECK_REQUEST_PROFILE = "mumei.native-recheck-request/v1"
 NATIVE_RECHECK_REPORT_PROFILE = "mumei.native-recheck-report/v1"
-
-# Mirrors of the Core side's read bounds (src/commands/native_bundle.rs):
-# the pinned record is read under 1 MiB, every bundle member under
-# 32 MiB, the source under 64 KiB. A declared input the Core cannot
-# even read is a static error, not a run.
-RECORD_FILE = "native-bundle.json"
-MAX_RECORD_BYTES = 1_048_576
-MAX_COMPONENT_BYTES = 33_554_432
-MAX_SOURCE_BYTES = 65_536
-
-# Bundle members the Core reads via components() — declared in the
-# request fingerprint exactly as the Core consumes them.
-BUNDLE_MEMBERS = ("program.ll", "program.o", "proof-cert.json", "program")
 
 # Terminal exit-code mapping mirrors the native recheck-llvm contract,
 # restricted to unambiguous codes: 0 = EquivalentWithinProfile and
@@ -113,16 +120,13 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _bundle_files(bundle: Path) -> list[Path]:
-    return [bundle.joinpath(RECORD_FILE)] + [
-        bundle.joinpath(name) for name in BUNDLE_MEMBERS
-    ]
-
-
-def _declared_files(args: argparse.Namespace) -> list[Path]:
+def _declared_files(
+    args: argparse.Namespace, members: list[str]
+) -> list[Path]:
+    bundle = Path(args.bundle)
     return (
         [Path(args.core)]
-        + _bundle_files(Path(args.bundle))
+        + [bundle / member for member in members]
         + [Path(args.source)]
     )
 
@@ -147,12 +151,14 @@ def _is_build_id(value: str) -> bool:
     )
 
 
-def _check_request(args: argparse.Namespace) -> None:
+def _check_request(args: argparse.Namespace) -> list[str]:
     """Validate the declared request before any attempt is dispatched.
 
-    A static-shape error raised after a completed run would lose the
-    whole report, so everything checkable up front fails here as a
-    plain `ValueError` before the attempt is dispatched.
+    Returns the declared member list so the fingerprint binds exactly
+    the members the Core consumes. A static-shape error raised after a
+    completed run would lose the whole report, so everything checkable
+    up front fails here as a plain `ValueError` before the attempt is
+    dispatched.
     """
     if os.name != "posix":
         raise ValueError("native-recheck requires a POSIX host")
@@ -163,7 +169,8 @@ def _check_request(args: argparse.Namespace) -> None:
     ):
         if not os.path.isabs(path) or "\x00" in path:
             raise ValueError(f"{name} must be an absolute path")
-    if not Path(args.bundle).is_dir():
+    bundle = Path(args.bundle)
+    if not bundle.is_dir():
         raise ValueError("--bundle must be a native-bundle directory")
     if not _is_build_id(args.expected_build_id):
         raise ValueError(
@@ -171,12 +178,20 @@ def _check_request(args: argparse.Namespace) -> None:
         )
     if not 1 <= args.attempt_timeout <= 300_000:
         raise ValueError("--attempt-timeout must be 1..300000 ms")
-    bundle = Path(args.bundle)
-    for path, bound in (
-        (bundle / RECORD_FILE, MAX_RECORD_BYTES),
-        *((bundle / name, MAX_COMPONENT_BYTES) for name in BUNDLE_MEMBERS),
-        (Path(args.source), MAX_SOURCE_BYTES),
-    ):
+    # Bound the record before parsing it — enumeration reads it whole.
+    try:
+        record_size = os.path.getsize(bundle / RECORD_FILE)
+    except OSError as exc:
+        raise ValueError(f"cannot read declared input: {exc}") from exc
+    if record_size > MAX_RECORD_BYTES:
+        raise ValueError(
+            f"{RECORD_FILE} exceeds the Core input bound "
+            f"({MAX_RECORD_BYTES} bytes)"
+        )
+    members = declared_members(bundle)
+    for member in members:
+        path = bundle / member
+        bound = member_bound_bytes(member)
         try:
             size = os.path.getsize(path)
         except OSError as exc:
@@ -185,31 +200,39 @@ def _check_request(args: argparse.Namespace) -> None:
             raise ValueError(
                 f"{path.name} exceeds the Core input bound ({bound} bytes)"
             )
-    _check_output_path(args, _declared_files(args))
+    try:
+        size = os.path.getsize(args.source)
+    except OSError as exc:
+        raise ValueError(f"cannot read declared input: {exc}") from exc
+    if size > MAX_SOURCE_BYTES:
+        raise ValueError(
+            f"{Path(args.source).name} exceeds the Core input bound "
+            f"({MAX_SOURCE_BYTES} bytes)"
+        )
+    _check_output_path(args, _declared_files(args, members))
+    return members
 
 
-def _attempt_fingerprint(args: argparse.Namespace) -> str:
+def _attempt_fingerprint(
+    args: argparse.Namespace, members: list[str]
+) -> str:
     """Bind the request's declared inputs into one request identity.
 
-    The fingerprint covers the Core executable's bytes, every bundle
-    member the Core reads (the pinned record plus the four component
-    files), the declared source's bytes and the expected build ID —
-    what the recheck-llvm invocation would consume. The attempt's own
-    timeout_ms is the sequence's separate declared field, not part of
-    request identity.
+    The fingerprint covers the Core executable's bytes, every member
+    the record declares (the pinned record, the component files and
+    each `sources/` member the merge is re-derived from), the declared
+    source's bytes and the expected build ID — what the recheck-llvm
+    invocation would consume. The attempt's own timeout_ms is the
+    sequence's separate declared field, not part of request identity.
     """
     bundle = Path(args.bundle)
-    members = {
-        RECORD_FILE: _file_sha256(bundle / RECORD_FILE),
-        **{
-            name: _file_sha256(bundle / name)
-            for name in BUNDLE_MEMBERS
-        },
+    member_hashes = {
+        member: _file_sha256(bundle / member) for member in members
     }
     request = {
         "schema_version": NATIVE_RECHECK_REQUEST_PROFILE,
         "core": _file_sha256(Path(args.core)),
-        "bundle": {"path": str(bundle), "members": members},
+        "bundle": {"path": str(bundle), "members": member_hashes},
         "source": {
             "path": args.source,
             "sha256": _file_sha256(Path(args.source)),
@@ -246,8 +269,9 @@ def build_recheck_parser(
         metavar="DIR",
         help=(
             "Declared native-bundle directory (absolute path) holding "
-            "native-bundle.json, program.ll, program.o, "
-            "proof-cert.json and program."
+            "native-bundle.json and its declared members (the component "
+            "files plus any `sources/` members a multifile record "
+            "pins)."
         ),
     )
     parser.add_argument(
@@ -311,9 +335,9 @@ def run_recheck(args: argparse.Namespace) -> dict:
         AttemptSequenceStore,
     )
 
-    _check_request(args)
+    members = _check_request(args)
 
-    fingerprint = _attempt_fingerprint(args)
+    fingerprint = _attempt_fingerprint(args, members)
     argv = (
         args.core,
         "native-bundle",
@@ -333,9 +357,16 @@ def run_recheck(args: argparse.Namespace) -> dict:
         argv,
         memory_bound_mb=args.memory_bound_mb,
     )
+    # Re-enumerate members from the CURRENT record before re-hashing:
+    # the member set derives from the record, so a record swapped
+    # mid-run may declare members the pre-run enumeration never
+    # fingerprinted. Only a same-set, same-bytes re-hash is consistent.
     try:
-        inputs_changed = _attempt_fingerprint(args) != fingerprint
-    except OSError:
+        drift_members = declared_members(Path(args.bundle))
+        inputs_changed = (
+            _attempt_fingerprint(args, drift_members) != fingerprint
+        )
+    except (OSError, ValueError):
         inputs_changed = True
     record = dispatch.run.record
     exit_code = None
