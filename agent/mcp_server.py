@@ -2800,6 +2800,83 @@ def verify_recheck(
 
 
 @mcp.tool()
+def verify_accept(
+    core_path: str,
+    evidence_path: str,
+    source_path: str,
+    solver_timeout_ms: int = 5000,
+    solver_resource_limit: int = 1000000,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Evaluate a saved Evidence record's source-side acceptance.
+
+    Runs `evidence accept-source` as one declared attempt — the same
+    wiring as the `verify-accept` CLI route: the record must parse AND
+    still match a fresh same-profile verification. The declared budget
+    must match the producer's explicit budget, and `acceptance` is
+    claimed only for uniquely-mapped exit codes (0 `accepted`,
+    3 `inconclusive`); mid-run drift reports `inputs_changed` with no
+    claimed outcome. An `accepted` run reports `discharged_checks` —
+    `claim_truth`, `freshness` and `semantic_correspondence` — with
+    the remaining checks in `checks_not_performed`.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        evidence_path: Absolute path to the declared saved
+            `mumei.verification-evidence/v1` record (at most 64 KiB).
+        source_path: Absolute path to the declared .mm source file; the
+            record's own labels/paths are never read.
+        solver_timeout_ms: Solver budget in milliseconds — must equal
+            the producer's explicit budget.
+        solver_resource_limit: Solver resource limit — same rule.
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the `mumei.verify-accept-report/v1`
+        document — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.verify_accept import run_accept
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("evidence_path", evidence_path),
+        ("source_path", source_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    for name, value in (
+        ("solver_timeout_ms", solver_timeout_ms),
+        ("solver_resource_limit", solver_resource_limit),
+        ("attempt_timeout_ms", attempt_timeout_ms),
+    ):
+        if type(value) is not int or value < 1:
+            return _err(f"{name} must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        evidence=evidence_path,
+        source=source_path,
+        solver_timeout=str(solver_timeout_ms),
+        solver_resource_limit=str(solver_resource_limit),
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_accept(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, evidence_path, source_path]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def evidence_check(
     core_path: str,
     evidence_path: str,

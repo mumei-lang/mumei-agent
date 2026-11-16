@@ -55,6 +55,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
+| `verify-accept` | 8 | Run a declared Core source-evidence acceptance evaluation as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
 | `native-accept` | 7 | Run a declared Core native artifact acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
@@ -779,6 +780,24 @@ Run a declared Core source-evidence recheck as one attempt and emit the reconcil
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the recheck report JSON here instead of stdout. |
+
+
+## `mumei-agent verify-accept`
+
+Run a declared Core source-evidence acceptance evaluation as one attempt and emit the reconciled lineage plus the declared acceptance outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence accept-source`. |
+| `--evidence` | `<PATH>` | yes | — | Declared saved Evidence record (absolute path, a common mumei.verification-evidence/v1 JSON, at most 65536 bytes). |
+| `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path); the saved record's own labels/paths are never read. |
+| `--solver-timeout` | `<<MS>>` | no | 5000 | Bounded solver budget passed to `evidence accept-source` (ms); must match the producer's explicit budget. |
+| `--solver-resource-limit` | `<<N>>` | no | 1000000 | Bounded solver resource limit passed to `evidence accept-source`. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the acceptance report JSON here instead of stdout. |
 
 
 ## `mumei-agent native-recheck`
