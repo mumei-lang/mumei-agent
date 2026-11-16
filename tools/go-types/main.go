@@ -885,6 +885,13 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 		f.Elem = &e
 		return f
 	}
+	if _, ok := t.Underlying().(*types.Struct); ok {
+		// `struct{...}` — named or anonymous. The kind alone
+		// classifies the shape; a field's own binding carries its
+		// type, so no field facts are needed.
+		f.Kind = "struct"
+		return f
+	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
 		f.Kind = "function"
 		return f

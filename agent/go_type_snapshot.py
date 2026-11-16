@@ -421,6 +421,7 @@ def _go_type(value: Any, arch: str) -> GoType:
                 "slice",
                 "array",
                 "map",
+                "struct",
             }
             and width == 0
             and signed is None
@@ -435,7 +436,7 @@ def _go_type(value: Any, arch: str) -> GoType:
             "string",
             "unsafe.Pointer",
         }
-        if kind in {"function", "pointer", "slice", "array", "map"}:
+        if kind in {"function", "pointer", "slice", "array", "map", "struct"}:
             # A pointer fact's identity lives in `type_id` (the
             # pointee's named/alias type), not in a basic name; a
             # slice/array fact's element lives in `elem`, and a map

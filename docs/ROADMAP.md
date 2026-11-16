@@ -2101,13 +2101,22 @@ imported transfer, argument deps union, `&x` arguments fold and
 `effects` stays unknown, while each element name carries
 deps(args) ∪ escaped ∪ indirect writes and the index/key stays
 dep-free — while nested element
-fields (`(*p)[i].F.G` reads or stores), anonymous `*struct{...}`
-pointees and deeper nested derefs still stay closed (`**p` now
+fields (`(*p)[i].F.G` reads or stores) and deeper nested derefs
+still stay closed (`**p` now
 admits one level — the inner `*p` operand must still be a bare
 identifier and the pointee chain resolves pointer →
 scalar/pointer under a `<binding>/pointee/pointee` identity or a
 named deep type, while `***p` and named-alias pointer chains
-(`type PP *T`, whose producer facts stay opaque) fail closed),
+(`type PP *T`, whose producer facts stay opaque) fail closed).
+Anonymous `*struct{...}` pointees now admit single-level scalar
+field access — `p.V`/`(*p).V` reads and `p.V = v`/`+=`/`++`
+stores — since the producer emits a `struct` fact for every
+struct underlying and each field still resolves through its own
+binding; the synthetic `<binding>/pointee` identity records the
+store and the pin, while whole-struct derefs (`*p` reads or
+stores), nested selections (`p.A.N` or `p.A.N` through a
+pointer-typed `A`) and anonymous `struct{...}` VALUES
+(`st := struct{...}{...}`) stay closed,
 the remaining
 resource-state semantics (channels, `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
@@ -2937,7 +2946,9 @@ resolved identity lives in `known`, so `stale_dependents` flags a
 redeclared `type T` or renamed field without any synthetic ids.
 Boundaries hold: struct-typed local values (`st := P{...}` —
 admitted in the next slice), unnamed composites (`*[]T`,
-`*struct{...}`), nested derefs (`**t`) and non-scalar fields stay
+`*struct{...}` — single-level scalar field access admitted in a
+later slice via the producer's `struct` fact and the field's own
+binding), nested derefs (`**t`) and non-scalar fields stay
 closed.
 
 ### C07 struct-typed local values

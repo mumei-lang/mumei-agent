@@ -211,6 +211,17 @@ class CallTransfer:
         )
 
 
+@dataclass(frozen=True)
+class _AnonymousPointee:
+    """The pointee record a bound `*struct{...}` supplies — the
+    anonymous struct names no `type` member, so its slot in a
+    resolved pointer chain carries the synthetic `<binding>/pointee`
+    identity and the pointee fact itself for classification."""
+
+    id: str
+    type: Any
+
+
 def _span_dict(span: ByteSpan | FileSpan | None) -> dict | None:
     if span is None:
         return None
@@ -758,7 +769,7 @@ class _Builder:
         composite = (
             binding is not None
             and binding.type is not None
-            and binding.type.kind == "unsupported"
+            and binding.type.kind in {"unsupported", "struct"}
             and bool(binding.type.type_id)
             and self._pointee_type(binding.type.type_id) is not None
         )
@@ -1555,16 +1566,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         binding = self.bindings.get(ref.binding_id)
-        if (
-            binding is None
-            or binding.type.kind != "pointer"
-            or not binding.type.type_id
-        ):
+        if binding is None or binding.type.kind != "pointer":
             return None
-        pointee = self._pointee_type(binding.type.type_id)
-        if pointee is None:
+        if binding.type.type_id:
+            pointee = self._pointee_type(binding.type.type_id)
+            if pointee is None:
+                return None
+            return (pointee,), ref
+        # `t *struct{...}` — an anonymous struct pointee names no
+        # `type` member, but the pointee fact still classifies the
+        # shape and each field resolves through its own binding.
+        # A synthetic identity keeps the write side's transfer and
+        # the pin honest — it can never redeclare, so it flags no
+        # false staleness either.
+        pointee_fact = binding.type.elem
+        if pointee_fact is None or pointee_fact.kind != "struct":
             return None
-        return (pointee,), ref
+        return (
+            (
+                _AnonymousPointee(
+                    ref.binding_id + "/pointee", pointee_fact
+                ),
+            ),
+            ref,
+        )
 
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` qualified type names, or None.
@@ -2751,8 +2776,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         binding = self.bindings.get(ref.binding_id)
-        if binding is None or not binding.type.type_id:
+        if binding is None:
             return None
+        if not binding.type.type_id:
+            # `t.V = v` on a bound `*struct{...}` — the anonymous
+            # pointee names no `type` identity, but the store still
+            # lands in caller memory the dep model never tracks:
+            # the synthetic `<binding>/pointee` identity records it
+            # like every other unnamed pointee's.
+            elem = binding.type.elem
+            if (
+                binding.type.kind != "pointer"
+                or elem is None
+                or elem.kind != "struct"
+            ):
+                return None
+            return ref.binding_id + "/pointee", ref
         if self._is_local_composite(binding):
             # `st.V = v` on a tracked local composite — the value
             # folds into st's dep set; no external mutation records.
