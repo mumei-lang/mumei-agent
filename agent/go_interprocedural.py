@@ -670,6 +670,13 @@ class _Builder:
         # between the literal and the call (`p := &a; h := func(){*p};
         # p = &b; h()` reads `b`, not `a`).
         self.closure_captures: dict[str, frozenset[str]] = {}
+        # Whether the statement currently running may not execute —
+        # a closure rebind inside a branch unions its captures like
+        # `_store` unions the binding's deps. `_conditional` covers
+        # post-exit skips; `_may_skip` covers branch/loop scope
+        # copies, whose writes only join back by union.
+        self._conditional = False
+        self._may_skip = 0
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -3351,6 +3358,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 saw_return, conditional,
             )
 
+    def _branch_sequence(self, children, *args: Any) -> None:
+        """`_sequence` over a maybe-unexecuted scope copy — the body's
+        writes only join back by union, so a closure literal bound
+        inside keeps the skipped path's capture record too."""
+        self._may_skip += 1
+        try:
+            self._sequence(children, *args)
+        finally:
+            self._may_skip -= 1
+
+    def _branch_statement(self, node: Any, *args: Any) -> None:
+        """The same marker for a single statement on a scope copy
+        (a switch alternative, a for-update)."""
+        self._may_skip += 1
+        try:
+            self.statement(node, *args)
+        finally:
+            self._may_skip -= 1
+
     @staticmethod
     def _store(
         locals_: dict[str, frozenset[int]],
@@ -3383,6 +3409,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count[0] += 1
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
+        self._conditional = conditional
         kind = node.type
         if kind in {"block", "statement_list"}:
             self._sequence(
@@ -3448,6 +3475,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     for rhs in rights
                 ]
+            # Tuple binds evaluate the pre-state in parallel — `a, h2
+            # := g, h` or `h, g := g, h` — so the propagation below
+            # reads the maps as they were BEFORE any store landed.
+            captures_before = dict(self.closure_captures)
+            pointee_before = set(self.pointee_closures)
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -3495,16 +3527,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if (
                         src_id is not None
-                        and src_id in self.closure_captures
+                        and src_id in captures_before
                     ):
                         self.closure_captures[binding.id] = (
-                            self.closure_captures[src_id]
+                            captures_before[src_id]
                         )
                     else:
                         self.closure_captures.pop(binding.id, None)
                     if (
                         src_id is not None
-                        and src_id in self.pointee_closures
+                        and src_id in pointee_before
                     ):
                         self.pointee_closures.add(binding.id)
                     else:
@@ -3572,6 +3604,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ]
                 else:
                     values = [frozenset() for _ in names]
+                # See the short-declaration store loop: tuple values
+                # evaluate against the pre-state, so copies read the
+                # capture maps as they were before any store.
+                captures_before = dict(self.closure_captures)
+                pointee_before = set(self.pointee_closures)
                 for i, (name, value) in enumerate(zip(names, values)):
                     if name.text == b"_":
                         continue
@@ -3612,16 +3649,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if (
                             src_id is not None
-                            and src_id in self.closure_captures
+                            and src_id in captures_before
                         ):
                             self.closure_captures[binding.id] = (
-                                self.closure_captures[src_id]
+                                captures_before[src_id]
                             )
                         else:
                             self.closure_captures.pop(binding.id, None)
                         if (
                             src_id is not None
-                            and src_id in self.pointee_closures
+                            and src_id in pointee_before
                         ):
                             self.pointee_closures.add(binding.id)
                         else:
@@ -3696,7 +3733,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # Reassignments of existing names join back by union: the
             # branch may not execute.
             branch = dict(scope)
-            self._sequence(
+            self._branch_sequence(
                 _children(consequence), fn, params, branch, transfers,
                 count, deps, saw_return, conditional,
             )
@@ -3705,12 +3742,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if alternative is not None:
                 branch = dict(scope)
                 if alternative.type == "if_statement":
-                    self.statement(
+                    self._branch_statement(
                         alternative, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
                     )
                 else:
-                    self._sequence(
+                    self._branch_sequence(
                         _children(alternative), fn, params, branch,
                         transfers, count, deps, saw_return, conditional,
                     )
@@ -3998,6 +4035,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for rhs in rights
                 ]
             )
+            # Tuple assignment stores evaluate the pre-state in
+            # parallel — `h, g = g, h` swaps — so the capture
+            # propagation below reads the maps from BEFORE any store.
+            captures_before = dict(self.closure_captures)
+            pointee_before = set(self.pointee_closures)
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     continue
@@ -4058,16 +4100,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if (
                         src_id is not None
-                        and src_id in self.closure_captures
+                        and src_id in captures_before
                     ):
                         self.closure_captures[ref.binding_id] = (
-                            self.closure_captures[src_id]
+                            captures_before[src_id]
                         )
                     else:
                         self.closure_captures.pop(ref.binding_id, None)
                     if (
                         src_id is not None
-                        and src_id in self.pointee_closures
+                        and src_id in pointee_before
                     ):
                         self.pointee_closures.add(ref.binding_id)
                     else:
@@ -4369,7 +4411,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             elem_base | self.indirect_writes,
                             conditional,
                         )
-                    self._sequence(
+                    self._branch_sequence(
                         _children(body_node), fn, params, inner, transfers,
                         count, deps, saw_return, conditional,
                     )
@@ -4378,7 +4420,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # seed the next iteration — an inc/dec is a
                         # dependency-preserving no-op, an assignment's
                         # RHS dependencies widen into the fixed point.
-                        self.statement(
+                        self._branch_statement(
                             update, fn, params, inner, transfers, count,
                             deps, saw_return, conditional,
                         )
@@ -4474,7 +4516,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # first step when the clause falls through.
                         frame["exited"] = False
                         branch = dict(scope)
-                        self._sequence(
+                        self._branch_sequence(
                             statements, fn, params, branch, transfers,
                             count, deps, saw_return, conditional,
                         )
@@ -4487,14 +4529,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `exited` preserved across the chain), once as a
                     # fresh alternative (the direct-match path, which
                     # skips the preceding clause's writes).
-                    self._sequence(
+                    self._branch_sequence(
                         statements, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
                     )
                     chain_exited = frame["exited"]
                     frame["exited"] = False
                     fresh = dict(scope)
-                    self._sequence(
+                    self._branch_sequence(
                         statements, fn, params, fresh, transfers,
                         count, deps, saw_return, conditional,
                     )
@@ -5877,12 +5919,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             )
             if bound_id is not None:
-                self.closure_captures[bound_id] = frozenset(captured)
+                may_skip = self._conditional or self._may_skip > 0
+                if may_skip and bound_id in self.closure_captures:
+                    # A maybe-skipped rebind keeps the old literal's
+                    # captures on the path that does not run it —
+                    # union like `_store` unions the binding's deps.
+                    self.closure_captures[bound_id] = (
+                        self.closure_captures[bound_id]
+                        | frozenset(captured)
+                    )
+                else:
+                    self.closure_captures[bound_id] = frozenset(captured)
                 if captures_pointer:
                     self.pointee_closures.add(bound_id)
-                else:
+                elif not may_skip:
                     # Rebinding `h` to a literal that captures no
-                    # pointer clears the flag the earlier literal set.
+                    # pointer clears the flag the earlier literal set
+                    # — a conditional rebind keeps it for the path
+                    # that keeps the old literal.
                     self.pointee_closures.discard(bound_id)
         return deps
 
@@ -5940,13 +5994,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
             # reassignments between the literal and the call move
-            # what the call actually reads.
+            # what the call actually reads. `locals_` wins over the
+            # parameter index: `x = y` stores the param's current
+            # value under its binding id.
             resolved: frozenset[int] = frozenset()
             for cbid in captured:
-                if cbid in params:
+                if cbid in locals_:
+                    resolved |= locals_[cbid]
+                elif cbid in params:
                     resolved |= frozenset({params[cbid]})
-                else:
-                    resolved |= locals_.get(cbid, frozenset())
             deps = resolved
         elif ref.binding_id in params:
             deps = frozenset({params[ref.binding_id]})
@@ -5955,10 +6011,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
         deps |= self.indirect_writes
         if ref.binding_id in self.pointee_closures:
             # The literal captures a pointer — calling it reads caller
-            # memory like a `*p` read: record the external read on the
-            # closure's own binding identity (a real id in `known`, so
-            # `stale_dependents` stays honest) and mark effects
-            # unknown.
+            # memory like a `*p` read: union the escaped bindings'
+            # current deps exactly as a `*p` read does (the pointer
+            # may alias any `&x`-escaped binding — `p := &a; a = y;
+            # h()` observes `y`), then record the external read on
+            # the closure's own binding identity (a real id in
+            # `known`, so `stale_dependents` stays honest) and mark
+            # effects unknown.
+            for escaped_id in self.escaped:
+                if escaped_id in locals_:
+                    deps |= locals_[escaped_id]
+                elif escaped_id in params:
+                    deps |= frozenset({params[escaped_id]})
             transfers.append(
                 CallTransfer(
                     FileSpan(

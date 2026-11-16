@@ -11551,7 +11551,9 @@ def test_bound_closure_rebind_clears_captures(go_types_helper):
 
 def test_bound_closure_pointer_capture_resolves_at_call(go_types_helper):
     # A pointer-capturing literal resolves the captured pointer's
-    # current deps too — `p` re-pointed `a` → `b` before `h()`.
+    # current deps too — `p` re-pointed `a` → `b` before `h()`, and
+    # `*p` may observe either escaped binding like a direct `*p`
+    # read does.
     data = unit(
         go_types_helper,
         "func F(x, y int64) int64 {\n"
@@ -11564,7 +11566,7 @@ def test_bound_closure_pointer_capture_resolves_at_call(go_types_helper):
     )
     result = named(*data)
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -11599,6 +11601,91 @@ def test_bound_closure_assignment_copy_propagates_captures(
         "\th2 = h\n"
         "\tz = y\n"
         "\treturn h2()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_bound_closure_conditional_rebind_unions_captures(
+    go_types_helper,
+):
+    # `if c { h = func() { return y } }` — the skipped path keeps
+    # the old literal, so `h()` reports both captures.
+    data = unit(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\th := func() int64 { return x }\n"
+        "\tif x > 0 {\n"
+        "\t\th = func() int64 { return y }\n"
+        "\t}\n"
+        "\treturn h()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_closure_param_reassign_resolves_at_call(
+    go_types_helper,
+):
+    # A captured parameter reassigned before the call resolves to
+    # its current deps, not the parameter index.
+    data = unit(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\th := func() int64 { return x }\n"
+        "\tx = y\n"
+        "\treturn h()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_bound_closure_pointer_capture_sees_escaped_updates(
+    go_types_helper,
+):
+    # `p := &a; a = y; h()` — the captured pointer reads `a`'s
+    # CURRENT contents. The result unions the pointer's own deps
+    # with every escaped binding's current deps — a superset of
+    # what a direct `*p` read reports, sound in both directions.
+    data = unit(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\ta := x\n"
+        "\tp := &a\n"
+        "\th := func() int64 { return *p }\n"
+        "\ta = y\n"
+        "\treturn h()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_tuple_swap(go_types_helper):
+    # `h, g = g, h` evaluates the pre-state in parallel — after the
+    # swap `g()` reads what `h` captured and `h()` what `g` did.
+    data = unit(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\th := func() int64 { return x }\n"
+        "\tg := func() int64 { return y }\n"
+        "\th, g = g, h\n"
+        "\treturn g()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    data = unit(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\th := func() int64 { return x }\n"
+        "\tg := func() int64 { return y }\n"
+        "\th, g = g, h\n"
+        "\treturn h()\n}",
     )
     result = named(*data)
     assert result.available
