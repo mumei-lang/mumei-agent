@@ -2356,6 +2356,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         "binding_unavailable", _span(name)
                     )
                 scope[binding.id] = deps
+                if binding.type.kind == "pointer":
+                    # A pointer-typed range name's provenance is
+                    # the element value — `for _, p = range *ps`.
+                    self._ptr_deps[binding.id] = deps
             else:
                 ref = self.references.get(self.node_key(name))
                 if ref is None or (
@@ -2365,6 +2369,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported(
                         "binding_unavailable", _span(name)
                     )
+                rb = self.bindings.get(ref.binding_id)
+                if rb is not None and rb.type.kind == "pointer":
+                    new = deps
+                    if conditional:
+                        new = (
+                            self._pointer_deps(
+                                ref.binding_id, params, scope
+                            )
+                            | new
+                        )
+                    self._ptr_deps[ref.binding_id] = new
                 self._store(
                     scope, params, ref.binding_id, deps, conditional,
                 )

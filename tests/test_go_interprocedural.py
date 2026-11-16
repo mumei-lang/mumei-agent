@@ -13167,3 +13167,29 @@ def test_statement_reads_nested_pointer_store_reads_traversal(
     }
     i = src.index("p.Next.V = 0")
     assert reads[(i, i + 12)] == {0, 1}
+
+
+def test_statement_reads_range_assign_pointer_provenance(
+    go_types_helper,
+):
+    # `for _, p = range *ps` reseats the declared pointer `p` —
+    # the later `p.V = 0` reads the may-run union: the element
+    # deps (`*ps`'s contents) joined with p's old provenance.
+    files = {
+        "a.go": "package p\ntype N struct{ V int64 }\n"
+        "func F(ps *[]*N, p *N) int64 {\n"
+        "\tfor _, p = range *ps {\n\t}\n"
+        "\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {0, 1}
