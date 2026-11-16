@@ -490,6 +490,27 @@ def observe_probes(
 # evidence, not a retry scheduler, so it stays small.
 MAX_PROBE_HISTORY = 8
 
+# Terminal outcome vocabulary of `AttemptNormalizedResult` — the
+# declared retry gate compares the last recorded outcome's kind
+# against this set.
+PROBE_OUTCOME_KINDS = frozenset(
+    {"exited", "failed", "timed_out", "cancelled"}
+)
+
+
+def _check_retry_on(retry_on) -> None:
+    """`retry_on` is a declared non-empty subset of the terminal
+    outcome vocabulary; anything else is a static error, never a
+    wildcard or a silently dropped gate."""
+    if retry_on is None:
+        return
+    if (
+        type(retry_on) is not frozenset
+        or not retry_on
+        or not retry_on <= PROBE_OUTCOME_KINDS
+    ):
+        raise ValueError("probe retry kinds out of vocabulary")
+
 
 @dataclass(frozen=True)
 class AdapterProbeHistory:
@@ -651,6 +672,7 @@ def plan_with_probes(
     max_parallel: int = 1,
     histories: tuple["AdapterProbeHistory", ...] = (),
     max_attempts: int = MAX_PROBE_HISTORY,
+    retry_on: "frozenset[str] | None" = None,
 ) -> AdapterProbePlan:
     """Plan, probe the observation-excluded candidates, re-plan.
 
@@ -674,7 +696,10 @@ def plan_with_probes(
     (bounded by MAX_PROBE_HISTORY) is reached. Every observed
     outcome is appended to the adapter's history, and the updated
     histories come back on the returned `AdapterProbePlan` for the
-    caller to persist or chain.
+    caller to persist or chain. `retry_on` is the declared retry
+    gate passed to `probe_retry_requests` each round — an adapter
+    whose last outcome kind is outside the set stops being
+    re-asked.
 
     The caller owns `stamp` allocation: pass a base stamp that is
     fresh for every adapter, then keep the returned observations to
@@ -701,6 +726,7 @@ def plan_with_probes(
         1 <= max_attempts <= MAX_PROBE_HISTORY
     ):
         raise ValueError("probe planning attempt bound out of range")
+    _check_retry_on(retry_on)
     if runner is None:
         runner = AttemptRunner()
     # Latest observation per adapter — the result must be
@@ -725,6 +751,7 @@ def plan_with_probes(
             stamp=stamp,
             max_attempts=max_attempts,
             tool_version=tool_version,
+            retry_on=retry_on,
         )
         if not reqs:
             break
@@ -765,6 +792,7 @@ def probe_retry_requests(
     stamp: int,
     max_attempts: int = MAX_PROBE_HISTORY,
     tool_version: str | None = None,
+    retry_on: "frozenset[str] | None" = None,
 ) -> tuple[AdapterProbeRequest, ...]:
     """Retry scheduling for declared probes, bounded by history.
 
@@ -784,10 +812,17 @@ def probe_retry_requests(
     The history binds the probe COMMAND — adapter, argv and budgets —
     not the stamp, so attempts across stamps stay in one record.
 
+    `retry_on` is the declared retry gate: when given, an adapter
+    whose last recorded outcome kind is not in the set is skipped
+    — a policy that retries `timed_out` only never re-asks an
+    adapter after a `failed` spawn. First attempts are unaffected
+    (no outcome exists to gate on), and `None` keeps the
+    unfiltered behavior.
+
     Scheduling stays declarative: this runs nothing, never invents
     a candidate the observation rules did not exclude, and retries
-    only inside the declared bound. Concurrency and Evidence
-    acceptance remain open.
+    only inside the declared bound and gate. Concurrency and
+    Evidence acceptance remain open.
     """
     if type(max_attempts) is not int or not (
         1 <= max_attempts <= MAX_PROBE_HISTORY
@@ -797,6 +832,7 @@ def probe_retry_requests(
         type(h) is not AdapterProbeHistory for h in histories
     ):
         raise ValueError("probe retries require probe histories")
+    _check_retry_on(retry_on)
     by_id: dict[str, AdapterProbeHistory] = {}
     for h in histories:
         if h.adapter_id in by_id:
@@ -820,6 +856,15 @@ def probe_retry_requests(
         if hist.command_fingerprint != req.command_fingerprint():
             raise ValueError("probe retry history fingerprint mismatch")
         if hist.attempt_count >= max_attempts:
+            continue
+        if (
+            retry_on is not None
+            and hist.outcomes
+            and hist.outcomes[-1].outcome not in retry_on
+        ):
+            # The last observed outcome's kind is not one the
+            # declared policy re-requests — the adapter stays
+            # excluded and is never re-asked.
             continue
         out.append(
             replace(

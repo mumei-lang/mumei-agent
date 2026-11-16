@@ -4007,8 +4007,9 @@ probes stay parallel-safe on POSIX hosts; `preexec_fn` remains
 only when neither wrapper exists, and only on such a host does a
 batch carrying a bound request fall back to sequential
 execution because the fork+exec spawn path can deadlock in a
-multithreaded process before timeout accounting starts. Retry policy
-and Evidence acceptance remain open.
+multithreaded process before timeout accounting starts. Evidence
+acceptance remains open; the declared retry gate is covered by its
+own section below.
 
 ### C11 declared probe cancellation
 
@@ -4073,6 +4074,25 @@ rather than authorizing a retry on stale evidence.
 Scheduling stays declarative: it runs nothing, invents no candidate the
 observation rules did not exclude, and retries only inside the declared
 bound. Concurrency and Evidence acceptance remain open.
+
+### C11 declared probe retry gate
+
+`probe_retry_requests(..., retry_on=frozenset({...}))` narrows which
+still-excluded candidates are re-asked: when the gate is given, an
+adapter whose **last recorded outcome kind** is outside the set is
+skipped — `retry_on={"timed_out"}` re-asks a probe that timed out but
+never one whose spawn `failed`. `PROBE_OUTCOME_KINDS`
+(`{"exited", "failed", "timed_out", "cancelled"}`) bounds the
+vocabulary: anything else — an unknown kind, an empty set, or a
+non-frozenset — is a static `ValueError`, never a silently dropped
+gate. `plan_with_probes(..., retry_on=...)` passes the same gate to
+every scheduling round.
+
+First attempts are unaffected (no outcome exists to gate on) and
+`None` keeps the unfiltered behavior. The gate stays declarative — it
+emits or withholds requests; it runs nothing, invents no outcome,
+and accepts no Evidence. Evidence acceptance of probe outcomes
+remains open.
 
 ## Roadmap authority and vocabulary
 

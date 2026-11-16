@@ -917,3 +917,80 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
     assert (
         plan.selected.adapter_id == "zendingsol.host.lean_scaffold"
     )
+
+
+def test_probe_retry_gate_skips_non_retryable_outcome():
+    registry = _registry()
+    req = probe_requests_for(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )[0]
+    hist = AdapterProbeHistory.start(req)
+    # The declared binary does not exist — the spawn fails.
+    hist = hist.record(req, run_probe(req))
+    assert hist.outcomes[-1].outcome == "failed"
+    # A policy retrying only timeouts never re-asks it.
+    assert (
+        probe_retry_requests(
+            registry, _route(), PlannerPolicy(), (), (hist,),
+            stamp=1, retry_on=frozenset({"timed_out"}),
+        )
+        == ()
+    )
+    # The outcome's own kind stays retryable.
+    reqs = probe_retry_requests(
+        registry, _route(), PlannerPolicy(), (), (hist,),
+        stamp=1, retry_on=frozenset({"failed"}),
+    )
+    assert len(reqs) == 1
+    assert reqs[0].attempt_number == 2
+
+
+def test_probe_retry_gate_ignores_first_attempt():
+    # No recorded outcome exists to gate on — the first attempt
+    # is always emitted.
+    reqs = probe_retry_requests(
+        _registry(), _route(), PlannerPolicy(), stamp=1,
+        retry_on=frozenset({"timed_out"}),
+    )
+    assert len(reqs) == 1
+
+
+def test_probe_retry_gate_validates_vocabulary():
+    registry = _registry()
+    for bad in (
+        {"timed_out"},
+        frozenset(),
+        frozenset({"bogus"}),
+        ("timed_out",),
+    ):
+        with pytest.raises(ValueError, match="retry kinds"):
+            probe_retry_requests(
+                registry, _route(), PlannerPolicy(), stamp=1,
+                retry_on=bad,
+            )
+    with pytest.raises(ValueError, match="retry kinds"):
+        plan_with_probes(
+            registry, _route(), PlannerPolicy(), stamp=1,
+            retry_on=frozenset({"bogus"}),
+        )
+
+
+def test_plan_with_probes_retry_gate_stops_reprobe():
+    registry = _registry(probe_argv=["/nonexistent-probe-binary"])
+    req = probe_requests_for(
+        registry, _route(), PlannerPolicy(), stamp=1
+    )[0]
+    hist = AdapterProbeHistory.start(req).record(req, run_probe(req))
+    out = plan_with_probes(
+        registry,
+        _route(),
+        PlannerPolicy(),
+        stamp=2,
+        histories=(hist,),
+        retry_on=frozenset({"timed_out"}),
+    )
+    # `failed` is outside the gate — no second attempt, no new
+    # observation, history untouched.
+    assert out.plan.selected is None
+    assert out.observations == ()
+    assert out.histories[0].attempt_count == 1
