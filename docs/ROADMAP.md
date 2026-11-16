@@ -750,6 +750,29 @@ claim). The route is also the `native_accept` MCP tool (same
 `run_accept` report production, declared-path validation and basename
 redaction as the other spawn tools). C02/C10 stay partial.
 
+### C02/C10 declared native-artifact-recheck route (native-artifact-recheck)
+
+`python -m agent native-artifact-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares a native
+artifact reproduction replay as one attempt: `<core> native-bundle
+recheck-artifact --expected-build-id <id> <bundle> <source>` under a
+`mumei.native-artifact-recheck-request/v1` fingerprint binding the
+bundle record plus every member it declares (the component files and,
+for a multifile record, each `sources/` member the merge is re-derived
+from) and the declared source. `artifact_recheck` is claimed only for
+uniquely-mapped exit codes (`0 → reproduced`, `3 → inconclusive`);
+exit 1 conflates a failed reproduction with every static failure and
+claims nothing, mid-run drift reports `inputs_changed` with no claimed
+outcome, and the drift check re-enumerates the member set from the
+current record so a swapped-in member is caught. A `reproduced` run
+reports `discharged_checks` — `artifact_semantics` and `claim_truth` —
+with the remaining checks in `checks_not_performed`. The command's
+stdout is a fixed diagnostic line rather than an evidence record, so
+no `candidate` is emitted and a successful run selects only lineage.
+The route is also the `native_artifact_recheck` MCP tool (same
+`run_artifact_recheck` report production, declared-path validation and
+basename redaction as the other spawn tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-attempt route (native-attempt)
 
 `python -m agent native-attempt --core <path> --source <path>
