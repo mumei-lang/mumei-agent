@@ -71,7 +71,9 @@ class GoType:
     type_id: str
     # The element fact on slice/array kinds — `[]T`, `[N]T` and
     # named/alias types whose underlying is one. On map kinds it
-    # carries the value fact.
+    # carries the value fact. On pointer kinds it carries the
+    # pointee's fact — an unnamed `*int64` leaves `type_id` empty
+    # yet `elem` still classifies the pointee as scalar.
     elem: "GoType | None" = None
     # The key fact on map kinds — `map[K]V` — so a named key's
     # identity pins like the value's does.
@@ -375,8 +377,9 @@ def _package_raws(
 
 
 def _go_type(value: Any, arch: str) -> GoType:
-    # `elem` is omitempty: only slice/array facts carry it, so it joins
-    # the required keys' set rather than being required itself.
+    # `elem`/`key` are omitempty: slice, array, map and pointer facts
+    # carry them, so they join the optional keys rather than the
+    # required set.
     _require(
         isinstance(value, dict)
         and {"kind", "basic_name", "bit_width", "signed", "type_id"}
@@ -452,6 +455,13 @@ def _go_type(value: Any, arch: str) -> GoType:
         _require(isinstance(elem_raw, dict) and isinstance(key_raw, dict))
         elem = _go_type(elem_raw, arch)
         key = _go_type(key_raw, arch)
+    elif kind == "pointer":
+        # The pointee fact is optional: snapshots from a helper that
+        # predates it simply carry none, and no pointee is classified
+        # then — `*p` reads/writes stay closed like before.
+        _require(key_raw is None and (elem_raw is None or isinstance(elem_raw, dict)))
+        elem = _go_type(elem_raw, arch) if elem_raw is not None else None
+        key = None
     else:
         _require(elem_raw is None and key_raw is None)
         elem = key = None

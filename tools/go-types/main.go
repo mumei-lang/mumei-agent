@@ -835,7 +835,10 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 		// A pointer's own identity is the pointee's named type — the
 		// pointer itself names nothing pinnable. The pointee may be
 		// anything (basic, composite, named); only a named/alias
-		// pointee contributes an identity a pin can cover.
+		// pointee contributes an identity a pin can cover. `elem`
+		// carries the pointee's kind anyway — an unnamed `*int64`
+		// leaves `type_id` empty yet still classifies the pointee as
+		// scalar, which is what a `*p` dereference needs to admit.
 		f.Kind = "pointer"
 		switch e := typ.Elem().(type) {
 		case *types.Named:
@@ -843,6 +846,8 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 		case *types.Alias:
 			f.TypeID = ix.typeID(e.Obj())
 		}
+		e := ix.typeOfRec(typ.Elem(), seen)
+		f.Elem = &e
 		return f
 	}
 	// A named container type can name itself — `type R []R` is valid

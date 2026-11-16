@@ -2066,11 +2066,13 @@ depth and 2,048 syntax/expression nodes per function. Limit exhaustion blocks
 analysis rather than supplying an effect-free or dependency-free result.
 
 C07 is **partially delivered**, not done. Fixed-point joins, bounded
-loop bodies, `&x` escape folds and `*p` stores/reads, multi-file
-package units and audit wiring (`--enable-summaries`) have all landed
-since this line was written — the honest residuals are pointee-state
-tracking for pointer parameters (the signature admits `pointer` types
-but dep sets index the binding, never its contents), true
+loop bodies, `&x` escape folds, `*p` stores/reads (named *and*
+unnamed scalar pointees), multi-file package units and audit wiring
+(`--enable-summaries`) have all landed
+since this line was written — the honest residuals are composite-
+pointee state tracking (`*[]T`, `*struct{...}`, local named
+types; dep sets still union every escaped binding rather than track
+which pointee a write may hit), true
 resource-state semantics (package globals,
 channels, constructors, bound closures), per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
@@ -2618,10 +2620,12 @@ ever stored through a pointer write — `*t = v; return *t` reports
 `v`'s deps even when no `&x` escaped — because the store lands in
 untracked memory this read may observe. The pointee's
 identity resolves only through `imported_members`, so `*T` on a
-local `type T` stays closed too. An unnamed-pointee
-binding (`p := &x` on a builtin `int64`), a computed pointer
-(`*g()`), and a nested deref (`**t`) stay closed — matching the
-`*t = v` write side, where dep sets track binding indices, not
+local `type T` stays closed too. An unnamed *scalar* pointee — a
+`p := &x` binding on a builtin `int64` — admits the same way by
+classifying through the pointer fact's own `elem` (see the unnamed
+scalar pointees slice); composite unnamed pointees, a computed
+pointer (`*g()`), and a nested deref (`**t`) stay closed — matching
+the `*t = v` write side, where dep sets track binding indices, not
 pointee contents. To make the named pointee visible the producer
 now declares it: recording a pointer-typed `var` member also
 records the pointee's `type` member, the same way a function
@@ -2786,6 +2790,39 @@ edges flag the pinner directly but are not walked further (a pinned
 identity names a type declaration, not a summary). Transitivity is
 detection semantics, not proof that the re-derived summaries will
 differ; detection, not equivalence.
+
+### C07 unnamed scalar pointees
+
+A bound pointer whose pointee names no member — `p := &x` producing
+an unnamed `*int64` binding — now admits `*p` reads and writes.
+The producer emits the pointee's own type fact on every pointer fact
+(`elem`, the same encoding slices/arrays/maps already used), so the
+analyzer can classify `*p` even when `type_id` is empty: a
+scalar-or-pointer `elem` admits the deref, composite shapes
+(`*[]int64`, `*struct{...}`) and facts recorded before `elem` was
+emitted stay closed, matching the named-pointee rule. A `*int64`
+parameter dereference admits the same way, so
+`G(p *int64) { return *p }` composed with `F(x) { return G(&x) }`
+reports `{0}`.
+
+The dep model is unchanged: the read unions the pointer binding's
+own deps with every escaped binding's deps and every stored
+indirect-write deps; the store records the external mutation and
+folds the stored value into every escaped binding (the same
+approximation `*lib.PV = v` uses). Since nothing declared can name
+the unnamed pointee, the recorded mutation/read transfer carries a
+synthetic per-binding identity, `<binding_id>/pointee` — it can
+never be pinned nor redeclared, so `stale_dependents` can never
+falsely flag it, and `effects` still reports `unknown` like every
+other pointee-touching operation.
+
+Boundaries: the admitted surface is unnamed pointees only —
+`*struct{...}`, `*[]T`, `*map[K]V`, `**T`-deref (`*p` where `p`
+is `**T` admits; `**p` does not) and local named types keep their
+closed verdicts. A snapshot produced by an older helper carries no
+`elem` on pointer facts and stays closed, so consumer and producer
+move together; the compiler-helper test matrix covers the new
+emission on every arch.
 
 ### C06 imported generic instantiations
 

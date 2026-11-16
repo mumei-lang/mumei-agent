@@ -174,7 +174,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x int64) int64 {return (func() int64 {return x})()}",
         "func G(){}; func F(x int64) int64 {defer G(); return x}",
         "func G(){}; func F(x int64) int64 {go G(); return x}",
-        "func F(x *int64) int64 {return *x}",
         "func F(x []int64) int64 {return x[0]}",
         "func F(x map[int64]int64) int64 {return x[0]}",
         "func F(x chan int64) int64 {return <-x}",
@@ -195,13 +194,6 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
 @pytest.mark.parametrize(
     "declarations",
     [
-        # A callee taking a pointer parameter has a non-scalar signature —
-        # the caller cannot pass an address-of without one too.
-        "func G(p *int64) int64 { return *p }; func F(x int64) int64 { return G(&x) }",
-        # An alias of a parameter cannot be bound — `&x` is non-scalar.
-        "func F(x int64) int64 { p := &x; return *p }",
-        # …and neither can it reach a callee through a bound alias.
-        "func G(p *int64) int64 { return *p }; func F(x int64) int64 { q := &x; return G(q) }",
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
@@ -303,6 +295,47 @@ def test_let_bindings_propagate_dependencies(go_types_helper, declarations, expe
     result = named(*unit(go_types_helper, declarations))
     assert result.available and result.return_dependencies == expected
     assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A `*int64` parameter dereference reads through the
+        # pointer's own provenance.
+        ("func F(x *int64) int64 { return *x }", frozenset({0})),
+        # `p := &x` binds the pointer's provenance — a `*p` read
+        # carries x's deps, with the pointee classified by the
+        # pointer fact's `elem` since `*int64` names no identity.
+        ("func F(x int64) int64 { p := &x; return *p }", frozenset({0})),
+        # A `*int64` callee parameter reads through a `&x` argument…
+        (
+            "func G(p *int64) int64 { return *p }; "
+            "func F(x int64) int64 { return G(&x) }",
+            frozenset({0}),
+        ),
+        # …and through a bound alias passed as the argument.
+        (
+            "func G(p *int64) int64 { return *p }; "
+            "func F(x int64) int64 { q := &x; return G(q) }",
+            frozenset({0}),
+        ),
+        # A `*p` store folds the stored value into the escaped binding.
+        (
+            "func F(x, y int64) int64 { p := &x; *p = y; return x }",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_unnamed_scalar_pointees_alias_and_resolve(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    # Every unnamed-pointee deref records an imported transfer — the
+    # pointee is memory outside the fragment, so `effects` reports
+    # `unknown`; a callee's imported transfer marks its call site
+    # `imported` rather than propagating into the caller's list.
+    assert result.effects == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -5443,17 +5476,41 @@ def test_bound_pointer_deref_read_through_copy_is_admitted(
     assert targets == {members["PV"]["id"], members["T"]["id"]}
 
 
-def test_bound_pointer_deref_read_unnamed_pointee_stays_closed(
+def test_bound_pointer_deref_read_unnamed_pointee_is_admitted(
     go_types_helper,
 ):
     # `p := &x` on a builtin `int64` — the binding's `*int64` names
-    # no pointee identity, so the read stays closed like the
-    # `*lib.PU` member form.
+    # no member identity, but the pointer fact's `elem` classifies
+    # the pointee as scalar, so the read admits like `*lib.PU`. The
+    # synthetic per-binding identity records the external read.
     files = {
         "a.go": "package p\nimport \"lib\"\nvar _ = lib.PV\n"
         "func F(x int64) int64 {\n"
         "\tp := &x\n"
         "\treturn *p\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    (read,) = [c for c in result.calls if c.imported]
+    assert read.target.endswith("/pointee")
+
+
+def test_bound_pointer_deref_read_composite_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*p` on `p *[]int64` — the pointee fact's `elem` reports a
+    # composite kind, so the read stays closed like `*[]T` member
+    # reads do.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar _ = lib.PV\n"
+        "func F(s []int64) int64 {\n"
+        "\tp := &s\n"
+        "\treturn (*p)[0]\n}\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
@@ -5687,9 +5744,12 @@ def test_deref_write_local_pointer_is_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
-def test_deref_write_unnamed_pointee_stays_closed(go_types_helper):
+def test_deref_write_unnamed_pointee_is_admitted(go_types_helper):
     # `p := &b` on a builtin `int64` produces an unnamed `*int64`
-    # binding — no pointee identity to record the mutation against.
+    # binding — the pointee fact's `elem` classifies it as scalar, so
+    # the store records an imported mutation against the synthetic
+    # per-binding identity and folds `v`'s deps into every escaped
+    # binding: `return b` may observe `v`.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(b int64, v int64, z lib.T) int64 {\n"
@@ -5701,7 +5761,11 @@ def test_deref_write_unnamed_pointee_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target.endswith("/pointee")
 
 
 def test_deref_write_then_deref_read_keeps_stored_deps(go_types_helper):
