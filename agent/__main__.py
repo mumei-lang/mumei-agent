@@ -60,6 +60,7 @@ _SUBCOMMANDS = {
     "native-attempt",
     "native-recheck",
     "native-accept",
+    "native-evidence-accept",
     "native-evidence-recheck",
 }
 
@@ -837,6 +838,24 @@ def main() -> None:
         native_erc_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_erc_main(args))
+    elif command == "native-evidence-accept":
+        import argparse
+        from agent.native_evidence_accept import (
+            build_evidence_accept_parser as native_eac_build_parser,
+            main_evidence_accept as native_eac_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-evidence-accept",
+            description=(
+                "Run a declared Core native saved-Evidence acceptance "
+                "as one attempt and emit the reconciled lineage plus "
+                "the declared acceptance outcome."
+            ),
+        )
+        native_eac_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_eac_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
