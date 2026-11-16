@@ -815,19 +815,35 @@ class _Builder:
         which is what lets the caller spot a write that must cross
         an embedded pointer. Returns () when the type declares no
         fields (`type Ptr *P` — a named pointer is not a struct).
+
+        The boundary candidate must be a *top-level* declaration —
+        one carrying a scope (the file or package extent, or an
+        enclosing function body). Bindings nested inside the type
+        declaration itself, like an interface method inside a
+        field's type (`type P struct{ I interface{ M() }; V int64 }`),
+        carry no scope, so they must not cut the field list short.
         """
         span = type_binding.span
+        if span is None:
+            return ()
+        type_file = span.file if isinstance(span, FileSpan) else 0
         boundary: int | None = None
         direct: list[Any] = []
         for b in self.bindings.values():
-            if b.span.file != span.file or b.span.start <= span.end:
+            bspan = b.span
+            if bspan is None:
+                continue
+            bfile = bspan.file if isinstance(bspan, FileSpan) else 0
+            if bfile != type_file or bspan.start <= span.end:
                 continue
             is_field = b.kind == "variable" and b.scope is None
             if is_field:
-                if boundary is None or b.span.start < boundary:
+                if boundary is None or bspan.start < boundary:
                     direct.append(b)
-            elif boundary is None or b.span.start < boundary:
-                boundary = b.span.start
+            elif b.scope is not None and (
+                boundary is None or bspan.start < boundary
+            ):
+                boundary = bspan.start
         return tuple(
             b
             for b in direct
@@ -866,7 +882,7 @@ class _Builder:
                 return False
             type_binding = self._pointee_type(type_id)
             span = getattr(type_binding, "span", None)
-            if not isinstance(span, FileSpan):
+            if span is None:
                 return False
             direct = {f.id for f in self._struct_fields(type_binding)}
             if resolved_fields[j].id not in direct:

@@ -10056,3 +10056,40 @@ def test_summary_manifest_restore_rejects_non_dict_spans_as_snapshot_errors():
         data["functions"][0]["calls"][0]["span"] = bad
         with pytest.raises(SnapshotError):
             ip.GoSummarySet.from_dict(data)
+
+
+def test_local_struct_value_field_write_single_file_api(
+    go_types_helper,
+):
+    # The single-file `summarize_go` profile carries ByteSpans, not
+    # FileSpans — the field-chain check must admit the write there
+    # the same way the package profile does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type P struct{ V int64 }\n"
+        "func F(x int64) int64 { st := P{}; st.V = x; return st.V }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects != "unknown"
+
+
+def test_local_struct_value_interface_field_type_does_not_hide_fields(
+    go_types_helper,
+):
+    # `interface{ M() }` inside a field's type declares a method
+    # binding *nested inside P's declaration* — it carries no scope,
+    # so it must not act as the boundary that hides `V`.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ I interface{ M() int64 }; V int64 }\n"
+        "func F(x int64) int64 { st := P{}; st.V = x; return st.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects != "unknown"
