@@ -64,6 +64,7 @@ _SUBCOMMANDS = {
     "native-recheck",
     "native-accept",
     "native-artifact-recheck",
+    "native-check",
     "native-evidence-accept",
     "native-evidence-recheck",
 }
@@ -897,6 +898,24 @@ def main() -> None:
         native_arc_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_arc_main(args))
+    elif command == "native-check":
+        import argparse
+        from agent.native_check import (
+            build_check_parser as native_check_build_parser,
+            main_check as native_check_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-check",
+            description=(
+                "Run a declared Core native bundle identity check as "
+                "one attempt and emit the reconciled lineage plus the "
+                "declared check outcome."
+            ),
+        )
+        native_check_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_check_main(args))
     elif command == "native-evidence-recheck":
         import argparse
         from agent.native_evidence_recheck import (

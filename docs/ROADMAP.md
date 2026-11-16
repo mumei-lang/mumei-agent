@@ -773,6 +773,27 @@ The route is also the `native_artifact_recheck` MCP tool (same
 `run_artifact_recheck` report production, declared-path validation and
 basename redaction as the other spawn tools). C02/C10 stay partial.
 
+### C02/C10 declared native-check route (native-check)
+
+`python -m agent native-check --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the shallowest
+native consumer as one attempt: `<core> native-bundle check
+--expected-build-id <id> <bundle> <source>` under a
+`mumei.native-check-request/v1` fingerprint binding the bundle record
+plus every member it declares and the declared source. `bundle_check`
+is claimed only for uniquely-mapped exit codes (`0 → consistent`);
+the command has no inconclusive exit and exit 1 conflates an identity
+mismatch with every static failure, so it claims nothing, mid-run
+drift reports `inputs_changed` with no claimed outcome, and the drift
+check re-enumerates the member set from the current record. A
+`consistent` run reports `discharged_checks` — `file_identity` — with
+the remaining five checks in `checks_not_performed`. The command's
+stdout is a fixed diagnostic line rather than an evidence record, so
+no `candidate` is emitted. The route is also the `native_check` MCP
+tool (same `run_check` report production, declared-path validation
+and basename redaction as the other spawn tools). C02/C10 stay
+partial.
+
 ### C02/C10 declared native-attempt route (native-attempt)
 
 `python -m agent native-attempt --core <path> --source <path>
