@@ -262,7 +262,9 @@ def build_plan_parser(parser):
         metavar="PATH",
         help=(
             "Optional JSON array of persisted "
-            "mumei.adapter-probe-history/v1 records this pass resumes."
+            "mumei.adapter-probe-history records this pass resumes "
+            "(v1 records restore with undeclared outcome stamps; "
+            "v2 records carry them)."
         ),
     )
     return parser

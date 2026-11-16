@@ -201,8 +201,9 @@ def test_probe_history_record_round_trips():
     )
     history = result.histories[0]
     data = history.to_dict()
-    assert data["schema_version"] == "mumei.adapter-probe-history/v1"
+    assert data["schema_version"] == "mumei.adapter-probe-history/v2"
     assert data["adapter_id"] == history.adapter_id
+    assert len(data["stamps"]) == len(history.outcomes)
     restored = AdapterProbeHistory.from_dict(data)
     assert restored == history
 
@@ -313,7 +314,7 @@ def test_mcp_summaries_plan_selects_under_declared_pin(tmp_path):
     assert out["schema_version"] == "mumei.summaries-plan/v1"
     assert out["plan"]["selected"]["adapter_id"] == "agent.go-summaries"
     assert out["histories"][0]["schema_version"] == (
-        "mumei.adapter-probe-history/v1"
+        "mumei.adapter-probe-history/v2"
     )
 
 

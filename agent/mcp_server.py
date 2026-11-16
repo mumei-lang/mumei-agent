@@ -3010,8 +3010,9 @@ def summaries_plan(
         tool_version: Optional declared tool version the planner pins
             against (empty means no pin — nothing selects).
         histories_path: Optional path to a JSON array of persisted
-            `mumei.adapter-probe-history/v1` records this pass resumes
-            (empty means a fresh pass).
+            `mumei.adapter-probe-history` records this pass resumes
+            (v1 records restore with undeclared outcome stamps; v2
+            records carry them — empty means a fresh pass).
         rounds: Maximum observe-and-replan rounds.
         max_parallel: Maximum probes run concurrently per round.
 
