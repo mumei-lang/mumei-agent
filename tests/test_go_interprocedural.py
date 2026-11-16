@@ -12854,3 +12854,414 @@ def test_local_chan_captured_by_literal_keeps_local_effects(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_statement_reads_attribute_per_statement(go_types_helper):
+    # Each walked statement records the parameter ordinals its
+    # evaluation read — `y := x + 1` reads {0}, `_ = z` reads {1},
+    # a literal assignment reads nothing but is still recorded.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, z int64) int64 {\n"
+            "\ty := x + 1\n\t_ = z\n\ty = 5\n\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    reads = {(r.span.start, r.span.end): r.deps for r in result.statement_reads}
+    assert frozenset({0}) in reads.values()
+    assert frozenset({1}) in reads.values()
+    assert frozenset() in reads.values()  # `y = 5` reads nothing
+
+
+def test_statement_reads_nested_attribution(go_types_helper):
+    # A read inside `if c { y = x }` attributes to both the
+    # assignment and the enclosing `if` — which also carries the
+    # condition's read.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\ty := x\n\tif b {\n\t\ty = x * 2\n\t}\n\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    spans = {(r.span.start, r.span.end): r.deps for r in result.statement_reads}
+    if_read = max(
+        ((s, d) for (s, d) in spans.items() if d == frozenset({0, 1})),
+        key=lambda e: e[0][1] - e[0][0],
+    )
+    assert if_read[1] == frozenset({0, 1})
+
+
+def test_statement_reads_loop_fixed_point_idempotent(go_types_helper):
+    # `for ... { s += x }` re-passes the body until the deps stop
+    # growing — the span's recorded set unions each pass and stays
+    # a single record, never duplicated.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, n int64) int64 {\n"
+            "\ts := int64(0)\n"
+            "\tfor i := int64(0); i < n; i++ {\n\t\ts += x\n\t}\n"
+            "\treturn s\n}\n",
+        )
+    )
+    assert result.available
+    spans = [(r.span.start, r.span.end) for r in result.statement_reads]
+    assert len(spans) == len(set(spans))
+
+
+def test_statement_reads_absent_when_closed(go_types_helper):
+    # A gapped walk misattributes — closed functions emit no reads.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\ts := make([]int64, 2)\n\treturn s[0]\n}\n",
+        )
+    )
+    assert not result.available
+    assert result.statement_reads == ()
+
+
+def test_statement_reads_roundtrip(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\ty := x + 1\n\tif b {\n\t\ty = x * 2\n\t}\n\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    restored = ip.FunctionSummary.from_dict(result.to_dict())
+    assert restored.statement_reads == result.statement_reads
+    # An ordinal beyond the declared parameters is rejected.
+    bad = result.to_dict()
+    bad["statement_reads"][0]["deps"] = [len(result.parameters)]
+    with pytest.raises(SnapshotError):
+        ip.FunctionSummary.from_dict(bad)
+
+
+def test_statement_reads_cover_implicit_reads(go_types_helper):
+    # `x++`, `x += y` and a bare `return` over a named result all
+    # read a binding without routing through `expression()` —
+    # statement_reads must still attribute the parameter deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, y int64) (r int64) {\n"
+            "\tr = x\n"
+            "\tx++\n"
+            "\tx += y\n"
+            "\treturn\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    reads = {(r.span.start, r.span.end): set(r.deps) for r in result.statement_reads}
+    src = ("package p;\nfunc F(x int64, y int64) (r int64) {\n"
+           "\tr = x\n\tx++\n\tx += y\n\treturn\n}\n")
+    i, j, k = src.index("x++"), src.index("x += y"), src.index("return\n")
+    assert reads[(i, i + 3)] == {0}
+    assert reads[(j, j + 6)] == {0, 1}
+    assert reads[(k, k + 6)] == {0}
+
+
+def test_statement_reads_composite_inc_and_compound(go_types_helper):
+    # `st.V++` / `st.V += y` on a conflated local composite read the
+    # base's dep set; the field write folds it back in.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tst := P{V: x}\n\tst.V++\n\tst.V += y\n\tst.V = 0\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("st.V++")
+    j = src.index("st.V += y")
+    k = src.index("st.V = 0")
+    assert reads[(i, i + 6)] == {0}
+    assert reads[(j, j + 9)] == {0, 1}
+    # A plain field store folds the RHS into st's continuing set —
+    # the merge reads the old contents the same way `+=` does.
+    assert reads[(k, k + 8)] == {0, 1}
+
+
+def test_statement_reads_pointer_field_write_reads_pointer(
+    go_types_helper,
+):
+    # `p.V = x` on a `*P` reads `p` — the pointer value computes the
+    # store's destination, unlike a local composite's dep-fold.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tp.V = x\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = x")
+    assert reads[(i, i + 7)] == {0, 1}
+
+
+def test_statement_reads_bound_write_reads_only_pointer(
+    go_types_helper,
+):
+    # `p.V = x; p.V = 0` — the second store reads the pointer's own
+    # provenance, never the fold the first store left in the slot.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tp.V = x\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = x")
+    j = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {0, 1}
+    assert reads[(j, j + 7)] == {0}
+
+
+def test_statement_reads_tuple_dest_uses_old_pointer(
+    go_types_helper,
+):
+    # `p, p.V = q, 0` — Go assigns in two phases, so `p.V`'s
+    # destination resolves against the OLD p: the statement reads
+    # deps(p) ∪ deps(q), not the post-store p.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, p, q *P) int64 {\n"
+        "\tp, p.V = q, 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p, p.V = q, 0")
+    assert reads[(i, i + 13)] == {1, 2}
+
+
+def test_statement_reads_reseated_pointer_write(go_types_helper):
+    # `p = q; p.V = 0` — the field store reads the reseated
+    # pointer's provenance ({1}), not p's original parameter.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, p, q *P) int64 {\n"
+        "\tp = q\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {2}
+
+
+def test_statement_reads_branch_reseat_unions_provenance(
+    go_types_helper,
+):
+    # `if c { p = q }; p.V = 0` — the store reads the may-write
+    # union: p's pre-branch provenance joined with q's.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(c bool, p, q *P) int64 {\n"
+        "\tif c {\n\t\tp = q\n\t}\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {1, 2}
+
+
+
+def test_statement_reads_container_write_reads_index(
+    go_types_helper,
+):
+    # `(*p)[i] = v` reads the pointer AND its index operand — the
+    # statement's reads cover both, like the read path does.
+    files = {
+        "a.go": "package p\n"
+        "func F(v int64, p *[]int64, i int64) int64 {\n"
+        "\t(*p)[i] = v\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("(*p)[i] = v")
+    assert reads[(i, i + 11)] == {0, 1, 2}
+
+
+def test_statement_reads_nested_pointer_store_reads_traversal(
+    go_types_helper,
+):
+    # `p.Next = q; p.Next.V = 0` — the second store's destination
+    # traverses the pointer field `p.Next`, whose value is whatever
+    # the first store folded into indirect writes: the statement
+    # reads deps(p) ∪ deps(q).
+    files = {
+        "a.go": "package p\ntype N struct{ Next *N; V int64 }\n"
+        "func F(p, q *N) int64 {\n"
+        "\tp.Next = q\n\tp.Next.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.Next.V = 0")
+    assert reads[(i, i + 12)] == {0, 1}
+
+
+def test_statement_reads_range_assign_pointer_provenance(
+    go_types_helper,
+):
+    # `for _, p = range *ps` reseats the declared pointer `p` —
+    # the later `p.V = 0` reads the may-run union: the element
+    # deps (`*ps`'s contents) joined with p's old provenance.
+    files = {
+        "a.go": "package p\ntype N struct{ V int64 }\n"
+        "func F(ps *[]*N, p *N) int64 {\n"
+        "\tfor _, p = range *ps {\n\t}\n"
+        "\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {0, 1}
+
+
+def test_statement_reads_pointer_arg_reseats_escaped_pointer(
+    go_types_helper,
+):
+    # `pp := &p; lib.G(pp, q)` — the opaque callee may store
+    # through `pp` and reseat `p`: the escaped-pointer fold must
+    # reach `_ptr_deps`, or `p.V = 0` reads p's stale provenance.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p, q *lib.N) int64 {\n"
+        "\tpp := &p\n\tlib.G(pp, q)\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype N struct{ V int64 }\n"
+            "func G(a **N, b *N) int64 { return 0 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {0, 1}
+
+
+def test_statement_reads_composite_dest_reads_old(go_types_helper):
+    # `st.V = x` merges the RHS into the binding's continuing dep
+    # set — the merge reads the OLD contents like `st.V += x` does,
+    # so the store statement attributes st's existing deps too.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type N struct{ V int64 }\n"
+            "func F(y int64, x int64) int64 {\n"
+            "\tst := N{V: y}\n"
+            "\tst.V = x\n"
+            "\treturn st.V\n}\n",
+        )
+    )
+    assert result.available
+    reads = {r.deps for r in result.statement_reads}
+    assert frozenset({0, 1}) in reads  # `st.V = x` reads old st and x
+
+
+def test_statement_reads_parallel_dest_uses_old_binding(go_types_helper):
+    # `p, p.V = q, 0` resolves `p.V` against the OLD `p` — the
+    # destination read snapshots pre-state, so the statement still
+    # attributes the old pointer's provenance alongside the RHS.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type N struct{ V int64 }\n"
+            "func F(p *N, q *N, x int64) int64 {\n"
+            "\tp, p.V = q, x\n"
+            "\treturn p.V\n}\n",
+        )
+    )
+    assert result.available
+    reads = {r.deps for r in result.statement_reads}
+    assert frozenset({0, 1, 2}) in reads
