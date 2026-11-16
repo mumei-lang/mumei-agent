@@ -126,6 +126,16 @@ _SCALAR_BASIC_TYPES = frozenset(
 _UNTYPED_SCALAR_CONSTS = frozenset(
     {"untyped int", "untyped rune", "untyped bool"}
 )
+_INDEX_LITERALS = frozenset(
+    {
+        "int_literal",
+        "float_literal",
+        "imaginary_literal",
+        "rune_literal",
+        "interpreted_string_literal",
+        "raw_string_literal",
+    }
+)
 
 
 def _scalar_const_type(t: Any) -> bool:
@@ -4458,14 +4468,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             raise _Unsupported(
                                 "unresolved_or_opaque_call", _span(node)
                             )
-                        if idx.type in {
-                            "int_literal",
-                            "float_literal",
-                            "imaginary_literal",
-                            "rune_literal",
-                            "interpreted_string_literal",
-                            "raw_string_literal",
-                        }:
+                        if idx.type in _INDEX_LITERALS:
                             continue
                         field_index_nodes.add(self.node_key(idx))
                         field_index_deps |= self.expression(
@@ -4593,7 +4596,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # a deref operand) evaluate here, once.
                     deps = field_index_deps
                     for extra in reversed(extras):
-                        if self.node_key(extra) in field_index_nodes:
+                        if (
+                            extra.type in _INDEX_LITERALS
+                            or self.node_key(extra) in field_index_nodes
+                        ):
                             continue
                         deps |= self.expression(
                             extra, fn, params, locals_,

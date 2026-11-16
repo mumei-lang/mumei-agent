@@ -10827,3 +10827,23 @@ def test_package_nested_index_field_read_depends_on_index(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_package_nested_map_field_read_literal_key(
+    go_types_helper,
+):
+    # `G.M["k"].V` — a literal index carries no deps; the read must
+    # not try to evaluate the literal as an expression.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\ntype P struct{ M map[string]Q }\n"
+        "var G P\n"
+        "func F(x int64) int64 {\n"
+        "\treturn G.M[\"k\"].V + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
