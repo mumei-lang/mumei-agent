@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -102,6 +103,12 @@ MAX_DEPTH = 48
 # gaps), so a valid manifest can far exceed MAX_FUNCTIONS.
 MAX_MANIFEST_MEMBERS = 8192
 MAX_EXPRESSION_NODES = 2048
+# The `statement`/`expression` wrappers that attribute per-statement
+# reads cost one extra Python frame per analyzed level; deep
+# expression nesting plus callee `summarize` recursion was already
+# near the interpreter's default ceiling, so the analyzer raises it
+# to keep the same logical `MAX_DEPTH` budget reachable.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 16384))
 _BINARY = frozenset(
     {
         "+", "-", "*", "/", "%", "&", "|", "^", "&^", "<<", ">>",
@@ -209,6 +216,33 @@ class CallTransfer:
             _deps_from_list(v["result"]),
             _boolean(v["imported"]) if "imported" in v else False,
         )
+
+
+@dataclass(frozen=True)
+class StatementRead:
+    """The parameter ordinals one statement's evaluation read.
+
+    A read inside a nested block attributes to every enclosing
+    statement, like dep flow itself: `if c { y = x }` records `x`
+    against both the assignment and the `if`. Descriptive only —
+    like `calls`, it never feeds `for_function`/`stale_dependents`.
+    """
+
+    span: ByteSpan | FileSpan
+    deps: frozenset[int]
+
+    def to_dict(self) -> dict:
+        return {
+            "span": _span_dict(self.span),
+            "deps": sorted(self.deps),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "StatementRead":
+        v = _manifest_record(value, ("span", "deps"), ())
+        span = _span_from_dict(v["span"])
+        _require_restore(span is not None)
+        return cls(span, _deps_from_list(v["deps"]))
 
 
 @dataclass(frozen=True)
@@ -335,6 +369,11 @@ class FunctionSummary:
     # when any is redeclared. Basic and unnamed types carry no identity
     # and pin nothing.
     pinned: tuple[str, ...] = ()
+    # Per-statement read attribution: `(span, parameter ordinals)` for
+    # each walked statement, nested reads included. Emitted only on
+    # available summaries — a gapped walk would misattribute — and
+    # never authorizes anything (descriptive like `calls`).
+    statement_reads: tuple[StatementRead, ...] = ()
 
     @property
     def available(self) -> bool:
@@ -386,6 +425,10 @@ class FunctionSummary:
             result["return_dependencies"] = sorted(self.return_dependencies)
         if self.pinned:
             result["pinned"] = list(self.pinned)
+        if self.statement_reads:
+            result["statement_reads"] = [
+                read.to_dict() for read in self.statement_reads
+            ]
         return result
 
     @classmethod
@@ -399,7 +442,12 @@ class FunctionSummary:
         v = _manifest_record(
             value,
             ("binding_id", "key", "parameters", "calls", "gaps"),
-            ("result_type", "return_dependencies", "pinned"),
+            (
+                "result_type",
+                "return_dependencies",
+                "pinned",
+                "statement_reads",
+            ),
         )
         parameters = _list(v["parameters"])
         _require_restore(len(parameters) <= MAX_MANIFEST_MEMBERS)
@@ -433,6 +481,19 @@ class FunctionSummary:
                 for d in argument
             )
         )
+        restored_reads = (
+            tuple(StatementRead.from_dict(r) for r in _list(v["statement_reads"]))
+            if "statement_reads" in v
+            else ()
+        )
+        _require_restore(
+            len(restored_reads) <= MAX_MANIFEST_MEMBERS
+            and all(
+                d < len(parameters)
+                for r in restored_reads
+                for d in r.deps
+            )
+        )
         return cls(
             _string(v["binding_id"]),
             _string(v["key"]),
@@ -442,6 +503,7 @@ class FunctionSummary:
             restored_calls,
             tuple(SummaryGap.from_dict(g) for g in gaps),
             pinned,
+            restored_reads,
         )
 
 
@@ -695,6 +757,14 @@ class _Builder:
         # copies, whose writes only join back by union.
         self._conditional = False
         self._may_skip = 0
+        # Per-statement read attribution: `statement` pushes one list
+        # per walked statement and `expression` appends every dep set
+        # it returns to all open frames, so a nested read lands on
+        # every enclosing statement. `_stmt_reads` merges the unions
+        # by span — a loop's fixed-point re-passes re-record the same
+        # spans idempotently.
+        self._read_stack: list[list[frozenset[int]]] = []
+        self._stmt_reads: dict[tuple[int, int, int], list] = {}
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -1768,6 +1838,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         calls: tuple[CallTransfer, ...] = (),
         gaps: tuple[SummaryGap, ...] = (),
         pinned: tuple[str, ...] = (),
+        statement_reads: tuple[StatementRead, ...] = (),
     ) -> FunctionSummary:
         key = hashlib.sha256((self.key + ":" + fn.binding_id).encode()).hexdigest()
         return FunctionSummary(
@@ -1779,6 +1850,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             calls,
             gaps,
             pinned,
+            statement_reads,
         )
 
     def _pin_member_type(self, member: PackageMember) -> None:
@@ -3644,10 +3716,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_pinned = self.pinned
         saved_escaped = self.escaped
         saved_indirect = self.indirect_writes
+        saved_read_stack = self._read_stack
+        saved_stmt_reads = self._stmt_reads
         self.frames = []
         self.pinned = set()
         self.escaped = set()
         self.indirect_writes = frozenset()
+        self._read_stack = []
+        self._stmt_reads = {}
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -3667,10 +3743,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         finally:
             pinned = tuple(sorted(self.pinned))
+            reads = tuple(
+                StatementRead(entry[0], entry[1])
+                for entry in sorted(
+                    self._stmt_reads.values(), key=lambda e: _key3(e[0])
+                )
+            )
             self.frames = saved_frames
             self.pinned = saved_pinned
             self.escaped = saved_escaped
             self.indirect_writes = saved_indirect
+            self._read_stack = saved_read_stack
+            self._stmt_reads = saved_stmt_reads
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -3679,6 +3763,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             deps[0],
             tuple(sorted(transfers, key=lambda c: _key3(c.span))),
             pinned=pinned,
+            statement_reads=reads,
         )
 
     def _sequence(
@@ -3745,6 +3830,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_[binding_id] = value
 
     def statement(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        deps: list[frozenset[int]],
+        saw_return: list[bool],
+        conditional: bool,
+    ) -> None:
+        # Passive read attribution: every dep set `expression` returns
+        # while this statement walks lands on this frame (and on every
+        # enclosing frame) — a nested statement's reads belong to the
+        # outer statement too, like dep flow itself. A statement closed
+        # by `_Unsupported` records nothing; the function gaps anyway.
+        self._read_stack.append([])
+        try:
+            self._statement(
+                node, fn, params, locals_, transfers, count, deps,
+                saw_return, conditional,
+            )
+        finally:
+            frame = self._read_stack.pop()
+        # Same addressing `CallTransfer.span` uses — the file index is
+        # part of the identity in a multi-file package.
+        span = FileSpan(
+            self.current_file, node.start_byte, node.end_byte
+        )
+        union = (
+            frozenset().union(*frame) if frame else frozenset()
+        )
+        key = _key3(span)
+        entry = self._stmt_reads.get(key)
+        if entry is None:
+            self._stmt_reads[key] = [span, union]
+        else:
+            # Loop fixed-point re-passes walk the same span again —
+            # union, never replace, so the record stays idempotent.
+            entry[1] |= union
+
+    def _statement(
         self,
         node: Any,
         fn: Function,
@@ -5553,6 +5680,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 outer[binding_id] = frozenset({params[binding_id]}) | deps
 
     def expression(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        result = self._expression(
+            node, fn, params, locals_, transfers, count, depth
+        )
+        # Attribute the read to every statement frame still open — a
+        # nested expression's deps are a subset of its parent's union,
+        # so recursive calls appending their own returns change
+        # nothing (the union is idempotent).
+        if isinstance(result, frozenset):
+            for frame in self._read_stack:
+                frame.append(result)
+        return result
+
+    def _expression(
         self,
         node: Any,
         fn: Function,

@@ -12854,3 +12854,93 @@ def test_local_chan_captured_by_literal_keeps_local_effects(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_statement_reads_attribute_per_statement(go_types_helper):
+    # Each walked statement records the parameter ordinals its
+    # evaluation read — `y := x + 1` reads {0}, `_ = z` reads {1},
+    # a literal assignment reads nothing but is still recorded.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, z int64) int64 {\n"
+            "\ty := x + 1\n\t_ = z\n\ty = 5\n\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    reads = {(r.span.start, r.span.end): r.deps for r in result.statement_reads}
+    assert frozenset({0}) in reads.values()
+    assert frozenset({1}) in reads.values()
+    assert frozenset() in reads.values()  # `y = 5` reads nothing
+
+
+def test_statement_reads_nested_attribution(go_types_helper):
+    # A read inside `if c { y = x }` attributes to both the
+    # assignment and the enclosing `if` — which also carries the
+    # condition's read.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\ty := x\n\tif b {\n\t\ty = x * 2\n\t}\n\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    spans = {(r.span.start, r.span.end): r.deps for r in result.statement_reads}
+    if_read = max(
+        ((s, d) for (s, d) in spans.items() if d == frozenset({0, 1})),
+        key=lambda e: e[0][1] - e[0][0],
+    )
+    assert if_read[1] == frozenset({0, 1})
+
+
+def test_statement_reads_loop_fixed_point_idempotent(go_types_helper):
+    # `for ... { s += x }` re-passes the body until the deps stop
+    # growing — the span's recorded set unions each pass and stays
+    # a single record, never duplicated.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, n int64) int64 {\n"
+            "\ts := int64(0)\n"
+            "\tfor i := int64(0); i < n; i++ {\n\t\ts += x\n\t}\n"
+            "\treturn s\n}\n",
+        )
+    )
+    assert result.available
+    spans = [(r.span.start, r.span.end) for r in result.statement_reads]
+    assert len(spans) == len(set(spans))
+
+
+def test_statement_reads_absent_when_closed(go_types_helper):
+    # A gapped walk misattributes — closed functions emit no reads.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\ts := make([]int64, 2)\n\treturn s[0]\n}\n",
+        )
+    )
+    assert not result.available
+    assert result.statement_reads == ()
+
+
+def test_statement_reads_roundtrip(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\ty := x + 1\n\tif b {\n\t\ty = x * 2\n\t}\n\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    restored = ip.FunctionSummary.from_dict(result.to_dict())
+    assert restored.statement_reads == result.statement_reads
+    # An ordinal beyond the declared parameters is rejected.
+    bad = result.to_dict()
+    bad["statement_reads"][0]["deps"] = [len(result.parameters)]
+    try:
+        ip.FunctionSummary.from_dict(bad)
+        raise AssertionError("accepted out-of-range statement dep")
+    except Exception:
+        pass
