@@ -722,15 +722,20 @@ class _Builder:
         `type_id` naming the `type` declaration; unnamed composites
         (`struct{...}`, `[]T`, `map`, `string`) carry no `type_id`
         and stay closed. The binding's single dep set conflates all
-        fields — a sound over-approximation in both directions.
+        fields — a sound over-approximation in both directions. The
+        named type's identity pins on every admit so `stale_dependents`
+        flags the summary when the type is redeclared.
         """
-        return (
+        composite = (
             binding is not None
             and binding.type is not None
             and binding.type.kind == "unsupported"
             and bool(binding.type.type_id)
             and self._pointee_type(binding.type.type_id) is not None
         )
+        if composite:
+            self.pinned.add(binding.type.type_id)
+        return composite
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an

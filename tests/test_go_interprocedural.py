@@ -6109,6 +6109,39 @@ def test_local_struct_value_map_literal_key_side_effect(
     assert result.effects == "unknown"
 
 
+def test_local_struct_value_type_pin_flags_stale_dependents(
+    go_types_helper,
+):
+    # The composite local pins its declared type's identity — a
+    # redeclared `type P` in a *sibling* file flags the summary even
+    # though nothing the summary records transfers to the type.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 { st := P{V: x}; return st.V }\n",
+        "t.go": "package p\ntype P struct{ V int64 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    files2 = {**files, "t.go": "package p\n\ntype P struct{ V int64 }\n"}
+    snapshot2 = _snapshot_for(go_types_helper, files2)
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    # a.go is untouched, so F's own identities survive — only the
+    # pinned type identity flags it stale.
+    assert f_id in known
+    p_id = next(
+        b.id
+        for b in snapshot.bindings
+        if b.name == "P" and b.kind == "type"
+    )
+    assert p_id not in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
 def test_local_pointer_deref_read_named_pointee_is_admitted(
     go_types_helper,
 ):
