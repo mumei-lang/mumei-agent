@@ -1619,8 +1619,47 @@ member, or one explicit dereference of one (`(*t).F` — the same
             inner = inner.child_by_field_name("operand")
         member = None
         package_var = None
+        bound_pointer = None
+        bound_operand = None
+        package_pointee = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)
+        elif inner is not None and inner.type == "unary_expression":
+            # `(*p)[i]` — an index read through a bound pointer whose
+            # pointee is a container. The chain root is the `*p`
+            # deref, so the operand must name an identifier binding.
+            operator = inner.child_by_field_name("operator")
+            sub = inner.child_by_field_name("operand")
+            while (
+                sub is not None
+                and sub.type == "parenthesized_expression"
+            ):
+                sub = next(
+                    (
+                        c
+                        for c in sub.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if (
+                operator is not None
+                and operator.text == b"*"
+                and sub is not None
+                and sub.type == "identifier"
+            ):
+                bound_pointer = self._bound_container_pointee(
+                    sub, locals_, params
+                )
+                bound_operand = sub
+                if bound_pointer is None:
+                    # `(*GP)[i]` on `var GP *[]T` — a package-level
+                    # pointer var to a container pointee reads
+                    # external memory like `GA[i]` does: dep-free,
+                    # with the var's own identity recording the read.
+                    package_pointee = self._package_container_pointee(
+                        sub
+                    )
         elif inner is not None and inner.type == "identifier":
             ref = self.references.get(self.node_key(inner))
             if ref is not None and ref.kind == "import":
@@ -1636,6 +1675,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # tracks, so the result stays dep-free while the
                 # var's own identity records the read.
                 package_var = self._package_container_var(inner)
+                if package_var is None:
+                    # `p[i]` on `p *[N]T` — Go's auto-deref sugar
+                    # for pointer-to-array indexing reads through
+                    # the bound pointer the same way `(*p)[i]` does.
+                    bound_pointer = self._bound_container_pointee(
+                        inner, locals_, params
+                    )
+                    bound_operand = inner
+                    if bound_pointer is None:
+                        # `GP[i]` on `var GP *[N]T` — the package
+                        # var's own identity records the read.
+                        package_pointee = (
+                            self._package_container_pointee(inner)
+                        )
         # Descend one `elem` fact per extra index level — `[][]T`
         # yields `[]T` then `T`. Every container's own named identity
         # pins at its level (a named `[]T` element, a map key).
@@ -1643,7 +1696,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
         fact = (
             member.type
             if member is not None
-            else (package_var.type if package_var is not None else None)
+            else (
+                package_var.type
+                if package_var is not None
+                else (
+                    bound_pointer[2]
+                    if bound_pointer is not None
+                    else (
+                        package_pointee[1]
+                        if package_pointee is not None
+                        else None
+                    )
+                )
+            )
         )
         for _ in range(len(indexes) - 1):
             if (
@@ -1666,7 +1731,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         if (
             index is None
-            or (member is None and package_var is None)
+            or (
+                member is None
+                and package_var is None
+                and bound_pointer is None
+                and package_pointee is None
+            )
             or (member is not None and member.kind != "var")
             or fact is None
             or fact.kind not in container_kinds
@@ -1676,8 +1746,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             raise _Unsupported("non_parameter_reference", _span(node))
         if member is not None:
             self._pin_member_type(member)
-        else:
+        elif package_var is not None:
             self._pin_fact_identities(package_var.type)
+        elif bound_pointer is not None:
+            # `(*p)[i]` — the pointee's container fact pins its
+            # declared identities; the synthetic `{binding}/pointee`
+            # identity is never pinnable, and a named pointee's
+            # `type_id` already sits inside the fact.
+            self._pin_fact_identities(bound_pointer[2])
+        else:
+            # `(*GP)[i]` — same pins on the pointee container fact;
+            # the var's own identity is the transfer target below.
+            self._pin_fact_identities(package_pointee[1])
         if fact.type_id:
             # The innermost container's own named identity —
             # `[]NS`/`map[K]NS` levels the descent stops on — must
@@ -1691,7 +1771,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
         transfers.append(
             CallTransfer(
                 FileSpan(self.current_file, node.start_byte, node.end_byte),
-                member.id if member is not None else package_var.id,
+                (
+                    member.id
+                    if member is not None
+                    else (
+                        package_var.id
+                        if package_var is not None
+                        else (
+                            bound_pointer[1]
+                            if bound_pointer is not None
+                            else package_pointee[0]
+                        )
+                    )
+                ),
                 (),
                 frozenset(),
                 imported=True,
@@ -1723,6 +1815,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
             deps |= self.expression(
                 idx, fn, params, locals_, transfers, count, depth + 1
             )
+        if bound_pointer is not None:
+            # `(*p)[i]` — the loaded element also depends on where
+            # the pointer was aimed (its own deps), on every escaped
+            # binding it could alias, and on every earlier indirect
+            # store — the same union a bare `*p` deref read applies.
+            base = self.expression(
+                bound_operand, fn, params, locals_, transfers, count,
+                depth + 1,
+            )
+            for escaped_id in self.escaped:
+                if escaped_id in locals_:
+                    base |= locals_[escaped_id]
+                elif escaped_id in params:
+                    base |= {params[escaped_id]}
+            deps |= base | self.indirect_writes
         return deps
 
     def _imported_container_member(
@@ -2143,7 +2250,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # arithmetic) needs no evaluation at all; one that does
             # evaluates through the normal expression gate and keeps
             # the statement closed when its shape is unmodelled.
-            if self._index_extra_effects(extra):
+            if self._index_extra_effects(extra, locals_, params):
                 self.expression(
                     extra, fn, params, locals_, transfers, count, 0
                 )
@@ -2182,17 +2289,59 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # Same rule as `_record_member_write`: indices evaluate
             # inside-out, and only a shape that could record (a call,
             # a member read) needs the evaluation pass at all.
-            if self._index_extra_effects(extra):
+            if self._index_extra_effects(extra, locals_, params):
                 self.expression(
                     extra, fn, params, locals_, transfers, count, 0
                 )
 
-    def _index_extra_effects(self, node: Any) -> bool:
+    def _index_extra_effects(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> bool:
         """Whether an index sub-expression's evaluation could record a
-        transfer or pin — a call, or a name/selector that resolves to
-        an imported member."""
+        transfer or pin — a call, a name/selector that resolves to an
+        imported member, a bound or package pointer's dereference
+        (`*p` records an imported transfer on the pointee identity),
+        or an index read through either (`(*p)[i]`, `p[i]` sugar)."""
         if node.type == "call_expression":
             return True
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is not None and operator.text == b"*":
+                # `*p` — a dereference read records the pointee's
+                # transfer whenever the operand names a bound or
+                # package pointer; a non-pointer operand can never
+                # typecheck, so flagging broadly stays exact.
+                return True
+        if node.type == "index_expression":
+            operand = node.child_by_field_name("operand")
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = next(
+                    (
+                        c
+                        for c in operand.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if operand is not None and operand.type == "identifier":
+                # `p[i]` sugar on a bound or package `*[N]T` — the
+                # chain's root identifier never reaches the unary
+                # check above.
+                if (
+                    self._bound_container_pointee(
+                        operand, locals_, params
+                    )
+                    is not None
+                    or self._package_container_pointee(operand)
+                    is not None
+                ):
+                    return True
         if (
             node.type == "selector_expression"
             and self._package_member(node) is not None
@@ -2218,7 +2367,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # flag a redeclared `GI`.
                 return True
         return any(
-            self._index_extra_effects(c) for c in _children(node)
+            self._index_extra_effects(c, locals_, params)
+            for c in _children(node)
         )
 
     def _opaque_write_target(
@@ -2366,6 +2516,170 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return binding.type.type_id, ref
 
+    def _bound_container_pointee(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[Any, str, Any] | None:
+        """A bound pointer whose pointee is a container — `p *[]T`,
+        `p *map[K]V`, `p *[N]T`, or a named `p *S` resolving to one.
+
+        Returns (reference, pointee identity, container fact) or
+        None. The identity is the named pointee's `type_id`, or the
+        per-binding synthetic `<binding_id>/pointee` for an unnamed
+        `*[]T`-shaped pointer — the same classification
+        `_bound_pointer_write` uses for scalars, so the synthetic id
+        can never be redeclared nor falsely flag `stale_dependents`.
+        A bound pointer can never point at a local composite (the
+        `&` gate closes `&s`/`&st`), which is what makes the
+        external-state treatment sound.
+        """
+        ref = self.references.get(self.node_key(node))
+        if ref is None or (
+            ref.binding_id not in locals_ and ref.binding_id not in params
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if binding is None or binding.type.kind != "pointer":
+            return None
+        if binding.type.type_id:
+            target = self._pointee_type(binding.type.type_id)
+            if (
+                target is None
+                or target.type.kind not in {"slice", "array", "map"}
+            ):
+                return None
+            return ref, binding.type.type_id, target.type
+        elem = binding.type.elem
+        if elem is None or elem.kind not in {"slice", "array", "map"}:
+            return None
+        return ref, f"{ref.binding_id}/pointee", elem
+
+    def _package_container_pointee(
+        self, node: Any
+    ) -> tuple[str, Any] | None:
+        """`(*GP)[i]` — a package-level pointer var whose pointee is
+        a container, for an index chain's root. Returns (the var's
+        own binding identity, the pointee's container fact) or
+        None — the var's id records the read like `GA[i]` records
+        the container var's."""
+        ref = self.references.get(self.node_key(node))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None and ref.binding_id
+            else None
+        )
+        if (
+            binding is None
+            or binding.kind != "variable"
+            or not self._package_level(binding)
+            or binding.type.kind != "pointer"
+        ):
+            return None
+        elem = binding.type.elem
+        if elem is None or elem.kind not in {"slice", "array", "map"}:
+            return None
+        return binding.id, elem
+
+    def _bound_container_write(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[str, tuple[Any, ...], Any] | None:
+        """`(*p)[i] = v` / `p[i] = v` — an index-element store
+        through a bound pointer whose pointee is a container.
+
+        Returns (pointee identity, index nodes outermost-first,
+        innermost container fact) or None. The element the last
+        level writes must be scalar-or-pointer, like the read side.
+        """
+        cur = node
+        while cur is not None and cur.type == "parenthesized_expression":
+            cur = next(
+                (c for c in cur.named_children if c.type != "comment"),
+                None,
+            )
+        if cur is None or cur.type != "index_expression":
+            return None
+        extras: list[Any] = []
+        inner = cur
+        while inner is not None and inner.type == "index_expression":
+            idx = inner.child_by_field_name("index")
+            if idx is not None:
+                extras.append(idx)
+            inner = inner.child_by_field_name("operand")
+            while (
+                inner is not None
+                and inner.type == "parenthesized_expression"
+            ):
+                inner = next(
+                    (
+                        c
+                        for c in inner.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+        ident = None
+        if inner is not None and inner.type == "unary_expression":
+            operator = inner.child_by_field_name("operator")
+            sub = inner.child_by_field_name("operand")
+            while (
+                sub is not None
+                and sub.type == "parenthesized_expression"
+            ):
+                sub = next(
+                    (
+                        c
+                        for c in sub.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if (
+                operator is not None
+                and operator.text == b"*"
+                and sub is not None
+                and sub.type == "identifier"
+            ):
+                ident = sub
+        elif inner is not None and inner.type == "identifier":
+            # `p[i]` on `p *[N]T` — Go's auto-deref sugar for
+            # pointer-to-array indexing.
+            ident = inner
+        if ident is None:
+            return None
+        bound = self._bound_container_pointee(ident, locals_, params)
+        if bound is None:
+            return None
+        _, pointee_id, fact = bound
+        container_kinds = {"slice", "array", "map"}
+        for _ in range(len(extras) - 1):
+            if (
+                fact is None
+                or fact.kind not in container_kinds
+                or fact.elem is None
+            ):
+                return None
+            if fact.type_id:
+                self.pinned.add(fact.type_id)
+            if fact.key is not None and fact.key.type_id:
+                self.pinned.add(fact.key.type_id)
+            fact = fact.elem
+        elem = (
+            fact.elem
+            if fact is not None and fact.kind in container_kinds
+            else None
+        )
+        if (
+            elem is None
+            or elem.kind not in {"integer", "boolean", "pointer"}
+        ):
+            return None
+        return pointee_id, tuple(extras), fact
+
     def _bound_pointer_write(
         self,
         node: Any,
@@ -2382,9 +2696,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         every escaped binding is the same over-approximation
         `*lib.PV = v` uses. Returns the declared pointee identity
         for the mutation's transfer record — or None when the LHS is
-        not a bound-pointer dereference, the binding's pointer names
-        no pointee (`*int64`), or the pointee names a non-scalar
-        shape, matching the `*lib.PV` read's pointee classification.
+        not a bound-pointer dereference or the binding's pointer
+        names no pointee at all (a fact recorded before `elem` was
+        emitted, or an unresolvable `type_id`). The fold is
+        unconditional, so any resolvable pointee admits — composite
+        shapes included; the READ side's scalar-or-pointer
+        classification does not apply to stores.
         """
         cur = node
         while cur is not None and cur.type == "parenthesized_expression":
@@ -2416,24 +2733,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if not binding.type.type_id:
             # A `p := &x` alias binds an unnamed `*int64` — no member
             # identity classifies the pointee, so the pointer fact's
-            # own `elem` carries its kind. Scalar-or-pointer pointees
-            # admit; composite shapes (`*[]int64`, `*struct{...}`)
-            # stay closed, as does a fact recorded before `elem` was
-            # emitted. The returned identity is per-binding — nothing
+            # own `elem` carries its kind. Any emitted `elem` admits
+            # on the write side: the store lands in external memory
+            # and folds unconditionally, so composite pointees
+            # (`*[]int64`, `*struct{...}`) are as sound as scalars —
+            # only a fact recorded before `elem` was emitted stays
+            # closed. The returned identity is per-binding — nothing
             # declared can ever redeclare it, so `stale_dependents`
             # can never falsely flag it.
-            elem = binding.type.elem
-            if (
-                elem is None
-                or elem.kind not in {"integer", "boolean", "pointer"}
-            ):
+            if binding.type.elem is None:
                 return None
             return f"{ref.binding_id}/pointee"
         target = self._pointee_type(binding.type.type_id)
-        if (
-            target is None
-            or target.type.kind not in {"integer", "boolean", "pointer"}
-        ):
+        if target is None:
             return None
         return binding.type.type_id
 
@@ -3221,6 +3533,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         fn, params, locals_, transfers, count,
                     )
                     refs.append(_ALIAS_FOLD if saw_deref else None)
+                    continue
+                # `(*p)[i] = v` — a store through a bound pointer
+                # whose pointee is a container writes element memory
+                # no binding tracks: the pointee identity records
+                # the external mutation (`effects` unknown) and the
+                # index expressions evaluate in order. The fold is
+                # required — a later `(*q)[j]` read must observe this
+                # store through `indirect_writes`.
+                bound_write = self._bound_container_write(
+                    lhs, locals_, params
+                )
+                if bound_write is not None:
+                    pointee_id, extras, fact = bound_write
+                    self._pin_fact_identities(fact)
+                    for extra in reversed(extras):
+                        if self._index_extra_effects(
+                            extra, locals_, params
+                        ):
+                            self.expression(
+                                extra, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            pointee_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    refs.append(_ALIAS_FOLD)
                     continue
                 # `*p = v` — a store through a bound pointer lands in
                 # memory the dep model does not track: the pointee's

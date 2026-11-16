@@ -2077,10 +2077,13 @@ fields carry no resolvable identities and stay closed), multi-file
 package
 units and audit wiring
 (`--enable-summaries`) have all landed
-since this line was written — the honest residuals are composite-
-pointee state tracking (`*[]T`, `*struct{...}`; dep sets still union
-every escaped binding rather than track which pointee a write may
-hit), the remaining
+since this line was written — the honest residuals are the
+remaining composite-pointee surfaces (index reads/writes through
+bound pointers to containers and whole-pointee stores admit under
+the external-state model — `(*p)[i]` on `p *[]T`/`*map`/`*[N]T`
+and `*p = v` on any resolvable pointee; element-field reads
+(`(*p)[i].F`), `for range *p`, anonymous `*struct{...}` pointees
+and nested `**p` derefs still stay closed), the remaining
 resource-state semantics (channels, constructors, bound closures),
 per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
