@@ -163,11 +163,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func Ext(x int64) int64; func F(x int64) int64 { return Ext(x) }",
         "func F(f func(int64) int64, x int64) int64 { return f(x) }",
         "func Id(x int64) int64 {return x}; var Alias = Id; func F(x int64) int64 {return Alias(x)}",
-        "var global int64; func F(x int64) int64 {return global}",
-        # A package variable named `iota` is not the predeclared
-        # constant — its read stays a declared gap.
-        "var iota int64; func F(x int64) int64 { return iota }",
-        "var true bool; func F() bool {return true}",
         "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
         "func F(x int64) int64 {return 1.0}",
@@ -197,10 +192,7 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
-        # A callee reading or writing shared package state is opaque —
-        # the global is neither a parameter nor a local of the callee.
-        "var g int64; func G() int64 { g = 1; return g }; func F(x int64) int64 { return G() + x }",
-        "var g int64; func G(v int64) int64 { return g + v }; func F(x int64) int64 { return G(x) }",
+
         # Constructor builtins produce non-scalar resource state.
         "func G(p *int64) int64 { return *p }; func F(x int64) int64 { return G(new(int64)) }",
         "func F(x int64) int64 { var s []int64; _ = s; return x }",
@@ -1490,7 +1482,7 @@ def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_hel
 def test_opaque_callee_blocks_callers_but_not_an_unrelated_function(go_types_helper):
     data = unit(
         go_types_helper,
-        "var G int64; func Bad(x int64)int64{return G}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
+        "var G int64; func Bad(x int64)int64{G++; return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
     )
     assert not named(*data).available
     assert named(*data, "Good").available
@@ -5790,6 +5782,103 @@ def test_synthetic_pointee_target_does_not_flag_stale_dependents(
     known = {b.id for b in snapshot.bindings}
     assert read.target not in known
     assert summaries.stale_dependents(known) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "declarations,expected_deps",
+    [
+        # A package-level scalar `var` reads like an imported `lib.V`:
+        # dep-free for the value, `effects` unknown via the recorded
+        # imported transfer against the var's binding identity.
+        ("var G int64\nfunc F(x int64) int64 { return x + G }", {0}),
+        ("var G int64\nfunc F(x int64) int64 { return G }", set()),
+        # `G = v` mutates package state like `lib.V = v` — external,
+        # so the stored deps drop and `effects` stays unknown.
+        ("var G int64\nfunc F(x int64) int64 { G = x; return x }", {0}),
+        ("var G int64\nfunc F(x int64) int64 { G += x; return x }", {0}),
+        # A package var shadowing a universe name is still package
+        # state — the read admits and marks `effects` unknown.
+        ("var iota int64\nfunc F(x int64) int64 { return iota }", set()),
+        ("var true bool\nfunc F() bool { return true }", set()),
+        # A cross-file package var resolves through the same binding.
+        ("func F(x int64) int64 { G = x; return G }", set()),
+    ],
+)
+def test_package_level_scalar_vars_record_imported_transfers(
+    go_types_helper, declarations, expected_deps
+):
+    files = {"a.go": "package p\n" + declarations}
+    if "func F" in declarations and "var G" not in declarations:
+        files["b.go"] = "package p\nvar G int64\n"
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset(expected_deps)
+    assert result.effects == "unknown"
+    assert all(c.imported for c in result.calls)
+
+
+def test_package_global_transfer_target_flags_stale_dependents(
+    go_types_helper,
+):
+    # The recorded target is the var's real binding identity, so
+    # regenerating the unit without `G` flags the reader — unlike a
+    # synthetic identity it lives in `known` while the var exists.
+    files = {
+        "a.go": "package p\nvar G int64\n"
+        "func F(x int64) int64 { return x + G }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    known = {b.id for b in snapshot.bindings}
+    assert summaries.stale_dependents(known) == frozenset()
+    files2 = {"a.go": "package p\nfunc F(x int64) int64 { return x }\n"}
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, files2), files2, target_arch="amd64"
+    )
+    known2 = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known2) == frozenset({f_id})
+
+
+def test_package_level_composite_var_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nvar G string = \"a\"\n"
+        "func F(x int64) int64 { if G == \"a\" { return x }; return 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_function_local_var_is_not_a_package_global(go_types_helper):
+    # A function-local `var` the fragment binds is in `locals_` — the
+    # package-level gate never reaches it.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 { var y int64 = x; return y }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
 
 
 def test_deref_write_then_deref_read_keeps_stored_deps(go_types_helper):

@@ -2067,13 +2067,14 @@ analysis rather than supplying an effect-free or dependency-free result.
 
 C07 is **partially delivered**, not done. Fixed-point joins, bounded
 loop bodies, `&x` escape folds, `*p` stores/reads (named *and*
-unnamed scalar pointees), multi-file package units and audit wiring
+unnamed scalar pointees), scalar package-level `var` reads/writes,
+multi-file package units and audit wiring
 (`--enable-summaries`) have all landed
 since this line was written — the honest residuals are composite-
 pointee state tracking (`*[]T`, `*struct{...}`, local named
 types; dep sets still union every escaped binding rather than track
-which pointee a write may hit), true
-resource-state semantics (package globals,
+which pointee a write may hit), the remaining
+resource-state semantics (composite package globals,
 channels, constructors, bound closures), per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
 TS's host-declared `--resolve-modules` relative-import resolution
@@ -2823,6 +2824,38 @@ closed verdicts. A snapshot produced by an older helper carries no
 `elem` on pointer facts and stays closed, so consumer and producer
 move together; the compiler-helper test matrix covers the new
 emission on every arch.
+
+### C07 package-level scalar vars
+
+`var G int64` declarations at package scope — shared mutable state
+outside the parameter set — now admit reads and writes, modelled
+exactly like an imported `lib.V`: the read is dep-free for the
+value (its contents derive from package state, not from any
+parameter) but records an imported transfer, so `effects` reports
+`unknown`; the write records the same transfer and drops the
+stored value's dependencies, since no binding tracks global
+contents — `G = x; return G` therefore reports no parameter deps,
+matching `lib.V = x; return lib.V`. `G += v` follows the same
+assignment gate.
+
+The recorded target is the var's own binding identity — a real
+declaration, so `stale_dependents` works honestly in both
+directions: removing or redeclaring `G` flags every summary that
+touched it, and an unchanged unit flags nothing (no synthetic
+identity). Named types in the var's fact tree pin through
+`_pin_fact_identities`, so redeclaring `T` under `var G T` flags
+the readers and writers too.
+
+Package scope is detected from the binding's scope record: the
+packaged profile's file `-1` sentinel, or the whole-file span in
+the single-file profile. A function-local `var` the fragment does
+not track carries its function's scope and stays closed, as do
+package vars of composite or non-scalar type (`var G []int64`,
+`var G string`), `G++`/`G--` inc/dec statements, and `const`
+shadows — scalar package `const`s were always dep-free. Package
+vars shadowing universe names (`var iota int64`, `var true bool`)
+admit the same way: the compiler resolves the use to the
+declaration, so the read is package state like any other.
 
 ### C06 imported generic instantiations
 
