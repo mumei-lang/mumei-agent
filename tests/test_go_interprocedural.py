@@ -13019,3 +13019,101 @@ def test_statement_reads_pointer_field_write_reads_pointer(
     }
     i = src.index("p.V = x")
     assert reads[(i, i + 7)] == {0, 1}
+
+
+def test_statement_reads_bound_write_reads_only_pointer(
+    go_types_helper,
+):
+    # `p.V = x; p.V = 0` — the second store reads the pointer's own
+    # provenance, never the fold the first store left in the slot.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tp.V = x\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = x")
+    j = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {0, 1}
+    assert reads[(j, j + 7)] == {0}
+
+
+def test_statement_reads_tuple_dest_uses_old_pointer(
+    go_types_helper,
+):
+    # `p, p.V = q, 0` — Go assigns in two phases, so `p.V`'s
+    # destination resolves against the OLD p: the statement reads
+    # deps(p) ∪ deps(q), not the post-store p.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, p, q *P) int64 {\n"
+        "\tp, p.V = q, 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p, p.V = q, 0")
+    assert reads[(i, i + 13)] == {1, 2}
+
+
+def test_statement_reads_reseated_pointer_write(go_types_helper):
+    # `p = q; p.V = 0` — the field store reads the reseated
+    # pointer's provenance ({1}), not p's original parameter.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, p, q *P) int64 {\n"
+        "\tp = q\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {2}
+
+
+def test_statement_reads_branch_reseat_unions_provenance(
+    go_types_helper,
+):
+    # `if c { p = q }; p.V = 0` — the store reads the may-write
+    # union: p's pre-branch provenance joined with q's.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(c bool, p, q *P) int64 {\n"
+        "\tif c {\n\t\tp = q\n\t}\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {1, 2}
+

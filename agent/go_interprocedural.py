@@ -765,6 +765,15 @@ class _Builder:
         # spans idempotently.
         self._read_stack: list[list[frozenset[int]]] = []
         self._stmt_reads: dict[tuple[int, int, int], list] = {}
+        # Pointer provenance per binding — what the pointer itself
+        # depends on, tracked separately from `locals_`: a
+        # bound-pointer store (`p.V = x`) folds the stored value's
+        # deps into `locals_[p]` as pointee contents, but the
+        # pointer's own deps never change. A later write through `p`
+        # reads the pointer, not the folded contents, so the two sets
+        # must not conflate. Recorded at every plain store and
+        # declaration; `_join` scopes union back via `_join_ptr`.
+        self._ptr_deps: dict[str, frozenset[int]] = {}
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -1627,7 +1636,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             not in {"integer", "boolean", "pointer"}
         ):
             return None
-        return ident, pointee_id, fact, tuple(extras), field_member
+        return ident, pointee_id, fact, tuple(extras), field_member, ref
 
     def _bound_selector_pointees(
         self,
@@ -3135,8 +3144,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         through a bound pointer whose pointee is a container.
 
         Returns (pointee identity, index nodes outermost-first,
-        innermost container fact) or None. The element the last
-        level writes must be scalar-or-pointer, like the read side.
+        innermost container fact, the bound root's reference) or
+        None. The element the last level writes must be
+        scalar-or-pointer, like the read side.
         """
         cur = node
         while cur is not None and cur.type == "parenthesized_expression":
@@ -3221,14 +3231,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or elem.kind not in {"integer", "boolean", "pointer"}
         ):
             return None
-        return pointee_id, tuple(extras), fact
+        return pointee_id, tuple(extras), fact, bound[0]
 
     def _bound_pointer_write(
         self,
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> str | None:
+    ) -> tuple[str, Any, bool] | None:
         """A `*p = v` store through a bound pointer.
 
         `p := &x` may aim the pointer at any escaped binding — dep
@@ -3338,9 +3348,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 return None
             self._pin_fact_identities(deep)
             if deep.type_id:
-                return deep.type_id
-            return f"{ref.binding_id}/pointee/pointee"
-        return pointee_id
+                return deep.type_id, ref, nested
+            return f"{ref.binding_id}/pointee/pointee", ref, nested
+        return pointee_id, ref, nested
 
     def _imported_pointer_deref(
         self,
@@ -3718,12 +3728,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_indirect = self.indirect_writes
         saved_read_stack = self._read_stack
         saved_stmt_reads = self._stmt_reads
+        saved_ptr_deps = self._ptr_deps
         self.frames = []
         self.pinned = set()
         self.escaped = set()
         self.indirect_writes = frozenset()
         self._read_stack = []
         self._stmt_reads = {}
+        self._ptr_deps = {}
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -3755,6 +3767,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.indirect_writes = saved_indirect
             self._read_stack = saved_read_stack
             self._stmt_reads = saved_stmt_reads
+            self._ptr_deps = saved_ptr_deps
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -3960,6 +3973,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # reads the maps as they were BEFORE any store landed.
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
+            # Identifier-RHS pointer provenance reads the pre-state
+            # too — `p, r := q, p` hands r the OLD p's pointer.
+            rhs_ptrs: list = []
+            for i in range(len(lefts)):
+                src_ref = (
+                    self.references.get(self.node_key(rights[i]))
+                    if len(lefts) == len(rights)
+                    and rights[i].type == "identifier"
+                    else None
+                )
+                rhs_ptrs.append(
+                    self._pointer_deps(
+                        src_ref.binding_id, params, locals_
+                    )
+                    if src_ref is not None
+                    else None
+                )
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -4004,6 +4034,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # channel in-fragment, and only a scalar element
                     # keeps queue contents inside the dep model.
                     raise _Unsupported("binding_unavailable", _span(node))
+                if not conditional:
+                    self._ptr_deps[binding.id] = (
+                        rhs_ptrs[i]
+                        if rhs_ptrs[i] is not None
+                        else value
+                    )
+                else:
+                    self._ptr_deps[binding.id] = (
+                        self._pointer_deps(
+                            binding.id, params, locals_
+                        )
+                        | (
+                            rhs_ptrs[i]
+                            if rhs_ptrs[i] is not None
+                            else value
+                        )
+                    )
                 self._store(locals_, params, binding.id, value, conditional)
                 # `h2 := h` — a copied closure keeps its captured
                 # bindings: propagate the capture record so `h2()`
@@ -4127,6 +4174,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # capture maps as they were before any store.
                 captures_before = dict(self.closure_captures)
                 pointee_before = set(self.pointee_closures)
+                rhs_ptrs = []
+                for i in range(len(names)):
+                    src_ref = (
+                        self.references.get(
+                            self.node_key(value_nodes[i])
+                        )
+                        if len(names) == len(value_nodes)
+                        and value_nodes[i].type == "identifier"
+                        else None
+                    )
+                    rhs_ptrs.append(
+                        self._pointer_deps(
+                            src_ref.binding_id, params, locals_
+                        )
+                        if src_ref is not None
+                        else None
+                    )
                 for i, (name, value) in enumerate(zip(names, values)):
                     if name.text == b"_":
                         continue
@@ -4169,6 +4233,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # creates a channel in-fragment.
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
+                        )
+                    if not conditional:
+                        self._ptr_deps[binding.id] = (
+                            rhs_ptrs[i]
+                            if rhs_ptrs[i] is not None
+                            else value
+                        )
+                    else:
+                        self._ptr_deps[binding.id] = (
+                            self._pointer_deps(
+                                binding.id, params, locals_
+                            )
+                            | (
+                                rhs_ptrs[i]
+                                if rhs_ptrs[i] is not None
+                                else value
+                            )
                         )
                     self._store(
                         locals_, params, binding.id, value, conditional
@@ -4303,6 +4384,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # fresh binding that is scoped to the statement and dropped
             # by the join below, so a shadowed outer name keeps its deps.
             scope = dict(locals_) if initializer is not None else locals_
+            ptr_scope = dict(self._ptr_deps)
             if initializer is not None:
                 self.statement(
                     initializer, fn, params, scope, transfers, count,
@@ -4318,14 +4400,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # Reassignments of existing names join back by union: the
             # branch may not execute.
             branch = dict(scope)
+            ptr_branch = dict(self._ptr_deps)
             self._branch_sequence(
                 _children(consequence), fn, params, branch, transfers,
                 count, deps, saw_return, conditional,
             )
             self._join(scope, branch, params)
+            self._join_ptr(ptr_branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
                 branch = dict(scope)
+                ptr_branch = dict(self._ptr_deps)
                 if alternative.type == "if_statement":
                     self._branch_statement(
                         alternative, fn, params, branch, transfers,
@@ -4337,8 +4422,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         transfers, count, deps, saw_return, conditional,
                     )
                 self._join(scope, branch, params)
+                self._join_ptr(ptr_branch, params)
             if initializer is not None:
                 self._join(locals_, scope, params)
+                self._join_ptr(ptr_scope, params)
             return
         if kind == "assignment_statement":
             operator = node.child_by_field_name("operator")
@@ -4510,16 +4597,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_, params
                 )
                 if bound_write is not None:
-                    pointee_id, extras, fact = bound_write
+                    pointee_id, extras, fact, ref = bound_write
+                    # The store's destination is computed from the
+                    # pointer itself — read its provenance, not the
+                    # folded element contents. `(*p)[i] += v` also
+                    # reads the old element — `deps(p) ∪`
+                    # `indirect_writes` like the read side.
+                    dest_deps = self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if compound:
+                        dest_deps = dest_deps | self.indirect_writes
+                    self._record_read(dest_deps)
                     self._pin_fact_identities(fact)
                     for extra in reversed(extras):
-                        if self._index_extra_effects(
-                            extra, locals_, params
-                        ):
+                        if extra.type in _INDEX_LITERALS:
+                            continue
+                        self._record_read(
                             self.expression(
                                 extra, fn, params, locals_,
                                 transfers, count, 0,
                             )
+                        )
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -4547,18 +4646,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_, params
                 )
                 if indexed_field is not None:
-                    _root, _pid, fact, extras, field_member = indexed_field
+                    _root, _pid, fact, extras, field_member, ref = (
+                        indexed_field
+                    )
+                    # Same pointer-read as `(*p)[i] = v` — the field
+                    # store's destination resolves through the
+                    # bound pointer.
+                    dest_deps = self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if compound:
+                        dest_deps = dest_deps | self.indirect_writes
+                    self._record_read(dest_deps)
                     self._pin_fact_identities(fact)
                     if field_member.type is not None:
                         self._pin_fact_identities(field_member.type)
                     for extra in reversed(extras):
-                        if self._index_extra_effects(
-                            extra, locals_, params
-                        ):
+                        if extra.type in _INDEX_LITERALS:
+                            continue
+                        self._record_read(
                             self.expression(
                                 extra, fn, params, locals_,
                                 transfers, count, 0,
                             )
+                        )
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -4582,10 +4693,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # binding because `p := &x` may have aimed the
                 # pointer at any of them — the same approximation
                 # `*lib.PV = v` uses.
-                pointee_id = self._bound_pointer_write(
+                bound_ptr = self._bound_pointer_write(
                     lhs, locals_, params
                 )
-                if pointee_id is not None:
+                if bound_ptr is not None:
+                    pointee_id, ref, nested = bound_ptr
+                    # `*p = v` computes its destination from the
+                    # pointer's own provenance. `*p += v` also reads
+                    # the old pointee, and `**pp = v` reads the
+                    # pointer and `*pp` — the full deref-read union
+                    # covers both.
+                    self._record_read(
+                        self._deref_read_deps(
+                            ref.binding_id, params, locals_
+                        )
+                        if nested or compound
+                        else self._pointer_deps(
+                            ref.binding_id, params, locals_
+                        )
+                    )
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -4602,6 +4728,69 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     refs.append(_ALIAS_FOLD)
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
+            # Go assignments run in two phases — destination operands
+            # (pointer indirections and index expressions) and every
+            # RHS evaluate against the pre-state before any store
+            # lands — so the destination reads and identifier-RHS
+            # pointer provenance snapshot BEFORE `values` evaluates:
+            # `p, p.V = q, 0` resolves `p.V` against the OLD `p`, and
+            # `p, r = q, p` carries p's old pointer, not the store's.
+            dest_reads: list = []
+            rhs_ptrs: list = []
+            for i, r in enumerate(refs):
+                tgt = r[0] if isinstance(r, tuple) else r
+                bcast = (
+                    isinstance(r, tuple)
+                    and len(r) == 3
+                    and bool(r[2])
+                )
+                dest = None
+                if (
+                    tgt is not None
+                    and tgt is not _ALIAS_FOLD
+                ):
+                    if compound:
+                        # `x op= e` reads the slot's old contents; a
+                        # bound-pointer target (`p.V += v`) reads its
+                        # pointer's provenance plus the element's
+                        # recorded contents — never the folds in the
+                        # pointer slot itself.
+                        if bcast:
+                            dest = self._pointer_deps(
+                                tgt.binding_id, params, locals_
+                            ) | self.indirect_writes
+                        else:
+                            dest = locals_.get(
+                                tgt.binding_id,
+                                frozenset({params[tgt.binding_id]})
+                                if tgt.binding_id in params
+                                else frozenset(),
+                            )
+                    elif bcast:
+                        # A plain bound-pointer store (`p.V = v`)
+                        # reads only the pointer's provenance — the
+                        # pointee contents folded into `locals_[p]`
+                        # by earlier writes are not the pointer.
+                        dest = self._pointer_deps(
+                            tgt.binding_id, params, locals_
+                        )
+                dest_reads.append(dest)
+                if (
+                    len(rights) == len(refs)
+                    and rights[i].type == "identifier"
+                ):
+                    src_ref = self.references.get(
+                        self.node_key(rights[i])
+                    )
+                    rhs_ptrs.append(
+                        self._pointer_deps(
+                            src_ref.binding_id, params, locals_
+                        )
+                        if src_ref is not None
+                        else None
+                    )
+                else:
+                    rhs_ptrs.append(None)
             # Tuple assignment is parallel: every RHS evaluates against the
             # pre-state before any store lands, so `x, y = y, x` swaps each
             # name's original dependencies. `x, y = lib.F(a)` unpacks one
@@ -4643,6 +4832,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._store(
                             locals_, params, escaped_id, value, True
                         )
+                        esc = self.bindings.get(escaped_id)
+                        if (
+                            esc is not None
+                            and esc.type.kind == "pointer"
+                        ):
+                            # The store may have reseated the escaped
+                            # pointer itself — its provenance gains
+                            # the written deps too.
+                            self._ptr_deps[escaped_id] = (
+                                self._pointer_deps(
+                                    escaped_id, params, locals_
+                                )
+                                | value
+                            )
                     continue
                 accumulating = compound
                 broadcast = False
@@ -4665,12 +4868,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if compound or broadcast:
                         # An `op=` assignment reads the old value,
                         # and a bound-pointer target (`p.V = v`,
-                        # `*p = v`) reads the pointer itself to
-                        # compute the destination. Only a dep-fold
+                        # `*p = v`) reads the pointer's pre-state
+                        # provenance to compute the destination —
+                        # snapshotted in `dest_reads` because `p,
+                        # p.V = q, 0` resolves `p.V` against the OLD
+                        # `p` and `p.V = x; p.V = 0` must not read
+                        # x's fold as the pointer. Only a dep-fold
                         # accumulate on a local composite
                         # (`st.V = v`) unions the RHS into the
                         # binding's continuing set without a read.
-                        self._record_read(old)
+                        self._record_read(dest_reads[i])
                     value = old | value
                 if (
                     not compound
@@ -4687,6 +4894,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # bind a channel just the same, so the arity guard
                     # sits inside the chan check, not outside it.
                     raise _Unsupported("binding_unavailable", _span(node))
+                if not accumulating:
+                    # A plain store replaces what the pointer itself
+                    # depends on — pointee folds stay in `locals_`
+                    # and never enter `_ptr_deps`. An identifier RHS
+                    # carries the source's own pointer provenance
+                    # (`p = q`), not its folded slot; a conditional
+                    # store unions the pre-state like `_store` does.
+                    ptr_new = (
+                        rhs_ptrs[i]
+                        if rhs_ptrs[i] is not None
+                        else value
+                    )
+                    if conditional:
+                        ptr_new = (
+                            self._pointer_deps(
+                                ref.binding_id, params, locals_
+                            )
+                            | ptr_new
+                        )
+                    self._ptr_deps[ref.binding_id] = ptr_new
                 # Reassignment replaces the binding's dependencies; it never
                 # declares a new variable. Inside a branch the caller's join
                 # unions the new value back as a may-assignment.
@@ -4741,6 +4968,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # The loop variable and every binding made inside the body are
             # scoped to the loop — none of them escape, matching the compiler.
             scope = dict(locals_)
+            ptr_scope = dict(self._ptr_deps)
             update = None
             # (elem binding id, seed deps, local channel id | None).
             range_elem = None
@@ -5287,12 +5515,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # Loop-body reassignments join back by union: the loop may
             # execute zero or many times.
             self._join(locals_, scope, params)
+            self._join_ptr(ptr_scope, params)
             return
         if kind == "expression_switch_statement":
             initializer = node.child_by_field_name("initializer")
             # `switch init; tag` runs a simple statement first — any name
             # it binds is scoped to the switch, like a for-clause init.
             scope = dict(locals_) if initializer is not None else locals_
+            ptr_scope = dict(self._ptr_deps)
             if initializer is not None:
                 self.statement(
                     initializer, fn, params, scope, transfers, count,
@@ -5354,12 +5584,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # first step when the clause falls through.
                         frame["exited"] = False
                         branch = dict(scope)
+                        ptr_branch = dict(self._ptr_deps)
                         self._branch_sequence(
                             statements, fn, params, branch, transfers,
                             count, deps, saw_return, conditional,
                         )
                         if not falls:
                             self._join(scope, branch, params)
+                            self._join_ptr(ptr_branch, params)
                             branch = None
                         continue
                     # Fall-through target — the body runs twice: once in
@@ -5374,20 +5606,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     chain_exited = frame["exited"]
                     frame["exited"] = False
                     fresh = dict(scope)
+                    ptr_fresh = dict(self._ptr_deps)
                     self._branch_sequence(
                         statements, fn, params, fresh, transfers,
                         count, deps, saw_return, conditional,
                     )
                     self._join(scope, fresh, params)
+                    self._join_ptr(ptr_fresh, params)
                     if falls:
                         frame["exited"] = chain_exited
                     else:
                         self._join(scope, branch, params)
+                        self._join_ptr(ptr_branch, params)
                         branch = None
             finally:
                 self.frames.pop()
             if initializer is not None:
                 self._join(locals_, scope, params)
+                self._join_ptr(ptr_scope, params)
             return
         if kind == "labeled_statement":
             inner = [c for c in node.named_children if c.type != "label_name"]
@@ -5454,10 +5690,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # provenance-preserving: an aliased binding keeps its own
             # deps across the store, so no fold is needed — only the
             # external mutation records.
-            pointee_id = self._bound_pointer_write(
+            bound_ptr = self._bound_pointer_write(
                 operand, locals_, params
             )
-            if pointee_id is not None:
+            if bound_ptr is not None:
+                pointee_id, ref, nested = bound_ptr
+                # `(*p)++` reads the pointer and the old pointee —
+                # the deref-read union covers `**pp` too.
+                self._record_read(
+                    self._deref_read_deps(
+                        ref.binding_id, params, locals_
+                    )
+                )
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -5481,16 +5725,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 operand, locals_, params
             )
             if bound_write is not None:
-                pointee_id, extras, fact = bound_write
+                pointee_id, extras, fact, ref = bound_write
+                # `(*p)[i]++` reads the pointer and the old
+                # element — `deps(p) ∪ indirect_writes` like the
+                # read path.
+                self._record_read(
+                    self._pointer_deps(ref.binding_id, params, locals_)
+                    | self.indirect_writes
+                )
                 self._pin_fact_identities(fact)
                 for extra in reversed(extras):
-                    if self._index_extra_effects(
-                        extra, locals_, params
-                    ):
+                    if extra.type in _INDEX_LITERALS:
+                        continue
+                    self._record_read(
                         self.expression(
                             extra, fn, params, locals_,
                             transfers, count, 0,
                         )
+                    )
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -5511,18 +5763,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 operand, locals_, params
             )
             if indexed_field is not None:
-                _root, _pid, fact, extras, field_member = indexed_field
+                _root, _pid, fact, extras, field_member, ref = (
+                    indexed_field
+                )
+                self._record_read(
+                    self._pointer_deps(ref.binding_id, params, locals_)
+                    | self.indirect_writes
+                )
                 self._pin_fact_identities(fact)
                 if field_member.type is not None:
                     self._pin_fact_identities(field_member.type)
                 for extra in reversed(extras):
-                    if self._index_extra_effects(
-                        extra, locals_, params
-                    ):
+                    if extra.type in _INDEX_LITERALS:
+                        continue
+                    self._record_read(
                         self.expression(
                             extra, fn, params, locals_,
                             transfers, count, 0,
                         )
+                    )
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -5555,6 +5814,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if base_deps is not None:
                         self._record_read(base_deps)
                 if type_id:
+                    if _ref is not None:
+                        # `p.F++` on a bound pointer reads the
+                        # pointer's provenance plus the field's
+                        # recorded contents — never the folds in
+                        # the pointer slot.
+                        self._record_read(
+                            self._pointer_deps(
+                                _ref.binding_id, params, locals_
+                            )
+                            | self.indirect_writes
+                        )
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -5733,6 +6003,70 @@ member, or one explicit dereference of one (`(*t).F` — the same
         the wrapper never sees them."""
         for frame in self._read_stack:
             frame.append(deps)
+
+    def _pointer_deps(
+        self,
+        binding_id: str,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        """What the pointer binding itself depends on — its declared
+        provenance — without the pointee contents broadcast stores
+        folded into `locals_`. Every binding that reaches `locals_`
+        does so through a declaration or a plain store, which records
+        here first, so the lazy fallback below only ever sees an
+        untouched slot. A parameter's pointer provenance is always
+        its own dep — recorded entries supersede it once the name
+        rebinds."""
+        deps = self._ptr_deps.get(binding_id)
+        if deps is None:
+            if binding_id in params:
+                return frozenset({params[binding_id]})
+            deps = locals_.get(binding_id, frozenset())
+            self._ptr_deps[binding_id] = deps
+        return deps
+
+    def _deref_read_deps(
+        self,
+        binding_id: str,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        """What dereferencing `binding_id` reads — the slot's own
+        deps (folded pointee contents included), every escaped
+        binding an `&x` may have aimed the pointer at, and every
+        earlier indirect store — the union the `*p` read path
+        builds."""
+        deps = locals_.get(binding_id)
+        if deps is None:
+            deps = (
+                frozenset({params[binding_id]})
+                if binding_id in params
+                else frozenset()
+            )
+        deps = deps | self.indirect_writes
+        for escaped_id in self.escaped:
+            if escaped_id in locals_:
+                deps |= locals_[escaped_id]
+            elif escaped_id in params:
+                deps |= frozenset({params[escaped_id]})
+        return deps
+
+    def _join_ptr(
+        self,
+        before: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> None:
+        """Mirror `_join` for `_ptr_deps`: stores inside a branch or
+        loop body replaced the shared map unconditionally, so the
+        pre-scope snapshot unions back as a may-write."""
+        for binding_id in self._ptr_deps:
+            if binding_id in before:
+                self._ptr_deps[binding_id] |= before[binding_id]
+            elif binding_id in params:
+                self._ptr_deps[binding_id] |= frozenset(
+                    {params[binding_id]}
+                )
 
     def _expression(
         self,
@@ -6091,7 +6425,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     node, locals_, params
                 )
                 if indexed is not None:
-                    ident, pointee_id, fact, extras, field_member = indexed
+                    (
+                        ident, pointee_id, fact, extras, field_member,
+                        _ref,
+                    ) = indexed
                     self._pin_fact_identities(fact)
                     if field_member.type is not None:
                         self._pin_fact_identities(field_member.type)
@@ -7282,6 +7619,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         else frozenset({params[ref.binding_id]})
                     )
                     locals_[ref.binding_id] = base | stored
+                    arg_binding = self.bindings.get(ref.binding_id)
+                    if (
+                        arg_binding is not None
+                        and arg_binding.type.kind == "pointer"
+                    ):
+                        # `G(&p)` — the callee's `*q` IS p itself:
+                        # a `*q = r` store reseats the pointer, so
+                        # its provenance gains the write's deps.
+                        self._ptr_deps[ref.binding_id] = (
+                            self._pointer_deps(
+                                ref.binding_id, params, locals_
+                            )
+                            | stored
+                        )
             elif arg_node.type == "identifier":
                 # `G(p)` hands the callee a pointer binding — the
                 # callee's `*q` stores write caller memory, so every
