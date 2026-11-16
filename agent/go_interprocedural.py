@@ -652,6 +652,7 @@ class _Builder:
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
         self.frames: list[dict[str, Any]] = []
+        self.raws = raws
         for file, raw in raws.items():
             root = _syntax(raw)
             if root is None:
@@ -668,6 +669,19 @@ class _Builder:
 
     def node_key(self, node: Any) -> tuple[int, int, int]:
         return (self.current_file, node.start_byte, node.end_byte)
+
+    def _package_level(self, binding: Any) -> bool:
+        """Whether the binding declares package scope — the packaged
+        profile's file `-1` sentinel, or the whole-file span in the
+        single-file profile. A function-local `var` the fragment does
+        not track carries its function's scope, not the unit's."""
+        scope = binding.scope
+        if scope is None:
+            return False
+        if isinstance(scope, FileSpan):
+            return scope.file == -1
+        raw = self.raws.get(0)
+        return raw is not None and scope.start == 0 and scope.end == len(raw)
 
     def _package_member(self, selector_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` selector names, or None.
@@ -2550,9 +2564,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `lib.V = v`; the member record decides.
                         member_write = self._imported_member_write(lhs)
                         if member_write is None:
-                            raise _Unsupported(
-                                "binding_unavailable", _span(lhs)
+                            # A package-level `var` — `G = v` —
+                            # mutates package state the same way:
+                            # external state no binding tracks, so the
+                            # stored value's deps drop and the imported
+                            # transfer marks `effects` unknown. The
+                            # target is the var's binding identity —
+                            # in `known`, so redeclaring it flags
+                            # `stale_dependents`.
+                            gvar = (
+                                self.bindings.get(ref.binding_id)
+                                if ref is not None and ref.binding_id
+                                else None
                             )
+                            if (
+                                gvar is None
+                                or gvar.kind != "variable"
+                                or not self._package_level(gvar)
+                                or gvar.type.kind
+                                not in {"integer", "boolean", "pointer"}
+                            ):
+                                raise _Unsupported(
+                                    "binding_unavailable", _span(lhs)
+                                )
+                            self._pin_fact_identities(gvar.type)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        lhs.start_byte,
+                                        lhs.end_byte,
+                                    ),
+                                    gvar.id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            refs.append(None)
+                            continue
                         member, extras, _ = member_write
                         self._record_member_write(
                             lhs, member, extras,
@@ -3023,6 +3073,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     count,
                 )
                 return
+            if operand.type == "identifier":
+                # `G++`/`G--` on a package-level `var` mutate package
+                # state like `lib.V++`: provenance-preserving, only the
+                # external mutation records against the var's identity.
+                gvar = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None and ref.binding_id
+                    else None
+                )
+                if (
+                    gvar is not None
+                    and gvar.kind == "variable"
+                    and self._package_level(gvar)
+                    and gvar.type.kind
+                    in {"integer", "boolean", "pointer"}
+                ):
+                    self._pin_fact_identities(gvar.type)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                operand.start_byte,
+                                operand.end_byte,
+                            ),
+                            gvar.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return
             # `(*p)++` — an increment through a bound pointer mutates
             # the same untracked memory `*p = v` does, but is
             # provenance-preserving: an aliased binding keeps its own
@@ -3236,6 +3317,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     return frozenset()
                 if binding.kind == "constant":
                     raise _Unsupported("binding_unavailable", _span(node))
+                if (
+                    binding.kind == "variable"
+                    and self._package_level(binding)
+                    and binding.type.kind in {"integer", "boolean", "pointer"}
+                ):
+                    # A package-level `var` — mutable state outside the
+                    # parameter set — reads like an imported `lib.V`:
+                    # dep-free for the value but not purity-proof, so
+                    # the imported transfer marks `effects` unknown.
+                    # The target is the var's own binding identity,
+                    # which lives in `known` — a redeclared or removed
+                    # var still flags `stale_dependents`, and the
+                    # recorded dep set never claims a false
+                    # staleness the way a synthetic identity would.
+                    self._pin_fact_identities(binding.type)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            ref.binding_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return frozenset()
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
             # `lib.K` — a package-qualified member read. Scalar constants
@@ -4071,9 +4181,15 @@ def summarize_go_package(
     Reports may declare the imported objects the unit referenced
     (`imported_members`). A package-qualified read of a scalar
     constant (`lib.K`) is admitted — constants carry no dependencies,
-    like local constants. Imported variables are unmodelled package
-    state and imported functions are not values: their reads keep
-    `non_parameter_reference` and fail closed. Reports without the
+    like local constants. A scalar imported `var` read (`lib.V`)
+    records an imported transfer against the member identity —
+    external state like an imported call, so `effects` reports
+    `unknown`; non-scalar members and imported functions used as
+    values stay closed. The unit's own package-level `var`s admit
+    the same way: reads and writes (`G`, `G = v`, `G += v`,
+    `G++`/`G--`) record imported transfers against the var's binding
+    identity — in `known`, so `stale_dependents` flags on
+    redeclaration. Reports without the
     section load unchanged; the member record only widens what was
     already unmodelled.
     """
