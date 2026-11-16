@@ -10,11 +10,14 @@ descriptor itself declared `accepted: true`).
 
 Representation-level evaluation only: the route performs no Core check,
 no fresh query and no semantic evaluation — `checks_not_performed` names
-what the fold leaves unassessed. Anonymous Core descriptors bind no
-request or attempt, so `accepted: true` credits nothing to a selected
-output; it only states some Core run accepted within its declared scope.
-A malformed or foreign document fails statically rather than matching
-nothing.
+what the fold leaves unassessed. With `--expected-fingerprint` the
+caller declares the record pin an attempt binds to and the evaluation
+emits `attempt_bound` — fingerprint equality against the descriptor's
+`evidence_fingerprint`, representation-level only. Without it anonymous
+descriptors bind no attempt, so `accepted: true` credits nothing to a
+selected output; it only states some Core run accepted within its
+declared scope. A malformed or foreign document fails statically rather
+than matching nothing.
 """
 
 from __future__ import annotations
@@ -37,6 +40,15 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         help="Declared Core acceptance descriptor JSON "
         "(mumei.source-evidence-acceptance/v1 or "
         "mumei.native-evidence-acceptance/v1).",
+    )
+    parser.add_argument(
+        "--expected-fingerprint",
+        metavar="HEX",
+        help="Declared record pin an attempt binds to (64-char lowercase "
+        "SHA-256 hex of the record bytes, e.g. the evidence-check "
+        "request's evidence.sha256). When supplied the evaluation emits "
+        "attempt_bound comparing it to the descriptor's "
+        "evidence_fingerprint.",
     )
     parser.add_argument(
         "--output",
@@ -74,7 +86,9 @@ def main_eval(args: argparse.Namespace | None = None) -> int:
                     )
             except FileNotFoundError:
                 pass
-        evaluation = evaluate_core_acceptance(descriptor)
+        evaluation = evaluate_core_acceptance(
+            descriptor, getattr(args, "expected_fingerprint", None)
+        )
         text = json.dumps(evaluation, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)

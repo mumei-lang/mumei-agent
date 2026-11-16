@@ -159,3 +159,59 @@ def test_optional_evidence_fingerprint_field(tmp_path):
         _descriptor(evidence_fingerprint="b" * 64, foreign_field=1)
     )
     assert foreign["descriptor_match"] is False
+
+
+def test_expected_fingerprint_binds_descriptor_to_attempt(tmp_path, capsys):
+    fingerprint = "c" * 64
+    descriptor = _descriptor(evidence_fingerprint=fingerprint)
+
+    # Equal pins bind the descriptor to the declared attempt record and
+    # attempt_binding leaves checks_not_performed.
+    bound = evaluate_core_acceptance(descriptor, fingerprint)
+    assert bound["descriptor_match"] is True
+    assert bound["accepted"] is True
+    assert bound["attempt_bound"] is True
+    assert "attempt_binding" not in bound["checks_not_performed"]
+
+    # A different pin reports attempt_bound=False — an observation, not
+    # an error (the descriptor may honestly describe another record).
+    other = evaluate_core_acceptance(descriptor, "d" * 64)
+    assert other["descriptor_match"] is True
+    assert other["attempt_bound"] is False
+
+    # A matched descriptor that carries no fingerprint cannot bind.
+    unpinned = evaluate_core_acceptance(_descriptor(), fingerprint)
+    assert unpinned["descriptor_match"] is True
+    assert unpinned["attempt_bound"] is False
+
+    # A non-matching descriptor can never bind.
+    foreign = evaluate_core_acceptance(
+        _descriptor(schema_version="mumei.probe-acceptance/v1"), fingerprint
+    )
+    assert foreign["descriptor_match"] is False
+    assert foreign["attempt_bound"] is False
+
+    # Without an expected fingerprint the key is absent and the check
+    # stays honestly unperformed.
+    plain = evaluate_core_acceptance(descriptor)
+    assert "attempt_bound" not in plain
+    assert "attempt_binding" in plain["checks_not_performed"]
+
+    # A malformed expected fingerprint is a static request error.
+    for bad in ("ABC", "a" * 63, 123, ["a" * 64]):
+        with pytest.raises(ValueError):
+            evaluate_core_acceptance(descriptor, bad)
+
+    # The route forwards --expected-fingerprint.
+    path = _write(tmp_path / "desc.json", descriptor)
+    parser = __import__("argparse").ArgumentParser()
+    build_eval_parser(parser)
+    exit_code = main_eval(
+        parser.parse_args(
+            ["--descriptor", str(path), "--expected-fingerprint", fingerprint]
+        )
+    )
+    assert exit_code == 0
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["attempt_bound"] is True
+    assert "attempt_binding" not in emitted["checks_not_performed"]

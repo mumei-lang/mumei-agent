@@ -4231,9 +4231,30 @@ credit: anonymous Core descriptors bind no request or attempt, so
 scope — `checks_not_performed` names `attempt_binding`,
 `descriptor_authenticity`, `descriptor_freshness` and
 `unperformed_check_recovery` (the fold re-runs nothing the descriptor
-left unassessed). plan() consumes nothing new; C11 stays partial —
-binding a descriptor to a selected attempt output remains a Core-side
-contract question.
+left unassessed). plan() consumes nothing new; C11 stays partial.
+
+### C11 declared attempt-binding fold
+
+`evidence-acceptance-eval --expected-fingerprint <hex>` declares the
+record pin an attempt binds to — the SHA-256 of the record bytes fed to
+the attempt, matching the `evidence.sha256` the evidence-check request
+embeds in its request identity (a `request_fingerprint` covers the
+whole manifest, not the record, so it cannot serve as the pin). The
+fold then emits `attempt_bound` — true only when the descriptor matched
+AND carries an equal `evidence_fingerprint` — and `attempt_binding`
+leaves `checks_not_performed`. A matched descriptor with no fingerprint
+or a different one reports `attempt_bound: false` as an observation,
+never an error; a malformed expected fingerprint is a static request
+error; without one the key is absent and the check stays declared
+unperformed. `descriptor_match`/`accepted` keep their descriptor-only
+meaning — binding never folds into the descriptor's own verdict.
+
+This is representation-level binding: fingerprint equality says the
+descriptor and the caller pin the same record bytes, not that the
+descriptor was produced for this attempt (`descriptor_authenticity`
+stays) nor that any check ran again (`unperformed_check_recovery`
+stays). The caller-side pin is trusted as declared — matching an
+attempt's own pin is the caller's duty, not the fold's.
 
 ## Roadmap authority and vocabulary
 
