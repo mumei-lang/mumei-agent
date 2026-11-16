@@ -799,6 +799,33 @@ run selects only lineage. The route is also the
 report production, declared-path validation and basename redaction as
 the other spawn tools). C02/C10 stay partial.
 
+### C02/C10 declared native-exit-status-accept route (native-exit-status-accept)
+
+`python -m agent native-exit-status-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the deepest
+native consumer acceptance as one attempt: `<core> native-bundle
+accept-exit-status --expected-build-id <id> --json <bundle> <source>`
+under a `mumei.native-exit-status-accept-request/v1` fingerprint
+binding the bundle record plus every member it declares (the
+component files and, for a multifile record, each `sources/` member
+the merge is re-derived from) and the declared source. `acceptance`
+is claimed only for uniquely-mapped exit codes (`0 → accepted`,
+`3 → inconclusive`); exit 1 conflates a mismatched exit status with
+every static failure and claims nothing, mid-run drift reports
+`inputs_changed` with no claimed outcome, and the drift check
+re-enumerates the member set from the current record. An `accepted`
+run reports `discharged_checks` — `artifact_semantics` and
+`claim_truth` — with the remaining checks in `checks_not_performed`;
+the exit-status match itself is an OS-level observation bound by the
+record pin, discharging no additional category since the vocabulary
+has no runtime/ABI/process-semantics claim for it. Only an `exited`
+run with `exit_code == 0` selects the produced
+`mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
+design, so no `candidate` is emitted. The route is also the
+`native_exit_status_accept` MCP tool (same `run_exit_status_accept`
+report production, declared-path validation and basename redaction as
+the other spawn tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-check route (native-check)
 
 `python -m agent native-check --core <path> --bundle <dir>
