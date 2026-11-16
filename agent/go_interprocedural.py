@@ -2412,6 +2412,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and binding.type.kind == "chan"
         )
 
+    def _local_chan_binding(self, node: Any, locals_: dict) -> Any:
+        """The local channel binding `node` names, or None.
+
+        Sends, receives and closes only model a channel that lives
+        inside the function — a selector (`p.C`), a param or a
+        package-level channel names a queue in external state whose
+        mutation the summary cannot record, so those operands stay
+        closed.
+        """
+        while (
+            node is not None and node.type == "parenthesized_expression"
+        ):
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
+        if node is None or node.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(node))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None and ref.binding_id
+            else None
+        )
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "chan"
+            or binding.id not in locals_
+        ):
+            return None
+        return binding
+
     def _is_make_chan_call(self, node: Any) -> bool:
         """`make(chan T[, cap])` — the one in-fragment channel
         constructor. Anything else on the RHS of a channel binding
@@ -5305,28 +5338,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # conflated dep set: the sent value's deps accumulate
             # into `ch` (local state, no transfer — a send inside
             # the function is not an external effect). Sends
-            # through a selector (`st.C <- x`), a param or a
+            # through a selector (`p.C <- x`), a param or a
             # package channel stay closed.
             channel = node.child_by_field_name("channel")
             value = node.child_by_field_name("value")
             if channel is None or value is None:
                 raise _Unsupported("unsupported_statement", _span(node))
-            ref = (
-                self.references.get(self.node_key(channel))
-                if channel.type == "identifier"
-                else None
-            )
-            binding = (
-                self.bindings.get(ref.binding_id)
-                if ref is not None and ref.binding_id
-                else None
-            )
-            if (
-                binding is None
-                or binding.type is None
-                or binding.type.kind != "chan"
-                or binding.id not in locals_
-            ):
+            binding = self._local_chan_binding(channel, locals_)
+            if binding is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             value_deps = self.expression(
                 value, fn, params, locals_, transfers, count, 0
@@ -5866,35 +5885,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # selector, a param or a package channel stays
                     # closed.
                     operand = node.child_by_field_name("operand")
-                    while (
-                        operand is not None
-                        and operand.type == "parenthesized_expression"
-                    ):
-                        operand = next(
-                            (
-                                c
-                                for c in operand.named_children
-                                if c.type != "comment"
-                            ),
-                            None,
-                        )
-                    ref = (
-                        self.references.get(self.node_key(operand))
-                        if operand is not None
-                        and operand.type == "identifier"
-                        else None
-                    )
-                    binding = (
-                        self.bindings.get(ref.binding_id)
-                        if ref is not None and ref.binding_id
-                        else None
-                    )
-                    if (
-                        binding is None
-                        or binding.type is None
-                        or binding.type.kind != "chan"
-                        or binding.id not in locals_
-                    ):
+                    binding = self._local_chan_binding(operand, locals_)
+                    if binding is None:
                         raise _Unsupported(
                             "non_parameter_reference", _span(node)
                         )
@@ -6134,17 +6126,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     return frozenset()
                 if name == b"close":
-                    # `close(ch)` — a synchronization fact the dep
-                    # model does not track: the channel argument
-                    # still evaluates for calls.
+                    # `close(ch)` on a local channel — a
+                    # synchronization fact the dep model does not
+                    # track. Closing a channel in external state
+                    # (`close(p.C)`, `close(GC)`) mutates memory the
+                    # summary cannot record, so only a local
+                    # channel operand admits.
                     if len(arguments) != 1:
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
-                    self.expression(
-                        arguments[0], fn, params, locals_, transfers,
-                        count, depth + 1,
-                    )
+                    if (
+                        self._local_chan_binding(
+                            arguments[0], locals_
+                        )
+                        is None
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
                     return frozenset()
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
