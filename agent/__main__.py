@@ -52,6 +52,7 @@ _SUBCOMMANDS = {
     "evidence-check",
     "evidence-check-accept",
     "evidence-check-list",
+    "evidence-check-consistency",
     "evidence-acceptance-eval",
     "evidence-compare",
     "evidence-identity-check",
@@ -677,6 +678,25 @@ def main() -> None:
         evidence_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_accept_main(args))
+    elif command == "evidence-check-consistency":
+        import argparse
+        from agent.evidence_check_consistency import (
+            build_check_consistency_parser as consistency_build_parser,
+            main_check_consistency as consistency_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check-consistency",
+            description=(
+                "Run a declared Core Evidence list cross-record "
+                "consistency check as one attempt and emit the "
+                "reconciled lineage plus the declared consistency "
+                "outcome."
+            ),
+        )
+        consistency_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(consistency_main(args))
     elif command == "evidence-acceptance-eval":
         import argparse
         from agent.evidence_acceptance_eval import (

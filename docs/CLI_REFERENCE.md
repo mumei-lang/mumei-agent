@@ -48,6 +48,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check` | 5 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-list` | 5 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
+| `evidence-check-consistency` | 5 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
@@ -672,6 +673,21 @@ Evaluate a declared evidence-check record against a restored attempt-sequence sn
 | `--sequence` | `<PATH>` | yes | — | Declared attempt-sequence snapshot (mumei.verifier-attempt-sequence/v1 JSON). |
 | `--check` | `<PATH>` | yes | — | Declared evidence-check record (mumei.verifier-evidence-check/v1 JSON). |
 | `--output` | `<PATH>` | no | — | Write the acceptance descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent evidence-check-consistency`
+
+Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check-consistency`. |
+| `--evidence` | `<PATH>` | yes | — | Declared saved Evidence list envelope (absolute path, a mumei.verification-evidence-list/v1 JSON, at most 65536 bytes); its bytes are fed to the check on stdin. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
 
 
 ## `mumei-agent evidence-acceptance-eval`

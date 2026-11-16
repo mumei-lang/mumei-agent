@@ -979,6 +979,38 @@ candidate; mid-run drift suppresses the outcome via
 admission of a multi-record envelope, not record agreement or
 acceptance.
 
+### C02 declared evidence-check-consistency route (evidence-check-consistency)
+
+`python -m agent evidence-check-consistency --core <path> --evidence
+<path>` is the consistency companion of `evidence-check`: it feeds a
+saved `mumei.verification-evidence-list/v1` envelope's bytes to
+`<core> evidence check-consistency --stdin --json` as one declared
+attempt — same bounded `feed_bytes` stdin wiring, same drift
+re-hash, same compare-and-set publication.
+
+Selection requires exit 0 AND captured stdout that parses as the
+`mumei.evidence-consistency-check/v1` diagnostic. Both `consistent`
+outcomes select — the completed check IS the contract, and Core
+exits 0 whether or not conflicts were found. The validator is
+stricter than shape-matching: `record_count`/`conflict_count` are
+lifted and cross-checked (`consistent` must equal
+`conflict_count == 0`; `conflicts` must be exactly
+`min(conflict_count, 64)` well-formed
+`{"index_a","index_b","field"}` entries drawn from the nine-name
+comparison vocabulary), so an internally contradictory or
+out-of-vocabulary diagnostic binds nothing.
+
+The report (`mumei.evidence-check-consistency-report/v1`) echoes
+`representation`, `record_count`, `consistent`, `conflict_count`,
+the bounded `conflicts` list and `checks_not_performed` only on
+selection — the seven names now include `pin_correctness`:
+syntactic agreement on identity pins, not correctness, currency or
+authenticity of the pins themselves — plus the evidence candidate;
+mid-run drift suppresses the outcome via `inputs_changed`. The
+route is also reachable as the `evidence_check_consistency` MCP
+tool. C02 stays partial: cross-record agreement, not cross-record
+truth.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
