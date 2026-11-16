@@ -91,6 +91,15 @@ CONFLICT_FIELDS = frozenset(
     }
 )
 
+# Mirrors the Core descriptor's gated checks_performed list (evidence
+# check-consistency --expected-adapter): the gate names the declared id
+# match, never producer authenticity, which stays not_performed.
+GATED_CHECKS_PERFORMED = [
+    "representation_gate",
+    "cross_record_pin_agreement",
+    "declared_producer_identity",
+]
+
 EXPECTED_CHECKS_NOT_PERFORMED = [
     "claim_truth",
     "file_identity",
@@ -124,6 +133,8 @@ def _check_request(args: argparse.Namespace) -> None:
         raise ValueError(
             f"--attempt-timeout must be 1..{MAX_CHECK_TIMEOUT_MS} ms"
         )
+    if args.expected_adapter is not None and not args.expected_adapter:
+        raise ValueError("--expected-adapter must not be empty")
     try:
         size = os.path.getsize(args.evidence)
     except OSError as exc:
@@ -163,6 +174,11 @@ def _attempt_fingerprint(
             "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
         },
     }
+    if args.expected_adapter is not None:
+        # The declared producer expectation is part of the request
+        # identity: it joins the fingerprint only when given so an
+        # ungated request keeps its identity across versions.
+        request["expected_adapter"] = args.expected_adapter
     return hashlib.sha256(
         json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -194,7 +210,9 @@ def _valid_conflict(entry: object, record_count: int) -> bool:
     return isinstance(field, str) and field in CONFLICT_FIELDS
 
 
-def _parse_diagnostic(captured: bytes) -> dict | None:
+def _parse_diagnostic(
+    captured: bytes, gated: bool
+) -> dict | None:
     """Recognise the Core's consistency diagnostic, or None.
 
     The ``mumei.evidence-consistency-check/v1`` document carries four
@@ -203,14 +221,18 @@ def _parse_diagnostic(captured: bytes) -> dict | None:
     compared field-for-field and the variable ones are validated:
     ``consistent`` must equal ``conflict_count == 0``, and the
     reported ``conflicts`` list must be exactly
-    ``min(conflict_count, 64)`` well-formed entries. Any deviation
-    binds nothing — the diagnostic IS the contract.
+    ``min(conflict_count, 64)`` well-formed entries. A gated run
+    adds ``checks_performed`` with exactly the declared gate
+    vocabulary. Any deviation binds nothing — the diagnostic IS
+    the contract.
     """
     try:
         document = json.loads(captured.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
-    if not isinstance(document, dict) or len(document) != 9:
+    if not isinstance(document, dict) or len(document) != (
+        10 if gated else 9
+    ):
         return None
     if (
         document.get("schema_version")
@@ -220,6 +242,10 @@ def _parse_diagnostic(captured: bytes) -> dict | None:
         or document.get("acceptance") != "not_evaluated"
         or document.get("checks_not_performed")
         != EXPECTED_CHECKS_NOT_PERFORMED
+    ):
+        return None
+    if gated and (
+        document.get("checks_performed") != GATED_CHECKS_PERFORMED
     ):
         return None
     record_count = document.get("record_count")
@@ -284,6 +310,15 @@ def build_check_consistency_parser(
         help=f"Declared attempt bound in ms (max {MAX_CHECK_TIMEOUT_MS}).",
     )
     parser.add_argument(
+        "--expected-adapter",
+        default=None,
+        metavar="ID",
+        help=(
+            "Optional declared producer adapter id every record must "
+            "name; declared identity only, not producer authenticity."
+        ),
+    )
+    parser.add_argument(
         "--memory-bound-mb",
         type=int,
         default=None,
@@ -330,6 +365,8 @@ def run_check_consistency(args: argparse.Namespace) -> dict:
         "--stdin",
         "--json",
     )
+    if args.expected_adapter is not None:
+        argv += ("--expected-adapter", args.expected_adapter)
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
     store.publish(sequence)
@@ -354,7 +391,9 @@ def run_check_consistency(args: argparse.Namespace) -> dict:
     if record.state == "exited" and record.events:
         exit_code = record.events[-1].exit_code
     diagnostic = (
-        _parse_diagnostic(dispatch.run.stdout)
+        _parse_diagnostic(
+            dispatch.run.stdout, args.expected_adapter is not None
+        )
         if exit_code == 0 and not inputs_changed
         else None
     )
@@ -385,6 +424,10 @@ def run_check_consistency(args: argparse.Namespace) -> dict:
         report["consistent"] = diagnostic["consistent"]
         report["conflict_count"] = diagnostic["conflict_count"]
         report["conflicts"] = list(diagnostic["conflicts"])
+        if "checks_performed" in diagnostic:
+            report["checks_performed"] = list(
+                diagnostic["checks_performed"]
+            )
         report["checks_not_performed"] = list(
             diagnostic["checks_not_performed"]
         )

@@ -442,3 +442,120 @@ class TestRealCore:
         report = json.loads(out)
         assert "consistent" not in report
         assert report["normalized"]["exit_code"] == 1
+
+
+GATED_PERFORMED = [
+    "representation_gate",
+    "cross_record_pin_agreement",
+    "declared_producer_identity",
+]
+
+
+def _write_gated_core(tmp_path: Path, expect_sha: str) -> Path:
+    """Stub that emits the gated diagnostic when invoked with
+    `--expected-adapter expected-id`, the ungated one without."""
+    gated = json.dumps(
+        {**_diagnostic(), "checks_performed": GATED_PERFORMED}
+    )
+    core = tmp_path / "mumei-stub-gated"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "check-consistency" ]; then\n'
+        "    input_file=$(mktemp)\n"
+        '    cat > "$input_file"\n'
+        "    got=$(python3 -c '\n"
+        "import hashlib,sys\n"
+        "print(hashlib.sha256(open(sys.argv[1],\"rb\").read()).hexdigest())\n"
+        "' \"$input_file\")\n"
+        '    rm -f "$input_file"\n'
+        f'    if [ "$got" = "{expect_sha}" ]; then\n'
+        '        if [ "$5" = "--expected-adapter" ] '
+        '&& [ "$6" = "expected-id" ]; then\n'
+        f"            printf %s '{gated}'\n"
+        "            exit 0\n"
+        "        fi\n"
+        f"        printf %s '{_diagnostic_json()}'\n"
+        "        exit 0\n"
+        "    fi\n"
+        "    exit 1\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    return core
+
+
+def test_expected_adapter_gate_reports_declared_producer_identity(
+    tmp_path, capsys
+):
+    """A gated run selects the gated diagnostic: checks_performed
+    names declared_producer_identity alongside the consistency check
+    vocabulary, while producer_authenticity stays not_performed."""
+    evidence = _write_evidence(tmp_path)
+    sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    core = _write_gated_core(tmp_path, expect_sha=sha)
+    code, out, err = _run(
+        capsys,
+        _args(core, evidence, ("--expected-adapter", "expected-id")),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["consistent"] is True
+    assert report["checks_performed"] == GATED_PERFORMED
+    assert "producer_authenticity" in report["checks_not_performed"]
+    assert "pin_correctness" in report["checks_not_performed"]
+    assert report["sequence"]["selected_result"] is not None
+
+
+def test_ungated_shape_on_a_gated_run_binds_nothing(tmp_path, capsys):
+    """A gated request whose child emits the ungated diagnostic is not
+    the accepted shape — nothing is claimed or selected."""
+    evidence = _write_evidence(tmp_path)
+    sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    core = _write_core(tmp_path, expect_sha=sha)
+    code, out, _ = _run(
+        capsys,
+        _args(core, evidence, ("--expected-adapter", "expected-id")),
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert "consistent" not in report
+    assert "checks_performed" not in report
+    assert report["sequence"].get("selected_result") is None
+
+
+def test_wrong_gated_vocabulary_binds_nothing(tmp_path, capsys):
+    """A gated diagnostic naming a different performed list (or a
+    missing gate entry) is not the accepted shape."""
+    evidence = _write_evidence(tmp_path)
+    sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    wrong = json.dumps(
+        {
+            **_diagnostic(),
+            "checks_performed": [
+                "representation_gate",
+                "producer_authenticity",
+            ],
+        }
+    )
+    core = _write_core(tmp_path, expect_sha=sha, diagnostic=wrong)
+    code, out, _ = _run(
+        capsys,
+        _args(core, evidence, ("--expected-adapter", "expected-id")),
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert "consistent" not in report
+    assert report["sequence"].get("selected_result") is None
+
+
+def test_empty_expected_adapter_is_static_error(tmp_path, capsys):
+    evidence = _write_evidence(tmp_path)
+    core = _write_core(tmp_path, expect_sha="0" * 64)
+    code, out, err = _run(
+        capsys,
+        _args(core, evidence, ("--expected-adapter", "")),
+    )
+    assert code == 1
+    assert out == ""
+    assert "--expected-adapter" in err

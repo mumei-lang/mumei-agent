@@ -1157,6 +1157,22 @@ route is also reachable as the `evidence_check_consistency` MCP
 tool. C02 stays partial: cross-record agreement, not cross-record
 truth.
 
+All three check routes accept `--expected-adapter <id>` (and the
+matching `expected_adapter` MCP tool parameter), which forwards the
+Core's declared producer-identity gate from
+[mumei#1074](https://github.com/mumei-lang/mumei/pull/1074): the
+child must emit the gated diagnostic whose `checks_performed` ends
+with `declared_producer_identity` for anything to select — the
+gated and ungated diagnostic shapes are distinct accepted
+documents, so a shape that does not match the declared request
+binds nothing. The expectation joins the attempt fingerprint only
+when given, keeping ungated request identities stable, and the
+report lifts `checks_performed` alongside `checks_not_performed`
+on selection. The gate asserts the declared `provenance.adapter.id`
+match only — `producer_authenticity` remains not_performed:
+identity is what the record says, authenticity is whether it is
+true.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
