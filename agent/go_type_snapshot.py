@@ -422,6 +422,7 @@ def _go_type(value: Any, arch: str) -> GoType:
                 "array",
                 "map",
                 "struct",
+                "chan",
             }
             and width == 0
             and signed is None
@@ -436,7 +437,15 @@ def _go_type(value: Any, arch: str) -> GoType:
             "string",
             "unsafe.Pointer",
         }
-        if kind in {"function", "pointer", "slice", "array", "map", "struct"}:
+        if kind in {
+            "function",
+            "pointer",
+            "slice",
+            "array",
+            "map",
+            "struct",
+            "chan",
+        }:
             # A pointer fact's identity lives in `type_id` (the
             # pointee's named/alias type), not in a basic name; a
             # slice/array fact's element lives in `elem`, and a map
@@ -462,6 +471,11 @@ def _go_type(value: Any, arch: str) -> GoType:
         # then — `*p` reads/writes stay closed like before.
         _require(key_raw is None and (elem_raw is None or isinstance(elem_raw, dict)))
         elem = _go_type(elem_raw, arch) if elem_raw is not None else None
+        key = None
+    elif kind == "chan":
+        # The element fact lets `<-ch` classify what it returns.
+        _require(key_raw is None and isinstance(elem_raw, dict))
+        elem = _go_type(elem_raw, arch)
         key = None
     else:
         _require(elem_raw is None and key_raw is None)
