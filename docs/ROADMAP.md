@@ -2155,8 +2155,9 @@ name's identity (effects unknown — the captured pointer may aim
 at caller memory). Calls or writes inside the literal,
 selector/computed callees, function-typed parameters and
 package-level `var Alias = Id` callables stay closed),
-per-statement (rather than
-per-function) summary output, and cross-file dependencies beyond
+per-statement read attribution now
+lands in `statement_reads` (one `(span, deps)` record per walked
+statement — see its own section below), and cross-file dependencies beyond
 the TS-style host-declared resolver contract — Rust now resolves
 `mod NAME;` declarations and `use` bindings through the same
 `summarize_rust(source, resolver, source_path)`/`--resolve-modules`
@@ -3013,6 +3014,23 @@ intermediate field (`st.A.N` where `A *P2`) stays closed — the
 deref reads caller memory the conflated set cannot represent.
 Composite-typed package globals, method values (`f := st.M`),
 method calls (`st.M()`), `st[i]` and `*st.V` stay closed.
+
+### C07 per-statement read attribution
+
+`FunctionSummary` now also emits `statement_reads`: one
+`(span, deps)` record per walked statement naming the parameter
+ordinals its evaluation read. `expression` appends every dep set
+it returns to every open statement frame, so a read inside a
+nested block attributes upward (`if c { y = x }` records `x` on
+both the assignment and the `if`); loop fixed-point re-passes
+union into the same span key, so records stay idempotent.
+Spans use the same file-indexed addressing `CallTransfer.span`
+uses. The records serialize only on available summaries — a
+gapped walk would misattribute — and round-trip through
+`from_dict` under the usual ordinals-`<`-parameters invariant.
+Like `calls`, `statement_reads` is descriptive: it never feeds
+`for_function`/`stale_dependents`. TS/Rust/Sol summaries emit no
+field; consumers treat absence as "not provided".
 
 ### C06 imported generic instantiations
 
