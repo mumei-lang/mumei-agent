@@ -2127,7 +2127,14 @@ Struct-typed parameters and results stay outside the scalar
 signature fragment, and `st.P`/`*st.P` on a pointer-typed field
 stays closed like `st.A.N` on `A *P2`,
 the remaining
-resource-state semantics (channels, `make` —
+resource-state semantics (channels — local `make(chan T)`
+channels now admit under a conflated dep set: `ch <- x`
+accumulates the sent value's deps, `<-ch` and `for v := range ch`
+return the union of every send, `v, ok := <-ch` binds both names
+with it, and `close(ch)` admits as an untracked synchronization
+fact — while `chan` parameters/results, channel aliases
+(`ch2 := ch`), operands in external state (`p.C <- x`,
+`close(GC)`) and `select` stay closed — `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
 argument pins, with the pointee's own use-site gates classifying
 what `*p`/`p.V`/`(*p)[i]` admit — and bound function values:
@@ -2401,10 +2408,12 @@ The acceptance criterion that interprocedural fixtures cover aliasing
 and resource state is exercised as negative coverage: pointer
 parameters and `&x` aliases, slice/map/channel resource state
 (package-level `var`s now *do* admit — scalar and composite — under
-the external-state transfer model; the still-closed shapes are
-channel/constructor/closure state),
-`new`/`make`-style constructor
-state, bound function values and literal closures all fail closed —
+the external-state transfer model, and local `make(chan T)`
+channels admit under the conflated dep-set model; the still-closed
+shapes are `chan` parameters, channel aliases and `select`),
+slice/map `make` constructor
+state, selector/computed callees and function-typed parameters
+all fail closed —
 every one lands as a declared gap (`unsupported_signature`,
 `unsupported_operator`, `unsupported_expression`,
 `binding_unavailable`, `non_parameter_reference`,
