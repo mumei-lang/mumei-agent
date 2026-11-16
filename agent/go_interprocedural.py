@@ -5772,6 +5772,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         else frozenset({params[ref.binding_id]})
                     )
                     locals_[ref.binding_id] = base | stored
+            elif arg_node.type == "identifier":
+                # `G(p)` hands the callee a pointer binding — the
+                # callee's `*q` stores write caller memory, so every
+                # argument's dependencies fold into the indirect-write
+                # set (a later `*p` read observes them) and into each
+                # escaped binding (`p := &x` may have aimed at any of
+                # them) — the same approximation a `*p = v` store
+                # uses.
+                ref = self.references.get(self.node_key(arg_node))
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None
+                    else None
+                )
+                if binding is not None and binding.type.kind == "pointer":
+                    self.indirect_writes |= stored
+                    for escaped_id in self.escaped:
+                        self._store(
+                            locals_, params, escaped_id, stored, True
+                        )
 
 
 def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:

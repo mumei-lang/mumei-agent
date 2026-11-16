@@ -11332,3 +11332,25 @@ def test_builtin_make_stays_closed(
     )
     assert not result.available
     assert result.gaps[0].reason == "unresolved_or_opaque_call"
+
+
+def test_builtin_new_pointer_arg_propagates_callee_writes(
+    go_types_helper,
+):
+    # `G(p)` hands an opaque-effect callee the fresh pointer — its
+    # `*q` stores write caller memory, so a later `*p` read must
+    # observe every argument's deps through `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "func G(q *int64, a int64) int64 { *q = a; return 0 }\n"
+        "func F(a int64) int64 {\n"
+        "\tp := new(int64)\n"
+        "\t_ = G(p, a)\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
