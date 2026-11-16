@@ -2412,6 +2412,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and binding.type.kind == "chan"
         )
 
+    def _scalar_chan_binding(self, binding_id: str) -> bool:
+        """The bound name is a `chan T` whose element is scalar.
+
+        Only scalar-element channels admit: `chan chan T` would let a
+        channel VALUE travel through a queue (`ch2, _ = <-q`) and
+        alias it under a second dep set — the exact under-approx the
+        make-only bind gate exists to prevent; a composite element
+        binds into the unsupported composite-value shapes anyway.
+        """
+        binding = self.bindings.get(binding_id)
+        elem = (
+            binding.type.elem
+            if binding is not None and binding.type is not None
+            else None
+        )
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "chan"
+            and elem is not None
+            and elem.kind in {"integer", "boolean"}
+        )
+
     def _local_chan_binding(self, node: Any, locals_: dict) -> Any:
         """The local channel binding `node` names, or None.
 
@@ -2438,8 +2461,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         if (
             binding is None
-            or binding.type is None
-            or binding.type.kind != "chan"
+            or not self._scalar_chan_binding(binding.id)
             or binding.id not in locals_
         ):
             return None
@@ -3822,15 +3844,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and not self._is_local_composite(binding)
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
-                if (
-                    binding.type.kind == "chan"
-                    and not self._is_make_chan_call(rights[i])
+                if binding.type.kind == "chan" and (
+                    not self._is_make_chan_call(rights[i])
+                    or not self._scalar_chan_binding(binding.id)
                 ):
                     # `ch2 := ch` would copy ch's dep set while the
                     # two names still alias one queue — a later
                     # `ch2 <- x; <-ch` reads ch's stale set and
                     # under-approximates. Only `make` creates a
-                    # channel in-fragment.
+                    # channel in-fragment, and only a scalar element
+                    # keeps queue contents inside the dep model.
                     raise _Unsupported("binding_unavailable", _span(node))
                 self._store(locals_, params, binding.id, value, conditional)
                 # `h2 := h` — a copied closure keeps its captured
@@ -3979,12 +4002,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     if (
                         binding.type.kind == "chan"
-                        and value_nodes
-                        and not self._is_make_chan_call(value_nodes[i])
+                        and (
+                            not self._scalar_chan_binding(binding.id)
+                            or (
+                                value_nodes
+                                and not self._is_make_chan_call(
+                                    value_nodes[i]
+                                )
+                            )
+                        )
                     ):
                         # `var ch2 = ch` aliases one queue under a
-                        # second dep set, like `ch2 := ch` — only a
-                        # `make` RHS creates a channel in-fragment.
+                        # second dep set, like `ch2 := ch`; a
+                        # non-scalar element (`var q chan chan T`)
+                        # transports channel values the same way —
+                        # only a `make` RHS over a scalar element
+                        # creates a channel in-fragment.
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
@@ -4482,12 +4515,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         value = frozenset({params[ref.binding_id]}) | value
                 if (
                     not compound
-                    and len(lefts) == len(rights)
                     and self._is_chan_binding(ref.binding_id)
-                    and not self._is_make_chan_call(rights[i])
+                    and (
+                        len(lefts) != len(rights)
+                        or not self._is_make_chan_call(rights[i])
+                        or not self._scalar_chan_binding(ref.binding_id)
+                    )
                 ):
                     # `ch2 = ch` aliases one queue under a second dep
                     # set — sends through ch2 would never reach `<-ch`.
+                    # A tuple-of-different-width (`ch2, _ = <-q`) can
+                    # bind a channel just the same, so the arity guard
+                    # sits inside the chan check, not outside it.
                     raise _Unsupported("binding_unavailable", _span(node))
                 # Reassignment replaces the binding's dependencies; it never
                 # declares a new variable. Inside a branch the caller's join
@@ -4544,6 +4583,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # scoped to the loop — none of them escape, matching the compiler.
             scope = dict(locals_)
             update = None
+            # (elem binding id, seed deps, local channel id | None).
             range_elem = None
             if clause is not None and clause.type == "range_clause":
                 # Two operand families are reachable: an integer
@@ -4904,7 +4944,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.node_key(lefts[1])
                         )
                         if elem_binding is not None:
-                            range_elem = (elem_binding.id, value_deps)
+                            range_elem = (elem_binding.id, value_deps, None)
                         else:
                             elem_ref = self.references.get(
                                 self.node_key(lefts[1])
@@ -4913,6 +4953,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 range_elem = (
                                     elem_ref.binding_id,
                                     value_deps,
+                                    None,
                                 )
                 else:
                     if right is None or len(lefts) > 1 or (
@@ -4921,6 +4962,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unsupported_statement", _span(clause)
                         )
+                    chan = self._local_chan_binding(right, scope)
                     rdeps = self.expression(
                         right, fn, params, scope, transfers, count, 0
                     )
@@ -4932,6 +4974,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     "binding_unavailable", _span(lefts[0])
                                 )
                             scope[binding.id] = rdeps
+                            if chan is not None:
+                                # `for v := range ch` — the element
+                                # name re-joins the queue's widened
+                                # set each fixed-point pass, like the
+                                # bound-container element does.
+                                range_elem = (
+                                    binding.id,
+                                    rdeps,
+                                    chan.id,
+                                )
                         else:
                             ref = self.references.get(self.node_key(lefts[0]))
                             if ref is None or (
@@ -4944,6 +4996,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._store(
                                 scope, params, ref.binding_id, rdeps, conditional,
                             )
+                            if chan is not None:
+                                range_elem = (
+                                    ref.binding_id,
+                                    rdeps,
+                                    chan.id,
+                                )
             elif clause is not None and clause.type == "for_clause":
                 init = clause.child_by_field_name("initializer")
                 if init is not None:
@@ -4980,11 +5038,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # the body writes what the next iteration
                         # reads — so the bound name re-joins every
                         # pass's indirect writes until the point is
-                        # fixed.
-                        elem_id, elem_base = range_elem
+                        # fixed. `for range ch` re-joins the queue's
+                        # own widened set instead: sends inside the
+                        # body grow it in `inner`, and the pass join
+                        # carries that growth back through `scope`.
+                        elem_id, elem_base, elem_chan = range_elem
+                        extra = (
+                            inner.get(elem_chan, frozenset())
+                            if elem_chan is not None
+                            else self.indirect_writes
+                        )
                         self._store(
                             inner, params, elem_id,
-                            elem_base | self.indirect_writes,
+                            elem_base | extra,
                             conditional,
                         )
                     self._branch_sequence(

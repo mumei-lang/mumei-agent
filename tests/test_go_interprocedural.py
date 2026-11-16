@@ -12538,3 +12538,61 @@ def test_channel_boundaries_stay_closed(go_types_helper):
         )
     )
     assert not select_case.available
+
+
+def test_channel_non_scalar_element_stays_closed(go_types_helper):
+    # `chan chan T` would let a channel VALUE travel through a queue
+    # (`ch2, _ = <-q`) and alias it under a second dep set — the
+    # under-approx the make-only bind gate exists to prevent. A
+    # `chan *T`/`chan func()` element escapes the dep model the same
+    # way, so channel bindings admit scalar elements only.
+    for src in (
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64)\n\t_ = q\n\treturn x\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tvar q chan chan int64\n\t_ = q\n\treturn x\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan *int64)\n\t_ = q\n\treturn x\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan func() int64)\n\t_ = q\n\treturn x\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tvar q chan func()\n\t_ = q\n\treturn x\n}\n",
+    ):
+        result = named(*unit(go_types_helper, src))
+        assert not result.available
+
+
+def test_channel_range_body_send_rejoins_element(go_types_helper):
+    # `for v := range ch { ch <- y; *p = v }` — sends inside the
+    # body widen the queue every pass; the element name must re-join
+    # that grown set or `*p = v` stores the entry-time deps only.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x, y int64, p *int64) int64 {\n"
+            "\tch := make(chan int64)\n\tch <- x\n"
+            "\tfor v := range ch {\n\t\tch <- y\n\t\t*p = v\n\t}\n"
+            "\treturn *p\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_channel_tuple_receive_cannot_alias(go_types_helper):
+    # `ch2, _ = <-Q` — a tuple-of-different-width assignment can bind
+    # a channel through a receive just like `ch2 = ch`; the chan gate
+    # must not assume matching arity. `Q` lives at package scope
+    # because a local `chan chan int64` cannot be built at all.
+    files = {
+        "a.go": "package p\n"
+        "var Q chan chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tch2 := make(chan int64)\n"
+        "\tch2, _ = <-Q\n\tch2 <- x\n\treturn <-ch2\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
