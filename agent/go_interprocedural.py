@@ -1658,14 +1658,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         for idx in reversed(index_nodes):
             if idx is None:
                 raise _Unsupported("non_parameter_reference", _span(node))
-            if idx.type in {
-                "int_literal",
-                "float_literal",
-                "imaginary_literal",
-                "rune_literal",
-                "interpreted_string_literal",
-                "raw_string_literal",
-            }:
+            if idx.type in _INDEX_LITERALS:
                 # A literal index carries no dependencies — the
                 # expression path resolves `true`/`false` instead, in
                 # case the predeclared names are shadowed.
