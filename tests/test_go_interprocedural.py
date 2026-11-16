@@ -5669,9 +5669,10 @@ def test_local_struct_pointer_field_read_is_admitted(
     go_types_helper, expression
 ):
     # `p.V`/`(*p).V` on `p *P` where `P` is a package-local struct —
-    # the field read touches caller state like `lib.VS.F`: dep-free
-    # plus an imported transfer against the field's real binding
-    # identity, `effects` unknown.
+    # the field read touches caller state like `lib.VS.F`: the root
+    # pointer's provenance plus every indirect store, an imported
+    # transfer against the field's real binding identity, `effects`
+    # unknown.
     files = {
         "a.go": "package p\ntype P struct{ V int64; W bool }\n"
         f"func F(p *P) int64 {{ return {expression} }}\n"
@@ -5681,7 +5682,7 @@ def test_local_struct_pointer_field_read_is_admitted(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
 
 
@@ -5701,7 +5702,7 @@ def test_local_nested_pointer_field_read_is_admitted(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
 
 
@@ -5723,19 +5724,12 @@ def test_local_named_pointee_write_is_admitted(
     assert result.effects == "unknown"
 
 
-@pytest.mark.parametrize(
-    "decl,expression",
-    [
-        # A non-scalar field type keeps the read closed.
-        ("type P struct{ V []int64 }", "p.V[0]"),
-        # A composite pointee (`*struct` of an unnamed literal is
-        # never named; `*[]T`/`*map` carry no local type identity).
-        ("type S []int64", "(*p)[0]"),
-    ],
-)
 def test_local_named_pointee_composites_stay_closed(
-    go_types_helper, decl, expression
+    go_types_helper,
 ):
+    # A non-scalar field type keeps the read closed — indexing a
+    # slice *field* (`p.V[0]`) never reaches a container pointee.
+    decl, expression = "type P struct{ V []int64 }", "p.V[0]"
     files = {
         "a.go": f"package p\n{decl}\n"
         f"func F(p *{decl.split()[1]}, x int64) int64 {{ "
@@ -5746,6 +5740,186 @@ def test_local_named_pointee_composites_stay_closed(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_local_named_container_pointee_index_read(
+    go_types_helper,
+):
+    # `(*p)[0]` on `p *S` (`type S []int64`) — an index read through
+    # a bound pointer whose pointee is a container: external memory,
+    # so the pointee's identity records an imported transfer while
+    # the result carries the pointer's own deps (param 0).
+    files = {
+        "a.go": "package p\ntype S []int64\n"
+        "func F(p *S) int64 { return (*p)[0] }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    s_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "S" and b.kind == "type"
+    )
+    assert s_id in result.pinned
+    assert any(c.target == s_id for c in result.calls)
+
+
+def test_local_unnamed_container_pointee_index_read(
+    go_types_helper,
+):
+    # `(*p)[i]` on `p *[]int64` — the unnamed pointee classifies by
+    # the pointer fact's `elem`; the synthetic `<binding>/pointee`
+    # identity records the transfer and can never falsely flag
+    # `stale_dependents`.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, i int64) int64 { return (*p)[i] }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+    assert any(
+        c.target.endswith("/pointee") and c.imported
+        for c in result.calls
+    )
+
+
+def test_local_container_pointee_index_write_folds(
+    go_types_helper,
+):
+    # `(*p)[0] = x` — the store lands in external element memory, so
+    # the fold keeps x's deps visible: a later `(*p)[1]` read must
+    # observe them through `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, x int64) int64 {\n"
+        "\t(*p)[0] = x\n\treturn (*p)[1]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_array_pointee_sugar_index(
+    go_types_helper,
+):
+    # `p[i]` on `p *[4]int64` — Go's auto-deref sugar for
+    # pointer-to-array indexing, same model as `(*p)[i]`.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[4]int64) int64 { p[0] = 7; return p[0] }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_container_pointee_whole_store(
+    go_types_helper,
+):
+    # `*p = v` on `p *P` — a whole-composite store through a bound
+    # pointer: the fold makes it sound for any pointee shape, so the
+    # write side admits it like a scalar pointee store.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\t*p = P{V: x}\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+
+
+def test_pointee_store_flows_into_field_read(
+    go_types_helper,
+):
+    # `*p = P{V: x}` folds x into `indirect_writes` — a later `p.V`
+    # read must observe it: the bound field read unions the root's
+    # provenance with indirect stores, never returns dep-free.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\t*p = P{V: x}\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_field_write_flows_into_same_pointer_read(
+    go_types_helper,
+):
+    # `p.V = x` accumulates x into the base binding — a later `p.V`
+    # read sees it through the root's own deps.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tp.V = x\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_field_write_flows_into_aliased_pointer_read(
+    go_types_helper,
+):
+    # `q := p; q.V = x; return p.V` — a field store through a bound
+    # pointer also broadcasts into `indirect_writes`, so a read
+    # through a DIFFERENT aliased pointer observes it.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tq := p\n\tq.V = x\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_pointee_store_pins_declared_type(
+    go_types_helper,
+):
+    # `*p = MyInt(x)` — the resolved pointee fact pins `MyInt`, so
+    # redeclaring the named pointee flags `stale_dependents`.
+    files = {
+        "a.go": "package p\ntype MyInt int64\n"
+        "func F(p *MyInt, x int64) int64 {\n"
+        "\t*p = MyInt(x)\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    myint_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "MyInt" and b.kind == "type"
+    )
+    assert myint_id in result.pinned
 
 
 def test_local_struct_value_field_read_is_admitted(
@@ -8577,9 +8751,9 @@ def test_imported_field_read_method_member_stays_closed(go_types_helper):
 
 
 def test_bound_base_field_read_is_admitted(go_types_helper):
-    # `t.N` — a scalar field read through a bound `*S2` is dep-free
-    # caller state like `lib.VS2.N`: the transfer records the field's
-    # identity and `effects` reports `unknown`.
+    # `t.N` — a scalar field read through a bound `*S2` is caller
+    # state like `lib.VS2.N`: the root pointer's provenance deps, an
+    # imported transfer on the field's identity, `effects` unknown.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { return t.N }\n"
@@ -8589,7 +8763,7 @@ def test_bound_base_field_read_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
     members = {m.name: m for m in snapshot.imported_members}
     calls = [c for c in result.calls if c.imported]
@@ -8629,7 +8803,8 @@ def test_bound_base_field_read_parenthesized_base_is_admitted(
 
 
 def test_bound_base_field_read_local_pointer_is_admitted(go_types_helper):
-    # `q := t; q.N` — a bound local `*S2` admits the same way.
+    # `q := t; q.N` — a bound local `*S2` admits the same way,
+    # reporting the copied pointer's provenance deps.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { q := t\n\treturn q.N }\n"
@@ -8639,13 +8814,14 @@ def test_bound_base_field_read_local_pointer_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_base_field_read_no_escaped_union(go_types_helper):
     # A `*S` pointee is a struct — it can never alias a tracked
     # scalar binding, so escaped bindings do NOT union into the
-    # dep-free result (unlike `*t` scalar derefs).
+    # result (unlike `*t` scalar derefs): only the root's own
+    # provenance and indirect stores apply.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2, x lib.T, y lib.T) int64 {\n"
@@ -8656,7 +8832,7 @@ def test_bound_base_field_read_no_escaped_union(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_base_field_read_flags_stale_dependents(go_types_helper):
@@ -8698,7 +8874,7 @@ def test_bound_base_field_read_deref_base_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
 
 
@@ -8719,7 +8895,7 @@ def test_bound_base_field_read_double_deref_stays_closed(go_types_helper):
 def test_bound_base_field_read_nested_is_admitted(go_types_helper):
     # `t.W.N` — the operand `t.W` resolves to field `W`'s `*W2`
     # member, so `N` resolves one level deeper on `W2`. Both `S2`
-    # and `W2` pin; the read stays dep-free.
+    # and `W2` pin; the read reports the root pointer's provenance.
     lib = {
         "lib": {
             "m.go": "package lib\ntype T int64\n"
@@ -8741,7 +8917,7 @@ def test_bound_base_field_read_nested_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
     # Every member the chain traverses pins — redeclaring `W` itself
     # (say to a struct value) must flag the summary, so the
@@ -10407,3 +10583,69 @@ def test_package_pointer_intermediate_field_write_folds(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.effects == "unknown"
+
+
+def test_package_pointer_var_pointee_index_read_write(
+    go_types_helper,
+):
+    # `(*GP)[i]` on `var GP *[]int64` — the package pointer var's
+    # container pointee reads/writes like GA[i]: dep-free read, the
+    # var's own identity records both transfers.
+    files = {
+        "a.go": "package p\nvar GP *[]int64\n"
+        "func F(i int64) int64 { (*GP)[0] = 7; return (*GP)[i] }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    gp_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "GP" and b.kind == "variable"
+    )
+    assert any(c.target == gp_id for c in result.calls)
+
+
+def test_package_index_write_evaluates_bound_pointer_index(
+    go_types_helper,
+):
+    # `GA[(*q)[0]] = v` — the index's own dereference read records a
+    # transfer too: skipping its evaluation would under-report
+    # `effects`.
+    files = {
+        "a.go": "package p\nvar GA [4]int64\n"
+        "func F(q *[]int64, v int64) int64 {\n"
+        "\tGA[(*q)[0]] = v\n\treturn v\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert any(
+        c.target.endswith("/pointee") and c.imported
+        for c in result.calls
+    )
+
+
+def test_package_index_write_evaluates_scalar_deref_index(
+    go_types_helper,
+):
+    # `GA[*q] = v` — a scalar deref inside the index also records
+    # the pointee's transfer.
+    files = {
+        "a.go": "package p\nvar GA [4]int64\n"
+        "func F(q *int64, v int64) int64 {\n"
+        "\tGA[*q] = v\n\treturn v\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert any(
+        c.target.endswith("/pointee") and c.imported
+        for c in result.calls
+    )
