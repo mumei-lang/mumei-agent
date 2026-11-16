@@ -80,17 +80,17 @@ Exported tools:
 | `native_attempt(core_path, source_path, bundle_dir, attempt_timeout_ms=60000)` | Run `native-bundle build` as one declared attempt (same wiring as `native-attempt`) and return `mumei.native-attempt-report/v1` — `build_id` + `candidate` only when the produced bundle holds the full declared member set |
 | `summaries_plan(profile, stamp, tool_version='', histories_path='', rounds=1, max_parallel=1)` | Plan the summary route for a declared profile through the C11 probe boundary (same wiring as `summaries-plan`) and return the `mumei.summaries-plan/v1` document — a selected adapter is a routing decision, not an accepted manifest |
 | `ts_summaries(source_path, resolve_modules=false)` | Emit the `mumei.ts-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `ts-summaries`); optional relative-import resolution — a conservative report, not a proof |
-| `rust_summaries(source_path)` | Emit the `mumei.rust-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `rust-summaries`) — a conservative report, not a proof |
-| `sol_summaries(source_path)` | Emit the `mumei.sol-scalar-parameter-deps/v1` manifest for one declared source under the 256 KiB bound (same wiring as `sol-summaries`) — a conservative report, not a proof |
+| `rust_summaries(source_path, resolve_modules=false)` | Emit the `mumei.rust-scalar-parameter-deps/v1` manifest for one declared source under the 64 KiB bound (same wiring as `rust-summaries`); optional relative-import resolution — a conservative report, not a proof |
+| `sol_summaries(source_path, resolve_modules=false)` | Emit the `mumei.sol-scalar-parameter-deps/v1` manifest for one declared source under the 256 KiB bound (same wiring as `sol-summaries`); optional relative-import resolution — a conservative report, not a proof |
 | `ts_summaries_check(source_path, manifest_path, resolve_modules=false)` | Compare a declared `mumei.ts-scalar-parameter-deps/v1` manifest against a fresh derivation (same wiring as `ts-summaries-check`) and return `mumei.ts-summary-check/v1` (`context_match` + `reusable`/`stale`/`missing`); detection only |
-| `rust_summaries_check(source_path, manifest_path)` | Same wiring as `rust-summaries-check` — returns `mumei.rust-summary-check/v1` |
-| `sol_summaries_check(source_path, manifest_path)` | Same wiring as `sol-summaries-check` — returns `mumei.sol-summary-check/v1` |
+| `rust_summaries_check(source_path, manifest_path, resolve_modules=false)` | Same wiring as `rust-summaries-check` — returns `mumei.rust-summary-check/v1` |
+| `sol_summaries_check(source_path, manifest_path, resolve_modules=false)` | Same wiring as `sol-summaries-check` — returns `mumei.sol-summary-check/v1` |
 | `ts_summaries_reuse(source_path, manifest_path, resolve_modules=false)` | Emit a merged `mumei.ts-scalar-parameter-deps/v1` manifest reusing the declared manifest's unchanged summaries (same wiring as `ts-summaries-reuse`) — the weaker per-function freshness merge, not the strict gate |
-| `rust_summaries_reuse(source_path, manifest_path)` | Same wiring as `rust-summaries-reuse` — returns the merged `mumei.rust-scalar-parameter-deps/v1` manifest |
-| `sol_summaries_reuse(source_path, manifest_path)` | Same wiring as `sol-summaries-reuse` — returns the merged `mumei.sol-scalar-parameter-deps/v1` manifest |
+| `rust_summaries_reuse(source_path, manifest_path, resolve_modules=false)` | Same wiring as `rust-summaries-reuse` — returns the merged `mumei.rust-scalar-parameter-deps/v1` manifest |
+| `sol_summaries_reuse(source_path, manifest_path, resolve_modules=false)` | Same wiring as `sol-summaries-reuse` — returns the merged `mumei.sol-scalar-parameter-deps/v1` manifest |
 | `ts_summaries_accept(source_path, manifest_path, function, resolve_modules=false)` | Run the strict whole-context accept gate for one declared TS function (same wiring as `ts-summaries-accept`) — returns `mumei.ts-summary-accept/v1`; the freshly derived record, never the declared one |
-| `rust_summaries_accept(source_path, manifest_path, function)` | Same wiring as `rust-summaries-accept` — returns `mumei.rust-summary-accept/v1`; exact name or bare-member-name resolution |
-| `sol_summaries_accept(source_path, manifest_path, function)` | Same wiring as `sol-summaries-accept` — returns `mumei.sol-summary-accept/v1`; exact name or bare-member-name resolution |
+| `rust_summaries_accept(source_path, manifest_path, function, resolve_modules=false)` | Same wiring as `rust-summaries-accept` — returns `mumei.rust-summary-accept/v1`; exact name or bare-member-name resolution |
+| `sol_summaries_accept(source_path, manifest_path, function, resolve_modules=false)` | Same wiring as `sol-summaries-accept` — returns `mumei.sol-summary-accept/v1`; exact name or bare-member-name resolution |
 | `ts_summaries_attempt(source_path, attempt_timeout_ms, memory_bound_mb=0)` | Run the `ts-summaries` produce route as one declared attempt (same wiring as `ts-summaries-attempt`) — returns `mumei.ts-summaries-attempt-report/v1`: canonical lineage, not an accepted manifest |
 | `rust_summaries_attempt(source_path, attempt_timeout_ms, memory_bound_mb=0)` | Same wiring as `rust-summaries-attempt` — returns `mumei.rust-summaries-attempt-report/v1` |
 | `sol_summaries_attempt(source_path, attempt_timeout_ms, memory_bound_mb=0)` | Same wiring as `sol-summaries-attempt` — returns `mumei.sol-summaries-attempt-report/v1` |
@@ -174,17 +174,17 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `native_attempt` | `core_path: str, source_path: str, bundle_dir: str, attempt_timeout_ms: int = 60000` | `report` |
 | `summaries_plan` | `profile: str, stamp: int, tool_version: str = '', histories_path: str = '', rounds: int = 1, max_parallel: int = 1` | `plan`, `observations`, `histories` |
 | `ts_summaries` | `source_path: str, resolve_modules: bool = False` | `manifest` |
-| `rust_summaries` | `source_path: str` | `manifest` |
-| `sol_summaries` | `source_path: str` | `manifest` |
+| `rust_summaries` | `source_path: str, resolve_modules: bool = False` | `manifest` |
+| `sol_summaries` | `source_path: str, resolve_modules: bool = False` | `manifest` |
 | `ts_summaries_check` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `check` |
-| `rust_summaries_check` | `source_path: str, manifest_path: str` | `check` |
-| `sol_summaries_check` | `source_path: str, manifest_path: str` | `check` |
+| `rust_summaries_check` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `check` |
+| `sol_summaries_check` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `check` |
 | `ts_summaries_reuse` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `manifest` |
-| `rust_summaries_reuse` | `source_path: str, manifest_path: str` | `manifest` |
-| `sol_summaries_reuse` | `source_path: str, manifest_path: str` | `manifest` |
+| `rust_summaries_reuse` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `manifest` |
+| `sol_summaries_reuse` | `source_path: str, manifest_path: str, resolve_modules: bool = False` | `manifest` |
 | `ts_summaries_accept` | `source_path: str, manifest_path: str, function: str, resolve_modules: bool = False` | `accept` |
-| `rust_summaries_accept` | `source_path: str, manifest_path: str, function: str` | `accept` |
-| `sol_summaries_accept` | `source_path: str, manifest_path: str, function: str` | `accept` |
+| `rust_summaries_accept` | `source_path: str, manifest_path: str, function: str, resolve_modules: bool = False` | `accept` |
+| `sol_summaries_accept` | `source_path: str, manifest_path: str, function: str, resolve_modules: bool = False` | `accept` |
 | `ts_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `rust_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `sol_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
