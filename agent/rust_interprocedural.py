@@ -888,6 +888,15 @@ class _Builder:
             mp = mp.rpartition(".")[0]
         return name if name in table else None
 
+    def _is_local_name(self, name, param_index):
+        """A parameter or a `let`-bound name — writes to it stay
+        local. A `use`-imported static's writes also land in
+        `locals_` (dependency tracking), so slot membership alone
+        cannot tell a shadowing local from the static."""
+        return name in param_index or any(
+            name in decls for decls in self._block_decls
+        )
+
     # -- per-function summary --------------------------------------
 
     def _summarize(self, name, fn_node) -> RustFunctionSummary:
@@ -1470,7 +1479,7 @@ class _Builder:
                 else frozenset()
             )
             name = left.text.decode()
-            is_local = name in locals_
+            is_local = self._is_local_name(name, param_index)
             if expr.type == "compound_assignment_expr":
                 deps |= locals_.get(name, frozenset())
             locals_[name] = deps
@@ -1553,7 +1562,7 @@ class _Builder:
         for arg, root in zip(_children(arglist), roots):
             if root is None or not _is_mut_ref(arg):
                 continue
-            is_local = root in locals_
+            is_local = self._is_local_name(root, param_index)
             locals_[root] = (
                 locals_.get(root, frozenset()) | actual_union
             )
@@ -1709,6 +1718,14 @@ class _Builder:
                 locals_[rname] = slot
                 if self._writes:
                     self._writes[-1].add(rname)
+                if (
+                    not self._is_local_name(rname, param_index)
+                    and self._global_of(rname, self.mut_globals)
+                    is not None
+                ):
+                    # `V.push(x)` on a `static mut` mutates
+                    # external state like `V = x`.
+                    summary.effects = "unknown"
                 summary.calls.append(
                     RustCall(
                         _span(node),
@@ -1798,7 +1815,7 @@ class _Builder:
             if rname is None:
                 summary.effects = "unknown"
                 continue
-            is_local = rname in locals_
+            is_local = self._is_local_name(rname, param_index)
             locals_[rname] = (
                 locals_.get(rname, frozenset()) | projected
             )

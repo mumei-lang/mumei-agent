@@ -1722,3 +1722,38 @@ def test_identical_content_modules_are_not_cycles(tmp_path):
         source_path=str(root),
     )
     assert "a.inner.inner.f" in {f.name for f in r.functions}
+
+
+def test_static_mut_write_after_container_write_marks_unknown():
+    # `V.push(x)` tracks the static's name in `locals_` for dep
+    # tracking — that slot must not make a later `V[0] = x` or
+    # `V = x` look like a local write.
+    src = (
+        "mod b;\nuse b::V;\n"
+        "fn af(x: u64) {\n"
+        "    unsafe {\n"
+        "        V.push(x);\n"
+        "        V[0] = x;\n"
+        "        V = vec![x];\n"
+        "    }\n"
+        "}\n"
+    )
+    b = "pub static mut V: Vec<u64> = Vec::new();\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects == "unknown"
+
+
+def test_container_write_on_use_imported_mut_static_marks_unknown():
+    # `V.push(x)` alone on a `use`-imported `static mut` mutates
+    # external state.
+    src = (
+        "mod b;\nuse b::V;\n"
+        "fn af(x: u64) {\n"
+        "    unsafe { V.push(x); }\n"
+        "}\n"
+    )
+    b = "pub static mut V: Vec<u64> = Vec::new();\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects == "unknown"
