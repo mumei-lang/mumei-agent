@@ -59,6 +59,7 @@ _SUBCOMMANDS = {
     "evidence-producer-check",
     "verify-attempt",
     "verify-recheck",
+    "verify-accept",
     "native-attempt",
     "native-recheck",
     "native-accept",
@@ -805,6 +806,24 @@ def main() -> None:
         verify_recheck_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(verify_recheck_main(args))
+    elif command == "verify-accept":
+        import argparse
+        from agent.verify_accept import (
+            build_accept_parser as verify_accept_build_parser,
+            main_accept as verify_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-accept",
+            description=(
+                "Run a declared Core source-evidence acceptance "
+                "evaluation as one attempt and emit the reconciled "
+                "lineage plus the declared acceptance outcome."
+            ),
+        )
+        verify_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(verify_accept_main(args))
     elif command == "native-recheck":
         import argparse
         from agent.native_recheck import (
