@@ -2145,17 +2145,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
         scope: dict[str, frozenset[int]],
         params: dict[str, int],
         conditional: bool,
+        value_deps: frozenset[int] = frozenset(),
     ) -> None:
         """Bind `for` range names to dep-free (external-state) values.
 
         `_` slots skip; a fresh `:=` name uses the compiler's binding
         record (its declared type must be scalar-or-pointer — a map's
         string key or a struct element stays closed); an `=` name
-        reuses the referenced binding through `_store`.
+        reuses the referenced binding through `_store`. `value_deps`
+        applies to the element name — the second of a two-name range
+        — when the container lives in caller memory a bound pointer's
+        aim selects (`for range *p`): those elements carry the
+        pointer's own and the indirect stores' deps like `(*p)[i]`.
         """
-        for name in names:
+        for pos, name in enumerate(names):
             if name.text == b"_":
                 continue
+            deps = value_deps if pos == 1 else frozenset()
             binding = self.bindings_by_span.get(self.node_key(name))
             if binding is not None:
                 if binding.type.kind not in {
@@ -2166,7 +2172,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported(
                         "binding_unavailable", _span(name)
                     )
-                scope[binding.id] = frozenset()
+                scope[binding.id] = deps
             else:
                 ref = self.references.get(self.node_key(name))
                 if ref is None or (
@@ -2177,7 +2183,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         "binding_unavailable", _span(name)
                     )
                 self._store(
-                    scope, params, ref.binding_id, frozenset(), conditional,
+                    scope, params, ref.binding_id, deps, conditional,
                 )
 
     def _bound_receiver_root(
@@ -3825,6 +3831,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     refs.append(_ALIAS_FOLD)
                     continue
+                # `(*p)[i].F = v` — a field store through the
+                # element a bound container pointee's index selects
+                # writes external element memory no binding tracks:
+                # the leaf field's own identity records the mutation
+                # and the index expressions evaluate for their
+                # effects. The alias fold is required — a later
+                # `(*q)[j].F`/`(*p)[i].F` read observes the store
+                # through `indirect_writes`.
+                indexed_field = self._bound_pointee_index_field(
+                    lhs, locals_, params
+                )
+                if indexed_field is not None:
+                    _root, _pid, fact, extras, field_member = indexed_field
+                    self._pin_fact_identities(fact)
+                    if field_member.type is not None:
+                        self._pin_fact_identities(field_member.type)
+                    for extra in reversed(extras):
+                        if self._index_extra_effects(
+                            extra, locals_, params
+                        ):
+                            self.expression(
+                                extra, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            field_member.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    refs.append(_ALIAS_FOLD)
+                    continue
                 # `*p = v` — a store through a bound pointer lands in
                 # memory the dep model does not track: the pointee's
                 # declared identity records the external mutation
@@ -3957,33 +4002,136 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if right is not None and member is None
                     else None
                 )
-                if member is not None or container_var is not None:
-                    # Ranging a package-state container — an imported
-                    # member (`lib.VA`, `lib.VM`) or the unit's own
-                    # package-level container var — reads external
-                    # state: the values (index/key and element) carry
-                    # no parameter deps — like an index read — while
-                    # the read still records the imported transfer and
-                    # pins the container, key and element identities.
-                    # At most two names bind; the second (element) and
-                    # a map's key must each hold a modelled type.
+                bound = None
+                package_pointee = None
+                range_ident = None
+                if (
+                    right is not None
+                    and member is None
+                    and container_var is None
+                ):
+                    # `for range *p` / `for range p` — a bound
+                    # pointer whose pointee is a container, or a
+                    # package-level pointer var's, iterates caller
+                    # memory the way `(*p)[i]`/`(*GP)[i]` reads it.
+                    cur = right
+                    while (
+                        cur is not None
+                        and cur.type == "parenthesized_expression"
+                    ):
+                        cur = next(
+                            (
+                                c
+                                for c in cur.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    sugar = False
+                    if (
+                        cur is not None
+                        and cur.type == "unary_expression"
+                    ):
+                        operator = cur.child_by_field_name("operator")
+                        sub = cur.child_by_field_name("operand")
+                        while (
+                            sub is not None
+                            and sub.type == "parenthesized_expression"
+                        ):
+                            sub = next(
+                                (
+                                    c
+                                    for c in sub.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if (
+                            operator is not None
+                            and operator.text == b"*"
+                            and sub is not None
+                            and sub.type == "identifier"
+                        ):
+                            range_ident = sub
+                    elif cur is not None and cur.type == "identifier":
+                        range_ident = cur
+                        sugar = True
+                    if range_ident is not None:
+                        bound = self._bound_container_pointee(
+                            range_ident, locals_, params
+                        )
+                        if bound is None:
+                            package_pointee = (
+                                self._package_container_pointee(
+                                    range_ident
+                                )
+                            )
+                        # `for range p` auto-derefs only a
+                        # pointer-to-array — the producer never
+                        # emits the slice/map shape, and the gate
+                        # keeps the admit honest anyway.
+                        if sugar:
+                            if bound is not None and bound[2].kind != "array":
+                                bound = None
+                            if (
+                                package_pointee is not None
+                                and package_pointee[1].kind != "array"
+                            ):
+                                package_pointee = None
+                if (
+                    member is not None
+                    or container_var is not None
+                    or bound is not None
+                    or package_pointee is not None
+                ):
+                    # Ranging a container in external state — an
+                    # imported member (`lib.VA`, `lib.VM`), the
+                    # unit's own package-level container var, or a
+                    # container pointee (`*p`, `*GP`) — reads no
+                    # binding's tracked value: index/key and element
+                    # carry no parameter deps — like an index read —
+                    # while the read still records the imported
+                    # transfer and pins the container, key and
+                    # element identities. A bound pointer's elements
+                    # DO carry deps: the pointer's aim picks caller
+                    # memory, so the element name gets deps(p) and
+                    # every earlier indirect store like `(*p)[i]`.
+                    # At most two names bind; the second (element)
+                    # and a map's key must each hold a modelled type.
                     if len(lefts) > 2 or any(
                         l.type != "identifier" for l in lefts
                     ):
                         raise _Unsupported(
                             "unsupported_statement", _span(clause)
                         )
-                    container = (
-                        member if member is not None else container_var
-                    )
-                    if member is not None:
-                        self._pin_member_type(member)
+                    if bound is not None or package_pointee is not None:
+                        fact = (
+                            bound[2]
+                            if bound is not None
+                            else package_pointee[1]
+                        )
+                        target = (
+                            bound[1]
+                            if bound is not None
+                            else package_pointee[0]
+                        )
+                        self._pin_fact_identities(fact)
                     else:
-                        self._pin_fact_identities(container_var.type)
-                    key = container.type.key
+                        container = (
+                            member
+                            if member is not None
+                            else container_var
+                        )
+                        fact = container.type
+                        target = container.id
+                        if member is not None:
+                            self._pin_member_type(member)
+                        else:
+                            self._pin_fact_identities(fact)
+                    key = fact.key
                     if key is not None and key.type_id:
                         self.pinned.add(key.type_id)
-                    elem = container.type.elem
+                    elem = fact.elem
                     if elem is not None and elem.type_id:
                         self.pinned.add(elem.type_id)
                     transfers.append(
@@ -3993,18 +4141,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 right.start_byte,
                                 right.end_byte,
                             ),
-                            container.id,
+                            target,
                             (),
                             frozenset(),
                             imported=True,
                         )
                     )
+                    value_deps = frozenset()
+                    if bound is not None and len(lefts) == 2:
+                        # `for range *p` — each element is caller
+                        # memory the pointer's aim selects, so the
+                        # bound name carries the pointer's own deps
+                        # and every earlier indirect store, the same
+                        # union `(*p)[i]`'s read reports.
+                        value_deps = self.expression(
+                            range_ident, fn, params, scope,
+                            transfers, count, 0,
+                        ) | self.indirect_writes
                     # Each name's declared type comes from the
                     # compiler's binding — scalar-or-pointer, matching
                     # the index-read rule (a struct element or a
                     # string map key stays closed).
                     self._bind_range_names(
-                        lefts, scope, params, conditional
+                        lefts, scope, params, conditional, value_deps
                     )
                 else:
                     if right is None or len(lefts) > 1 or (
@@ -4276,6 +4435,71 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             operand.end_byte,
                         ),
                         pointee_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return
+            # `(*p)[i]++` — an inc/dec through a bound container
+            # pointee's element mutates caller memory like
+            # `(*p)[i] = v` does, but is provenance-preserving like
+            # `(*p)++`: the element's own value changes, no tracked
+            # binding's deps do — only the external mutation records.
+            bound_write = self._bound_container_write(
+                operand, locals_, params
+            )
+            if bound_write is not None:
+                pointee_id, extras, fact = bound_write
+                self._pin_fact_identities(fact)
+                for extra in reversed(extras):
+                    if self._index_extra_effects(
+                        extra, locals_, params
+                    ):
+                        self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            operand.start_byte,
+                            operand.end_byte,
+                        ),
+                        pointee_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return
+            # `(*p)[i].F++` — the same increment on the element's
+            # scalar field; the leaf field's identity records it.
+            indexed_field = self._bound_pointee_index_field(
+                operand, locals_, params
+            )
+            if indexed_field is not None:
+                _root, _pid, fact, extras, field_member = indexed_field
+                self._pin_fact_identities(fact)
+                if field_member.type is not None:
+                    self._pin_fact_identities(field_member.type)
+                for extra in reversed(extras):
+                    if self._index_extra_effects(
+                        extra, locals_, params
+                    ):
+                        self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            operand.start_byte,
+                            operand.end_byte,
+                        ),
+                        field_member.id,
                         (),
                         frozenset(),
                         imported=True,
