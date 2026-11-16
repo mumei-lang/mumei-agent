@@ -12696,3 +12696,48 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     assert not results["Alias"].available
     assert not results["Len"].available
     assert not results["Sel"].available
+
+
+def test_chan_argument_propagates_queue_contents(go_types_helper):
+    # `G(ch)` hands the callee the shared queue: sends the callee
+    # records land in the caller's channel state, and a callee's
+    # own `<-ch` carries what the caller already sent.
+    files = {
+        "a.go": "package p\n"
+        "func Send(ch chan int64, q int64) int64 {\n"
+        "\tch <- q\n"
+        "\treturn 0\n}\n"
+        "func Recv(ch chan int64) int64 {\n"
+        "\treturn <-ch\n}\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\tch <- x\n"
+        "\tSend(ch, x+1)\n"
+        "\treturn <-ch + Recv(ch)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_channel_argument_propagates_queue_contents(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Send(ch chan int64, q int64) int64 {\n"
+        "\tch <- q\n"
+        "\treturn 0\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 2)\n"
+        "\tSend(ch, x)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})

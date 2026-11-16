@@ -5570,7 +5570,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if ref is not None and ref.binding_id in locals_:
                 return locals_[ref.binding_id]
             if ref is not None and ref.binding_id in params:
-                return frozenset({params[ref.binding_id]})
+                deps = frozenset({params[ref.binding_id]})
+                binding = self.bindings.get(ref.binding_id)
+                if (
+                    binding is not None
+                    and binding.type is not None
+                    and binding.type.kind == "chan"
+                ):
+                    # Naming a channel parameter surfaces what the
+                    # shared queue may hold — `G(ch)` after `ch <- x`
+                    # must carry x's deps into the call, like `<-ch`
+                    # does — so the bare read unions every earlier
+                    # send's broadcast exactly like the receive.
+                    deps |= self.indirect_writes
+                return deps
             # `iota` is not a keyword — only the compiler's universe
             # reference proves the predeclared constant, never the name.
             if (
@@ -7070,6 +7083,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._store(
                             locals_, params, escaped_id, stored, True
                         )
+                elif (
+                    binding is not None
+                    and binding.type.kind == "chan"
+                ):
+                    # `G(ch)` hands the callee a shared queue — its
+                    # sends land in it like a caller-side `ch <- x`:
+                    # a local channel's conflated set gains the deps;
+                    # a channel parameter's live in external state,
+                    # so they broadcast into `indirect_writes` where
+                    # a later `<-ch` observes them.
+                    if binding.id in locals_:
+                        locals_[binding.id] = (
+                            locals_.get(binding.id, frozenset())
+                            | stored
+                        )
+                    elif binding.id in params:
+                        self.indirect_writes |= stored
 
 
 def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
