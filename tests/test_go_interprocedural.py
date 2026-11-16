@@ -11001,3 +11001,273 @@ def test_package_map_var_indexed_element_field_read(
     )
     assert result.available and result.effects == "unknown"
     assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_container_pointee_range_element_values(
+    go_types_helper,
+):
+    # `for _, v := range *p` on `p *[]int64` — the elements are
+    # caller memory the pointer's aim selects, so the bound name
+    # carries the pointer's own deps (and earlier indirect stores)
+    # like `(*p)[i]` does; the read records the pointee transfer.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, s int64) int64 {\n"
+        "\tfor _, v := range *p { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_container_pointee_range_index_only(
+    go_types_helper,
+):
+    # `for i := range *p` binds only the index — dep-free like the
+    # package-container range's index name.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, s int64) int64 {\n"
+        "\tfor i := range *p { s += int64(i) }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_bound_array_pointee_sugar_range(go_types_helper):
+    # `for _, v := range p` on `p *[4]int64` — the auto-deref sugar
+    # spells the same iteration as `range *p`.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[4]int64, s int64) int64 {\n"
+        "\tfor _, v := range p { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_map_pointee_range(go_types_helper):
+    # `for k, v := range *p` on `p *map[int64]int64` — the key name
+    # is dep-free, the element carries the pointer's deps.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *map[int64]int64, s int64) int64 {\n"
+        "\tfor k, v := range *p { s += v + k }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_package_pointer_var_range(go_types_helper):
+    # `for _, v := range *GP` on `var GP *[]int64` — package state
+    # reads dep-free like `(*GP)[i]` does.
+    files = {
+        "a.go": "package p\n"
+        "var GP *[]int64\n"
+        "func F(s int64) int64 {\n"
+        "\tfor _, v := range *GP { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_container_pointee_index_incdec(go_types_helper):
+    # `(*p)[i]++`/`(*p)[i]--` — a provenance-preserving external
+    # mutation like `(*p)++`; only the mutation records.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, i int64) int64 {\n"
+        "\t(*p)[i]++\n\t(*p)[i]--\n\treturn i\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_bound_pointee_indexed_element_field_store(
+    go_types_helper,
+):
+    # `(*p)[i].V = w` stores into element memory; the same read-back
+    # `(*p)[i].V` observes it through `indirect_writes` — the result
+    # unions the pointer's, the index's and the stored value's deps.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[]Q, i, w int64) int64 {\n"
+        "\t(*p)[i].V = w\n\treturn (*p)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1, 2})
+    v_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "V" and b.kind == "variable" and b.scope is None
+    )
+    assert any(c.target == v_id and c.imported for c in result.calls)
+
+
+def test_bound_pointee_indexed_field_store_observed_through_alias(
+    go_types_helper,
+):
+    # `(*p)[i].V = w` must be observable through another pointer:
+    # `(*q)[i].V` reads caller memory the store cannot be proven to
+    # miss, so `w` joins `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[]Q, q *[]Q, i, w int64) int64 {\n"
+        "\t(*p)[i].V = w\n\treturn (*q)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({1, 2, 3})
+
+
+def test_bound_pointee_indexed_element_field_inc(go_types_helper):
+    # `(*p)[i].V++` — the increment records the leaf field's own
+    # identity like the store's does.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\t(*p)[i].V++\n\treturn (*p)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_array_pointee_sugar_indexed_field_store(
+    go_types_helper,
+):
+    # `p[i].V = w` on `p *[8]Q` — the auto-deref sugar spells the
+    # same element-field store as `(*p)[i].V = w`.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[8]Q, i, w int64) int64 {\n"
+        "\tp[i].V = w\n\treturn p[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_bound_container_pointee_range_struct_element_closed(
+    go_types_helper,
+):
+    # `for _, v := range *p` on `p *[]Q` — a struct-typed element
+    # cannot bind under the scalar-or-pointer gate.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *[]Q, s int64) int64 {\n"
+        "\tfor _, v := range *p { s += v.V }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "binding_unavailable"
+
+
+def test_bound_map_pointee_range_string_key_closed(
+    go_types_helper,
+):
+    # `for k, v := range *p` on `p *map[string]int64` — a string
+    # key stays closed like the package-container range's.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *map[string]int64, s int64) int64 {\n"
+        "\tfor k, v := range *p { s += v + int64(len(k)) }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "binding_unavailable"
+
+
+def test_bound_pointee_indexed_nested_field_store_closed(
+    go_types_helper,
+):
+    # `(*p)[i].V.G = w` — a second traversal level past the element
+    # stays closed like the nested read does.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ G int64 }\ntype Q struct{ V S }\n"
+        "func F(p *[]Q, i, w int64) int64 {\n"
+        "\t(*p)[i].V.G = w\n\treturn i\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_pointee_range_element_sees_loop_store(
+    go_types_helper,
+):
+    # `for _, v := range *p` with an element-field store inside the
+    # body: `v` is caller memory, so each pass re-joins
+    # `indirect_writes` — `w` reaches `s` on the fixed point.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, i, w int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\t(*p)[i] = w\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})

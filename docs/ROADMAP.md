@@ -2082,12 +2082,17 @@ remaining composite-pointee surfaces (index-element reads and
 assignments through bound pointers to containers and whole-pointee
 stores admit under the external-state model — `(*p)[i]`/`p[i]` and
 `(*p)[i] = v` on `p *[]T`/`*map`/`*[N]T`, `*p = v` on any
-resolvable pointee; element-field reads admit too — `(*p)[i].F`/
-`p[i].F` on a named-struct element and `GA[i].V`/`M["k"].V` on a
-package container `var` — while nested element fields
-(`(*p)[i].F.G`), element-field stores (`(*p)[i].F = v`), `for
-range *p`, `(*p)[i]++`/`+=`, anonymous `*struct{...}` pointees and
-nested `**p` derefs still stay closed), the remaining
+resolvable pointee; element-field reads and stores admit too —
+`(*p)[i].F`/`p[i].F` reads and `(*p)[i].F = v`/`+=`/`++` stores on
+a named-struct element (the store folds the value's deps into
+`indirect_writes` so an aliased `(*q)[j].F` observes them), plus
+`GA[i].V`/`M["k"].V` on a package container `var`; container
+iteration and element inc/dec admit as well — `for range *p`/
+`for range p`/`for range *GP`/`for range GP` (the element name
+carries deps(p) ∪ indirect stores for a bound pointer, dep-free
+for a package var) and `(*p)[i]++`/`--` — while nested element
+fields (`(*p)[i].F.G` reads or stores), anonymous `*struct{...}`
+pointees and nested `**p` derefs still stay closed), the remaining
 resource-state semantics (channels, constructors, bound closures),
 per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
