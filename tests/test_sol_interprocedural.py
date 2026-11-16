@@ -2719,3 +2719,58 @@ function af(uint256 x) returns (uint256) {
         assert not af.available
     finally:
         outside.unlink(missing_ok=True)
+
+
+def test_import_cross_category_name_collision_is_ambiguous():
+    # `contract X` from one import and `function X` from another
+    # share one namespace — same-name different-kind must be
+    # ambiguous, never a wrong pick on `X(...)`.
+    b_mod = "contract X { function xf(uint256 v) public returns (uint256) { return v; } }"
+    c_mod = "function X(uint256 a) returns (uint256) { return a; }"
+    src = """import "./b.sol";
+import "./c.sol";
+function af(uint256 x) returns (uint256) {
+  return X(x);
+}"""
+    s = _summarize_mods(
+        src, {"./b.sol": b_mod, "./c.sol": c_mod}
+    )
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert not af.available
+    assert af.gaps
+
+
+def test_import_alias_collision_with_own_contract_is_ambiguous():
+    # `import "b.sol" as C` while the root module declares its own
+    # contract C — the ambiguous `C` binds to neither: `C.helper(x)`
+    # degrades to an opaque external member call (deps preserved,
+    # effects unknown) rather than wrong-picking b.helper or C.cf.
+    b_mod = "function helper(uint256 a) returns (uint256) { return a; }"
+    src = """import "./b.sol" as C;
+contract C {
+  function cf(uint256 v) public returns (uint256) { return v; }
+}
+function af(uint256 x) returns (uint256) {
+  return C.helper(x);
+}"""
+    s = _summarize_mods(src, {"./b.sol": b_mod})
+    af = next(fn for fn in s.functions if fn.name == "af")
+    assert af.available
+    assert af.effects == "unknown"
+    assert {c.callee for c in af.calls} == {"C.helper"}
+
+
+def test_failed_resolution_does_not_break_resolved_paths_outparam():
+    # An unresolvable import caches None in module_cache — the
+    # resolved_paths out-param must not trip over it.
+    resolved = set()
+    src = """import "./missing.sol";
+function af(uint256 a) returns (uint256) { return a; }"""
+    s = sol.summarize_solidity(
+        src,
+        resolver=lambda spec, imp: None,
+        source_path="/tmp/x.sol",
+        resolved_paths=resolved,
+    )
+    assert resolved == set()
+    assert s.functions[0].available

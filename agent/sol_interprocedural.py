@@ -520,9 +520,9 @@ class _Builder:
                 )
         if self.resolved_paths is not None:
             self.resolved_paths.update(
-                ref
-                for (_src, ref) in self.module_cache.values()
-                if ref
+                entry[1]
+                for entry in self.module_cache.values()
+                if entry is not None and entry[1]
             )
         # The context key folds every resolved module's bytes with
         # the root source — a changed module invalidates reuse. A
@@ -675,17 +675,29 @@ class _Builder:
         return src, ref
 
     def _merge_names(self, scope, kind, name, value):
-        """Merge `name -> value` into scope[kind]; a name already
-        bound by a different source becomes ambiguous instead of
-        silently shadowing."""
+        """Bind `name` in scope[kind]; a name already bound by a
+        different source — in ANY category — becomes ambiguous
+        instead of silently shadowing: `contract X` in one import
+        collides with `function X` or a namespace alias in
+        another, exactly like same-kind collisions."""
         if name in scope["ambiguous"]:
             return
-        bucket = scope[kind]
-        if name in bucket:
-            del bucket[name]
+        if (
+            name in scope["contracts"]
+            or name in scope["free"]
+            or name in scope["structs"]
+            or name in scope["namespaces"]
+        ):
+            scope["contracts"].pop(name, None)
+            scope["free"].pop(name, None)
+            scope["structs"].discard(name)
+            scope["namespaces"].pop(name, None)
             scope["ambiguous"].add(name)
             return
-        bucket[name] = value
+        if kind == "structs":
+            scope["structs"].add(name)
+        else:
+            scope[kind][name] = value
 
     def _scan_module(self, source, tok, importer_path):
         """Register one module's top-level declarations under
@@ -779,11 +791,9 @@ class _Builder:
             if child_own is None:
                 continue
             if kind == "alias":
-                if alias in merged["namespaces"]:
-                    merged["ambiguous"].add(alias)
-                    del merged["namespaces"][alias]
-                elif alias not in merged["ambiguous"]:
-                    merged["namespaces"][alias] = mtok
+                self._merge_names(
+                    merged, "namespaces", alias, mtok
+                )
                 continue
             wanted = None if kind == "star" else {n for n, _l in names}
             renames = dict(names or [])
@@ -808,47 +818,23 @@ class _Builder:
             for sname in child_own["structs"]:
                 if wanted is not None and sname not in wanted:
                     continue
-                local = renames.get(sname, sname)
-                if (
-                    local in merged["structs"]
-                    or local in merged["contracts"]
-                    or local in merged["free"]
-                ):
-                    merged["ambiguous"].add(local)
-                    merged["structs"].discard(local)
-                    merged["contracts"].pop(local, None)
-                    merged["free"].pop(local, None)
-                elif local not in merged["ambiguous"]:
-                    merged["structs"].add(local)
+                self._merge_names(
+                    merged,
+                    "structs",
+                    renames.get(sname, sname),
+                    None,
+                )
         # Own names overlay the imports; a name contributed by an
         # import and declared locally is ambiguous — never a
         # wrong pick.
         for name, internal in own["contracts"].items():
-            if name in merged["contracts"] or name in merged["free"]:
-                merged["ambiguous"].add(name)
-                merged["contracts"].pop(name, None)
-                merged["free"].pop(name, None)
-            elif name not in merged["ambiguous"]:
-                merged["contracts"][name] = internal
+            self._merge_names(merged, "contracts", name, internal)
         for name, _ukeys in own["free"].items():
-            if name in merged["contracts"] or name in merged["free"]:
-                merged["ambiguous"].add(name)
-                merged["contracts"].pop(name, None)
-                merged["free"].pop(name, None)
-            elif name not in merged["ambiguous"]:
-                merged["free"][name] = []
+            # `[]` is a placeholder — registration rebinds the
+            # name to its ukey group below.
+            self._merge_names(merged, "free", name, [])
         for name in own["structs"]:
-            if (
-                name in merged["structs"]
-                or name in merged["contracts"]
-                or name in merged["free"]
-            ):
-                merged["ambiguous"].add(name)
-                merged["structs"].discard(name)
-                merged["contracts"].pop(name, None)
-                merged["free"].pop(name, None)
-            elif name not in merged["ambiguous"]:
-                merged["structs"].add(name)
+            self._merge_names(merged, "structs", name, None)
         self._mod_own[tok] = own
         self._scopes[tok] = merged
         # Register contents into the shared registries under
