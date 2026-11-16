@@ -1757,3 +1757,45 @@ def test_container_write_on_use_imported_mut_static_marks_unknown():
     r = summarize_rust(src, resolver=_set_resolver({"b": b}))
     s = next(f for f in r.functions if f.name == "af")
     assert s.effects == "unknown"
+
+
+def test_caller_let_does_not_shadow_callee_static_write():
+    # A caller's `let STATE` must not make the callee's write to
+    # the `use`-imported static look local — `_block_decls` is a
+    # per-function stack.
+    src = (
+        "mod b;\nuse b::STATE;\n"
+        "fn callee(x: u64) { unsafe { STATE = x; } }\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    let mut STATE = 0;\n"
+        "    callee(x);\n"
+        "    STATE\n"
+        "}\n"
+    )
+    b = "pub static mut STATE: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    callee = next(f for f in r.functions if f.name == "callee")
+    af = next(f for f in r.functions if f.name == "af")
+    assert callee.effects == "unknown"
+    # The caller observes the callee's external mutation.
+    assert af.effects == "unknown"
+    # The return reads the caller's local STATE, not the static.
+    assert af.return_dependencies == frozenset()
+
+
+def test_destructured_param_shadows_ancestor_static():
+    # `f((a, b): ...)` binds `a`/`b` as function locals — a write
+    # to `a` must not be read as a write to an ancestor static.
+    src = (
+        "mod b;\n"
+        "fn af((a, b): (u64, u64)) -> u64 {\n"
+        "    let mut a = a;\n"
+        "    a = b;\n"
+        "    a\n"
+        "}\n"
+    )
+    b = "pub static mut a: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects != "unknown"
+    assert s.return_dependencies == frozenset({0})

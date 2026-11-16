@@ -913,6 +913,12 @@ class _Builder:
         self._mut_ref_params.append(set())
         types: dict = {}
         self._type_envs.append(types)
+        # `_block_decls` is a stack of per-block `let`-name sets —
+        # a callee inlined mid-body must not see the caller's `let`
+        # names, or its write to a `use`-imported static would look
+        # like a write to the caller's local.
+        prev_block_decls = self._block_decls
+        self._block_decls = [set()]
         try:
             params = fn_node.child_by_field_name("parameters")
             param_names = []
@@ -965,6 +971,11 @@ class _Builder:
                                 locals_[d.text.decode()] = frozenset(
                                     {idx}
                                 )
+                                # A destructured parameter is a
+                                # function-scope local like a `let`.
+                                self._block_decls[0].add(
+                                    d.text.decode()
+                                )
                         param_names.append(pat.text.decode())
                     else:
                         param_names.append("_")
@@ -1003,6 +1014,7 @@ class _Builder:
             self._decls.pop()
             self._in_progress.discard(name)
             self._cur_use_map, self._cur_mod_path = prev_scope
+            self._block_decls = prev_block_decls
 
     # -- statements -------------------------------------------------
 
