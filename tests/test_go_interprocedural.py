@@ -12273,3 +12273,79 @@ def test_package_anonymous_struct_var_is_admitted(go_types_helper):
     write = named_package(files, snapshot, summaries, "G")
     assert write.available
     assert write.effects == "unknown"
+
+
+def test_anonymous_struct_copy_is_admitted(go_types_helper):
+    # `cp := st` copies the anonymous type — cp's fields are the ones
+    # declared in st's literal, so cp.V resolves through st's anchor.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{V: x}\n"
+        "\tcp := st\n\tcp.V = x + 1\n\treturn cp.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_multi_name_var_is_admitted(go_types_helper):
+    # `var a, b struct{...}` declares the literal after the LAST
+    # name — every earlier name anchors its field window there.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tvar a, b struct{ V int64 }\n"
+        "\ta.V = x\n\treturn a.V + b.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_copy_embedded_pointer_stays_closed(
+    go_types_helper,
+):
+    # `cp := st` where st embeds `*Q` — the promoted field's binding
+    # still lives inside `type Q`'s scoped declaration, outside the
+    # copied anchor's window, so the read stays closed.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(p *Q) int64 {\n"
+        "\tst := struct{ *Q }{Q: p}\n\tcp := st\n\treturn cp.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_anonymous_struct_signature_positions_declare_gap(
+    go_types_helper,
+):
+    # An anonymous `struct{...}` param still sits outside the
+    # fragment (the signature gate closes the function) — its
+    # declaration must keep flagging `unsupported_value_semantics`
+    # even though anonymous struct VALUES now admit.
+    snapshot = load_go_snapshot(
+        compiler_report(
+            go_types_helper,
+            "package p;\n"
+            "func F(s struct{ V int64 }) int64 { return s.V }\n",
+            "amd64",
+        ),
+        "package p;\n"
+        "func F(s struct{ V int64 }) int64 { return s.V }\n",
+        target_arch="amd64",
+    )
+    assert any(
+        gap.reason == "unsupported_value_semantics" for gap in snapshot.gaps
+    )

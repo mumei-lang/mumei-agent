@@ -681,6 +681,13 @@ class _Builder:
         # between the literal and the call (`p := &a; h := func(){*p};
         # p = &b; h()` reads `b`, not `a`).
         self.closure_captures: dict[str, frozenset[str]] = {}
+        # For an anonymous-`struct{...}` binding whose fields do not
+        # follow its own name span, the span that DOES precede them:
+        # `cp := st` copies st's (anonymous) type, so cp's fields are
+        # declared in st's literal — after st's anchor — and
+        # `var a, b struct{...}` declares the literal after the LAST
+        # name, so a's fields follow b's span, not a's.
+        self.anon_struct_anchor: dict[str, Any] = {}
         # Whether the statement currently running may not execute —
         # a closure rebind inside a branch unions its captures like
         # `_store` unions the binding's deps. `_conditional` covers
@@ -962,7 +969,14 @@ class _Builder:
                     or container_type.kind != "struct"
                 ):
                     return False
-                span = getattr(container_binding, "span", None)
+                # A copy or a multi-name `var` declares the literal
+                # after a different name — `cp := st` puts cp's fields
+                # after st's name (or ITS anchor), and `var a, b
+                # struct{...}` puts them after b's — so the window
+                # anchors at the recorded span, not the container's.
+                span = self.anon_struct_anchor.get(
+                    container_binding.id
+                ) or getattr(container_binding, "span", None)
                 if span is None:
                     return False
                 direct = {
@@ -3755,6 +3769,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.pointee_closures.add(binding.id)
                     else:
                         self.pointee_closures.discard(binding.id)
+                    # `cp := st` — a copied anonymous struct shares
+                    # st's declared type, so cp's fields follow st's
+                    # anchor, not cp's own name.
+                    if (
+                        binding.type.kind == "struct"
+                        and not binding.type.type_id
+                        and src_id is not None
+                    ):
+                        src_binding = self.bindings.get(src_id)
+                        anchor = self.anon_struct_anchor.get(
+                            src_id
+                        ) or getattr(src_binding, "span", None)
+                        if anchor is not None:
+                            self.anon_struct_anchor[binding.id] = (
+                                anchor
+                            )
+                        else:
+                            self.anon_struct_anchor.pop(
+                                binding.id, None
+                            )
             return
         if kind == "var_declaration":
             # Grouped `var (...)` declarations never reach here — the
@@ -3877,6 +3911,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.pointee_closures.add(binding.id)
                         else:
                             self.pointee_closures.discard(binding.id)
+                        # `var cp = st` — a copied anonymous struct
+                        # shares st's anchor, like `cp := st`.
+                        if (
+                            binding.type.kind == "struct"
+                            and not binding.type.type_id
+                            and src_id is not None
+                        ):
+                            src_binding = self.bindings.get(src_id)
+                            anchor = self.anon_struct_anchor.get(
+                                src_id
+                            ) or getattr(src_binding, "span", None)
+                            if anchor is not None:
+                                self.anon_struct_anchor[
+                                    binding.id
+                                ] = anchor
+                            else:
+                                self.anon_struct_anchor.pop(
+                                    binding.id, None
+                                )
+                    # `var a, b struct{...}` — the literal follows the
+                    # LAST name, so every earlier name's fields anchor
+                    # there, not at its own span (whose window closes
+                    # at the next name, a scoped binding).
+                    if (
+                        binding.type.kind == "struct"
+                        and not binding.type.type_id
+                        and len(names) > 1
+                    ):
+                        last = self.bindings_by_span.get(
+                            self.node_key(names[-1])
+                        )
+                        last_span = getattr(last, "span", None)
+                        if last_span is not None:
+                            self.anon_struct_anchor[binding.id] = (
+                                last_span
+                            )
             return
         if kind == "const_declaration":
             # Grouped `const (...)` declarations never reach here — like
