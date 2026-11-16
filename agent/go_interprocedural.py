@@ -3250,15 +3250,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported(
                         "non_parameter_reference", _span(node)
                     )
+                # `deep`'s own `type_id` names ITS pointee (`*S`
+                # carries `S`), not a type this read returns — the
+                # pointer-kind gate above already classified `deep`
+                # itself, so the named identity pins for staleness
+                # without re-entering the named-pointee kind check
+                # (which would misread a `*S` element as a struct
+                # read).
                 if deep.type_id:
                     self._pin_fact_identities(deep)
-                    pointee_id = deep.type_id
-                    named_pointee = True
-                else:
-                    pointee_id = (
-                        f"{bound_ref.binding_id}/pointee/pointee"
-                    )
-                    named_pointee = False
+                pointee_id = (
+                    deep.type_id
+                    or f"{bound_ref.binding_id}/pointee/pointee"
+                )
+                named_pointee = False
             else:
                 pointee_id = binding.type.type_id
                 if not pointee_id:

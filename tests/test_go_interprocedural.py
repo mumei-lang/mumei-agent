@@ -11766,3 +11766,23 @@ def test_triple_pointer_stays_closed(
     )
     assert not result.available
     assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_double_pointer_deep_named_pointee(
+    go_types_helper,
+):
+    # `pp ***S` — `**pp` reads the `*S` element: `deep`'s own
+    # `type_id` names S (its pointee), not the read's result type —
+    # the pointer kind gate classifies `deep` itself, so the read
+    # admits like `q := *pp; return *q`.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        "func F(pp ***S) *S { return **pp }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
