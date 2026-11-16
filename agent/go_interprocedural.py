@@ -3978,6 +3978,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # scoped to the loop — none of them escape, matching the compiler.
             scope = dict(locals_)
             update = None
+            range_elem = None
             if clause is not None and clause.type == "range_clause":
                 # Two operand families are reachable: an integer
                 # (`for i := range e` yields one index variable) and
@@ -4165,6 +4166,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._bind_range_names(
                         lefts, scope, params, conditional, value_deps
                     )
+                    if (
+                        bound is not None
+                        and len(lefts) == 2
+                        and lefts[1].text != b"_"
+                    ):
+                        elem_binding = self.bindings_by_span.get(
+                            self.node_key(lefts[1])
+                        )
+                        if elem_binding is not None:
+                            range_elem = (elem_binding.id, value_deps)
+                        else:
+                            elem_ref = self.references.get(
+                                self.node_key(lefts[1])
+                            )
+                            if elem_ref is not None:
+                                range_elem = (
+                                    elem_ref.binding_id,
+                                    value_deps,
+                                )
                 else:
                     if right is None or len(lefts) > 1 or (
                         lefts and lefts[0].type != "identifier"
@@ -4225,6 +4245,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     mark = len(transfers)
                     frame["exited"] = False
                     inner = dict(scope)
+                    if range_elem is not None:
+                        # An element of `for range *p` is caller
+                        # memory — a store through the pointer inside
+                        # the body writes what the next iteration
+                        # reads — so the bound name re-joins every
+                        # pass's indirect writes until the point is
+                        # fixed.
+                        elem_id, elem_base = range_elem
+                        self._store(
+                            inner, params, elem_id,
+                            elem_base | self.indirect_writes,
+                            conditional,
+                        )
                     self._sequence(
                         _children(body_node), fn, params, inner, transfers,
                         count, deps, saw_return, conditional,

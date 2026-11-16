@@ -11247,3 +11247,27 @@ def test_bound_pointee_indexed_nested_field_store_closed(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_bound_pointee_range_element_sees_loop_store(
+    go_types_helper,
+):
+    # `for _, v := range *p` with an element-field store inside the
+    # body: `v` is caller memory, so each pass re-joins
+    # `indirect_writes` — `w` reaches `s` on the fixed point.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[]int64, i, w int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\t(*p)[i] = w\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
