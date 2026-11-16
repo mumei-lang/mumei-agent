@@ -12766,6 +12766,31 @@ def test_chan_parameter_range_body_send_rejoins_element(
     assert result.return_dependencies == frozenset({1, 2, 3})
 
 
+def test_chan_parameter_range_rejoin_visible_without_pointer(
+    go_types_helper,
+):
+    # The `*p` shape above cannot discriminate: `return *p` unions
+    # `indirect_writes` at read time anyway. Storing the element
+    # into a plain local isolates the re-join — `return s` carries
+    # only what the element actually held.
+    files = {
+        "a.go": "package p\n"
+        "func F(y int64, ch chan int64) int64 {\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range ch {\n"
+        "\t\tch <- y\n"
+        "\t\ts = v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_chan_parameter_parenthesized_arg_propagates(
     go_types_helper,
 ):
