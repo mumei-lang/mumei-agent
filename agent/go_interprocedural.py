@@ -889,6 +889,136 @@ class _Builder:
                 return False
         return True
 
+    def _package_composite_field_read(
+        self, node: Any
+    ) -> tuple[Any, Any] | None:
+        """The `(root var binding, leaf field identity)` of a field
+        read `G.V` / `G.A.N` rooted at a package-level composite
+        `var`. Package state is external like `lib.VS.F`: the read
+        stays dep-free, so a pointer-typed intermediate field —
+        which must stay closed inside a *local* composite's
+        conflated set — is fine here: the deref reads package state
+        either way."""
+        fields: list[Any] = []
+        cur = node
+        while cur is not None and cur.type == "selector_expression":
+            fields.append(cur.child_by_field_name("field"))
+            cur = cur.child_by_field_name("operand")
+            while (
+                cur is not None
+                and cur.type == "parenthesized_expression"
+            ):
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+        if cur is None or cur.type != "identifier" or cur.text == b"_":
+            return None
+        ref = self.references.get(self.node_key(cur))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None and ref.binding_id
+            else None
+        )
+        if (
+            binding is None
+            or binding.kind != "variable"
+            or not self._package_level(binding)
+            or not (
+                self._is_local_composite(binding)
+                or (
+                    binding.type is not None
+                    and binding.type.kind == "pointer"
+                )
+            )
+        ):
+            return None
+        resolved: list[Any] = []
+        for field in fields:
+            field_ref = (
+                self.references.get(self.node_key(field))
+                if field is not None
+                else None
+            )
+            ident = self._field_identity(field_ref)
+            if (
+                ident is None
+                or field is None
+                or ident.name.encode("utf-8") != field.text
+            ):
+                return None
+            resolved.append(ident)
+        if not resolved:
+            return None
+        return binding, resolved[0]
+
+    def _package_var_write(
+        self, node: Any
+    ) -> tuple[Any, tuple[Any, ...], bool] | None:
+        """The package-level `var` an assignment LHS stores into —
+        `G.V = v`, `G.A.N = v`, `G[i] = v`, `*GP = v` — mirroring
+        `_imported_member_write`: the chain descends through
+        parens/selectors/indexes/`*(saw_deref)` until a bare
+        identifier names the var, whose own binding identity
+        records the mutation (the stored deps drop — package state
+        tracks no binding's contents). Index sub-expressions return
+        as `extras` for evaluation like the imported path's."""
+        cur = node
+        while cur is not None and cur.type == "parenthesized_expression":
+            cur = next(
+                (c for c in cur.named_children if c.type != "comment"),
+                None,
+            )
+        extras: list[Any] = []
+        saw_deref = False
+        while cur is not None:
+            if cur.type == "parenthesized_expression":
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+                continue
+            if cur.type == "unary_expression":
+                operator = cur.child_by_field_name("operator")
+                if operator is None or operator.text != b"*":
+                    return None
+                saw_deref = True
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "selector_expression":
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "index_expression":
+                index = cur.child_by_field_name("index")
+                if index is not None:
+                    extras.append(index)
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type != "identifier" or cur.text == b"_":
+                return None
+            ref = self.references.get(self.node_key(cur))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            if (
+                binding is None
+                or binding.kind != "variable"
+                or not self._package_level(binding)
+            ):
+                return None
+            if saw_deref and (
+                binding.type is None
+                or binding.type.kind != "pointer"
+            ):
+                # `*GP = v` on a non-pointer var cannot compile —
+                # rejected anyway so a tampered binding cannot
+                # smuggle a store past the gate.
+                return None
+            return binding, tuple(extras), saw_deref
+        return None
+
     def _package_member(self, selector_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` selector names, or None.
 
@@ -1459,6 +1589,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             indexes.append(inner.child_by_field_name("index"))
             inner = inner.child_by_field_name("operand")
         member = None
+        package_var = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)
         elif inner is not None and inner.type == "identifier":
@@ -1470,11 +1601,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and candidate.name.encode("utf-8") == inner.text
                 ):
                     member = candidate
+            elif ref is not None and ref.binding_id:
+                # `G[i]` — a package-level container var reads like an
+                # imported member does: external state no binding
+                # tracks, so the result stays dep-free while the
+                # var's own identity records the read.
+                package_var = self._package_container_var(inner)
         # Descend one `elem` fact per extra index level — `[][]T`
         # yields `[]T` then `T`. Every container's own named identity
         # pins at its level (a named `[]T` element, a map key).
         container_kinds = {"slice", "array", "map"}
-        fact = member.type if member is not None else None
+        fact = (
+            member.type
+            if member is not None
+            else (package_var.type if package_var is not None else None)
+        )
         for _ in range(len(indexes) - 1):
             if (
                 fact is None
@@ -1496,15 +1637,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         if (
             index is None
-            or member is None
-            or member.kind != "var"
+            or (member is None and package_var is None)
+            or (member is not None and member.kind != "var")
             or fact is None
             or fact.kind not in container_kinds
             or elem is None
             or elem.kind not in {"integer", "boolean", "pointer"}
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
-        self._pin_member_type(member)
+        if member is not None:
+            self._pin_member_type(member)
+        else:
+            self._pin_fact_identities(package_var.type)
         if fact.type_id:
             # The innermost container's own named identity —
             # `[]NS`/`map[K]NS` levels the descent stops on — must
@@ -1518,7 +1662,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         transfers.append(
             CallTransfer(
                 FileSpan(self.current_file, node.start_byte, node.end_byte),
-                member.id,
+                member.id if member is not None else package_var.id,
                 (),
                 frozenset(),
                 imported=True,
@@ -1587,6 +1731,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and member.type.kind in {"slice", "array", "map"}
         ):
             return member
+        return None
+
+    def _package_container_var(self, node: Any) -> Any | None:
+        """The package-level `var` a range/index operand names — a
+        bare identifier (or parens) bound to a slice, array or map
+        kind. Anything else resolves to no binding and the caller
+        falls back to the ordinary expression gate, exactly like the
+        imported-member variant.
+        """
+        inner = node
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "identifier" or inner.text == b"_":
+            return None
+        ref = self.references.get(self.node_key(inner))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None and ref.binding_id
+            else None
+        )
+        if (
+            binding is not None
+            and binding.kind == "variable"
+            and self._package_level(binding)
+            and binding.type is not None
+            and binding.type.kind in {"slice", "array", "map"}
+        ):
+            return binding
         return None
 
     def _bind_range_names(
@@ -1944,6 +2119,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     extra, fn, params, locals_, transfers, count, 0
                 )
 
+    def _record_package_write(
+        self,
+        lhs: Any,
+        binding: Any,
+        extras: tuple[Any, ...],
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+    ) -> None:
+        """Record a package-level `var` write's mutation + index calls.
+
+        Package state is external like an imported member's: the
+        var's own binding identity is the transfer target — a real
+        identity in `known`, so redeclaring it flags
+        `stale_dependents` in both directions — and every named
+        identity inside its declared type pins.
+        """
+        if binding.type is not None:
+            self._pin_fact_identities(binding.type)
+        transfers.append(
+            CallTransfer(
+                FileSpan(self.current_file, lhs.start_byte, lhs.end_byte),
+                binding.id,
+                (),
+                frozenset(),
+                imported=True,
+            )
+        )
+        for extra in reversed(extras):
+            # Same rule as `_record_member_write`: indices evaluate
+            # inside-out, and only a shape that could record (a call,
+            # a member read) needs the evaluation pass at all.
+            if self._index_extra_effects(extra):
+                self.expression(
+                    extra, fn, params, locals_, transfers, count, 0
+                )
+
     def _index_extra_effects(self, node: Any) -> bool:
         """Whether an index sub-expression's evaluation could record a
         transfer or pin — a call, or a name/selector that resolves to
@@ -2279,12 +2493,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if inner is None or inner.type != "identifier":
                 raise _Unsupported("non_parameter_reference", _span(node))
             bound_ref = self.references.get(self.node_key(inner))
+            binding = (
+                self.bindings.get(bound_ref.binding_id)
+                if bound_ref is not None and bound_ref.binding_id
+                else None
+            )
             if bound_ref is None or (
                 bound_ref.binding_id not in locals_
                 and bound_ref.binding_id not in params
+                and not (
+                    binding is not None
+                    and binding.kind == "variable"
+                    and self._package_level(binding)
+                )
             ):
                 raise _Unsupported("non_parameter_reference", _span(node))
-            binding = self.bindings.get(bound_ref.binding_id)
+            # `*GP` on a package-level pointer var reads through
+            # package state into memory the model does not track —
+            # the same external read `*p` is.
             if binding is None or binding.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
             pointee_id = binding.type.type_id
@@ -2852,34 +3078,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # target is the var's binding identity —
                             # in `known`, so redeclaring it flags
                             # `stale_dependents`.
-                            gvar = (
-                                self.bindings.get(ref.binding_id)
-                                if ref is not None and ref.binding_id
-                                else None
-                            )
-                            if (
-                                gvar is None
-                                or gvar.kind != "variable"
-                                or not self._package_level(gvar)
-                                or gvar.type.kind
-                                not in {"integer", "boolean", "pointer"}
-                            ):
+                            package_write = self._package_var_write(lhs)
+                            if package_write is None:
                                 raise _Unsupported(
                                     "binding_unavailable", _span(lhs)
                                 )
-                            self._pin_fact_identities(gvar.type)
-                            transfers.append(
-                                CallTransfer(
-                                    FileSpan(
-                                        self.current_file,
-                                        lhs.start_byte,
-                                        lhs.end_byte,
-                                    ),
-                                    gvar.id,
-                                    (),
-                                    frozenset(),
-                                    imported=True,
-                                )
+                            binding, extras, _ = package_write
+                            self._record_package_write(
+                                lhs, binding, extras,
+                                fn, params, locals_, transfers, count,
                             )
                             refs.append(None)
                             continue
@@ -2953,6 +3160,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # earlier `&x` leaked into the member — mark the
                     # slot so the store loop unions the stored value's
                     # dependencies into every escaped binding.
+                    refs.append(_ALIAS_FOLD if saw_deref else None)
+                    continue
+                # A package-level `var` — `G.V = v`, `G[i] = v`,
+                # `*GP = v` — mutates package state the same way: the
+                # var's binding identity records the mutation (in
+                # `known`, so `stale_dependents` stays honest) and the
+                # stored value's dependencies drop — unless the store
+                # crosses the var's pointer, which may aim at any
+                # escaped binding like `*lib.PV = v` does.
+                package_write = self._package_var_write(lhs)
+                if package_write is not None:
+                    binding, extras, saw_deref = package_write
+                    self._record_package_write(
+                        lhs, binding, extras,
+                        fn, params, locals_, transfers, count,
+                    )
                     refs.append(_ALIAS_FOLD if saw_deref else None)
                     continue
                 # `*p = v` — a store through a bound pointer lands in
@@ -3075,25 +3298,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if right is not None
                     else None
                 )
-                if member is not None:
-                    # Ranging an imported container reads package state:
-                    # the values (index/key and element) carry no
-                    # parameter deps — like an index read — while the
-                    # read still records the imported transfer and pins
-                    # the container, key and element identities. At
-                    # most two names bind; the second (element) and a
-                    # map's key must each hold a modelled type.
+                container_var = (
+                    self._package_container_var(right)
+                    if right is not None and member is None
+                    else None
+                )
+                if member is not None or container_var is not None:
+                    # Ranging a package-state container — an imported
+                    # member (`lib.VA`, `lib.VM`) or the unit's own
+                    # package-level container var — reads external
+                    # state: the values (index/key and element) carry
+                    # no parameter deps — like an index read — while
+                    # the read still records the imported transfer and
+                    # pins the container, key and element identities.
+                    # At most two names bind; the second (element) and
+                    # a map's key must each hold a modelled type.
                     if len(lefts) > 2 or any(
                         l.type != "identifier" for l in lefts
                     ):
                         raise _Unsupported(
                             "unsupported_statement", _span(clause)
                         )
-                    self._pin_member_type(member)
-                    key = member.type.key
+                    container = (
+                        member if member is not None else container_var
+                    )
+                    if member is not None:
+                        self._pin_member_type(member)
+                    else:
+                        self._pin_fact_identities(container_var.type)
+                    key = container.type.key
                     if key is not None and key.type_id:
                         self.pinned.add(key.type_id)
-                    elem = member.type.elem
+                    elem = container.type.elem
                     if elem is not None and elem.type_id:
                         self.pinned.add(elem.type_id)
                     transfers.append(
@@ -3103,7 +3339,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 right.start_byte,
                                 right.end_byte,
                             ),
-                            member.id,
+                            container.id,
                             (),
                             frozenset(),
                             imported=True,
@@ -3357,37 +3593,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     count,
                 )
                 return
-            if operand.type == "identifier":
-                # `G++`/`G--` on a package-level `var` mutate package
-                # state like `lib.V++`: provenance-preserving, only the
-                # external mutation records against the var's identity.
-                gvar = (
-                    self.bindings.get(ref.binding_id)
-                    if ref is not None and ref.binding_id
-                    else None
+            # `G++`/`G--` (and `G.V++`, `G[i]++`, `(*GP)++`) on a
+            # package-level `var` mutate package state like
+            # `lib.V++`: provenance-preserving, only the external
+            # mutation records against the var's identity.
+            package_write = self._package_var_write(operand)
+            if package_write is not None:
+                binding, extras, _ = package_write
+                self._record_package_write(
+                    operand, binding, extras,
+                    fn, params, locals_, transfers, count,
                 )
-                if (
-                    gvar is not None
-                    and gvar.kind == "variable"
-                    and self._package_level(gvar)
-                    and gvar.type.kind
-                    in {"integer", "boolean", "pointer"}
-                ):
-                    self._pin_fact_identities(gvar.type)
-                    transfers.append(
-                        CallTransfer(
-                            FileSpan(
-                                self.current_file,
-                                operand.start_byte,
-                                operand.end_byte,
-                            ),
-                            gvar.id,
-                            (),
-                            frozenset(),
-                            imported=True,
-                        )
-                    )
-                    return
+                return
             # `(*p)++` — an increment through a bound pointer mutates
             # the same untracked memory `*p = v` does, but is
             # provenance-preserving: an aliased binding keeps its own
@@ -3607,7 +3824,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if (
                     binding.kind == "variable"
                     and self._package_level(binding)
-                    and binding.type.kind in {"integer", "boolean", "pointer"}
+                    and binding.type is not None
                 ):
                     # A package-level `var` — mutable state outside the
                     # parameter set — reads like an imported `lib.V`:
@@ -3786,6 +4003,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if local is not None:
                     ref, _fields = local
                     return locals_.get(ref.binding_id, frozenset())
+                # `G.V` / `G.A.N` — a field of a package-level
+                # composite (or pointer) var: package state is
+                # external exactly like `lib.VS.F`, so the read is
+                # dep-free while the leaf field's own identity
+                # records it — both the root var and the leaf's
+                # declared type pin for `stale_dependents`.
+                package_field = self._package_composite_field_read(node)
+                if package_field is not None:
+                    gvar, field_ident = package_field
+                    self.pinned.add(gvar.id)
+                    self._pin_fact_identities(gvar.type)
+                    if field_ident.type is not None:
+                        self._pin_fact_identities(field_ident.type)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            field_ident.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return frozenset()
             if (
                 member is None
                 or member.kind != "const"
