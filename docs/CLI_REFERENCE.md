@@ -54,11 +54,11 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
-| `rust-summaries` | 0 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
-| `rust-summaries-accept` | 2 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
-| `rust-summaries-check` | 2 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
-| `rust-summaries-reuse` | 2 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
-| `rust-summaries-attempt` | 3 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `rust-summaries` | 1 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `rust-summaries-accept` | 3 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `rust-summaries-check` | 3 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
+| `rust-summaries-reuse` | 3 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `rust-summaries-attempt` | 4 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `ts-summaries` | 1 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `ts-summaries-accept` | 3 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `ts-summaries-check` | 3 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
@@ -775,6 +775,12 @@ Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative
 |---|---|---|---|
 | `source` | yes | `<SOURCE>` | Path to a single Rust source file (at most 64 KiB). |
 
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
+
 
 ## `mumei-agent rust-summaries-accept`
 
@@ -790,6 +796,7 @@ Re-derive the Rust summary set for one declared source and accept one function's
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to accept from. |
 | `--function` | `<<NAME>>` | yes | — | Function whose summary to accept — the emitted name or a bare member name when it is unambiguous. Accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
 
@@ -808,6 +815,7 @@ Re-derive the Rust summary set for one declared source and check a declared mani
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to check. |
 | `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
 
@@ -826,6 +834,7 @@ Re-derive the Rust summary set for one declared source and emit a manifest that 
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to reuse unchanged summaries from. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
 
@@ -844,6 +853,7 @@ Run the rust-summaries produce route as one declared attempt and emit the reconc
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
+| `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |

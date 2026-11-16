@@ -1254,3 +1254,548 @@ def test_review7_double_shadow_restores_first_capture():
     )
     assert s.available
     assert s.return_dependencies == frozenset({0})
+
+
+# -- cross-file module resolution (resolver contract) ------------
+
+_B_SRC = "fn bf(x: u64) -> u64 { x + 1 }\n"
+_A_SRC = "mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n"
+
+
+def _set_resolver(table):
+    """In-memory resolver: spec -> source bytes/str."""
+
+    def resolve(spec):
+        return table.get(spec)
+
+    return resolve
+
+
+def _path_resolver(table):
+    """Importer-aware resolver: (importer_path, spec) -> source."""
+
+    def resolve(spec, importer_path=None):
+        return table.get((importer_path, spec))
+
+    return resolve
+
+
+def test_mod_resolution_registers_module_functions():
+    r = summarize_rust(_A_SRC, resolver=_set_resolver({"b": _B_SRC}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert "b.bf" in {f.name for f in r.functions}
+
+
+def test_use_binding_resolves_bare_call():
+    src = "mod b;\nuse b::bf;\nfn af(x: u64) -> u64 { bf(x) }\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": _B_SRC}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_use_list_and_alias_bind():
+    src = (
+        "mod b;\nuse b::{bf, bf2 as h};\n"
+        "fn af(x: u64) -> u64 { bf(x) + h(x) }\n"
+    )
+    b = _B_SRC + "fn bf2(y: u64) -> u64 { y * 2 }\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_same_module_bare_call_resolves():
+    # `caller` inside `b.rs` calls `hidden` bare — the same-module
+    # prefixed candidate resolves `b.hidden`.
+    src = (
+        "mod b;\n"
+        "fn af(x: u64) -> u64 { b::caller(x) }\n"
+    )
+    b = (
+        "fn hidden(y: u64) -> u64 { y }\n"
+        "fn caller(z: u64) -> u64 { hidden(z) }\n"
+    )
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "b.caller")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.name and "hidden" in c.name for c in s.calls)
+
+
+def test_crate_self_super_heads_resolve():
+    src = (
+        "mod a {\n"
+        "    pub fn deep(x: u64) -> u64 { x }\n"
+        "    mod c {\n"
+        "        pub fn cf(y: u64) -> u64 { y }\n"
+        "        pub fn sup(z: u64) -> u64 { super::deep(z) }\n"
+        "        pub fn sf(z: u64) -> u64 { self::cf(z) }\n"
+        "    }\n"
+        "}\n"
+        "fn f(x: u64) -> u64 { crate::a::deep(x) + a::c::cf(x) }\n"
+    )
+    r = summarize_rust(src)
+    for n in ("a.c.sup", "a.c.sf", "f"):
+        s = next(x for x in r.functions if x.name == n)
+        assert s.available
+        assert s.return_dependencies == frozenset({0}), n
+
+
+def test_use_head_segment_in_scoped_call():
+    # `use a::c;` binds the head `c`, so `c::cf(x)` resolves
+    # `a.c.cf`.
+    src = (
+        "mod a {\n"
+        "    pub mod c {\n"
+        "        pub fn cf(y: u64) -> u64 { y }\n"
+        "    }\n"
+        "}\n"
+        "use a::c;\n"
+        "fn f(x: u64) -> u64 { c::cf(x) }\n"
+    )
+    r = summarize_rust(src)
+    s = next(f for f in r.functions if f.name == "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_unresolved_mod_stays_opaque():
+    r = summarize_rust(_A_SRC, resolver=_set_resolver({}))
+    s = next(f for f in r.functions if f.name == "af")
+    # `b::bf` unresolvable — the call records opaque deps, the
+    # function still summarizes with the arg union (never weaker
+    # than no resolver).
+    assert s.available
+    assert "b.bf" not in {f.name for f in r.functions}
+
+
+def test_no_resolver_mod_stays_opaque():
+    r = summarize_rust(_A_SRC)
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+    assert "b.bf" not in {f.name for f in r.functions}
+
+
+def test_local_shadow_beats_module_item():
+    src = (
+        "mod b;\nuse b::bf;\n"
+        "fn af(x: u64, bf: u64) -> u64 { bf(x) }\n"
+    )
+    # A param named `bf` shadows the use binding — `bf(x)` stays
+    # opaque over the local's own deps.
+    r = summarize_rust(src, resolver=_set_resolver({"b": _B_SRC}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.return_dependencies is None or frozenset(
+        {0, 1}
+    ) == s.return_dependencies or not s.available
+
+
+def test_nested_distinct_module_paths_resolve(tmp_path):
+    # `a::b::a` through real files: each `mod` declares a FRESH
+    # path — `a.b.a.af` is a distinct module, not a cycle.
+    (tmp_path / "a.rs").write_text("mod b;\n")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.rs").write_text("mod a;\n")
+    ba = tmp_path / "a" / "b" / "a.rs"
+    ba.parent.mkdir()
+    ba.write_text("fn af2(x: u64) -> u64 { x }\n")
+    root = tmp_path / "main.rs"
+    root.write_text("mod a;\n")
+    r = summarize_rust(
+        root.read_bytes(),
+        resolver=rust._fs_resolver,
+        source_path=str(root),
+    )
+    assert "a.b.a.af2" in {f.name for f in r.functions}
+
+
+def test_self_resolving_mod_terminates_opaque():
+    # A degenerate resolver returning the same bytes for the same
+    # declaration: `a.af` registers once, `a.a.af` never does.
+    src = "mod a;\nfn af(x: u64) -> u64 { a::af(x) }\n"
+    r = summarize_rust(src, resolver=lambda spec: src)
+    names = {f.name for f in r.functions}
+    assert "a.af" in names
+    assert "a.a.af" not in names
+
+
+def test_module_digests_feed_context_key():
+    src = "mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n"
+    d1, d2 = {}, {}
+    k1 = summarize_rust(
+        src, resolver=_set_resolver({"b": "fn bf(x: u64) -> u64 { x }"}),
+        module_digests=d1,
+    ).context_key
+    k2 = summarize_rust(
+        src, resolver=_set_resolver({"b": "fn bf(x: u64) -> u64 { 0 }"}),
+        module_digests=d2,
+    ).context_key
+    assert "b" in d1 and "b" in d2
+    assert k1 != k2
+
+
+def test_fs_resolver_layout_and_confinement(tmp_path):
+    # `a.rs` importer: `b` resolves `<dir>/a/b.rs` then
+    # `<dir>/a/b/mod.rs`; `mod.rs`/`main.rs` importers use their
+    # own directory. `..` specs never escape the base.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.rs").write_text("fn bf() {}\n")
+    (tmp_path / "a.rs").write_text("")
+    (tmp_path / "main.rs").write_text("")
+    (tmp_path / "c.rs").write_text("")
+    assert rust._fs_resolver(
+        "b", str(tmp_path / "a.rs")
+    ) == (tmp_path / "a" / "b.rs").resolve()
+    assert rust._fs_resolver(
+        "c", str(tmp_path / "main.rs")
+    ) == (tmp_path / "c.rs").resolve()
+    assert rust._fs_resolver("../etc/x", str(tmp_path / "a.rs")) is None
+    assert rust._fs_resolver("b", None) is None
+
+
+def test_cli_resolve_modules_route(tmp_path):
+    # `rust-summaries --resolve-modules` resolves through the
+    # filesystem resolver; without it the module stays opaque.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.rs").write_text(
+        "fn bf(x: u64) -> u64 { x }\n"
+    )
+    a = tmp_path / "a.rs"
+    a.write_text("mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n")
+    args = type(
+        "A",
+        (),
+        {"source": str(a), "resolve_modules": True},
+    )()
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rust.main(args)
+    out = __import__("json").loads(buf.getvalue())
+    names = {f["name"] for f in out["functions"]}
+    assert "b.bf" in names
+
+
+def test_path_attr_mod_stays_opaque():
+    # `#[path = "..."]` redirects the compiler's file lookup —
+    # outside the resolver contract, the declaration stays opaque
+    # even when the default `b` resolution exists.
+    src = '#[path = "alt.rs"]\nmod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n'
+    r = summarize_rust(src, resolver=_set_resolver({"b": _B_SRC}))
+    assert "b.bf" not in {f.name for f in r.functions}
+
+
+def test_use_external_head_stays_opaque():
+    # `use std::fs` is authoritative: `fs::read` resolves
+    # `std::fs::read` or nothing — never a same-named internal
+    # item. The internal `fs.read` returns a constant, so a
+    # mis-resolution would drop `x`'s dep.
+    src = (
+        "use std::fs;\n"
+        "mod fs {\n"
+        "    pub fn read(x: u64) -> u64 { 0 }\n"
+        "}\n"
+        "fn af(x: u64) -> u64 { fs::read(x) }\n"
+    )
+    r = summarize_rust(src)
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.return_dependencies == frozenset({0})
+    assert not any(c.name == "fs.read" for c in s.calls)
+
+
+def test_method_call_scoped_to_caller_module():
+    # `t.m()` inside `mod b` resolves `b`'s impl only — the
+    # same-named root impl (dep-free `0`) must not be picked.
+    src = (
+        "struct T;\n"
+        "impl T { fn m(&self, x: u64) -> u64 { 0 } }\n"
+        "mod b {\n"
+        "    pub struct T;\n"
+        "    impl T { pub fn m(&self, x: u64) -> u64 { x } }\n"
+        "    pub fn caller(t: T, x: u64) -> u64 { t.m(x) }\n"
+        "}\n"
+    )
+    r = summarize_rust(src)
+    s = next(f for f in r.functions if f.name == "b.caller")
+    assert s.return_dependencies == frozenset({1})
+    assert any(c.name == "b.T.m" for c in s.calls)
+
+
+def test_child_static_does_not_taint_root_effects():
+    # `b`'s `static mut STATE` stays scoped — a root function's
+    # same-named local assignment is not an observable write, and
+    # `b`'s own write still marks unknown.
+    src = (
+        "mod b;\n"
+        "fn af(x: u64) -> u64 { let mut STATE = x; STATE += 1; STATE }\n"
+    )
+    b = "static mut STATE: u64 = 0;\nfn bf(x: u64) { STATE = x; }\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    sa = next(f for f in r.functions if f.name == "af")
+    sb = next(f for f in r.functions if f.name == "b.bf")
+    assert sa.effects != "unknown"
+    assert sb.effects == "unknown"
+
+
+def test_pathless_child_importers_stay_distinct():
+    # Bytes-resolved modules carry a unique importer identity —
+    # `a`'s `mod c` and `d`'s `mod c` resolve their own bytes,
+    # never each other's (a shared `None` importer would serve the
+    # first resolution to both).
+    src = "mod a;\nmod d;\nfn f(x: u64) -> u64 { x }\n"
+    a = "mod c;\nfn af(x: u64) -> u64 { c::cf(x) }\n"
+    d = "mod c;\nfn df(x: u64) -> u64 { c::cf(x) }\n"
+    table = {
+        ("root.rs", "a"): a,
+        ("root.rs", "d"): d,
+        ("root.rs\x00a", "c"): "fn cf(x: u64) -> u64 { x }\n",
+        ("root.rs\x00d", "c"): "fn cf(x: u64) -> u64 { 0 }\n",
+    }
+    r = summarize_rust(
+        src, resolver=_path_resolver(table), source_path="root.rs"
+    )
+    sa = next(f for f in r.functions if f.name == "a.af")
+    sd = next(f for f in r.functions if f.name == "d.df")
+    assert sa.return_dependencies == frozenset({0})
+    assert sd.return_dependencies == frozenset()
+
+
+def test_pathless_digest_keys_stay_distinct():
+    # The context key must see each parent's `mod c` — a bare
+    # `c` digest key would overwrite one with the other.
+    src = "mod a;\nmod d;\n"
+    table = {
+        ("root.rs", "a"): "mod c;\n",
+        ("root.rs", "d"): "mod c;\n",
+        ("root.rs\x00a", "c"): "fn cf(x: u64) -> u64 { x }\n",
+        ("root.rs\x00d", "c"): "fn cf(x: u64) -> u64 { 0 }\n",
+    }
+    digs = {}
+    summarize_rust(
+        src,
+        resolver=_path_resolver(table),
+        source_path="root.rs",
+        module_digests=digs,
+    )
+    assert "root.rs\x00a\x00c" in digs
+    assert "root.rs\x00d\x00c" in digs
+
+
+def test_resolved_module_paths_reject_output_overwrite(tmp_path):
+    # A `--output` pointing at a resolved child module is refused —
+    # the report write would destroy bytes the report describes.
+    (tmp_path / "a").mkdir()
+    b = tmp_path / "a" / "b.rs"
+    b.write_text("fn bf(x: u64) -> u64 { x }\n")
+    a = tmp_path / "a.rs"
+    a.write_text("mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n")
+    resolved = set()
+    summarize_rust(
+        a.read_bytes(),
+        resolver=rust._fs_resolver,
+        source_path=str(a),
+        resolved_paths=resolved,
+    )
+    assert str(b.resolve()) in resolved
+    with pytest.raises(SystemExit) as exc:
+        rust._reject_overwrite(str(b), resolved, "p")
+    assert exc.value.code == 2
+
+
+def test_use_imported_mut_static_write_marks_unknown():
+    # `use b::STATE` binds the name authoritatively — a write
+    # through it mutates imported state like a same-module
+    # `static mut` write.
+    src = (
+        "mod b;\nuse b::STATE;\n"
+        "fn af(x: u64) { unsafe { STATE = x; } }\n"
+    )
+    b = "pub static mut STATE: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects == "unknown"
+
+
+def test_local_let_shadows_use_imported_mut_static():
+    # `let mut STATE` shadows the `use`-bound static — writes
+    # target the local slot and must not mark `unknown` effects.
+    src = (
+        "mod b;\nuse b::STATE;\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    let mut STATE = 0;\n"
+        "    STATE = x;\n"
+        "    STATE\n"
+        "}\n"
+    )
+    b = "pub static mut STATE: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+    assert s.effects != "unknown"
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_local_let_shadows_use_imported_mut_static_mut_ref():
+    # `opaque(&mut STATE, x)` — the callee's param write merges
+    # into the shadowing local slot; the imported static is not
+    # touched, so effects stay honest.
+    src = (
+        "mod b;\nuse b::{STATE, opaque};\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    let mut STATE = 0;\n"
+        "    opaque(&mut STATE, x);\n"
+        "    STATE\n"
+        "}\n"
+    )
+    b = (
+        "pub static mut STATE: u64 = 0;\n"
+        "pub fn opaque(x: &mut u64, y: u64) { *x = y; }\n"
+    )
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+    assert s.effects != "unknown"
+    assert s.return_dependencies == frozenset({0})
+
+    # Same call without the shadowing `let` — the merge writes
+    # the imported static.
+    src2 = (
+        "mod b;\nuse b::{STATE, opaque};\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    unsafe { opaque(&mut STATE, x); }\n"
+        "    x\n"
+        "}\n"
+    )
+    r2 = summarize_rust(src2, resolver=_set_resolver({"b": b}))
+    s2 = next(f for f in r2.functions if f.name == "af")
+    assert s2.effects == "unknown"
+
+
+def test_unresolved_mod_keeps_resolved_path_listing():
+    # An unresolvable `mod` caches `None` — resolved-path
+    # collection must skip it rather than crash.
+    resolved = set()
+    r = summarize_rust(
+        _A_SRC, resolver=_set_resolver({}), resolved_paths=resolved
+    )
+    assert resolved == set()
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+
+
+def test_shared_parent_path_cache_hit(tmp_path):
+    # Two parents resolving to the same Path share the child
+    # cache — a cached pathless child still scans under each
+    # parent's own prefix without needing `module_ref` bound.
+    shared = tmp_path / "shared.rs"
+    shared.write_text("mod c;\n")
+    table = {
+        ("root.rs", "a"): shared,
+        ("root.rs", "d"): shared,
+        (str(shared), "c"): "fn cf(x: u64) -> u64 { x }\n",
+    }
+    src = "mod a;\nmod d;\nfn f(x: u64) -> u64 { x }\n"
+    r = summarize_rust(
+        src, resolver=_path_resolver(table), source_path="root.rs"
+    )
+    names = {f.name for f in r.functions}
+    assert "a.c.cf" in names and "d.c.cf" in names
+
+
+def test_identical_content_modules_are_not_cycles(tmp_path):
+    # Different paths with identical bytes are different files —
+    # the byte-identity cycle guard only applies to pathless
+    # resolutions, so `a.inner.inner.f` still registers.
+    (tmp_path / "a" / "inner").mkdir(parents=True)
+    (tmp_path / "a" / "inner" / "inner.rs").write_text(
+        "fn f(x: u64) -> u64 { x }\n"
+    )
+    same = "pub mod inner;\n"
+    (tmp_path / "a" / "mod.rs").write_text(same)
+    (tmp_path / "a" / "inner" / "mod.rs").write_text(same)
+    root = tmp_path / "main.rs"
+    root.write_text("mod a;\n")
+    r = summarize_rust(
+        root.read_bytes(),
+        resolver=rust._fs_resolver,
+        source_path=str(root),
+    )
+    assert "a.inner.inner.f" in {f.name for f in r.functions}
+
+
+def test_static_mut_write_after_container_write_marks_unknown():
+    # `V.push(x)` tracks the static's name in `locals_` for dep
+    # tracking — that slot must not make a later `V[0] = x` or
+    # `V = x` look like a local write.
+    src = (
+        "mod b;\nuse b::V;\n"
+        "fn af(x: u64) {\n"
+        "    unsafe {\n"
+        "        V.push(x);\n"
+        "        V[0] = x;\n"
+        "        V = vec![x];\n"
+        "    }\n"
+        "}\n"
+    )
+    b = "pub static mut V: Vec<u64> = Vec::new();\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects == "unknown"
+
+
+def test_container_write_on_use_imported_mut_static_marks_unknown():
+    # `V.push(x)` alone on a `use`-imported `static mut` mutates
+    # external state.
+    src = (
+        "mod b;\nuse b::V;\n"
+        "fn af(x: u64) {\n"
+        "    unsafe { V.push(x); }\n"
+        "}\n"
+    )
+    b = "pub static mut V: Vec<u64> = Vec::new();\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects == "unknown"
+
+
+def test_caller_let_does_not_shadow_callee_static_write():
+    # A caller's `let STATE` must not make the callee's write to
+    # the `use`-imported static look local — `_block_decls` is a
+    # per-function stack.
+    src = (
+        "mod b;\nuse b::STATE;\n"
+        "fn callee(x: u64) { unsafe { STATE = x; } }\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    let mut STATE = 0;\n"
+        "    callee(x);\n"
+        "    STATE\n"
+        "}\n"
+    )
+    b = "pub static mut STATE: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    callee = next(f for f in r.functions if f.name == "callee")
+    af = next(f for f in r.functions if f.name == "af")
+    assert callee.effects == "unknown"
+    # The caller observes the callee's external mutation.
+    assert af.effects == "unknown"
+    # The return reads the caller's local STATE, not the static.
+    assert af.return_dependencies == frozenset()
+
+
+def test_destructured_param_shadows_ancestor_static():
+    # `f((mut a, b): ...)` binds `a`/`b` as function locals — a
+    # write to `a` targets the parameter, not the `use`-imported
+    # static of the same name.
+    src = (
+        "mod b;\nuse b::a;\n"
+        "fn af((mut a, b): (u64, u64)) -> u64 {\n"
+        "    a = b;\n"
+        "    a\n"
+        "}\n"
+    )
+    b = "pub static mut a: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.effects != "unknown"
+    assert s.return_dependencies == frozenset({0})
