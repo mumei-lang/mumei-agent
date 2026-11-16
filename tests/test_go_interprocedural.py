@@ -10764,3 +10764,27 @@ def test_package_composite_nested_read_pins_intermediate_type(
         if b.name == "Q" and b.kind == "type"
     )
     assert q_id in result.pinned
+
+
+def test_package_indexed_pointer_element_deref_field_write(
+    go_types_helper,
+):
+    # `(*GA[0]).V = p` on `var GA []*Q` — the deref peels the
+    # index *element's* pointer (`*Q`), not the root var's slice
+    # type and not the leaf field's type.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V *int64 }\nvar GA []*Q\n"
+        "func F(p *int64) int64 {\n"
+        "\t(*GA[0]).V = p\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    ga_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "GA" and b.kind == "variable"
+    )
+    assert any(c.target == ga_id for c in result.calls)

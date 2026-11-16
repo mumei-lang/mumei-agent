@@ -907,9 +907,10 @@ class _Builder:
         conflated set — is fine here: the deref reads package state
         either way."""
         fields: list[Any] = []
+        extras: list[Any] = []
         cur = node
         saw_deref = False
-        deref_field_count = 0
+        deref_operand = None
         while cur is not None:
             if cur.type == "parenthesized_expression":
                 cur = next(
@@ -919,6 +920,14 @@ class _Builder:
                 continue
             if cur.type == "selector_expression":
                 fields.append(cur.child_by_field_name("field"))
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "index_expression":
+                # `(*GA[i]).V` — the index evaluates for its side
+                # effects like a write's does; the caller runs them.
+                index = cur.child_by_field_name("index")
+                if index is not None:
+                    extras.append(index)
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "unary_expression":
@@ -931,7 +940,7 @@ class _Builder:
                 # it already closes at the `&` operator gate.
                 if not saw_deref:
                     saw_deref = True
-                    deref_field_count = len(fields)
+                    deref_operand = cur.child_by_field_name("operand")
                 cur = cur.child_by_field_name("operand")
                 continue
             break
@@ -943,6 +952,11 @@ class _Builder:
             if ref is not None and ref.binding_id
             else None
         )
+        derefed = (
+            self._deref_operand_type(deref_operand, binding)
+            if saw_deref and binding is not None
+            else None
+        )
         if (
             binding is None
             or binding.kind != "variable"
@@ -952,6 +966,10 @@ class _Builder:
                 or (
                     binding.type is not None
                     and binding.type.kind == "pointer"
+                )
+                or (
+                    derefed is not None
+                    and derefed.kind == "pointer"
                 )
             )
         ):
@@ -973,26 +991,69 @@ class _Builder:
             resolved.append(ident)
         if not resolved:
             return None
-        if saw_deref:
-            # `(*G.P).V` dereferences the innermost field before the
-            # unary (the operand), not the leaf — resolved is
-            # outermost-first, so the entity at `deref_field_count`
-            # is what `*` unwraps; a bare-identifier operand leaves
-            # the root var itself.
-            derefed = (
-                resolved[deref_field_count].type
-                if deref_field_count < len(resolved)
-                else binding.type
-            )
-            if derefed is None or derefed.kind != "pointer":
-                return None
+        if saw_deref and (
+            derefed is None or derefed.kind != "pointer"
+        ):
+            # The deref must always peel a pointer — `(*GA[0]).V` on
+            # `var GA []Q` derefs a non-pointer element and stays
+            # closed even though the chain resolved.
+            return None
         # Every named type the chain traverses pins: redeclaring an
         # intermediate field's type (`type Q struct{...}` for `G.A.N`)
         # must flag `stale_dependents` like a root or leaf change.
         for ident in resolved:
             if ident.type is not None:
                 self._pin_fact_identities(ident.type)
-        return binding, resolved[0]
+        return binding, resolved[0], tuple(extras)
+
+    def _deref_operand_type(self, node: Any, binding: Any) -> Any:
+        """The type fact a `*` peels — the unary operand's declared
+        type, walked from the root binding's own type.
+
+        `(*GP).V` peels `GP`'s type, `(*G.P).V` the field `P`'s,
+        `(*GA[0]).V` the slice element's, `(*GA[0].P).V` the
+        element's field's. Components collect outermost-first and
+        apply innermost-first onto the root's type: an index takes
+        the container's `elem`, a selector the resolved field's
+        declared type. Anything else in the operand (a call, another
+        `*`) resolves to None — the chain stays closed."""
+        ty = binding.type
+        parts: list[Any] = []
+        cur = node
+        while cur is not None:
+            if cur.type == "parenthesized_expression":
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+                continue
+            if cur.type == "selector_expression":
+                parts.append(cur.child_by_field_name("field"))
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "index_expression":
+                parts.append(cur)
+                cur = cur.child_by_field_name("operand")
+                continue
+            break
+        if cur is None or cur.type != "identifier" or cur.text == b"_":
+            return None
+        for part in reversed(parts):
+            if ty is None:
+                return None
+            if part.type == "index_expression":
+                # `p[i]` on `*[]T` auto-derefs the pointer before
+                # indexing — peel it, then take the element.
+                if ty.kind == "pointer":
+                    ty = ty.elem
+                ty = ty.elem if ty is not None else None
+                continue
+            ref = self.references.get(self.node_key(part))
+            ident = self._field_identity(ref)
+            if ident is None:
+                return None
+            ty = ident.type
+        return ty
 
     def _package_var_write(
         self, node: Any
@@ -1014,7 +1075,7 @@ class _Builder:
         extras: list[Any] = []
         fields: list[Any] = []
         saw_deref = False
-        deref_field_count = 0
+        deref_operand = None
         while cur is not None:
             if cur.type == "parenthesized_expression":
                 cur = next(
@@ -1028,7 +1089,7 @@ class _Builder:
                     return None
                 if not saw_deref:
                     saw_deref = True
-                    deref_field_count = len(fields)
+                    deref_operand = cur.child_by_field_name("operand")
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "selector_expression":
@@ -1073,16 +1134,14 @@ class _Builder:
             fold = saw_deref
             if saw_deref:
                 # The `*` peels its operand: `*G.P` dereferences the
-                # innermost field's pointer, `(*GP).V` the root var's
-                # — resolved is outermost-first, so the entity at
-                # `deref_field_count` is what `*` unwraps. `*GP = v`
-                # on a non-pointer var cannot compile, but rejecting
+                # field's pointer, `(*GP).V` the root var's,
+                # `(*GA[0]).V` the index element's — whatever the
+                # operand subtree resolves to. `*GP = v` on a
+                # non-pointer var cannot compile, but rejecting
                 # anyway stops a tampered binding from smuggling a
                 # store past the gate.
-                derefed = (
-                    resolved[deref_field_count].type
-                    if deref_field_count < len(resolved)
-                    else binding.type
+                derefed = self._deref_operand_type(
+                    deref_operand, binding
                 )
                 if derefed is None or derefed.kind != "pointer":
                     return None
@@ -4506,7 +4565,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # declared type pin for `stale_dependents`.
                 package_field = self._package_composite_field_read(node)
                 if package_field is not None:
-                    gvar, field_ident = package_field
+                    gvar, field_ident, extras = package_field
                     self.pinned.add(gvar.id)
                     self._pin_fact_identities(gvar.type)
                     if field_ident.type is not None:
@@ -4524,6 +4583,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
+                    for extra in reversed(extras):
+                        if self._index_extra_effects(
+                            extra, locals_, params
+                        ):
+                            self.expression(
+                                extra, fn, params, locals_,
+                                transfers, count, 0,
+                            )
                     return frozenset()
             if (
                 member is None
