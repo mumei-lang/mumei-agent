@@ -794,6 +794,28 @@ tool (same `run_check` report production, declared-path validation
 and basename redaction as the other spawn tools). C02/C10 stay
 partial.
 
+### C02/C10 declared native-source-recheck route (native-source-recheck)
+
+`python -m agent native-source-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the Stage A
+native consumer as one attempt: `<core> native-bundle recheck-source
+--expected-build-id <id> <bundle> <source>` under a
+`mumei.native-source-recheck-request/v1` fingerprint binding the
+bundle record plus every member it declares and the declared source.
+`source_recheck` is claimed only for uniquely-mapped exit codes
+(`0 → rechecked`, `3 → inconclusive`); exit 1 conflates a refuted
+postcondition with every static failure so it claims nothing, mid-run
+drift reports `inputs_changed` with no claimed outcome, and the drift
+check re-enumerates the member set from the current record. A
+`rechecked` run reports `discharged_checks` — `file_identity` plus
+`claim_truth` (the source postcondition re-proven within the
+profile) — with the remaining four checks in `checks_not_performed`.
+The command's stdout is a fixed diagnostic line rather than an
+evidence record, so no `candidate` is emitted. The route is also the
+`native_source_recheck` MCP tool (same `run_source_recheck` report
+production, declared-path validation and basename redaction as the
+other spawn tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-attempt route (native-attempt)
 
 `python -m agent native-attempt --core <path> --source <path>
