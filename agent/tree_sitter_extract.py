@@ -1302,6 +1302,11 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
             start=start,
             values=(call_text,),
         )
+    if kind == "send_statement":
+        # `ch <- x` — a straight-line effect with no assigned names,
+        # so the CFG walks it like any other expression statement;
+        # the summary analyzer decides whether the send admits.
+        return Statement(kind="expr", text=text, start=start, values=(text,))
     if kind == "expression_statement":
         expr = node.named_children[0] if node.named_children else None
         expr_text = _decode(source_bytes, expr).strip() if expr is not None else text

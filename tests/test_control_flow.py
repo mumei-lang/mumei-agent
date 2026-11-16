@@ -131,7 +131,6 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
         ("outer: for { break missing }", "unresolved_label"),
         ("break", "jump_without_loop"),
         ("continue", "jump_without_loop"),
-        ("ch <- x", "unsupported_other"),
     ],
 )
 def test_unsupported_control_flow_returns_gaps_not_partial_graphs(

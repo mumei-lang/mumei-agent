@@ -892,6 +892,15 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 		f.Kind = "struct"
 		return f
 	}
+	if c, ok := t.Underlying().(*types.Chan); ok {
+		// `chan T` — named or anonymous. `elem` carries the element
+		// fact so a `<-ch` read can classify what it returns and a
+		// `ch <- x` send can check the stored value's shape.
+		f.Kind = "chan"
+		e := ix.typeOfRec(c.Elem(), seen)
+		f.Elem = &e
+		return f
+	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
 		f.Kind = "function"
 		return f
@@ -968,7 +977,17 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 				v.Kind() == types.ResultVar
 		}
 	}
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" || anonymousSignatureStruct {
+	// A function-LOCAL `chan` binding admits under the consumer's
+	// conflated queue model (`make(chan T)`, sends fold, receives
+	// return the union). Params/results, package vars and struct
+	// fields stay closed — keep flagging those.
+	nonLocalChan := false
+	if tf.Kind == "chan" {
+		if v, ok := obj.(*types.Var); ok {
+			nonLocalChan = v.Kind() != types.LocalVar
+		}
+	}
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" || anonymousSignatureStruct || nonLocalChan {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }

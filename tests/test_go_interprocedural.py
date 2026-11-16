@@ -12372,3 +12372,169 @@ def test_anonymous_struct_explicit_typed_var_copy_is_admitted(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_local_channel_send_recv_is_admitted(go_types_helper):
+    # `ch := make(chan T); ch <- x; return <-ch` — a local channel
+    # is one conflated dep set: the send accumulates x's deps, the
+    # receive returns the union of everything sent.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch <- x\n"
+            "\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_channel_sends_union(go_types_helper):
+    # Every send accumulates: `<-ch` reads the union of both sent
+    # values' deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, y int64) int64 {\n"
+            "\tch := make(chan int64, 2)\n"
+            "\tch <- x\n"
+            "\tch <- y\n"
+            "\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_channel_comma_ok_receive(go_types_helper):
+    # `v, ok := <-ch` binds the received value with the channel's
+    # deps; the presence flag conservatively takes the same set.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch <- x\n"
+            "\tv, ok := <-ch\n"
+            "\tif ok {\n\t\treturn v\n\t}\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_channel_var_and_close_forms(go_types_helper):
+    # `var ch chan T` (zero queue), `var ch = make(chan T)` and
+    # `close(ch)` all admit.
+    for decl in ("var ch chan int64", "var ch = make(chan int64)"):
+        result = named(
+            *unit(
+                go_types_helper,
+                "func F(x int64) int64 {\n"
+                "\t" + decl + "\n"
+                "\tch <- x\n"
+                "\tclose(ch)\n"
+                "\treturn <-ch\n}\n",
+            )
+        )
+        assert result.available, decl
+        assert result.return_dependencies == frozenset({0}), decl
+
+
+def test_local_channel_range_is_admitted(go_types_helper):
+    # `for v := range ch` binds v to the channel's set like a
+    # receive — the range operand evaluates to ch's union.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch <- x\n"
+            "\ts := int64(0)\n"
+            "\tfor v := range ch {\n\t\ts += v\n\t}\n"
+            "\treturn s\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_channel_conditional_send(go_types_helper):
+    # A send inside a branch still accumulates — the join unions
+    # the may-send into the channel's set.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tif b {\n\t\tch <- x\n\t}\n"
+            "\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_channel_alias_binds_stay_closed(go_types_helper):
+    # `ch2 := ch`, `var ch2 = ch` and `ch2 = ch` would alias one
+    # queue under a second dep set — a send through ch2 could never
+    # reach `<-ch`, under-approximating. Only `make` creates a
+    # channel binding.
+    for src in (
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tch2 := ch\n\tch2 <- x\n\treturn <-ch2\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tvar ch2 = ch\n\tch2 <- x\n\treturn <-ch2\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tch2 := make(chan int64)\n"
+        "\tch2 = ch\n\tch2 <- x\n\treturn <-ch2\n}\n",
+    ):
+        result = named(*unit(go_types_helper, src))
+        assert not result.available
+
+
+def test_channel_boundaries_stay_closed(go_types_helper):
+    # A `chan` parameter sits outside the signature fragment; a
+    # send through a selector (`p.C <- x`) and `make([]T)` stay
+    # opaque; `select` cannot build a CFG.
+    param = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64) int64 { return <-ch }\n",
+        )
+    )
+    assert not param.available
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ C chan int64 }\n"
+        "func F(p *Q, x int64) int64 { p.C <- x; return 0 }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    selector = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not selector.available
+    slice_make = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\ts := make([]int64, 2)\n\t_ = s\n\treturn x\n}\n",
+        )
+    )
+    assert not slice_make.available
+    select_case = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n\tch <- x\n"
+            "\tselect {\n\tcase v := <-ch:\n\t\treturn v\n"
+            "\tdefault:\n\t\treturn 0\n\t}\n}\n",
+        )
+    )
+    assert not select_case.available

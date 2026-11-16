@@ -2394,6 +2394,53 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return member
 
+    def _is_chan_recv(self, node: Any, width: int) -> bool:
+        """`v, ok := <-ch` — the comma-ok receive shape. The receive
+        itself evaluates through the ordinary `<-` path, which gates
+        the channel operand; this only sizes the LHS arity."""
+        if width != 2 or node is None or node.type != "unary_expression":
+            return False
+        operator = node.child_by_field_name("operator")
+        return operator is not None and operator.type == "<-"
+
+    def _is_chan_binding(self, binding_id: str) -> bool:
+        """The bound name's declared type is a channel."""
+        binding = self.bindings.get(binding_id)
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "chan"
+        )
+
+    def _is_make_chan_call(self, node: Any) -> bool:
+        """`make(chan T[, cap])` — the one in-fragment channel
+        constructor. Anything else on the RHS of a channel binding
+        (an identifier copy, a receive, a call result) aliases or
+        produces a queue the conflated dep set cannot model."""
+        if node is None or node.type != "call_expression":
+            return False
+        call = self.calls.get(self.node_key(node))
+        if call is None or call.kind != "builtin":
+            return False
+        function_node = node.child_by_field_name("function")
+        while (
+            function_node is not None
+            and function_node.type == "parenthesized_expression"
+        ):
+            function_node = next(
+                iter(function_node.named_children), None
+            )
+        if function_node is None or function_node.text != b"make":
+            return False
+        arguments_node = node.child_by_field_name("arguments")
+        arguments = (
+            _children(arguments_node) if arguments_node is not None else []
+        )
+        return (
+            arguments
+            and arguments[0].type == "channel_type"
+        )
+
     def _imported_member_write(
         self, node: Any
     ) -> tuple[PackageMember, tuple[Any, ...], bool] | None:
@@ -3686,6 +3733,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is None
                     and self._comma_ok_map_index(rights[0], len(lefts))
                     is None
+                    and not self._is_chan_recv(rights[0], len(lefts))
                 ):
                     raise _Unsupported("unsupported_statement", _span(node))
                 values = [
@@ -3731,11 +3779,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `h := func()...` — a bound closure carries its
                         # captured free-variable deps like a value.
                         "function",
+                        # `ch := make(chan T)` — a local channel
+                        # carries one conflated set of every sent
+                        # value's deps; `<-ch` returns the union.
+                        "chan",
                     }
                     # `st := P{...}` — a named composite local carries
                     # one conflated dep set for every field.
                     and not self._is_local_composite(binding)
                 ):
+                    raise _Unsupported("binding_unavailable", _span(node))
+                if (
+                    binding.type.kind == "chan"
+                    and not self._is_make_chan_call(rights[i])
+                ):
+                    # `ch2 := ch` would copy ch's dep set while the
+                    # two names still alias one queue — a later
+                    # `ch2 <- x; <-ch` reads ch's stale set and
+                    # under-approximates. Only `make` creates a
+                    # channel in-fragment.
                     raise _Unsupported("binding_unavailable", _span(node))
                 self._store(locals_, params, binding.id, value, conditional)
                 # `h2 := h` — a copied closure keeps its captured
@@ -3822,6 +3884,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             value_nodes[0], len(names)
                         )
                         is not None
+                        or self._is_chan_recv(
+                            value_nodes[0], len(names)
+                        )
                     )
                 )
                 if not names or (
@@ -3870,9 +3935,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # `var h func() T` / `var h = func()...` —
                             # a bound closure like the short-decl form.
                             "function",
+                            # `var ch chan T` — a local channel like
+                            # the make(chan) form.
+                            "chan",
                         }
                         and not self._is_local_composite(binding)
                     ):
+                        raise _Unsupported(
+                            "binding_unavailable", _span(spec)
+                        )
+                    if (
+                        binding.type.kind == "chan"
+                        and value_nodes
+                        and not self._is_make_chan_call(value_nodes[i])
+                    ):
+                        # `var ch2 = ch` aliases one queue under a
+                        # second dep set, like `ch2 := ch` — only a
+                        # `make` RHS creates a channel in-fragment.
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
@@ -4061,6 +4140,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is not None
                     or self._comma_ok_map_index(rights[0], len(lefts))
                     is not None
+                    or self._is_chan_recv(rights[0], len(lefts))
                 )
             )
             if (
@@ -4367,6 +4447,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         value = locals_[ref.binding_id] | value
                     else:
                         value = frozenset({params[ref.binding_id]}) | value
+                if (
+                    not compound
+                    and len(lefts) == len(rights)
+                    and self._is_chan_binding(ref.binding_id)
+                    and not self._is_make_chan_call(rights[i])
+                ):
+                    # `ch2 = ch` aliases one queue under a second dep
+                    # set — sends through ch2 would never reach `<-ch`.
+                    raise _Unsupported("binding_unavailable", _span(node))
                 # Reassignment replaces the binding's dependencies; it never
                 # declares a new variable. Inside a branch the caller's join
                 # unions the new value back as a may-assignment.
@@ -5211,6 +5300,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 inner[0], fn, params, locals_, transfers, count, 0
             )
             return
+        if kind == "send_statement":
+            # `ch <- x` on a local channel — the queue is one
+            # conflated dep set: the sent value's deps accumulate
+            # into `ch` (local state, no transfer — a send inside
+            # the function is not an external effect). Sends
+            # through a selector (`st.C <- x`), a param or a
+            # package channel stay closed.
+            channel = node.child_by_field_name("channel")
+            value = node.child_by_field_name("value")
+            if channel is None or value is None:
+                raise _Unsupported("unsupported_statement", _span(node))
+            ref = (
+                self.references.get(self.node_key(channel))
+                if channel.type == "identifier"
+                else None
+            )
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            if (
+                binding is None
+                or binding.type is None
+                or binding.type.kind != "chan"
+                or binding.id not in locals_
+            ):
+                raise _Unsupported("unsupported_statement", _span(node))
+            value_deps = self.expression(
+                value, fn, params, locals_, transfers, count, 0
+            )
+            self._store(
+                locals_, params, binding.id,
+                locals_.get(binding.id, frozenset()) | value_deps,
+                conditional,
+            )
+            return
         raise _Unsupported("unsupported_statement", _span(node))
 
     def _multi_result_call(self, node: Any, fn: Any, arity: int) -> Any:
@@ -5728,6 +5854,51 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     return self._imported_pointer_deref(
                         node, fn, params, locals_, transfers, count, depth
                     )
+                if (
+                    kind == "unary_expression"
+                    and operator is not None
+                    and operator.type == "<-"
+                ):
+                    # `<-ch` on a local channel — the queue's whole
+                    # conflated set (FIFO order is unmodelled; the
+                    # union of every send is the sound
+                    # over-approximation). A receive through a
+                    # selector, a param or a package channel stays
+                    # closed.
+                    operand = node.child_by_field_name("operand")
+                    while (
+                        operand is not None
+                        and operand.type == "parenthesized_expression"
+                    ):
+                        operand = next(
+                            (
+                                c
+                                for c in operand.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    ref = (
+                        self.references.get(self.node_key(operand))
+                        if operand is not None
+                        and operand.type == "identifier"
+                        else None
+                    )
+                    binding = (
+                        self.bindings.get(ref.binding_id)
+                        if ref is not None and ref.binding_id
+                        else None
+                    )
+                    if (
+                        binding is None
+                        or binding.type is None
+                        or binding.type.kind != "chan"
+                        or binding.id not in locals_
+                    ):
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    return locals_.get(binding.id, frozenset())
                 raise _Unsupported("unsupported_operator", _span(node))
             if kind == "unary_expression" and operator.type == "&":
                 # `&x` leaks a tracked binding's identity into an
@@ -5939,6 +6110,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
+                    return frozenset()
+                if name == b"make":
+                    # `make(chan T[, cap])` — a fresh empty channel:
+                    # the type expression pins its named identities
+                    # like `new`, and a buffered capacity evaluates
+                    # for calls but is not a stored value. The
+                    # channel's dep set starts empty and grows by
+                    # send. Slice/map `make` stays opaque — a
+                    # composite value still cannot bind.
+                    if (
+                        len(arguments) not in {1, 2}
+                        or arguments[0].type != "channel_type"
+                        or not self._pin_type_node(arguments[0])
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    if len(arguments) == 2:
+                        self.expression(
+                            arguments[1], fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                    return frozenset()
+                if name == b"close":
+                    # `close(ch)` — a synchronization fact the dep
+                    # model does not track: the channel argument
+                    # still evaluates for calls.
+                    if len(arguments) != 1:
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    self.expression(
+                        arguments[0], fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
                     return frozenset()
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
