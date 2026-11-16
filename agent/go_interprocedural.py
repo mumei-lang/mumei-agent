@@ -4662,11 +4662,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         old = locals_[ref.binding_id]
                     else:
                         old = frozenset({params[ref.binding_id]})
-                    if compound:
-                        # Only an `op=` assignment reads the old
-                        # value — the dep-fold accumulate (`st.V = v`,
-                        # `t.f = v`) unions the RHS into the binding's
-                        # continuing set without reading it.
+                    if compound or broadcast:
+                        # An `op=` assignment reads the old value,
+                        # and a bound-pointer target (`p.V = v`,
+                        # `*p = v`) reads the pointer itself to
+                        # compute the destination. Only a dep-fold
+                        # accumulate on a local composite
+                        # (`st.V = v`) unions the RHS into the
+                        # binding's continuing set without a read.
                         self._record_read(old)
                     value = old | value
                 if (

@@ -12995,3 +12995,27 @@ def test_statement_reads_composite_inc_and_compound(go_types_helper):
     # A plain field store folds the RHS into st's set — it does not
     # read the old contents.
     assert reads[(k, k + 8)] == frozenset()
+
+
+def test_statement_reads_pointer_field_write_reads_pointer(
+    go_types_helper,
+):
+    # `p.V = x` on a `*P` reads `p` — the pointer value computes the
+    # store's destination, unlike a local composite's dep-fold.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(p *P, x int64) int64 {\n"
+        "\tp.V = x\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = x")
+    assert reads[(i, i + 7)] == {0, 1}
