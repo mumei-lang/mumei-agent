@@ -685,8 +685,15 @@ class AdapterProbeHistory:
         if type(outcomes) is not list:
             raise ValueError("probe history record has malformed outcomes")
         stamps = data.get("stamps")
-        if stamps is not None and type(stamps) is not list:
-            raise ValueError("probe history record has malformed stamps")
+        if data["schema_version"] == "mumei.adapter-probe-history/v2":
+            if type(stamps) is not list:
+                raise ValueError(
+                    "probe history record has malformed stamps"
+                )
+        elif stamps is not None:
+            raise ValueError(
+                "probe history record has malformed stamps"
+            )
         return cls(
             data["adapter_id"],
             data["command_fingerprint"],

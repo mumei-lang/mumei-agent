@@ -1136,3 +1136,7 @@ def test_probe_history_v2_round_trip_and_rejects_reordered():
     data["stamps"] = [7, 2]
     with pytest.raises(ValueError, match="ordering"):
         AdapterProbeHistory.from_dict(data)
+    # A v2 record must carry a stamps list — null is malformed.
+    data["stamps"] = None
+    with pytest.raises(ValueError, match="stamps"):
+        AdapterProbeHistory.from_dict(data)
