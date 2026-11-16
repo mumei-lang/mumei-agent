@@ -476,10 +476,17 @@ class _Builder:
         # module, installed as `_cur_scope` during `_summarize`.
         self._fn_scope: dict[str, dict] = {}
         self._cur_scope: dict = _EMPTY_SCOPE
-        # Resolved-file reference -> module token so one file maps
-        # to one internal-name prefix however often it is
-        # imported.
-        self._ref_tok: dict[str, str] = {}
+        # Resolved module content digest -> module token: one file
+        # maps to one internal-name prefix however many specifiers
+        # reach it, and two files never share one — a specifier
+        # resolving to different bytes for different importers
+        # keeps both modules rather than wrong-picking.
+        self._digest_tok: dict[str, str] = {}
+        # Tokens whose `_scan_module` frame is on the stack. A
+        # cached resolution can reach a mid-scan module (the cache
+        # stores resolutions, not scan state) — re-entering it
+        # would recurse without bound.
+        self._scanning: set[str] = set()
 
     # -- unit scan ----------------------------------------------------
 
@@ -518,12 +525,6 @@ class _Builder:
                         gaps=[SolGap("analysis_limit", _span(fn_node))],
                     )
                 )
-        if self.resolved_paths is not None:
-            self.resolved_paths.update(
-                entry[1]
-                for entry in self.module_cache.values()
-                if entry is not None and entry[1]
-            )
         # The context key folds every resolved module's bytes with
         # the root source — a changed module invalidates reuse. A
         # resolver-free unit hashes exactly as before.
@@ -540,24 +541,27 @@ class _Builder:
 
     # -- module scan --------------------------------------------------
 
-    def _mod_token(self, spec, ref):
+    def _mod_token(self, spec, digest):
         """Stable internal-name prefix for a resolved module: the
-        path basename (`./lib/b.sol` -> `b`), deduplicated (`b#2`)
-        when distinct resolved files share it. The resolved
-        reference pins one file to one token however many
-        specifiers reach it."""
-        if ref in self._ref_tok:
-            return self._ref_tok[ref]
+        specifier's basename (`./lib/b.sol` -> `b`), deduplicated
+        (`b#2`) when distinct resolved files share it. The module
+        content digest pins one file to one token however many
+        specifiers reach it — `./b.sol` and `b.sol` naming the
+        same bytes merge once, while one specifier serving
+        different bytes to different importers keeps both
+        modules."""
+        if digest in self._digest_tok:
+            return self._digest_tok[digest]
         base = spec.rsplit("/", 1)[-1]
         stem = base[:-4] if base.endswith(".sol") else base
         stem = stem or "module"
         tok = stem
-        taken = set(self._ref_tok.values()) | {""}
+        taken = set(self._digest_tok.values()) | {""}
         n = 1
         while tok in taken:
             n += 1
             tok = f"{stem}#{n}"
-        self._ref_tok[ref] = tok
+        self._digest_tok[digest] = tok
         return tok
 
     def _parse_import(self, node):
@@ -665,6 +669,12 @@ class _Builder:
             self.module_cache[key] = None
             return None
         digest = hashlib.sha256(src).hexdigest()
+        if ref in self.module_digests and self.module_digests[ref] != digest:
+            # One specifier serving different bytes to different
+            # importers (a pathless resolver returns `ref == spec`
+            # for every file) — the reference must stay unique or
+            # the second module would ride the first's identity.
+            ref = f"{ref}#@{digest[:12]}"
         if digest in self.resolving_bytes:
             # A pathless resolver feeding a module its own
             # source — treat like a cycle.
@@ -672,6 +682,11 @@ class _Builder:
             return None
         self.module_cache[key] = (src, ref)
         self.module_digests[ref] = digest
+        if self.resolved_paths is not None:
+            # Recorded at resolution time, not at the end of the
+            # build — an early analysis-limit raise still leaves
+            # the route's overwrite guard truthful.
+            self.resolved_paths.add(ref)
         return src, ref
 
     def _merge_names(self, scope, kind, name, value):
@@ -688,6 +703,15 @@ class _Builder:
             or name in scope["structs"]
             or name in scope["namespaces"]
         ):
+            # Idempotent re-merge: importing one file through two
+            # specifiers (`import "./b.sol"` + `import "b.sol"`)
+            # or overlapping star/named directives binds the same
+            # internal name twice — not a collision.
+            if kind == "structs":
+                if name in scope["structs"]:
+                    return
+            elif scope[kind].get(name) == value:
+                return
             scope["contracts"].pop(name, None)
             scope["free"].pop(name, None)
             scope["structs"].discard(name)
@@ -777,14 +801,22 @@ class _Builder:
             if resolved is None:
                 continue
             src, ref = resolved
-            mtok = self._mod_token(spec, ref)
+            digest = hashlib.sha256(src).hexdigest()
+            mtok = self._mod_token(spec, digest)
+            if mtok in self._scanning:
+                # Reached while its own scan is still on the stack
+                # (a cached resolution bypassed the digest guard)
+                # — its symbols do not exist to it, exactly like a
+                # direct cycle.
+                continue
             if mtok not in self._mod_own:
+                self._scanning.add(mtok)
                 self.resolving.add((importer_path, spec))
-                digest = self.module_digests[ref]
                 self.resolving_bytes.add(digest)
                 try:
                     self._scan_module(src, mtok, ref)
                 finally:
+                    self._scanning.discard(mtok)
                     self.resolving.discard((importer_path, spec))
                     self.resolving_bytes.discard(digest)
             child_own = self._mod_own.get(mtok)

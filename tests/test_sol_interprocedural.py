@@ -2774,3 +2774,137 @@ function af(uint256 a) returns (uint256) { return a; }"""
     )
     assert resolved == set()
     assert s.functions[0].available
+
+
+def test_import_cycle_via_filesystem_resolver_terminates(tmp_path):
+    # a.sol <-> b.sol mutual imports: the cached resolution of a
+    # module still on the scan stack must not re-enter its
+    # `_scan_module` frame — before the mid-scan token guard this
+    # ping-ponged into RecursionError.
+    (tmp_path / "a.sol").write_text(
+        'import "./b.sol";\n'
+        "function fa(uint256 x) returns (uint256) { return fb(x); }\n"
+    )
+    (tmp_path / "b.sol").write_text(
+        'import "./a.sol";\n'
+        "function fb(uint256 x) returns (uint256) { return x; }\n"
+    )
+    src = (tmp_path / "a.sol").read_bytes()
+    s = sol.summarize_solidity(
+        src,
+        resolver=sol._fs_resolver,
+        source_path=str(tmp_path / "a.sol"),
+    )
+    names = {fn.name for fn in s.functions}
+    assert "b.fb" in names
+    fa = next(fn for fn in s.functions if fn.name == "fa")
+    assert fa.available
+    assert fa.return_dependencies == frozenset({0})
+
+
+def test_import_same_file_two_specifiers_stays_resolvable():
+    # `import "./b.sol"` and `import "b.sol"` naming the same bytes
+    # must merge once — the second directive re-binding the same
+    # internal names is idempotent, not an ambiguity.
+    src = """import "./b.sol";
+import "b.sol";
+function use(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD, "b.sol": B_MOD})
+    use = next(fn for fn in s.functions if fn.name == "use")
+    assert use.available
+    assert use.return_dependencies == frozenset({0})
+    assert {fn.name for fn in s.functions} >= {"b.helper"}
+
+
+def test_import_named_then_star_overlap_stays_resolvable():
+    src = """import {helper} from "./b.sol";
+import "./b.sol";
+function use(uint256 x) returns (uint256) {
+  return helper(x);
+}"""
+    s = _summarize_mods(src, {"./b.sol": B_MOD})
+    use = next(fn for fn in s.functions if fn.name == "use")
+    assert use.available
+
+
+def test_import_same_spec_different_content_keeps_both_modules():
+    # A pathless resolver returning source text keys refs on the
+    # specifier — two importers resolving the same spec to
+    # different bytes must keep both modules instead of the second
+    # riding the first's identity.
+    b_one = "function fb(uint256 a) returns (uint256) { return a; }"
+    b_two = "function fg(uint256 a) returns (uint256) { return a + 1; }"
+    a_mod = """import "./b.sol";
+function fa(uint256 x) returns (uint256) { return fb(x); }"""
+    c_mod = """import "./b.sol";
+function fc(uint256 x) returns (uint256) { return fg(x); }"""
+    root = """import "./a.sol";
+import "./c.sol";
+function run(uint256 x) returns (uint256) { return fc(x); }"""
+
+    def resolver(spec, importer_path=None):
+        if spec == "./b.sol" and importer_path == "./c.sol":
+            return b_two
+        return {"./a.sol": a_mod, "./c.sol": c_mod, "./b.sol": b_one}.get(
+            spec
+        )
+
+    s = sol.summarize_solidity(root, resolver=resolver)
+    names = {fn.name for fn in s.functions}
+    assert {"b.fb", "b#2.fg"} <= names
+    fc = next(fn for fn in s.functions if fn.name == "c.fc")
+    assert fc.available
+    run = next(fn for fn in s.functions if fn.name == "run")
+    assert run.available
+
+
+def test_analysis_limit_still_reports_resolved_paths():
+    # A resolved module pushing the unit over MAX_FUNCTIONS raises
+    # `analysis_limit` before the manifest is built — the
+    # `resolved_paths` out-param must already carry the module so
+    # the route's `--output` overwrite guard still refuses to
+    # clobber it.
+    big = "\n".join(
+        f"function m{i}(uint256 x) returns (uint256) {{ return x; }}"
+        for i in range(sol.MAX_FUNCTIONS + 2)
+    )
+    resolved = set()
+    src = 'import "./big.sol";\nfunction r(uint256 x) returns (uint256) { return x; }'
+    s = sol.summarize_solidity(
+        src,
+        resolver=_resolver({"./big.sol": big}),
+        resolved_paths=resolved,
+    )
+    assert resolved == {"./big.sol"}
+    assert all(not fn.available for fn in s.functions)
+
+
+def test_mcp_sol_summaries_accepts_cli_resolved_manifest(tmp_path):
+    # A manifest produced by the CLI with `--resolve-modules` is
+    # verifiable through the MCP tools when they resolve the same
+    # modules — without `resolve_modules` the fresh context key
+    # cannot match.
+    from agent import mcp_server
+
+    (tmp_path / "b.sol").write_text(
+        "function helper(uint256 a) returns (uint256) { return a; }\n"
+    )
+    a = tmp_path / "a.sol"
+    a.write_text(
+        'import "./b.sol";\n'
+        "function af(uint256 x) returns (uint256) { return helper(x); }\n"
+    )
+    produced = json.loads(
+        mcp_server.sol_summaries(str(a), resolve_modules=True)
+    )
+    manifest = produced["manifest"]
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    check = json.loads(
+        mcp_server.sol_summaries_check(
+            str(a), str(manifest_path), resolve_modules=True
+        )
+    )
+    assert check["check"]["context_match"] is True
