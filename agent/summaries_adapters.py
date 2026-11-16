@@ -304,6 +304,8 @@ def run_plan(args, *, runner=None) -> dict:
         max_parallel=args.max_parallel,
         runner=runner,
     )
+    from agent.adapter_probe import evaluate_probe_history
+
     return {
         "schema_version": PLAN_PROFILE,
         "profile": args.profile,
@@ -320,6 +322,10 @@ def run_plan(args, *, runner=None) -> dict:
         "histories": [
             history.to_dict() for history in probe_plan.histories
         ],
+        "evaluations": [
+            evaluate_probe_history(history)
+            for history in probe_plan.histories
+        ],
     }
 
 
@@ -328,8 +334,9 @@ def main_plan(args=None, *, runner=None) -> int:
 
     Emits ``mumei.summaries-plan/v1``: the resulting
     ``mumei.verification-plan/v1`` document, the probe observations this
-    pass recorded and the updated probe histories the host persists to
-    schedule retries. Routing only — no summary is derived, and a
+    pass recorded, the updated probe histories the host persists to
+    schedule retries, and a `mumei.probe-history-evaluation/v1`
+    descriptor per history. Routing only — no summary is derived, and a
     selected adapter is a routing decision, not an accepted manifest.
     """
     import argparse

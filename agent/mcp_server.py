@@ -3018,8 +3018,8 @@ def summaries_plan(
 
     Returns:
         JSON with `status: ok` carrying the `mumei.summaries-plan/v1`
-        document (`plan`, `observations`, `histories`), or `error` on
-        a declared failure.
+        document (`plan`, `observations`, `histories`, `evaluations`),
+        or `error` on a declared failure.
     """
     try:
         from agent.summaries_adapters import run_plan
