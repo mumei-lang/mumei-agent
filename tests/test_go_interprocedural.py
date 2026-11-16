@@ -5539,9 +5539,11 @@ def test_bound_pointer_deref_read_computed_operand_stays_closed(
     assert not result.available
 
 
-def test_bound_pointer_double_deref_stays_closed(go_types_helper):
-    # `**t` — the outer operand is itself a `*t` deref, not a
-    # bound name, so it stays closed.
+def test_bound_pointer_double_deref_read(go_types_helper):
+    # `**t` — one nested deref on a `**lib.T` binding now admits:
+    # the inner `*t` is still a bare identifier and the pointee
+    # chain resolves pointer → scalar; a deeper `***t` stays
+    # closed because its inner operand is not an identifier.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t **lib.T) int64 { return int64(**t) }\n"
@@ -5550,7 +5552,8 @@ def test_bound_pointer_double_deref_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_pointer_deref_read_carries_escaped_pointee_deps(
@@ -6601,9 +6604,10 @@ def test_deref_write_through_local_call_keeps_arg_deps(go_types_helper):
     assert result.effects == "unknown"
 
 
-def test_double_deref_write_stays_closed(go_types_helper):
-    # `**t = v` — the operand is itself a dereference, not an
-    # identifier, matching the read side.
+def test_double_deref_write_admits(go_types_helper):
+    # `**t = v` — one nested store level admits under the same
+    # unconditional alias fold `*t = v` uses; `***t = v` stays
+    # closed because its inner operand is not a bare identifier.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t **lib.T, v lib.T) lib.T {\n"
@@ -6614,7 +6618,8 @@ def test_double_deref_write_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_deref_inc_dec_is_admitted(go_types_helper):
@@ -11690,3 +11695,74 @@ def test_bound_closure_tuple_swap(go_types_helper):
     result = named(*data)
     assert result.available
     assert result.return_dependencies == frozenset({1})
+
+
+def test_double_pointer_read(
+    go_types_helper,
+):
+    # `**pp` — two-level deref: deps carry the pointer's provenance
+    # plus escaped and indirect stores, like one level does.
+    files = {
+        "a.go": "package p\n"
+        "func F(pp **int64) int64 { return **pp }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_double_pointer_store_observed(
+    go_types_helper,
+):
+    # `**pp = v` folds like `*p = v` — a later `**pp` read observes
+    # the stored deps through `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "func F(pp **int64, v int64) int64 {\n"
+        "\t**pp = v\n"
+        "\treturn **pp\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_double_pointer_named_chain_stays_closed(
+    go_types_helper,
+):
+    # `type PP *int64; pp *PP` — the producer records the named
+    # alias's fact as opaque (`unsupported`), so the pointee chain
+    # cannot resolve pointer → scalar and the read fails closed.
+    files = {
+        "a.go": "package p\n"
+        "type PP *int64\n"
+        "func F(pp *PP) int64 { return **pp }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_triple_pointer_stays_closed(
+    go_types_helper,
+):
+    # `***ppp` — the inner operand is not a bare identifier.
+    files = {
+        "a.go": "package p\n"
+        "func F(ppp ***int64) int64 { return ***ppp }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "non_parameter_reference"

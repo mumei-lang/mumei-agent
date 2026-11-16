@@ -2984,6 +2984,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
+        nested = False
+        if inner is not None and inner.type == "unary_expression":
+            inner_op = inner.child_by_field_name("operator")
+            inner_operand = inner.child_by_field_name("operand")
+            while (
+                inner_operand is not None
+                and inner_operand.type == "parenthesized_expression"
+            ):
+                inner_operand = next(
+                    (
+                        c
+                        for c in inner_operand.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if (
+                inner_op is not None
+                and inner_op.text == b"*"
+                and inner_operand is not None
+                and inner_operand.type == "identifier"
+            ):
+                inner = inner_operand
+                nested = True
         if inner is None or inner.type != "identifier":
             return None
         ref = self.references.get(self.node_key(inner))
@@ -3005,22 +3029,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # closed. The returned identity is per-binding — nothing
             # declared can ever redeclare it, so `stale_dependents`
             # can never falsely flag it.
-            if binding.type.elem is None:
+            pointee_fact = binding.type.elem
+            if pointee_fact is None:
                 return None
             # The pointee's element type can name declared
             # identities (`*[]lib.T`) that the synthetic
             # `/pointee` target cannot carry — pin them so a
             # redeclaration flags `stale_dependents`.
-            self._pin_fact_identities(binding.type.elem)
-            return f"{ref.binding_id}/pointee"
-        target = self._pointee_type(binding.type.type_id)
-        if target is None:
-            return None
-        # Same pin on the named pointee's resolved fact — its
-        # element/key `type_id`s (`type S = []lib.T`) ride under
-        # the `type_id` the transfer records.
-        self._pin_fact_identities(target.type)
-        return binding.type.type_id
+            self._pin_fact_identities(pointee_fact)
+            pointee_id = f"{ref.binding_id}/pointee"
+        else:
+            target = self._pointee_type(binding.type.type_id)
+            if target is None:
+                return None
+            # Same pin on the named pointee's resolved fact — its
+            # element/key `type_id`s (`type S = []lib.T`) ride under
+            # the `type_id` the transfer records.
+            self._pin_fact_identities(target.type)
+            pointee_fact = target.type
+            pointee_id = binding.type.type_id
+        if nested:
+            # `**pp = v` — the store lands one level deeper, in the
+            # pointee of pp's `*T` pointee; descend the fact chain
+            # once more under the same unconditional fold.
+            if pointee_fact.kind != "pointer":
+                return None
+            deep = pointee_fact.elem
+            if deep is None:
+                return None
+            self._pin_fact_identities(deep)
+            if deep.type_id:
+                return deep.type_id
+            return f"{ref.binding_id}/pointee/pointee"
+        return pointee_id
 
     def _imported_pointer_deref(
         self,
@@ -3118,7 +3159,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # the result still carries the binding's own
             # dependencies, the pointer's provenance. Only an
             # identifier operand admits — a computed pointer
-            # (`*g()`) or a nested deref (`**t`) stays closed.
+            # (`*g()`) stays closed. A nested `**t` unwraps one more
+            # level: the inner `*t` operand must still be a bare
+            # identifier (`***t` stays closed) and the bound name's
+            # pointee chain must resolve pointer → scalar/pointer.
+            nested = False
+            if inner is not None and inner.type == "unary_expression":
+                inner_op = inner.child_by_field_name("operator")
+                inner_operand = inner.child_by_field_name("operand")
+                while (
+                    inner_operand is not None
+                    and inner_operand.type == "parenthesized_expression"
+                ):
+                    inner_operand = next(
+                        (
+                            c
+                            for c in inner_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    inner_op is not None
+                    and inner_op.text == b"*"
+                    and inner_operand is not None
+                    and inner_operand.type == "identifier"
+                ):
+                    inner = inner_operand
+                    nested = True
             if inner is None or inner.type != "identifier":
                 raise _Unsupported("non_parameter_reference", _span(node))
             bound_ref = self.references.get(self.node_key(inner))
@@ -3142,26 +3210,77 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # the same external read `*p` is.
             if binding is None or binding.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
-            pointee_id = binding.type.type_id
-            if not pointee_id:
-                # A `p := &x` alias produces an unnamed `*int64`
-                # binding — classify the pointee by the pointer
-                # fact's `elem` (scalar-or-pointer admits, matching
-                # the named path; composite/absent pointees stay
-                # closed). The synthetic per-binding identity below
-                # can never be pinned nor redeclared, which is what
-                # the write side does too.
-                elem = binding.type.elem
+            if nested:
+                # `**pp` — descend the fact chain one level past the
+                # pointer's pointee: `pp`'s pointee must itself be a
+                # pointer whose own element classifies scalar or
+                # pointer like a first-level pointee would. A named
+                # step (`type PP *int64`) resolves through the type
+                # binding and pins it; an unnamed inner `*T` records
+                # a `<binding>/pointee/pointee` identity nothing can
+                # redeclare.
+                inner_fact = binding.type
+                if inner_fact.type_id:
+                    resolved = self._pointee_type(inner_fact.type_id)
+                    if (
+                        resolved is None
+                        or resolved.type.kind != "pointer"
+                    ):
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    self._pin_fact_identities(resolved.type)
+                    inner_fact = resolved.type
+                else:
+                    inner_fact = inner_fact.elem
+                    if (
+                        inner_fact is None
+                        or inner_fact.kind != "pointer"
+                    ):
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    self._pin_fact_identities(inner_fact)
+                deep = inner_fact.elem
                 if (
-                    elem is None
-                    or elem.kind
+                    deep is None
+                    or deep.kind
                     not in {"integer", "boolean", "pointer"}
                 ):
                     raise _Unsupported(
                         "non_parameter_reference", _span(node)
                     )
-                pointee_id = f"{bound_ref.binding_id}/pointee"
-                named_pointee = False
+                if deep.type_id:
+                    self._pin_fact_identities(deep)
+                    pointee_id = deep.type_id
+                    named_pointee = True
+                else:
+                    pointee_id = (
+                        f"{bound_ref.binding_id}/pointee/pointee"
+                    )
+                    named_pointee = False
+            else:
+                pointee_id = binding.type.type_id
+                if not pointee_id:
+                    # A `p := &x` alias produces an unnamed `*int64`
+                    # binding — classify the pointee by the pointer
+                    # fact's `elem` (scalar-or-pointer admits,
+                    # matching the named path; composite/absent
+                    # pointees stay closed). The synthetic per-binding
+                    # identity below can never be pinned nor
+                    # redeclared, which is what the write side does
+                    # too.
+                    elem = binding.type.elem
+                    if (
+                        elem is None
+                        or elem.kind
+                        not in {"integer", "boolean", "pointer"}
+                    ):
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    pointee_id = f"{bound_ref.binding_id}/pointee"
+                    named_pointee = False
         if named_pointee:
             target = self._pointee_type(pointee_id) if pointee_id else None
             if (
