@@ -4480,41 +4480,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     elem = fact.elem
                     if elem is not None and elem.type_id:
                         self.pinned.add(elem.type_id)
-                    transfers.append(
-                        CallTransfer(
-                            FileSpan(
-                                self.current_file,
-                                right.start_byte,
-                                right.end_byte,
-                            ),
-                            target,
-                            (),
-                            frozenset(),
-                            imported=True,
-                        )
-                    )
-                    value_deps = frozenset()
-                    if bound is not None and len(lefts) == 2:
-                        # `for range *p` — each element is caller
-                        # memory the pointer's aim selects, so the
-                        # bound name carries the pointer's own deps
-                        # and every earlier indirect store, the same
-                        # union `(*p)[i]`'s read reports.
-                        value_deps = self.expression(
-                            range_ident, fn, params, scope,
-                            transfers, count, 0,
-                        ) | self.indirect_writes
-                    elif computed is not None:
+                    computed_args = ()
+                    computed_call = None
+                    if computed is not None:
                         # `for range *G()` — the callee's body is
                         # opaque to the summary (a container result
                         # is outside the scalar signature fragment
-                        # anyway), so the call gets the opaque-callee
-                        # model rather than `expression`'s: argument
-                        # deps union, an imported transfer marks the
-                        # external read, `effects` stays honest, and
-                        # `&x` arguments fold like any effectful
-                        # call's. Evaluate whether one name binds or
-                        # two — the call runs either way.
+                        # anyway), so the call gets the
+                        # opaque-callee model rather than
+                        # `expression`'s: argument deps union, an
+                        # imported transfer marks the external read,
+                        # `effects` stays honest, and `&x` arguments
+                        # fold like any effectful call's. Evaluate
+                        # whether one name binds or two — the call
+                        # runs either way — and pin the callee's
+                        # signature types so redeclaring one flags
+                        # this summary stale.
                         call_node, _, _ = computed
                         call = self.calls[self.node_key(call_node)]
                         arguments_node = call_node.child_by_field_name(
@@ -4533,50 +4514,91 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 _span(call_node),
                                 call.target,
                             )
-                        actual = tuple(
+                        computed_args = tuple(
                             self.expression(
                                 arg, fn, params, scope,
                                 transfers, count, 0,
                             )
                             for arg in args
                         )
-                        if computed[2] != call.target:
-                            # The shared range transfer above already
-                            # records on `computed[2]`; when that is
-                            # the pointee identity (`*G()`), the call
-                            # itself needs its own transfer. For a
-                            # direct container result (`G()`) both
-                            # would land on `call.target` — record
-                            # once.
-                            transfers.append(
-                                CallTransfer(
-                                    call.span,
-                                    call.target,
-                                    actual,
-                                    frozenset(),
-                                    imported=True,
+                        computed_call = call
+                        target_fn = self.functions.get(call.target)
+                        if target_fn is not None:
+                            for signature_param in (
+                                *target_fn.parameters,
+                                *target_fn.results,
+                            ):
+                                self._pin_fact_identities(
+                                    signature_param.type
                                 )
-                            )
                         self._store_call_writes(
                             args,
-                            frozenset().union(*actual)
-                            if actual
+                            frozenset().union(*computed_args)
+                            if computed_args
                             else frozenset(),
                             scope,
                             params,
                         )
-                        if len(lefts) == 2:
-                            value_deps = (
-                                frozenset().union(*actual)
-                                if actual
-                                else frozenset()
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                right.start_byte,
+                                right.end_byte,
+                            ),
+                            target,
+                            computed_args,
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    if (
+                        computed_call is not None
+                        and computed[2] != computed_call.target
+                    ):
+                        # `*G()` — the shared transfer above pins the
+                        # result pointee's identity; the call itself
+                        # pins the callee's. A direct container
+                        # result (`G()`) names `call.target` in both,
+                        # so the shared transfer already covers it.
+                        transfers.append(
+                            CallTransfer(
+                                computed_call.span,
+                                computed_call.target,
+                                computed_args,
+                                frozenset(),
+                                imported=True,
                             )
-                            for escaped_id in self.escaped:
-                                if escaped_id in scope:
-                                    value_deps |= scope[escaped_id]
-                                elif escaped_id in params:
-                                    value_deps |= {params[escaped_id]}
-                            value_deps |= self.indirect_writes
+                        )
+                    value_deps = frozenset()
+                    if bound is not None and len(lefts) == 2:
+                        # `for range *p` — each element is caller
+                        # memory the pointer's aim selects, so the
+                        # bound name carries the pointer's own deps
+                        # and every earlier indirect store, the same
+                        # union `(*p)[i]`'s read reports.
+                        value_deps = self.expression(
+                            range_ident, fn, params, scope,
+                            transfers, count, 0,
+                        ) | self.indirect_writes
+                    elif computed is not None and len(lefts) == 2:
+                        # `for range *G()` — the elements live in the
+                        # memory the opaque result aims at, which may
+                        # alias any escaped binding like a `*p` read:
+                        # the argument deps (already evaluated above)
+                        # union with every escaped binding's current
+                        # deps and every indirect store.
+                        value_deps = (
+                            frozenset().union(*computed_args)
+                            if computed_args
+                            else frozenset()
+                        )
+                        for escaped_id in self.escaped:
+                            if escaped_id in scope:
+                                value_deps |= scope[escaped_id]
+                            elif escaped_id in params:
+                                value_deps |= {params[escaped_id]}
+                        value_deps |= self.indirect_writes
                     # Each name's declared type comes from the
                     # compiler's binding — scalar-or-pointer, matching
                     # the index-read rule (a struct element or a

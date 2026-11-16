@@ -11922,3 +11922,53 @@ def test_computed_range_imported_callee_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_computed_range_transfer_carries_arguments(go_types_helper):
+    # `for range G(x)` on a direct container result — the single
+    # transfer on the callee's identity carries the evaluated
+    # argument deps, so the call's inputs stay on record.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) []int64 { return nil }\n"
+        "func F(x, s int64) int64 {\n"
+        "\tfor _, v := range G(x) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    call_transfers = [
+        t for t in result.calls if t.arguments == (frozenset({0}),)
+    ]
+    assert len(call_transfers) == 1
+
+
+def test_computed_range_pointer_result_pins_both(go_types_helper):
+    # `for range *G()` — two transfers: the container read pins the
+    # result pointee's identity, and the call pins the callee.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) *[]int64 { return nil }\n"
+        "func F(x, s int64) int64 {\n"
+        "\tfor _, v := range *G(x) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    pointee_transfers = [
+        t for t in result.calls if t.target.endswith("/pointee")
+    ]
+    assert len(pointee_transfers) == 1
+    assert pointee_transfers[0].arguments == (frozenset({0}),)
+    callee = pointee_transfers[0].target[: -len("/pointee")]
+    call_transfers = [
+        t for t in result.calls if t.target == callee
+    ]
+    assert len(call_transfers) == 1
+    assert call_transfers[0].arguments == (frozenset({0}),)
