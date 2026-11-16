@@ -65,6 +65,7 @@ _SUBCOMMANDS = {
     "native-accept",
     "native-artifact-recheck",
     "native-exit-status-recheck",
+    "native-exit-status-accept",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -918,6 +919,24 @@ def main() -> None:
         native_esr_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_esr_main(args))
+    elif command == "native-exit-status-accept":
+        import argparse
+        from agent.native_exit_status_accept import (
+            build_exit_status_accept_parser as native_esa_build_parser,
+            main_exit_status_accept as native_esa_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-exit-status-accept",
+            description=(
+                "Run a declared Core native exit-status acceptance as "
+                "one attempt and emit the reconciled lineage plus the "
+                "declared acceptance outcome."
+            ),
+        )
+        native_esa_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_esa_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (

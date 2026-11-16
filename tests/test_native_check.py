@@ -363,7 +363,7 @@ def test_cli_dispatch():
 
 
 @pytest.mark.skipif(
-    not Path("/home/ubuntu/repos/mumei/target/debug/mumei").exists(),
+    not os.path.exists("/home/ubuntu/repos/mumei/target/debug/mumei"),
     reason="real Core binary not built",
 )
 def test_real_core_end_to_end(tmp_path, capsys):
