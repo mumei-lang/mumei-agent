@@ -773,6 +773,32 @@ The route is also the `native_artifact_recheck` MCP tool (same
 `run_artifact_recheck` report production, declared-path validation and
 basename redaction as the other spawn tools). C02/C10 stay partial.
 
+### C02/C10 declared native-exit-status-recheck route (native-exit-status-recheck)
+
+`python -m agent native-exit-status-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the deepest
+native consumer replay as one attempt: `<core> native-bundle
+recheck-exit-status --expected-build-id <id> <bundle> <source>` under a
+`mumei.native-exit-status-recheck-request/v1` fingerprint binding the
+bundle record plus every member it declares (the component files and,
+for a multifile record, each `sources/` member the merge is re-derived
+from) and the declared source. `exit_status_recheck` is claimed only
+for uniquely-mapped exit codes (`0 → reproduced`, `3 → inconclusive`);
+exit 1 conflates a mismatched exit status with every static failure
+and claims nothing, mid-run drift reports `inputs_changed` with no
+claimed outcome, and the drift check re-enumerates the member set from
+the current record. A `reproduced` run reports `discharged_checks` —
+`artifact_semantics` and `claim_truth` — with the remaining checks in
+`checks_not_performed`; the exit-status match itself is an OS-level
+observation bound by the record pin, discharging no additional
+category since the vocabulary has no runtime/ABI/process-semantics
+claim for it. The command's stdout is a fixed diagnostic line rather
+than an evidence record, so no `candidate` is emitted and a successful
+run selects only lineage. The route is also the
+`native_exit_status_recheck` MCP tool (same `run_exit_status_recheck`
+report production, declared-path validation and basename redaction as
+the other spawn tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-check route (native-check)
 
 `python -m agent native-check --core <path> --bundle <dir>
