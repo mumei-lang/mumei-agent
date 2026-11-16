@@ -2905,7 +2905,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for p in pointees
                     if not p.id.endswith("/pointee")
                 )
-                return pointees[-1].id, ref
+                # A nested selection (`t.W.f`) traverses a stored
+                # pointer field — the caller marks the target so the
+                # destination read unions the indirect stores where
+                # earlier `t.W = q` folds landed.
+                return pointees[-1].id, ref, True
             # `st.A.B = v` on a tracked local composite: the store
             # folds into st's conflated dep set — a local mutation,
             # so the empty identity records no transfer.
@@ -2943,7 +2947,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             ):
                 return None
-            return "", ref
+            return "", ref, True
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
         ref = self.references.get(self.node_key(base))
@@ -2967,7 +2971,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or elem.kind != "struct"
             ):
                 return None
-            return ref.binding_id + "/pointee", ref
+            return ref.binding_id + "/pointee", ref, False
         if self._is_local_composite(binding):
             # `st.V = v` on a tracked local composite — the value
             # folds into st's dep set; no external mutation records.
@@ -2990,10 +2994,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or not self._direct_field_chain(ref, (ident,))
             ):
                 return None
-            return "", ref
+            return "", ref, False
         if binding.type.kind != "pointer":
             return None
-        return binding.type.type_id, ref
+        return binding.type.type_id, ref, False
 
     def _bound_container_pointee(
         self,
@@ -4446,7 +4450,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_, params
                 )
                 if write_target is not None:
-                    type_id, ref = write_target
+                    type_id, ref, nested = write_target
                     # A local composite's field store reports no
                     # external mutation — the empty identity skips
                     # the transfer; only the dep fold applies.
@@ -4474,8 +4478,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # a read through a DIFFERENT aliased pointer
                     # (`q.F = v; return p.F`) must observe it too. A
                     # local composite (empty `type_id`) keeps the
-                    # precise accumulate-only fold.
-                    refs.append((ref, True, bool(type_id)))
+                    # precise accumulate-only fold. `nested` marks a
+                    # store reached through a stored pointer field
+                    # (`p.Next.V = v`) — computing the destination
+                    # reads that field's contents too.
+                    refs.append((ref, True, bool(type_id), nested))
                     continue
                 # An imported member write — `lib.V = v`,
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
@@ -4668,8 +4675,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 tgt = r[0] if isinstance(r, tuple) else r
                 bcast = (
                     isinstance(r, tuple)
-                    and len(r) == 3
+                    and len(r) >= 3
                     and bool(r[2])
+                )
+                nested_tgt = (
+                    isinstance(r, tuple)
+                    and len(r) == 4
+                    and bool(r[3])
                 )
                 dest = None
                 if (
@@ -4697,10 +4709,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # A plain bound-pointer store (`p.V = v`)
                         # reads only the pointer's provenance — the
                         # pointee contents folded into `locals_[p]`
-                        # by earlier writes are not the pointer.
+                        # by earlier writes are not the pointer. A
+                        # nested store (`p.Next.V = v`) also reads
+                        # the traversed pointer field's contents —
+                        # the indirect stores its value may be.
                         dest = self._pointer_deps(
                             tgt.binding_id, params, locals_
                         )
+                        if nested_tgt:
+                            dest = dest | self.indirect_writes
                 dest_reads.append(dest)
                 if (
                     len(rights) == len(refs)
@@ -4783,7 +4800,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # base marks the tuple so the store also reaches
                     # `indirect_writes` — other aliased pointers'
                     # field reads observe it.
-                    broadcast = len(ref) == 3 and ref[2]
+                    broadcast = len(ref) >= 3 and ref[2]
                     ref, accumulating = ref[0], ref[1]
                 if accumulating:
                     # `x op= e` reads the old value too — the result unions
@@ -5732,7 +5749,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 operand, locals_, params
             )
             if write_target is not None:
-                type_id, _ref = write_target
+                type_id, _ref, _nested = write_target
                 # `st.F++` on a local composite is provenance-
                 # preserving and local — no transfer records; the
                 # field read still attributes st's conflated deps.

@@ -13141,3 +13141,29 @@ def test_statement_reads_container_write_reads_index(
     }
     i = src.index("(*p)[i] = v")
     assert reads[(i, i + 11)] == {0, 1, 2}
+
+
+def test_statement_reads_nested_pointer_store_reads_traversal(
+    go_types_helper,
+):
+    # `p.Next = q; p.Next.V = 0` — the second store's destination
+    # traverses the pointer field `p.Next`, whose value is whatever
+    # the first store folded into indirect writes: the statement
+    # reads deps(p) ∪ deps(q).
+    files = {
+        "a.go": "package p\ntype N struct{ Next *N; V int64 }\n"
+        "func F(p, q *N) int64 {\n"
+        "\tp.Next = q\n\tp.Next.V = 0\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.Next.V = 0")
+    assert reads[(i, i + 12)] == {0, 1}
