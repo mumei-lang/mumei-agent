@@ -2836,7 +2836,8 @@ parameter) but records an imported transfer, so `effects` reports
 stored value's dependencies, since no binding tracks global
 contents — `G = x; return G` therefore reports no parameter deps,
 matching `lib.V = x; return lib.V`. `G += v` follows the same
-assignment gate.
+assignment gate, and `G++`/`G--` admit like `lib.V++` —
+provenance-preserving, only the external mutation records.
 
 The recorded target is the var's own binding identity — a real
 declaration, so `stale_dependents` works honestly in both
@@ -2851,8 +2852,8 @@ packaged profile's file `-1` sentinel, or the whole-file span in
 the single-file profile. A function-local `var` the fragment does
 not track carries its function's scope and stays closed, as do
 package vars of composite or non-scalar type (`var G []int64`,
-`var G string`), `G++`/`G--` inc/dec statements, and `const`
-shadows — scalar package `const`s were always dep-free. Package
+`var G string`), while scalar package `const`s were always
+dep-free. Package
 vars shadowing universe names (`var iota int64`, `var true bool`)
 admit the same way: the compiler resolves the use to the
 declaration, so the read is package state like any other.

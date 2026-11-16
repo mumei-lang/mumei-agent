@@ -3073,6 +3073,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     count,
                 )
                 return
+            if operand.type == "identifier":
+                # `G++`/`G--` on a package-level `var` mutate package
+                # state like `lib.V++`: provenance-preserving, only the
+                # external mutation records against the var's identity.
+                gvar = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None and ref.binding_id
+                    else None
+                )
+                if (
+                    gvar is not None
+                    and gvar.kind == "variable"
+                    and self._package_level(gvar)
+                    and gvar.type.kind
+                    in {"integer", "boolean", "pointer"}
+                ):
+                    self._pin_fact_identities(gvar.type)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                operand.start_byte,
+                                operand.end_byte,
+                            ),
+                            gvar.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return
             # `(*p)++` — an increment through a bound pointer mutates
             # the same untracked memory `*p = v` does, but is
             # provenance-preserving: an aliased binding keeps its own

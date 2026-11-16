@@ -1482,7 +1482,7 @@ def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_hel
 def test_opaque_callee_blocks_callers_but_not_an_unrelated_function(go_types_helper):
     data = unit(
         go_types_helper,
-        "var G int64; func Bad(x int64)int64{G++; return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
+        "var ch chan int64; func Bad(x int64)int64{return <-ch}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
     )
     assert not named(*data).available
     assert named(*data, "Good").available
@@ -5796,6 +5796,10 @@ def test_synthetic_pointee_target_does_not_flag_stale_dependents(
         # so the stored deps drop and `effects` stays unknown.
         ("var G int64\nfunc F(x int64) int64 { G = x; return x }", {0}),
         ("var G int64\nfunc F(x int64) int64 { G += x; return x }", {0}),
+        # `G++`/`G--` admit like `lib.V++` — provenance-preserving,
+        # only the external mutation records.
+        ("var G int64\nfunc F(x int64) int64 { G++; return x }", {0}),
+        ("var G int64\nfunc F(x int64) int64 { G--; return G }", set()),
         # A package var shadowing a universe name is still package
         # state — the read admits and marks `effects` unknown.
         ("var iota int64\nfunc F(x int64) int64 { return iota }", set()),
