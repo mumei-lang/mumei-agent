@@ -3906,7 +3906,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if not result_id:
                     raise _Unsupported("unsupported_return", _span(node))
-                deps[0] |= locals_.get(result_id, frozenset())
+                result_deps = locals_.get(result_id, frozenset())
+                deps[0] |= result_deps
+                self._record_read(result_deps)
             elif len(expressions) == 1:
                 deps[0] |= self.expression(
                     expressions[0], fn, params, locals_, transfers, count, 0
@@ -4657,9 +4659,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `x op= e` reads the old value too — the result unions
                     # the binding's current dependencies with the RHS's.
                     if ref.binding_id in locals_:
-                        value = locals_[ref.binding_id] | value
+                        old = locals_[ref.binding_id]
                     else:
-                        value = frozenset({params[ref.binding_id]}) | value
+                        old = frozenset({params[ref.binding_id]})
+                    self._record_read(old)
+                    value = old | value
                 if (
                     not compound
                     and self._is_chan_binding(ref.binding_id)
@@ -5399,7 +5403,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if ref is not None and (
                     ref.binding_id in locals_ or ref.binding_id in params
                 ):
-                    # x++ / x-- change the value, never its dependencies.
+                    # x++ / x-- read the operand and change the
+                    # value, never its dependencies.
+                    if ref.binding_id in locals_:
+                        self._record_read(locals_[ref.binding_id])
+                    else:
+                        self._record_read(
+                            frozenset({params[ref.binding_id]})
+                        )
                     return
             member_write = self._imported_member_write(operand)
             if member_write is not None:
@@ -5529,7 +5540,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if write_target is not None:
                 type_id, _ref = write_target
                 # `st.F++` on a local composite is provenance-
-                # preserving and local — no transfer records.
+                # preserving and local — no transfer records; the
+                # field read still attributes st's conflated deps.
+                if not type_id and _ref is not None:
+                    base_deps = locals_.get(_ref.binding_id)
+                    if base_deps is not None:
+                        self._record_read(base_deps)
                 if type_id:
                     transfers.append(
                         CallTransfer(
@@ -5700,6 +5716,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             for frame in self._read_stack:
                 frame.append(result)
         return result
+
+    def _record_read(self, deps: frozenset[int]) -> None:
+        """Attribute an implicit read to every open statement
+        frame. `x++`'s operand, `x op= e`'s LHS, a bare `return`'s
+        named result and `st.F++`'s conflated base all read a
+        binding's deps without routing through `expression()`, so
+        the wrapper never sees them."""
+        for frame in self._read_stack:
+            frame.append(deps)
 
     def _expression(
         self,

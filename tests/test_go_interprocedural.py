@@ -12939,8 +12939,55 @@ def test_statement_reads_roundtrip(go_types_helper):
     # An ordinal beyond the declared parameters is rejected.
     bad = result.to_dict()
     bad["statement_reads"][0]["deps"] = [len(result.parameters)]
-    try:
+    with pytest.raises(SnapshotError):
         ip.FunctionSummary.from_dict(bad)
-        raise AssertionError("accepted out-of-range statement dep")
-    except Exception:
-        pass
+
+
+def test_statement_reads_cover_implicit_reads(go_types_helper):
+    # `x++`, `x += y` and a bare `return` over a named result all
+    # read a binding without routing through `expression()` —
+    # statement_reads must still attribute the parameter deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, y int64) (r int64) {\n"
+            "\tr = x\n"
+            "\tx++\n"
+            "\tx += y\n"
+            "\treturn\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    reads = {(r.span.start, r.span.end): set(r.deps) for r in result.statement_reads}
+    src = ("package p;\nfunc F(x int64, y int64) (r int64) {\n"
+           "\tr = x\n\tx++\n\tx += y\n\treturn\n}\n")
+    i, j, k = src.index("x++"), src.index("x += y"), src.index("return\n")
+    assert reads[(i, i + 3)] == {0}
+    assert reads[(j, j + 6)] == {0, 1}
+    assert reads[(k, k + 6)] == {0}
+
+
+def test_statement_reads_composite_inc_and_compound(go_types_helper):
+    # `st.V++` / `st.V += y` on a conflated local composite read the
+    # base's dep set; the field write folds it back in.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tst := P{V: x}\n\tst.V++\n\tst.V += y\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("st.V++")
+    j = src.index("st.V += y")
+    assert reads[(i, i + 6)] == {0}
+    assert reads[(j, j + 9)] == {0, 1}
