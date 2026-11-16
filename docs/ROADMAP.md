@@ -2090,7 +2090,17 @@ a named-struct element (the store folds the value's deps into
 iteration and element inc/dec admit as well — `for range *p`/
 `for range p`/`for range *GP`/`for range GP` (the element name
 carries deps(p) ∪ indirect stores for a bound pointer, dep-free
-for a package var) and `(*p)[i]++`/`--` — while nested element
+for a package var) and `(*p)[i]++`/`--` — and a computed range
+operand admits too: `for range *g()`/`for range g()` over a
+locally declared callee whose declared result is a pointer to a
+slice/array/map (or a slice/array/map directly, or a
+pointer-to-array under the same sugar rule as `for range p`)
+ranges it under the opaque-callee model — the callee's body is
+outside the scalar signature fragment, so the call records an
+imported transfer, argument deps union, `&x` arguments fold and
+`effects` stays unknown, while each element name carries
+deps(args) ∪ escaped ∪ indirect writes and the index/key stays
+dep-free — while nested element
 fields (`(*p)[i].F.G` reads or stores), anonymous `*struct{...}`
 pointees and deeper nested derefs still stay closed (`**p` now
 admits one level — the inner `*p` operand must still be a bare

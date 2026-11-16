@@ -4283,6 +4283,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 bound = None
                 package_pointee = None
                 range_ident = None
+                computed = None
                 if (
                     right is not None
                     and member is None
@@ -4306,6 +4307,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             None,
                         )
                     sugar = False
+                    call_operand = None
                     if (
                         cur is not None
                         and cur.type == "unary_expression"
@@ -4328,12 +4330,65 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             operator is not None
                             and operator.text == b"*"
                             and sub is not None
-                            and sub.type == "identifier"
                         ):
-                            range_ident = sub
+                            if sub.type == "identifier":
+                                range_ident = sub
+                            elif sub.type == "call_expression":
+                                call_operand = sub
                     elif cur is not None and cur.type == "identifier":
                         range_ident = cur
                         sugar = True
+                    elif cur is not None and cur.type == "call_expression":
+                        call_operand = cur
+                        sugar = True
+                    if call_operand is not None:
+                        # `for range *G()` / `for range G()` — the
+                        # container lives in the memory the callee's
+                        # result points at (or IS, for a direct
+                        # container result), so the elements iterate
+                        # caller-observable memory like `(*p)[i]`.
+                        # Only a local callee's function record
+                        # declares the result fact — an imported
+                        # member's signature carries identities, not
+                        # the result's kind, so `lib.G()` stays
+                        # closed.
+                        call = self.calls.get(self.node_key(call_operand))
+                        if (
+                            call is not None
+                            and call.owner == fn.binding_id
+                            and call.kind == "direct_local"
+                        ):
+                            target = self.functions.get(call.target)
+                            rf = (
+                                target.results[0].type
+                                if target is not None
+                                and len(target.results) == 1
+                                else None
+                            )
+                            if rf is not None and rf.kind == "pointer":
+                                # `*G()` requires a pointer to a
+                                # container; `for range G()`
+                                # auto-derefs pointer-to-array only —
+                                # the same sugar rule `for range p`
+                                # follows.
+                                elem = rf.elem
+                                if elem is not None and elem.kind in {
+                                    "slice",
+                                    "array",
+                                    "map",
+                                } and (not sugar or elem.kind == "array"):
+                                    computed = (
+                                        call_operand,
+                                        elem,
+                                        rf.type_id
+                                        or call.target + "/pointee",
+                                    )
+                            elif (
+                                sugar
+                                and rf is not None
+                                and rf.kind in {"slice", "array", "map"}
+                            ):
+                                computed = (call_operand, rf, call.target)
                     if range_ident is not None:
                         bound = self._bound_container_pointee(
                             range_ident, locals_, params
@@ -4361,6 +4416,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or container_var is not None
                     or bound is not None
                     or package_pointee is not None
+                    or computed is not None
                 ):
                     # Ranging a container in external state — an
                     # imported member (`lib.VA`, `lib.VM`), the
@@ -4382,16 +4438,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unsupported_statement", _span(clause)
                         )
-                    if bound is not None or package_pointee is not None:
+                    if (
+                        bound is not None
+                        or package_pointee is not None
+                        or computed is not None
+                    ):
                         fact = (
                             bound[2]
                             if bound is not None
-                            else package_pointee[1]
+                            else (
+                                package_pointee[1]
+                                if package_pointee is not None
+                                else computed[1]
+                            )
                         )
                         target = (
                             bound[1]
                             if bound is not None
-                            else package_pointee[0]
+                            else (
+                                package_pointee[0]
+                                if package_pointee is not None
+                                else computed[2]
+                            )
                         )
                         self._pin_fact_identities(fact)
                     else:
@@ -4436,6 +4504,71 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             range_ident, fn, params, scope,
                             transfers, count, 0,
                         ) | self.indirect_writes
+                    elif computed is not None:
+                        # `for range *G()` — the callee's body is
+                        # opaque to the summary (a container result
+                        # is outside the scalar signature fragment
+                        # anyway), so the call gets the opaque-callee
+                        # model rather than `expression`'s: argument
+                        # deps union, an imported transfer marks the
+                        # external read, `effects` stays honest, and
+                        # `&x` arguments fold like any effectful
+                        # call's. Evaluate whether one name binds or
+                        # two — the call runs either way.
+                        call_node, _, _ = computed
+                        call = self.calls[self.node_key(call_node)]
+                        arguments_node = call_node.child_by_field_name(
+                            "arguments"
+                        )
+                        args = (
+                            _children(arguments_node)
+                            if arguments_node is not None
+                            else []
+                        )
+                        if tuple(
+                            self.node_key(arg) for arg in args
+                        ) != tuple(_key3(a) for a in call.arguments):
+                            raise _Unsupported(
+                                "call_mapping_unavailable",
+                                _span(call_node),
+                                call.target,
+                            )
+                        actual = tuple(
+                            self.expression(
+                                arg, fn, params, scope,
+                                transfers, count, 0,
+                            )
+                            for arg in args
+                        )
+                        transfers.append(
+                            CallTransfer(
+                                call.span,
+                                call.target,
+                                actual,
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                        self._store_call_writes(
+                            args,
+                            frozenset().union(*actual)
+                            if actual
+                            else frozenset(),
+                            scope,
+                            params,
+                        )
+                        if len(lefts) == 2:
+                            value_deps = (
+                                frozenset().union(*actual)
+                                if actual
+                                else frozenset()
+                            )
+                            for escaped_id in self.escaped:
+                                if escaped_id in scope:
+                                    value_deps |= scope[escaped_id]
+                                elif escaped_id in params:
+                                    value_deps |= {params[escaped_id]}
+                            value_deps |= self.indirect_writes
                     # Each name's declared type comes from the
                     # compiler's binding — scalar-or-pointer, matching
                     # the index-read rule (a struct element or a
@@ -4444,7 +4577,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         lefts, scope, params, conditional, value_deps
                     )
                     if (
-                        bound is not None
+                        (bound is not None or computed is not None)
                         and len(lefts) == 2
                         and lefts[1].text != b"_"
                     ):
