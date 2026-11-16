@@ -956,7 +956,19 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	ix.out.Bindings = append(ix.out.Bindings, binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" {
+	// Anonymous `struct{...}` VALUES admit under the consumer's
+	// conflated dep-set model, but an anonymous struct in a signature
+	// (param or result) still names value semantics the fragment
+	// cannot track — keep flagging those so the declaration stays
+	// honest about the still-closed positions it occupies.
+	anonymousSignatureStruct := false
+	if tf.Kind == "struct" && tf.TypeID == "" {
+		if v, ok := obj.(*types.Var); ok {
+			anonymousSignatureStruct = v.Kind() == types.ParamVar ||
+				v.Kind() == types.ResultVar
+		}
+	}
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" || anonymousSignatureStruct {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }
