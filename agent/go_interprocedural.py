@@ -126,6 +126,16 @@ _SCALAR_BASIC_TYPES = frozenset(
 _UNTYPED_SCALAR_CONSTS = frozenset(
     {"untyped int", "untyped rune", "untyped bool"}
 )
+_INDEX_LITERALS = frozenset(
+    {
+        "int_literal",
+        "float_literal",
+        "imaginary_literal",
+        "rune_literal",
+        "interpreted_string_literal",
+        "raw_string_literal",
+    }
+)
 
 
 def _scalar_const_type(t: Any) -> bool:
@@ -800,6 +810,13 @@ class _Builder:
             if i > 0 and ident.type.kind == "pointer":
                 return None
             resolved.append(ident)
+        # Every named type the chain traverses pins — `st.A.N`
+        # resolves `N` through `A`'s declared `type Q struct{...}`,
+        # so redeclaring `Q` must flag `stale_dependents` like a root
+        # or leaf change.
+        for ident in resolved:
+            if ident.type is not None:
+                self._pin_fact_identities(ident.type)
         return ref, tuple(resolved)
 
     def _struct_fields(self, type_binding: Any) -> tuple[Any, ...]:
@@ -900,24 +917,54 @@ class _Builder:
         conflated set — is fine here: the deref reads package state
         either way."""
         fields: list[Any] = []
+        extras: list[Any] = []
         cur = node
-        while cur is not None and cur.type == "selector_expression":
-            fields.append(cur.child_by_field_name("field"))
-            cur = cur.child_by_field_name("operand")
-            while (
-                cur is not None
-                and cur.type == "parenthesized_expression"
-            ):
+        saw_deref = False
+        deref_operand = None
+        while cur is not None:
+            if cur.type == "parenthesized_expression":
                 cur = next(
                     (c for c in cur.named_children if c.type != "comment"),
                     None,
                 )
+                continue
+            if cur.type == "selector_expression":
+                fields.append(cur.child_by_field_name("field"))
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "index_expression":
+                # `(*GA[i]).V` — the index evaluates for its side
+                # effects like a write's does; the caller runs them.
+                index = cur.child_by_field_name("index")
+                if index is not None:
+                    extras.append(index)
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "unary_expression":
+                operator = cur.child_by_field_name("operator")
+                if operator is None or operator.text != b"*":
+                    return None
+                # `(*GP).V` spells `GP.V`'s sugar explicitly — the
+                # deref peels the operand's declared pointer, still
+                # external package state. `&` never reaches here —
+                # it already closes at the `&` operator gate.
+                if not saw_deref:
+                    saw_deref = True
+                    deref_operand = cur.child_by_field_name("operand")
+                cur = cur.child_by_field_name("operand")
+                continue
+            break
         if cur is None or cur.type != "identifier" or cur.text == b"_":
             return None
         ref = self.references.get(self.node_key(cur))
         binding = (
             self.bindings.get(ref.binding_id)
             if ref is not None and ref.binding_id
+            else None
+        )
+        derefed = (
+            self._deref_operand_type(deref_operand, binding)
+            if saw_deref and binding is not None
             else None
         )
         if (
@@ -929,6 +976,10 @@ class _Builder:
                 or (
                     binding.type is not None
                     and binding.type.kind == "pointer"
+                )
+                or (
+                    derefed is not None
+                    and derefed.kind == "pointer"
                 )
             )
         ):
@@ -950,7 +1001,69 @@ class _Builder:
             resolved.append(ident)
         if not resolved:
             return None
-        return binding, resolved[0]
+        if saw_deref and (
+            derefed is None or derefed.kind != "pointer"
+        ):
+            # The deref must always peel a pointer — `(*GA[0]).V` on
+            # `var GA []Q` derefs a non-pointer element and stays
+            # closed even though the chain resolved.
+            return None
+        # Every named type the chain traverses pins: redeclaring an
+        # intermediate field's type (`type Q struct{...}` for `G.A.N`)
+        # must flag `stale_dependents` like a root or leaf change.
+        for ident in resolved:
+            if ident.type is not None:
+                self._pin_fact_identities(ident.type)
+        return binding, resolved[0], tuple(extras)
+
+    def _deref_operand_type(self, node: Any, binding: Any) -> Any:
+        """The type fact a `*` peels — the unary operand's declared
+        type, walked from the root binding's own type.
+
+        `(*GP).V` peels `GP`'s type, `(*G.P).V` the field `P`'s,
+        `(*GA[0]).V` the slice element's, `(*GA[0].P).V` the
+        element's field's. Components collect outermost-first and
+        apply innermost-first onto the root's type: an index takes
+        the container's `elem`, a selector the resolved field's
+        declared type. Anything else in the operand (a call, another
+        `*`) resolves to None — the chain stays closed."""
+        ty = binding.type
+        parts: list[Any] = []
+        cur = node
+        while cur is not None:
+            if cur.type == "parenthesized_expression":
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+                continue
+            if cur.type == "selector_expression":
+                parts.append(cur.child_by_field_name("field"))
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "index_expression":
+                parts.append(cur)
+                cur = cur.child_by_field_name("operand")
+                continue
+            break
+        if cur is None or cur.type != "identifier" or cur.text == b"_":
+            return None
+        for part in reversed(parts):
+            if ty is None:
+                return None
+            if part.type == "index_expression":
+                # `p[i]` on `*[]T` auto-derefs the pointer before
+                # indexing — peel it, then take the element.
+                if ty.kind == "pointer":
+                    ty = ty.elem
+                ty = ty.elem if ty is not None else None
+                continue
+            ref = self.references.get(self.node_key(part))
+            ident = self._field_identity(ref)
+            if ident is None:
+                return None
+            ty = ident.type
+        return ty
 
     def _package_var_write(
         self, node: Any
@@ -972,6 +1085,7 @@ class _Builder:
         extras: list[Any] = []
         fields: list[Any] = []
         saw_deref = False
+        deref_operand = None
         while cur is not None:
             if cur.type == "parenthesized_expression":
                 cur = next(
@@ -983,7 +1097,9 @@ class _Builder:
                 operator = cur.child_by_field_name("operator")
                 if operator is None or operator.text != b"*":
                     return None
-                saw_deref = True
+                if not saw_deref:
+                    saw_deref = True
+                    deref_operand = cur.child_by_field_name("operand")
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "selector_expression":
@@ -1027,16 +1143,24 @@ class _Builder:
                 resolved.append(ident)
             fold = saw_deref
             if saw_deref:
-                # `*G.P` dereferences the outermost field's pointer,
-                # not the root var — `*GP = v` on a non-pointer var
-                # cannot compile, but rejecting anyway stops a
-                # tampered binding from smuggling a store past the
-                # gate.
-                derefed = (
-                    resolved[0].type if resolved else binding.type
+                # The `*` peels its operand: `*G.P` dereferences the
+                # field's pointer, `(*GP).V` the root var's,
+                # `(*GA[0]).V` the index element's — whatever the
+                # operand subtree resolves to. `*GP = v` on a
+                # non-pointer var cannot compile, but rejecting
+                # anyway stops a tampered binding from smuggling a
+                # store past the gate.
+                derefed = self._deref_operand_type(
+                    deref_operand, binding
                 )
                 if derefed is None or derefed.kind != "pointer":
                     return None
+            # Every named type the chain traverses pins — redeclaring
+            # an intermediate field's type must flag
+            # `stale_dependents` like a root or leaf change.
+            for ident in resolved:
+                if ident.type is not None:
+                    self._pin_fact_identities(ident.type)
             if any(
                 ident.type is not None
                 and ident.type.kind == "pointer"
@@ -1534,14 +1658,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         for idx in reversed(index_nodes):
             if idx is None:
                 raise _Unsupported("non_parameter_reference", _span(node))
-            if idx.type in {
-                "int_literal",
-                "float_literal",
-                "imaginary_literal",
-                "rune_literal",
-                "interpreted_string_literal",
-                "raw_string_literal",
-            }:
+            if idx.type in _INDEX_LITERALS:
                 # A literal index carries no dependencies — the
                 # expression path resolves `true`/`false` instead, in
                 # case the predeclared names are shadowed.
@@ -4305,6 +4422,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # a literal index carries none, like the read's own
                 # `lib.VM["k"]` rule.
                 field_index_deps = frozenset()
+                field_index_nodes: set[Any] = set()
                 operand = node.child_by_field_name("operand")
                 while (
                     operand is not None
@@ -4343,15 +4461,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             raise _Unsupported(
                                 "unresolved_or_opaque_call", _span(node)
                             )
-                        if idx.type in {
-                            "int_literal",
-                            "float_literal",
-                            "imaginary_literal",
-                            "rune_literal",
-                            "interpreted_string_literal",
-                            "raw_string_literal",
-                        }:
+                        if idx.type in _INDEX_LITERALS:
                             continue
+                        field_index_nodes.add(self.node_key(idx))
                         field_index_deps |= self.expression(
                             idx, fn, params, locals_, transfers, count,
                             depth + 1,
@@ -4451,7 +4563,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # declared type pin for `stale_dependents`.
                 package_field = self._package_composite_field_read(node)
                 if package_field is not None:
-                    gvar, field_ident = package_field
+                    gvar, field_ident, extras = package_field
                     self.pinned.add(gvar.id)
                     self._pin_fact_identities(gvar.type)
                     if field_ident.type is not None:
@@ -4469,7 +4581,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    return frozenset()
+                    # The index selects which slot the field comes
+                    # from — `(*GA[i]).V` depends on `i` exactly like
+                    # `GA[i]` does. Indexes the `lib.VSM[k].F`
+                    # pre-scan already evaluated contribute their
+                    # deps via `field_index_deps`; the rest (inside
+                    # a deref operand) evaluate here, once.
+                    deps = field_index_deps
+                    for extra in reversed(extras):
+                        if (
+                            extra.type in _INDEX_LITERALS
+                            or self.node_key(extra) in field_index_nodes
+                        ):
+                            continue
+                        deps |= self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    return deps
             if (
                 member is None
                 or member.kind != "const"
