@@ -1,14 +1,15 @@
 """Shared member enumeration for declared native-bundle consumer routes.
 
-`native-recheck` (`recheck-llvm`) and `native-accept`
-(`accept-artifact`) fingerprint exactly the bundle members the Core
+`native-recheck` (`recheck-llvm`), `native-accept`
+(`accept-artifact`) and `native-evidence-recheck`
+(`recheck-evidence`) fingerprint exactly the bundle members the Core
 consumes — which the record itself declares. For a
 ``mumei.native-bundle/v1`` record that is the ``files`` map's
 component members; a ``mumei.native-multifile-bundle/v1`` record
 additionally declares every ``sources/<member>`` the merge
-re-derivation consumes. Both routes enumerate members through
-:func:`declared_members`, so the fingerprint binds the same member set
-Core reads for either record family.
+re-derivation consumes. All three routes enumerate members through
+:func:`declared_members`, so each fingerprint binds the same member
+set Core reads for either record family.
 
 Every member name is validated against the Core member grammar
 (``/``-separated nonempty segments, none dot-prefixed, no ``\\`` or
@@ -27,12 +28,14 @@ from pathlib import Path
 
 # Mirrors of the Core side's read bounds (src/commands/native_bundle.rs):
 # the pinned record is read under 1 MiB, every component member under
-# 32 MiB, each source member under 64 KiB. A declared input the Core
-# cannot even read is a static error, not a run.
+# 32 MiB, each source member under 64 KiB, a saved consumer-Evidence
+# envelope under 1 MiB. A declared input the Core cannot even read is
+# a static error, not a run.
 RECORD_FILE = "native-bundle.json"
 MAX_RECORD_BYTES = 1_048_576
 MAX_COMPONENT_BYTES = 33_554_432
 MAX_SOURCE_BYTES = 65_536
+MAX_EVIDENCE_BYTES = 1_048_576
 
 # The `files` map's snake_case keys to bundle-relative names — the same
 # table as Core's BundleFile::file_name. An unknown key fails closed:
