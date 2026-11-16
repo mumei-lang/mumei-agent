@@ -171,7 +171,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func G(){}; func F(x int64) int64 {go G(); return x}",
         "func F(x []int64) int64 {return x[0]}",
         "func F(x map[int64]int64) int64 {return x[0]}",
-        "func F(x chan int64) int64 {return <-x}",
         "type I interface{Get()int64}; func F(x I) int64 {return x.Get()}",
         "type T int64; func(t T)Get()int64{return int64(t)}; func F(x T)int64{return x.Get()}",
         "func G[T ~int64](x T)T{return x}; func F(x int64)int64{return G(x)}",
@@ -12500,16 +12499,10 @@ def test_local_channel_alias_binds_stay_closed(go_types_helper):
 
 
 def test_channel_boundaries_stay_closed(go_types_helper):
-    # A `chan` parameter sits outside the signature fragment; a
-    # send through a selector (`p.C <- x`) and `make([]T)` stay
-    # opaque; `select` cannot build a CFG.
-    param = named(
-        *unit(
-            go_types_helper,
-            "func F(ch chan int64) int64 { return <-ch }\n",
-        )
-    )
-    assert not param.available
+    # A send through a selector (`p.C <- x`) and `make([]T)` stay
+    # opaque; `select` cannot build a CFG. (`chan` parameters admit
+    # under the external sync-resource model — the admit tests
+    # below cover them.)
     files = {
         "a.go": "package p\n"
         "type Q struct{ C chan int64 }\n"
@@ -12596,3 +12589,268 @@ def test_channel_tuple_receive_cannot_alias(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_chan_parameter_send_recv_admitted(go_types_helper):
+    # A `chan T` parameter is a queue shared with the caller: the
+    # send's deps broadcast into indirect writes so the receive can
+    # observe them, and the receive also carries the parameter's
+    # own provenance.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, ch chan int64) int64 {\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_receive_only_carries_provenance(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\treturn <-ch + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_close_and_range_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range ch {\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\tclose(ch)\n"
+        "\treturn s + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_records_effects_and_staleness(go_types_helper):
+    # Sends, receives and closes on a channel parameter touch a
+    # caller-shared queue — they record imported transfers on the
+    # parameter's own binding identity, so `effects` stays unknown
+    # and redeclaring the parameter's type flags stale_dependents.
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_chan_parameter_boundaries_stay_closed(go_types_helper):
+    # Non-scalar elements, a channel result, an alias of the
+    # parameter, len/cap metadata and select all stay closed.
+    files = {
+        "a.go": "package p\n"
+        "func Ptr(ch chan *int64) int64 { return 0 }\n"
+        "func Res(x int64) chan int64 { return make(chan int64) }\n"
+        "func Alias(ch chan int64, x int64) int64 {\n"
+        "\tp := ch\n"
+        "\tp <- x\n"
+        "\treturn 0\n}\n"
+        "func Len(ch chan int64, x int64) int64 {\n"
+        "\tn := len(ch)\n"
+        "\t_ = n\n"
+        "\treturn x\n}\n"
+        "func Sel(ch chan int64, x int64) int64 {\n"
+        "\tselect {\n"
+        "\tcase v := <-ch:\n"
+        "\t\treturn v\n"
+        "\tdefault:\n"
+        "\t\treturn x\n"
+        "\t}\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in ("Ptr", "Res", "Alias", "Len", "Sel")
+    }
+    assert not results["Ptr"].available
+    assert not results["Res"].available
+    assert not results["Alias"].available
+    assert not results["Len"].available
+    assert not results["Sel"].available
+
+
+def test_chan_argument_propagates_queue_contents(go_types_helper):
+    # `G(ch)` hands the callee the shared queue: sends the callee
+    # records land in the caller's channel state, and a callee's
+    # own `<-ch` carries what the caller already sent.
+    files = {
+        "a.go": "package p\n"
+        "func Send(ch chan int64, q int64) int64 {\n"
+        "\tch <- q\n"
+        "\treturn 0\n}\n"
+        "func Recv(ch chan int64) int64 {\n"
+        "\treturn <-ch\n}\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\tch <- x\n"
+        "\tSend(ch, x+1)\n"
+        "\treturn <-ch + Recv(ch)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_channel_argument_propagates_queue_contents(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Send(ch chan int64, q int64) int64 {\n"
+        "\tch <- q\n"
+        "\treturn 0\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 2)\n"
+        "\tSend(ch, x)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_parameter_range_body_send_rejoins_element(
+    go_types_helper,
+):
+    # `for v := range ch { ch <- y; *p = v }` — the element must
+    # re-join `indirect_writes` each fixed-point pass, or `*p = v`
+    # stores only the entry-time deps and misses the body's send.
+    files = {
+        "a.go": "package p\n"
+        "func F(x, y int64, ch chan int64, p *int64) int64 {\n"
+        "\tfor v := range ch {\n"
+        "\t\tch <- y\n"
+        "\t\t*p = v\n"
+        "\t}\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+
+
+def test_chan_parameter_range_rejoin_visible_without_pointer(
+    go_types_helper,
+):
+    # The `*p` shape above cannot discriminate: `return *p` unions
+    # `indirect_writes` at read time anyway. Storing the element
+    # into a plain local isolates the re-join — `return s` carries
+    # only what the element actually held.
+    files = {
+        "a.go": "package p\n"
+        "func F(y int64, ch chan int64) int64 {\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range ch {\n"
+        "\t\tch <- y\n"
+        "\t\ts = v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_parenthesized_arg_propagates(
+    go_types_helper,
+):
+    # `G((ch), y)` names the same queue as `G(ch), y` — the call-arg
+    # propagation must unwrap parens before the shape checks.
+    files = {
+        "a.go": "package p\n"
+        "func G(c chan int64, z int64) int64 {\n"
+        "\tc <- z\n"
+        "\treturn 0\n}\n"
+        "func F(ch chan int64, y int64) int64 {\n"
+        "\tG((ch), y)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_parameter_captured_by_literal_records_effect(
+    go_types_helper,
+):
+    # `h := func() int64 { return <-ch }` — the receive inside the
+    # literal consumes a queue the caller shares, so `h()` must mark
+    # `effects` unknown like a captured pointer's deref does.
+    files = {
+        "a.go": "package p\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\th := func() int64 { return <-ch }\n"
+        "\treturn h() + x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_chan_captured_by_literal_keeps_local_effects(
+    go_types_helper,
+):
+    # A captured *local* channel's queue is local state — `<-ch`
+    # inside the literal records no external transfer, like a
+    # statement-level `<-ch`.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\th := func() int64 { return <-ch }\n"
+        "\treturn h()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
