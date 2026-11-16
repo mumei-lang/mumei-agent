@@ -874,3 +874,68 @@ def probe_retry_requests(
             )
         )
     return tuple(out)
+
+
+def evaluate_probe_acceptance(
+    request: AdapterProbeRequest,
+    outcome: AdapterProbeOutcome,
+) -> dict:
+    """Normalize a declared probe outcome into an acceptance descriptor.
+
+    Emits ``mumei.probe-acceptance/v1``: `request_match` holds only
+    when the outcome binds the presented request — the same binding
+    `AdapterProbeHistory.record` enforces — so a stale (older-attempt)
+    or foreign outcome never counts. `accepted` holds only when the
+    outcome is current AND mapped decisive: an `exited`/`failed`
+    probe answers `available`/`missing`, while a `timed_out` or
+    `cancelled` one answers `unknown` — an inconclusive attempt that
+    accepts nothing.
+
+    An outcome whose observation disagrees with its own result's
+    declared mapping — e.g. `available` over a `timed_out` run —
+    fails statically rather than accepting an inconclusive attempt.
+
+    This is declaration-level acceptance, not Evidence: the
+    descriptor lists every semantic check left unassessed in
+    `checks_not_performed` (stdout interpretation, tool-version
+    truth, availability semantics beyond the exit-code convention,
+    freshness beyond the declared stamp, producer authenticity).
+    Nothing here is a verdict, an adapter-health claim or a routing
+    authority — `plan()` consumes observations unchanged.
+    """
+    if (
+        type(request) is not AdapterProbeRequest
+        or type(outcome) is not AdapterProbeOutcome
+    ):
+        raise ValueError("unsupported probe acceptance evaluation")
+    if outcome.observation.adapter_id != request.adapter_id:
+        raise ValueError("probe acceptance adapter mismatch")
+    result = outcome.result
+    if outcome.observation.availability != _map_outcome(result):
+        # The declaration is internally inconsistent — an outcome
+        # claiming `available` over a `timed_out` result must fail
+        # statically, not accept an inconclusive attempt.
+        raise ValueError("inconsistent probe outcome")
+    match = (
+        result.request_fingerprint
+        == request.execution_request().request_fingerprint
+        and result.attempt_number == request.attempt_number
+    )
+    availability = outcome.observation.availability
+    return {
+        "schema_version": "mumei.probe-acceptance/v1",
+        "adapter_id": request.adapter_id,
+        "request_fingerprint": result.request_fingerprint,
+        "attempt_number": result.attempt_number,
+        "outcome": result.outcome,
+        "availability": availability,
+        "request_match": match,
+        "accepted": match and availability != "unknown",
+        "checks_not_performed": [
+            "stdout_interpretation",
+            "tool_version_truth",
+            "availability_semantics",
+            "freshness",
+            "producer_authenticity",
+        ],
+    }
