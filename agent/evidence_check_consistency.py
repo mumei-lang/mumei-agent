@@ -168,19 +168,30 @@ def _attempt_fingerprint(
     ).hexdigest()
 
 
-def _valid_conflict(entry: object) -> bool:
-    """One `{"index_a","index_b","field"}` conflict entry, or False."""
+def _valid_conflict(entry: object, record_count: int) -> bool:
+    """One `{"index_a","index_b","field"}` conflict entry, or False.
+
+    Core enumerates record pairs with ``index_a < index_b``, both below
+    ``record_count`` — a conflict naming a record outside the envelope
+    is not the known diagnostic. ``field`` must be a string before the
+    membership test: an unhashable value (list, dict) would otherwise
+    raise ``TypeError`` instead of binding nothing.
+    """
     if not isinstance(entry, dict) or len(entry) != 3:
         return False
-    for key in ("index_a", "index_b"):
-        value = entry.get(key)
+    index_a = entry.get("index_a")
+    index_b = entry.get("index_b")
+    for value in (index_a, index_b):
         if (
             not isinstance(value, int)
             or isinstance(value, bool)
             or value < 0
         ):
             return False
-    return entry.get("field") in CONFLICT_FIELDS
+    if not index_a < index_b < record_count:
+        return False
+    field = entry.get("field")
+    return isinstance(field, str) and field in CONFLICT_FIELDS
 
 
 def _parse_diagnostic(captured: bytes) -> dict | None:
@@ -229,7 +240,9 @@ def _parse_diagnostic(captured: bytes) -> dict | None:
         return None
     if len(conflicts) != min(conflict_count, MAX_CONFLICTS):
         return None
-    if not all(_valid_conflict(entry) for entry in conflicts):
+    if not all(
+        _valid_conflict(entry, record_count) for entry in conflicts
+    ):
         return None
     return document
 

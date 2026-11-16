@@ -253,6 +253,59 @@ def test_unknown_conflict_field_selects_nothing(tmp_path, capsys):
     assert "consistent" not in report
 
 
+def test_unhashable_conflict_field_selects_nothing(tmp_path, capsys):
+    """A conflict whose `field` is a list (unhashable) must bind
+    nothing, not crash the route on the membership test."""
+    diagnostic = json.dumps(
+        {
+            "schema_version": "mumei.evidence-consistency-check/v1",
+            "evidence_schema_version": LIST_SCHEMA_VERSION,
+            "representation": "valid",
+            "record_count": 2,
+            "consistent": False,
+            "conflict_count": 1,
+            "conflicts": [
+                {"index_a": 0, "index_b": 1, "field": ["subject.kind"]}
+            ],
+            "acceptance": "not_evaluated",
+            "checks_not_performed": list(CHECKS_NOT_PERFORMED),
+        }
+    )
+    evidence = _write_evidence(tmp_path)
+    sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    core = _write_core(
+        tmp_path, expect_sha=sha, diagnostic=diagnostic
+    )
+    code, out, _ = _run(capsys, _args(core, evidence))
+    assert code == 0
+    report = json.loads(out)
+    assert "consistent" not in report
+    assert report["sequence"].get("selected_result") is None
+
+
+def test_conflict_index_beyond_record_count_selects_nothing(
+    tmp_path, capsys
+):
+    """A conflict naming records outside the envelope
+    (`record_count: 0` but indices 0/1) is internally contradictory —
+    it binds nothing."""
+    diagnostic = _diagnostic_json(
+        record_count=0,
+        consistent=False,
+        conflict_count=1,
+        conflicts=[{"index_a": 0, "index_b": 1, "field": "subject.kind"}],
+    )
+    evidence = _write_evidence(tmp_path)
+    sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    core = _write_core(
+        tmp_path, expect_sha=sha, diagnostic=diagnostic
+    )
+    code, out, _ = _run(capsys, _args(core, evidence))
+    assert code == 0
+    report = json.loads(out)
+    assert "consistent" not in report
+
+
 def test_mid_run_envelope_drift_claims_no_outcome(tmp_path, capsys):
     """A child that mutates the declared envelope mid-run exits 0 —
     the exit applies to bytes outside the declared request."""
