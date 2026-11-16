@@ -659,7 +659,8 @@ class AdapterProbeHistory:
         members are static errors."""
         if (
             type(data) is not dict
-            or data.get("schema_version")
+            or type(data.get("schema_version")) is not str
+            or data["schema_version"]
             not in {
                 "mumei.adapter-probe-history/v1",
                 "mumei.adapter-probe-history/v2",
