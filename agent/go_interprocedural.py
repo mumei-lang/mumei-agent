@@ -800,6 +800,13 @@ class _Builder:
             if i > 0 and ident.type.kind == "pointer":
                 return None
             resolved.append(ident)
+        # Every named type the chain traverses pins — `st.A.N`
+        # resolves `N` through `A`'s declared `type Q struct{...}`,
+        # so redeclaring `Q` must flag `stale_dependents` like a root
+        # or leaf change.
+        for ident in resolved:
+            if ident.type is not None:
+                self._pin_fact_identities(ident.type)
         return ref, tuple(resolved)
 
     def _struct_fields(self, type_binding: Any) -> tuple[Any, ...]:
@@ -901,17 +908,33 @@ class _Builder:
         either way."""
         fields: list[Any] = []
         cur = node
-        while cur is not None and cur.type == "selector_expression":
-            fields.append(cur.child_by_field_name("field"))
-            cur = cur.child_by_field_name("operand")
-            while (
-                cur is not None
-                and cur.type == "parenthesized_expression"
-            ):
+        saw_deref = False
+        deref_field_count = 0
+        while cur is not None:
+            if cur.type == "parenthesized_expression":
                 cur = next(
                     (c for c in cur.named_children if c.type != "comment"),
                     None,
                 )
+                continue
+            if cur.type == "selector_expression":
+                fields.append(cur.child_by_field_name("field"))
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type == "unary_expression":
+                operator = cur.child_by_field_name("operator")
+                if operator is None or operator.text != b"*":
+                    return None
+                # `(*GP).V` spells `GP.V`'s sugar explicitly — the
+                # deref peels the operand's declared pointer, still
+                # external package state. `&` never reaches here —
+                # it already closes at the `&` operator gate.
+                if not saw_deref:
+                    saw_deref = True
+                    deref_field_count = len(fields)
+                cur = cur.child_by_field_name("operand")
+                continue
+            break
         if cur is None or cur.type != "identifier" or cur.text == b"_":
             return None
         ref = self.references.get(self.node_key(cur))
@@ -950,6 +973,25 @@ class _Builder:
             resolved.append(ident)
         if not resolved:
             return None
+        if saw_deref:
+            # `(*G.P).V` dereferences the innermost field before the
+            # unary (the operand), not the leaf — resolved is
+            # outermost-first, so the entity at `deref_field_count`
+            # is what `*` unwraps; a bare-identifier operand leaves
+            # the root var itself.
+            derefed = (
+                resolved[deref_field_count].type
+                if deref_field_count < len(resolved)
+                else binding.type
+            )
+            if derefed is None or derefed.kind != "pointer":
+                return None
+        # Every named type the chain traverses pins: redeclaring an
+        # intermediate field's type (`type Q struct{...}` for `G.A.N`)
+        # must flag `stale_dependents` like a root or leaf change.
+        for ident in resolved:
+            if ident.type is not None:
+                self._pin_fact_identities(ident.type)
         return binding, resolved[0]
 
     def _package_var_write(
@@ -972,6 +1014,7 @@ class _Builder:
         extras: list[Any] = []
         fields: list[Any] = []
         saw_deref = False
+        deref_field_count = 0
         while cur is not None:
             if cur.type == "parenthesized_expression":
                 cur = next(
@@ -983,7 +1026,9 @@ class _Builder:
                 operator = cur.child_by_field_name("operator")
                 if operator is None or operator.text != b"*":
                     return None
-                saw_deref = True
+                if not saw_deref:
+                    saw_deref = True
+                    deref_field_count = len(fields)
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "selector_expression":
@@ -1027,16 +1072,26 @@ class _Builder:
                 resolved.append(ident)
             fold = saw_deref
             if saw_deref:
-                # `*G.P` dereferences the outermost field's pointer,
-                # not the root var — `*GP = v` on a non-pointer var
-                # cannot compile, but rejecting anyway stops a
-                # tampered binding from smuggling a store past the
-                # gate.
+                # The `*` peels its operand: `*G.P` dereferences the
+                # innermost field's pointer, `(*GP).V` the root var's
+                # — resolved is outermost-first, so the entity at
+                # `deref_field_count` is what `*` unwraps. `*GP = v`
+                # on a non-pointer var cannot compile, but rejecting
+                # anyway stops a tampered binding from smuggling a
+                # store past the gate.
                 derefed = (
-                    resolved[0].type if resolved else binding.type
+                    resolved[deref_field_count].type
+                    if deref_field_count < len(resolved)
+                    else binding.type
                 )
                 if derefed is None or derefed.kind != "pointer":
                     return None
+            # Every named type the chain traverses pins — redeclaring
+            # an intermediate field's type must flag
+            # `stale_dependents` like a root or leaf change.
+            for ident in resolved:
+                if ident.type is not None:
+                    self._pin_fact_identities(ident.type)
             if any(
                 ident.type is not None
                 and ident.type.kind == "pointer"

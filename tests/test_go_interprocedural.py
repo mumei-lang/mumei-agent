@@ -10649,3 +10649,118 @@ def test_package_index_write_evaluates_scalar_deref_index(
         c.target.endswith("/pointee") and c.imported
         for c in result.calls
     )
+
+
+def test_package_pointer_var_deref_field_write_read(
+    go_types_helper,
+):
+    # `(*GP).V = x` spells `GP.V`'s sugar explicitly: the deref
+    # peels the root var's pointer, so the store records the
+    # mutation on GP's own identity like `*GP = v` — not on the
+    # leaf field, which is what the earlier gate mistakenly
+    # classified.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\nvar GP *P\n"
+        "func F(x int64) int64 {\n"
+        "\t(*GP).V = x\n\treturn (*GP).V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    gp_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "GP" and b.kind == "variable"
+    )
+    assert any(c.target == gp_id for c in result.calls)
+
+
+def test_package_pointer_var_deref_field_inc_dec(
+    go_types_helper,
+):
+    # `(*GP).V++` is the same deref-target classification as the
+    # assignment form.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\nvar GP *P\n"
+        "func F(x int64) int64 {\n"
+        "\t(*GP).V++\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+
+
+def test_package_deref_intermediate_field_write_read(
+    go_types_helper,
+):
+    # `(*G.P).N = x` — the deref peels the innermost field's
+    # pointer (`P *Q`), not the leaf's type and not the root var's:
+    # the store folds like any pointer-crossing package write.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ N int64 }\ntype P struct{ P *Q }\nvar G P\n"
+        "func F(x int64) int64 {\n"
+        "\t(*G.P).N = x\n\treturn (*G.P).N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    g_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "G" and b.kind == "variable"
+    )
+    assert any(c.target == g_id for c in result.calls)
+
+
+def test_local_composite_nested_read_pins_intermediate_type(
+    go_types_helper,
+):
+    # `st.A.N` resolves `N` through `A`'s declared `type Q` — the
+    # intermediate type identity must pin alongside the root's, or
+    # redeclaring `Q` would reuse a stale summary.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ N int64 }\ntype P struct{ A Q }\n"
+        "func F(x int64) int64 {\n"
+        "\tst := P{A: Q{N: x}}\n\treturn st.A.N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    q_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "Q" and b.kind == "type"
+    )
+    assert q_id in result.pinned
+
+
+def test_package_composite_nested_read_pins_intermediate_type(
+    go_types_helper,
+):
+    # `G.A.N` on a package-level composite pins the intermediate
+    # `type Q` identity too, exactly like the local composite read.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ N int64 }\ntype P struct{ A Q }\nvar G P\n"
+        "func F(x int64) int64 {\n"
+        "\treturn G.A.N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    q_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "Q" and b.kind == "type"
+    )
+    assert q_id in result.pinned
