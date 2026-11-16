@@ -2855,6 +2855,64 @@ def evidence_check(
 
 
 @mcp.tool()
+def evidence_check_list(
+    core_path: str,
+    evidence_path: str,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Run the Core representation check on a saved Evidence list envelope.
+
+    Feeds the declared envelope's bytes to
+    `evidence check-list --stdin --json` as one declared attempt — the
+    same wiring as the `evidence-check-list` CLI route. `representation`
+    is claimed only when the child exits 0 with the recognised
+    list-family diagnostic; mid-run drift reports `inputs_changed` with
+    no claimed outcome. Representation admission is not consistency:
+    `cross_record_consistency` stays in `checks_not_performed`.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        evidence_path: Absolute path to the declared saved
+            `mumei.verification-evidence-list/v1` envelope (at most
+            64 KiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds
+            (at most 60000).
+
+    Returns:
+        JSON with `report` — the `mumei.evidence-check-list-report/v1`
+        document — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.evidence_check_list import run_check_list
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("evidence_path", evidence_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        evidence=evidence_path,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_check_list(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [core_path, evidence_path])
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def native_recheck(
     core_path: str,
     bundle_dir: str,

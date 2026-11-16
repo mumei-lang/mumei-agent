@@ -51,6 +51,7 @@ _SUBCOMMANDS = {
     "sol-summaries-attempt",
     "evidence-check",
     "evidence-check-accept",
+    "evidence-check-list",
     "evidence-acceptance-eval",
     "evidence-compare",
     "evidence-identity-check",
@@ -639,6 +640,25 @@ def main() -> None:
         evidence_check_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_check_main(args))
+    elif command == "evidence-check-list":
+        import argparse
+        from agent.evidence_check_list import (
+            build_check_list_parser as evidence_check_list_build_parser,
+            main_check_list as evidence_check_list_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check-list",
+            description=(
+                "Run a declared Core Evidence list-envelope "
+                "representation check as one attempt and emit the "
+                "reconciled lineage plus the declared representation "
+                "outcome."
+            ),
+        )
+        evidence_check_list_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_check_list_main(args))
     elif command == "evidence-check-accept":
         import argparse
         from agent.evidence_check import (
