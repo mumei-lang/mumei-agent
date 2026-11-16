@@ -2728,7 +2728,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if resolved is not None:
                 pointees, ref = resolved
-                self.pinned.update(p.id for p in pointees)
+                # Synthetic `<binding>/pointee` ids name an unnamed
+                # pointee no declaration can redeclare — pinning one
+                # would flag the summary stale forever.
+                self.pinned.update(
+                    p.id
+                    for p in pointees
+                    if not p.id.endswith("/pointee")
+                )
                 return pointees[-1].id, ref
             # `st.A.B = v` on a tracked local composite: the store
             # folds into st's conflated dep set — a local mutation,
@@ -5364,7 +5371,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 bound = self._bound_field_read(node, locals_, params)
                 if bound is not None:
                     pointees, field_member, root_ref = bound
-                    self.pinned.update(p.id for p in pointees)
+                    self.pinned.update(
+                        p.id
+                        for p in pointees
+                        if not p.id.endswith("/pointee")
+                    )
                     self._pin_member_type(field_member)
                     transfers.append(
                         CallTransfer(

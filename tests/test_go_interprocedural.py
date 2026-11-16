@@ -12105,3 +12105,41 @@ def test_anonymous_struct_value_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_anonymous_struct_pointee_summary_is_not_self_stale(go_types_helper):
+    # The synthetic `<binding>/pointee` identity a bound `*struct{...}`
+    # read records must never land in `pinned`: it names an unnamed
+    # pointee no declaration can redeclare, so `stale_dependents`
+    # would flag the summary stale against its own snapshot forever.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }) int64 { return p.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    known = {b.id for b in snapshot.bindings}
+    assert summaries.stale_dependents(known) == frozenset()
+
+
+def test_anonymous_struct_value_declares_unsupported_gap(go_types_helper):
+    # An anonymous `struct{...}` VALUE declaration still names value
+    # semantics the fragment cannot track — the producer's
+    # `unsupported_value_semantics` gap must keep firing even though
+    # the kind now classifies as `struct` for the pointee chain.
+    snapshot = load_go_snapshot(
+        compiler_report(
+            go_types_helper,
+            "package p;\nfunc F(x int64) int64 {\n"
+            "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n",
+            "amd64",
+        ),
+        "package p;\nfunc F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n",
+        target_arch="amd64",
+    )
+    assert any(
+        gap.reason == "unsupported_value_semantics" for gap in snapshot.gaps
+    )
