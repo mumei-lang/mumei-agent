@@ -1617,6 +1617,61 @@ def test_use_imported_mut_static_write_marks_unknown():
     assert s.effects == "unknown"
 
 
+def test_local_let_shadows_use_imported_mut_static():
+    # `let mut STATE` shadows the `use`-bound static — writes
+    # target the local slot and must not mark `unknown` effects.
+    src = (
+        "mod b;\nuse b::STATE;\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    let mut STATE = 0;\n"
+        "    STATE = x;\n"
+        "    STATE\n"
+        "}\n"
+    )
+    b = "pub static mut STATE: u64 = 0;\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+    assert s.effects != "unknown"
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_local_let_shadows_use_imported_mut_static_mut_ref():
+    # `opaque(&mut STATE, x)` — the callee's param write merges
+    # into the shadowing local slot; the imported static is not
+    # touched, so effects stay honest.
+    src = (
+        "mod b;\nuse b::{STATE, opaque};\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    let mut STATE = 0;\n"
+        "    opaque(&mut STATE, x);\n"
+        "    STATE\n"
+        "}\n"
+    )
+    b = (
+        "pub static mut STATE: u64 = 0;\n"
+        "pub fn opaque(x: &mut u64, y: u64) { *x = y; }\n"
+    )
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+    assert s.effects != "unknown"
+    assert s.return_dependencies == frozenset({0})
+
+    # Same call without the shadowing `let` — the merge writes
+    # the imported static.
+    src2 = (
+        "mod b;\nuse b::{STATE, opaque};\n"
+        "fn af(x: u64) -> u64 {\n"
+        "    unsafe { opaque(&mut STATE, x); }\n"
+        "    x\n"
+        "}\n"
+    )
+    r2 = summarize_rust(src2, resolver=_set_resolver({"b": b}))
+    s2 = next(f for f in r2.functions if f.name == "af")
+    assert s2.effects == "unknown"
+
+
 def test_unresolved_mod_keeps_resolved_path_listing():
     # An unresolvable `mod` caches `None` — resolved-path
     # collection must skip it rather than crash.

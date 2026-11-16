@@ -1470,14 +1470,22 @@ class _Builder:
                 else frozenset()
             )
             name = left.text.decode()
+            is_local = name in locals_
             if expr.type == "compound_assignment_expr":
                 deps |= locals_.get(name, frozenset())
             locals_[name] = deps
             if self._writes:
                 self._writes[-1].add(name)
-            if self._global_of(name, self.mut_globals) is not None:
+            if (
+                not is_local
+                and self._global_of(name, self.mut_globals)
+                is not None
+            ):
                 # `static mut` writes are observable —
-                # unknown effects.
+                # unknown effects. A `let`-bound local
+                # shadowing a `use`-imported static stays
+                # local: the write does not reach the
+                # static.
                 summary.effects = "unknown"
             return deps
         if left is not None and left.type in _EXPR_TYPES:
@@ -1522,8 +1530,14 @@ class _Builder:
                     # opaque effect is not downgraded.
                     if summary.effects != "unknown":
                         summary.effects = "state_writes"
-                if self._global_of(root, self.mut_globals) is not None:
-                    # `static mut` writes are observable.
+                if (
+                    root not in locals_
+                    and self._global_of(root, self.mut_globals)
+                    is not None
+                ):
+                    # `static mut` writes are observable —
+                    # unless a local `let` shadows the
+                    # `use`-bound name.
                     summary.effects = "unknown"
             return deps
         raise _Unsupported("unsupported_statement", _span(expr))
@@ -1539,12 +1553,17 @@ class _Builder:
         for arg, root in zip(_children(arglist), roots):
             if root is None or not _is_mut_ref(arg):
                 continue
+            is_local = root in locals_
             locals_[root] = (
                 locals_.get(root, frozenset()) | actual_union
             )
             if self._writes:
                 self._writes[-1].add(root)
-            if self._global_of(root, self.mut_globals) is not None:
+            if (
+                not is_local
+                and self._global_of(root, self.mut_globals)
+                is not None
+            ):
                 summary.effects = "unknown"
             if root in param_index:
                 pw = getattr(summary, "param_writes", None)
@@ -1779,12 +1798,17 @@ class _Builder:
             if rname is None:
                 summary.effects = "unknown"
                 continue
+            is_local = rname in locals_
             locals_[rname] = (
                 locals_.get(rname, frozenset()) | projected
             )
             if self._writes:
                 self._writes[-1].add(rname)
-            if self._global_of(rname, self.mut_globals) is not None:
+            if (
+                not is_local
+                and self._global_of(rname, self.mut_globals)
+                is not None
+            ):
                 summary.effects = "unknown"
             if rname in param_index:
                 if summary.effects != "unknown":
