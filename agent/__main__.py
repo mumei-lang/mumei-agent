@@ -64,6 +64,7 @@ _SUBCOMMANDS = {
     "native-recheck",
     "native-accept",
     "native-artifact-recheck",
+    "native-exit-status-recheck",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -899,6 +900,24 @@ def main() -> None:
         native_arc_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_arc_main(args))
+    elif command == "native-exit-status-recheck":
+        import argparse
+        from agent.native_exit_status_recheck import (
+            build_exit_status_recheck_parser as native_esr_build_parser,
+            main_exit_status_recheck as native_esr_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-exit-status-recheck",
+            description=(
+                "Run a declared Core native exit-status recheck as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared recheck outcome."
+            ),
+        )
+        native_esr_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_esr_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (
