@@ -797,6 +797,77 @@ class _Builder:
             resolved.append(ident)
         return ref, tuple(resolved)
 
+    def _struct_fields(self, type_binding: Any) -> tuple[Any, ...]:
+        """The field bindings declared directly inside a local named
+        type's declaration — `V` and `Q` for
+        `type P struct{ *Q; V int64 }`.
+
+        Field bindings are the `variable` bindings with no scope; they
+        appear in source order between their type's name span and the
+        next top-level declaration in the same file. A field reached
+        by promotion (`st.V` where V lives on embedded `Q`) binds
+        under its own declaring type, so it never appears here —
+        which is what lets the caller spot a write that must cross
+        an embedded pointer. Returns () when the type declares no
+        fields (`type Ptr *P` — a named pointer is not a struct).
+        """
+        span = type_binding.span
+        boundary: int | None = None
+        direct: list[Any] = []
+        for b in self.bindings.values():
+            if b.span.file != span.file or b.span.start <= span.end:
+                continue
+            is_field = b.kind == "variable" and b.scope is None
+            if is_field:
+                if boundary is None or b.span.start < boundary:
+                    direct.append(b)
+            elif boundary is None or b.span.start < boundary:
+                boundary = b.span.start
+        return tuple(
+            b
+            for b in direct
+            if boundary is None or b.span.start < boundary
+        )
+
+    def _direct_field_chain(
+        self, ref: Any, resolved_fields: tuple[Any, ...]
+    ) -> bool:
+        """Whether every resolved field of a tracked-composite store
+        is a *direct* field of its container's declared type.
+
+        `st.V = x` on `type P struct{ *Q }` resolves `V` to its own
+        declaring type `Q` — the syntactic chain names no pointer,
+        but the store crosses embedded `*Q` into memory the conflated
+        dep set cannot represent. The same check closes `q.V = x` on
+        `var q Ptr` where `type Ptr *P` names no fields at all. An
+        imported or anonymous container cannot be enumerated, so a
+        write through it stays closed — reads remain sound under
+        conflation.
+        """
+        root_binding = self.bindings.get(ref.binding_id)
+        if root_binding is None or root_binding.type is None:
+            return False
+        n = len(resolved_fields)
+        for j in range(n):
+            container_type = (
+                resolved_fields[j + 1].type
+                if j + 1 < n
+                else root_binding.type
+            )
+            type_id = (
+                container_type.type_id if container_type is not None else ""
+            )
+            if not type_id:
+                return False
+            type_binding = self._pointee_type(type_id)
+            span = getattr(type_binding, "span", None)
+            if not isinstance(span, FileSpan):
+                return False
+            direct = {f.id for f in self._struct_fields(type_binding)}
+            if resolved_fields[j].id not in direct:
+                return False
+        return True
+
     def _package_member(self, selector_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` selector names, or None.
 
@@ -1957,6 +2028,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for field in resolved_fields
             ):
                 return None
+            # A field reached through an *embedded* pointer hides the
+            # same traversal (`st.V` on `type P struct{ *Q }`, or the
+            # written leaf `st.A.N` on `type A struct{ *Q }`), so the
+            # leaf must resolve and every field must be a direct
+            # field of its container's declared type.
+            leaf_node = node.child_by_field_name("field")
+            leaf_ref = (
+                self.references.get(self.node_key(leaf_node))
+                if leaf_node is not None
+                else None
+            )
+            leaf = self._field_identity(leaf_ref)
+            if (
+                leaf is None
+                or leaf_node is None
+                or leaf.name.encode("utf-8") != leaf_node.text
+                or not self._direct_field_chain(
+                    ref, (leaf,) + resolved_fields
+                )
+            ):
+                return None
             return "", ref
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
@@ -1971,6 +2063,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if self._is_local_composite(binding):
             # `st.V = v` on a tracked local composite — the value
             # folds into st's dep set; no external mutation records.
+            # The selected field must be a *direct* field of st's
+            # declared type: `st.V` on `type P struct{ *Q }` resolves
+            # to a promoted field whose store crosses the embedded
+            # pointer, and `q.V` on `var q Ptr` (`type Ptr *P`) names
+            # no local memory at all — both write into caller state.
+            field_node = node.child_by_field_name("field")
+            field_ref = (
+                self.references.get(self.node_key(field_node))
+                if field_node is not None
+                else None
+            )
+            ident = self._field_identity(field_ref)
+            if (
+                ident is None
+                or field_node is None
+                or ident.name.encode("utf-8") != field_node.text
+                or not self._direct_field_chain(ref, (ident,))
+            ):
+                return None
             return "", ref
         if binding.type.kind != "pointer":
             return None

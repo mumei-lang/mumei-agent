@@ -6024,6 +6024,71 @@ def test_local_struct_value_boundaries(
         assert not result.available, body
 
 
+@pytest.mark.parametrize(
+    "statement", ["st.V = x", "st.V++", "st.V += x"]
+)
+def test_local_struct_value_embedded_pointer_write_stays_closed(
+    go_types_helper, statement
+):
+    # `type P struct{ *Q }` — `st.V` resolves to Q's field through
+    # the embedded pointer: the store crosses it into memory the
+    # conflated dep set cannot represent, so every write form stays
+    # closed. (Promoted reads still return st's set — a sound
+    # over-approximation.)
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\ntype P struct{ *Q }\n"
+        f"func F(q *Q, x int64) int64 {{ st := P{{Q: q}}; "
+        f"{statement}; return x }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_local_struct_value_embedded_pointer_leaf_write_stays_closed(
+    go_types_helper,
+):
+    # `st.A.N` where `A` embeds `*Q` — the *written* leaf resolves
+    # through the embedded pointer even though the syntactic chain
+    # names none, so the store stays closed too.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ N int64 }\ntype A struct{ *Q }\n"
+        "type P struct{ A A }\n"
+        "func F(x int64) int64 { st := P{}; st.A.N = x; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    "statement", ["q.V = x", "q.V++", "q.V += x"]
+)
+def test_local_struct_value_named_pointer_write_stays_closed(
+    go_types_helper, statement
+):
+    # `type Ptr *P` — `var q Ptr = p` binds a pointer under a named
+    # alias: `q.V` names a field of `*P`, so the store crosses the
+    # pointer into caller memory and stays closed.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\ntype Ptr *P\n"
+        f"func F(p *P, x int64) int64 {{ var q Ptr = p; "
+        f"{statement}; return x }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_local_struct_value_map_literal_key_side_effect(
     go_types_helper,
 ):
