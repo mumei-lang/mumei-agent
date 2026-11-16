@@ -7612,6 +7612,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._store(
                             locals_, params, escaped_id, stored, True
                         )
+                        eb = self.bindings.get(escaped_id)
+                        if (
+                            eb is not None
+                            and eb.type.kind == "pointer"
+                        ):
+                            # A callee `*q = r` store may reseat an
+                            # escaped pointer — its provenance gains
+                            # the stored deps like a caller-side
+                            # `p = q` does.
+                            self._ptr_deps[escaped_id] = (
+                                self._pointer_deps(
+                                    escaped_id, params, locals_
+                                )
+                                | stored
+                            )
                 elif (
                     binding is not None
                     and binding.type.kind == "chan"

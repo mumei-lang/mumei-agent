@@ -13193,3 +13193,38 @@ def test_statement_reads_range_assign_pointer_provenance(
     }
     i = src.index("p.V = 0")
     assert reads[(i, i + 7)] == {0, 1}
+
+
+def test_statement_reads_pointer_arg_reseats_escaped_pointer(
+    go_types_helper,
+):
+    # `pp := &p; lib.G(pp, q)` — the opaque callee may store
+    # through `pp` and reseat `p`: the escaped-pointer fold must
+    # reach `_ptr_deps`, or `p.V = 0` reads p's stale provenance.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p, q *lib.N) int64 {\n"
+        "\tpp := &p\n\tlib.G(pp, q)\n\tp.V = 0\n\treturn 0\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype N struct{ V int64 }\n"
+            "func G(a **N, b *N) int64 { return 0 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("p.V = 0")
+    assert reads[(i, i + 7)] == {0, 1}
