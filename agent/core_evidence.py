@@ -331,7 +331,9 @@ def _is_fingerprint(value: object) -> bool:
     )
 
 
-def evaluate_core_acceptance(descriptor: dict) -> dict:
+def evaluate_core_acceptance(
+    descriptor: dict, expected_fingerprint: str | None = None
+) -> dict:
     """Fold a restored Core acceptance descriptor into an evaluation.
 
     Emits ``mumei.core-acceptance-evaluation/v1``: `descriptor_match`
@@ -343,12 +345,33 @@ def evaluate_core_acceptance(descriptor: dict) -> dict:
     `accepted: true`. Core may add the optional `evidence_fingerprint`
     field — a 64-char lowercase-hex SHA-256 of the accepted record's
     bytes; a malformed fingerprint breaks the match like any foreign
-    field. This is representation-level evaluation only:
-    anonymous descriptors bind no request or attempt, so nothing here
-    credits acceptance to a selected output; `checks_not_performed`
-    names what the fold leaves unassessed."""
+    field.
+
+    When `expected_fingerprint` is supplied (the record pin an attempt
+    binds to — e.g. the evidence-check request's declared
+    `evidence.sha256`, the SHA-256 of the record bytes fed to the
+    attempt; note a `request_fingerprint` covers the whole request
+    manifest, not the record),
+    the fold emits `attempt_bound`: true only when the descriptor
+    matched AND carries an equal `evidence_fingerprint`. A matched
+    descriptor with no fingerprint or a different one reports
+    `attempt_bound: false` — the descriptor may honestly describe a
+    different record, so a mismatch is an observation, not an error.
+    Without an expected fingerprint the fold cannot bind, so the key is
+    absent and `attempt_binding` stays in `checks_not_performed`.
+    `descriptor_match` and `accepted` keep their descriptor-only
+    meaning — binding is a separate observation, never folded into the
+    descriptor's own verdict. The binding is representation-level:
+    fingerprint equality says the descriptor and the caller pin the
+    same record bytes, not that the descriptor was produced for this
+    attempt (`descriptor_authenticity` and
+    `unperformed_check_recovery` stay unperformed)."""
     if type(descriptor) is not dict:
         raise ValueError("unsupported core acceptance evaluation request")
+    if expected_fingerprint is not None and not _is_fingerprint(
+        expected_fingerprint
+    ):
+        raise ValueError("invalid expected evidence fingerprint")
     fields = frozenset(descriptor)
     match = (
         _CORE_ACCEPTANCE_REQUIRED_FIELDS <= fields
@@ -367,7 +390,7 @@ def evaluate_core_acceptance(descriptor: dict) -> dict:
             or _is_fingerprint(descriptor["evidence_fingerprint"])
         )
     )
-    return {
+    evaluation = {
         "schema_version": "mumei.core-acceptance-evaluation/v1",
         "descriptor_match": match,
         "accepted": match and descriptor["accepted"],
@@ -378,3 +401,14 @@ def evaluate_core_acceptance(descriptor: dict) -> dict:
             "unperformed_check_recovery",
         ],
     }
+    if expected_fingerprint is not None:
+        evaluation["attempt_bound"] = (
+            match
+            and descriptor.get("evidence_fingerprint") == expected_fingerprint
+        )
+        evaluation["checks_not_performed"] = [
+            check
+            for check in evaluation["checks_not_performed"]
+            if check != "attempt_binding"
+        ]
+    return evaluation
