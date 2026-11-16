@@ -776,6 +776,40 @@ artifact. The route is also the `native_evidence_recheck` MCP tool
 validation and basename redaction as the other spawn tools).
 C02/C10 stay partial.
 
+### C02/C10 declared native-evidence-accept route (native-evidence-accept)
+
+`python -m agent native-evidence-accept --core <path> --bundle <dir>
+--source <path> --evidence <path> --expected-build-id <sha256>`
+declares the saved-Evidence acceptance as one attempt: `<core>
+native-bundle accept-evidence --expected-build-id <id> --json
+<bundle> <source> <evidence>` under a
+`mumei.native-evidence-accept-request/v1` fingerprint binding the
+Core executable's bytes, every bundle member the record declares (the
+same dynamic enumeration `native-recheck`/`native-accept`/
+`native-evidence-recheck` share — component `files` plus multifile
+`sources/<member>`), the source's bytes, the saved consumer-Evidence
+envelope's bytes (bounded at the Core's 1 MiB `MAX_EVIDENCE_BYTES`)
+and the trusted-channel build ID. Where `native-evidence-recheck`
+only reports saved-vs-fresh consistency, this route selects the
+produced `mumei.native-evidence-acceptance/v1` descriptor — printed
+on stdout only on a clean accepted exit — into the attempt lineage.
+`acceptance` names only `0 → accepted` and `3 → inconclusive`; exit 1
+conflates a rejected or non-reproducing envelope (or an other-family
+decode failure) with every static failure, so the route claims
+nothing for it. Mid-run drift — including the saved envelope itself,
+a fourth declared input — reports `inputs_changed` with no claimed
+outcome. An `accepted` run reports `discharged_checks`
+{`artifact_semantics`, `claim_truth`} with the remaining checks in
+`checks_not_performed`. The descriptor is anonymous by design (no
+subject, digest or provenance binding), so no evidence candidate is
+emitted — the captured bytes enter the lineage through the selection
+itself. Acceptance is representation-level only: producer
+authenticity, freshness against an external clock and runtime/OS
+semantics stay outside the profile. The route is also the
+`native_evidence_accept` MCP tool (same `run_evidence_accept` report
+production, declared-path validation and basename redaction as the
+other spawn tools). C02/C10 stay partial.
+
 ### C02 declared evidence file-identity route (evidence-identity-check)
 
 `python -m agent evidence-identity-check --evidence <path>

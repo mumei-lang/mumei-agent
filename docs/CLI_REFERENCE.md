@@ -57,6 +57,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
 | `native-accept` | 7 | Run a declared Core native artifact acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
+| `native-evidence-accept` | 8 | Run a declared Core native saved-Evidence acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `rust-summaries` | 1 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 3 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 3 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -814,6 +815,24 @@ Replay a saved native consumer Evidence envelope against a fresh pinned recheck 
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the evidence-recheck report JSON here instead of stdout. |
+
+
+## `mumei-agent native-evidence-accept`
+
+Run a declared Core native saved-Evidence acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle accept-evidence`. |
+| `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json and its declared members (the component files plus any `sources/` members a multifile record pins). |
+| `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
+| `--evidence` | `<PATH>` | yes | — | Declared saved consumer-Evidence envelope (absolute path, at most 1048576 bytes) whose acceptance is evaluated under the pinned recheck chain. |
+| `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the evidence-accept report JSON here instead of stdout. |
 
 
 ## `mumei-agent rust-summaries`
