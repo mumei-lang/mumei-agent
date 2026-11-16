@@ -337,7 +337,9 @@ def evaluate_core_acceptance(descriptor: dict) -> dict:
         raise ValueError("unsupported core acceptance evaluation request")
     match = (
         frozenset(descriptor) == _CORE_ACCEPTANCE_FIELDS
+        and type(descriptor["schema_version"]) is str
         and descriptor["schema_version"] in CORE_ACCEPTANCE_SCHEMAS
+        and type(descriptor["acceptance"]) is str
         and descriptor["acceptance"] == "evaluated"
         and type(descriptor["accepted"]) is bool
         and type(descriptor["scope"]) is str

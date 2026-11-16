@@ -122,3 +122,16 @@ def test_malformed_and_missing_inputs_fail_statically(tmp_path, capsys):
 def test_non_dict_descriptor_input_is_a_static_error():
     with pytest.raises(ValueError):
         evaluate_core_acceptance(["not", "a", "dict"])
+
+def test_unhashable_field_types_never_raise(tmp_path):
+    # schema_version/acceptance as list or dict must fold to match=False,
+    # not crash on `in frozenset`.
+    for weird in (
+        _descriptor(schema_version=["mumei.source-evidence-acceptance/v1"]),
+        _descriptor(schema_version={"v": 1}),
+        _descriptor(acceptance=["evaluated"]),
+        _descriptor(acceptance={"v": "evaluated"}),
+    ):
+        evaluation = evaluate_core_acceptance(weird)
+        assert evaluation["descriptor_match"] is False
+        assert evaluation["accepted"] is False
