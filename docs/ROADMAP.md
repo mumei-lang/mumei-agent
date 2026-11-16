@@ -954,6 +954,31 @@ attempt only — `claim_truth`, `freshness` (beyond record currency),
 `producer_authenticity`, `semantic_correspondence` and
 `artifact_semantics` remain host/Core duties.
 
+### C02 declared evidence-check-list route (evidence-check-list)
+
+`python -m agent evidence-check-list --core <path> --evidence <path>`
+is the multi-record companion of `evidence-check`: it feeds a saved
+`mumei.verification-evidence-list/v1` envelope's bytes to
+`<core> evidence check-list --stdin --json` as one declared attempt —
+same bounded `feed_bytes` stdin wiring, same drift re-hash, same
+compare-and-set publication.
+
+Selection requires exit 0 AND captured stdout that parses as the
+list-family `mumei.evidence-representation-check/v1` diagnostic —
+`evidence_schema_version` pinned to `mumei.verification-evidence-list/v1`,
+`representation: valid`, and a non-negative `record_count` lifted out
+and compared field-for-field (a single-record v1 diagnostic or any
+unrecognised bytes bind nothing). The report
+(`mumei.evidence-check-list-report/v1`) echoes `representation`,
+`record_count` and `checks_not_performed` only on selection — the
+seven names now include `cross_record_consistency`, which stays
+Core's `evidence check-consistency` duty — plus the evidence
+candidate; mid-run drift suppresses the outcome via
+`inputs_changed`. The route is also reachable as the
+`evidence_check_list` MCP tool. C02 stays partial: representation
+admission of a multi-record envelope, not record agreement or
+acceptance.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two
