@@ -6024,6 +6024,26 @@ def test_local_struct_value_boundaries(
         assert not result.available, body
 
 
+def test_local_struct_value_map_literal_key_side_effect(
+    go_types_helper,
+):
+    # A map literal's key is a *evaluated* expression, unlike a
+    # struct literal's field name — `M[K(x): 0]` runs `K`, whose
+    # package-var write must record.
+    files = {
+        "a.go": "package p\nvar G int64\n"
+        "func K(v int64) int64 { G = v; return v }\n"
+        "func F(x int64) int64 {\n"
+        "\t_ = map[int64]int64{K(x): 0}\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
 def test_local_pointer_deref_read_named_pointee_is_admitted(
     go_types_helper,
 ):

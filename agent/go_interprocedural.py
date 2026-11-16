@@ -3686,15 +3686,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             return deps
         if kind == "keyed_element":
-            # Keys are field names (or literal indexes), never
-            # expressions — only the `value` child evaluates.
+            # A struct literal's key is a field name — it resolves to
+            # the field's binding and is never evaluated. A map or
+            # slice literal's key IS an expression: `M[K(x): 0]` runs
+            # `K` for its side effect, so it evaluates exactly like
+            # the `value` child does.
             value_node = node.child_by_field_name("value")
             if value_node is None:
                 raise _Unsupported("unsupported_expression", _span(node))
-            return self.expression(
+            deps = self.expression(
                 value_node, fn, params, locals_, transfers, count,
                 depth + 1,
             )
+            key_node = node.child_by_field_name("key")
+            while (
+                key_node is not None
+                and key_node.type == "literal_element"
+            ):
+                key_node = next(
+                    (
+                        c
+                        for c in key_node.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if key_node is not None:
+                key_ref = (
+                    self.references.get(self.node_key(key_node))
+                    if key_node.type == "identifier"
+                    else None
+                )
+                if self._field_identity(key_ref) is None:
+                    deps |= self.expression(
+                        key_node, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
+            return deps
         if kind in {"binary_expression", "unary_expression"}:
             # `&x` is the one unary with pointer semantics: the result
             # inherits the operand's deps exactly like a `p := t` bind,
