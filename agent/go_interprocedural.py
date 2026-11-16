@@ -978,6 +978,16 @@ class _Builder:
                     and binding.type.kind == "pointer"
                 )
                 or (
+                    # `GA[i].V` / `M["k"].V` — a container var's
+                    # indexed element's field: the descent's
+                    # extras already evaluate the index, and the
+                    # field resolves through its own reference like
+                    # a struct field's does.
+                    binding.type is not None
+                    and binding.type.kind in {"slice", "array", "map"}
+                    and fields
+                )
+                or (
                     derefed is not None
                     and derefed.kind == "pointer"
                 )
@@ -1345,6 +1355,121 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         return pointees, field_member, root_ref
+
+    def _bound_pointee_index_field(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[Any, str, Any, tuple[Any, ...], Any] | None:
+        """`(*p)[i].F` — a field of the element a bound container
+        pointee's index selects.
+
+        Returns `(root identifier, pointee identity, innermost
+        container fact, index nodes outermost-first, field member)`
+        or None. The element the last level reaches must resolve the
+        field through its own reference — a named struct's `var`
+        member like `_bound_field_read`'s leaf, scalar-or-pointer.
+        `(*p)[i].F.G` stays closed: the field's operand must be the
+        index itself, so a second selection never reaches here.
+        """
+        operand = node.child_by_field_name("operand")
+        field = node.child_by_field_name("field")
+        if operand is None or field is None:
+            return None
+        while operand.type == "parenthesized_expression":
+            operand = next(
+                (c for c in operand.named_children if c.type != "comment"),
+                None,
+            )
+            if operand is None:
+                return None
+        if operand.type != "index_expression":
+            return None
+        extras: list[Any] = []
+        inner = operand
+        while inner is not None and inner.type == "index_expression":
+            idx = inner.child_by_field_name("index")
+            if idx is not None:
+                extras.append(idx)
+            inner = inner.child_by_field_name("operand")
+            while (
+                inner is not None
+                and inner.type == "parenthesized_expression"
+            ):
+                inner = next(
+                    (
+                        c
+                        for c in inner.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+        ident = None
+        if inner is not None and inner.type == "unary_expression":
+            operator = inner.child_by_field_name("operator")
+            sub = inner.child_by_field_name("operand")
+            while (
+                sub is not None
+                and sub.type == "parenthesized_expression"
+            ):
+                sub = next(
+                    (
+                        c
+                        for c in sub.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if (
+                operator is not None
+                and operator.text == b"*"
+                and sub is not None
+                and sub.type == "identifier"
+            ):
+                ident = sub
+        elif inner is not None and inner.type == "identifier":
+            # `p[i].F` on `p *[N]T` — Go's auto-deref sugar for
+            # pointer-to-array indexing.
+            ident = inner
+        if ident is None:
+            return None
+        bound = self._bound_container_pointee(ident, locals_, params)
+        if bound is None:
+            return None
+        ref, pointee_id, fact = bound
+        container_kinds = {"slice", "array", "map"}
+        for _ in range(len(extras) - 1):
+            if (
+                fact is None
+                or fact.kind not in container_kinds
+                or fact.elem is None
+            ):
+                return None
+            # Every level's own named identity pins so redeclaring
+            # any traversed container type flags `stale_dependents`.
+            if fact.type_id:
+                self.pinned.add(fact.type_id)
+            if fact.key is not None and fact.key.type_id:
+                self.pinned.add(fact.key.type_id)
+            fact = fact.elem
+        if fact is None or fact.kind not in container_kinds:
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        field_member = None
+        if field_ref is not None and field_ref.kind == "import":
+            field_member = self.members.get(field_ref.binding_id)
+        else:
+            field_member = self._local_field(field_ref)
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind not in {"var", "variable"}
+            or field_member.type.kind
+            not in {"integer", "boolean", "pointer"}
+        ):
+            return None
+        return ident, pointee_id, fact, tuple(extras), field_member
 
     def _bound_selector_pointees(
         self,
@@ -4588,6 +4713,51 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # deps via `field_index_deps`; the rest (inside
                     # a deref operand) evaluate here, once.
                     deps = field_index_deps
+                    for extra in reversed(extras):
+                        if (
+                            extra.type in _INDEX_LITERALS
+                            or self.node_key(extra) in field_index_nodes
+                        ):
+                            continue
+                        deps |= self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    return deps
+                # `(*p)[i].F` — a field of the element a bound
+                # container pointee's index selects: caller memory
+                # like `(*p)[i]` itself, so the deps union the
+                # pointer's own, the indexes' (the pre-scan's via
+                # `field_index_deps`), and every indirect store —
+                # the bound pointer cannot alias a tracked
+                # composite (`&st` stays closed), so no escaped
+                # union applies.
+                indexed = self._bound_pointee_index_field(
+                    node, locals_, params
+                )
+                if indexed is not None:
+                    ident, pointee_id, fact, extras, field_member = indexed
+                    self._pin_fact_identities(fact)
+                    if field_member.type is not None:
+                        self._pin_fact_identities(field_member.type)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            field_member.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    deps = field_index_deps | self.indirect_writes
+                    deps |= self.expression(
+                        ident, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
                     for extra in reversed(extras):
                         if (
                             extra.type in _INDEX_LITERALS
