@@ -192,7 +192,6 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
-
         # Constructor builtins produce non-scalar resource state.
         "func G(p *int64) int64 { return *p }; func F(x int64) int64 { return G(new(int64)) }",
         "func F(x int64) int64 { var s []int64; _ = s; return x }",

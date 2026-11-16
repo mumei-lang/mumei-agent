@@ -4181,9 +4181,15 @@ def summarize_go_package(
     Reports may declare the imported objects the unit referenced
     (`imported_members`). A package-qualified read of a scalar
     constant (`lib.K`) is admitted — constants carry no dependencies,
-    like local constants. Imported variables are unmodelled package
-    state and imported functions are not values: their reads keep
-    `non_parameter_reference` and fail closed. Reports without the
+    like local constants. A scalar imported `var` read (`lib.V`)
+    records an imported transfer against the member identity —
+    external state like an imported call, so `effects` reports
+    `unknown`; non-scalar members and imported functions used as
+    values stay closed. The unit's own package-level `var`s admit
+    the same way: reads and writes (`G`, `G = v`, `G += v`,
+    `G++`/`G--`) record imported transfers against the var's binding
+    identity — in `known`, so `stale_dependents` flags on
+    redeclaration. Reports without the
     section load unchanged; the member record only widens what was
     already unmodelled.
     """
