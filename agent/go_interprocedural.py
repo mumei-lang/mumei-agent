@@ -714,6 +714,89 @@ class _Builder:
             return binding
         return None
 
+    def _is_local_composite(self, binding: Any) -> bool:
+        """A package-local named composite value — `st := P{...}`.
+
+        Named composite declarations (`struct`/`interface`/`chan`/
+        `func` shapes) carry `type.kind == "unsupported"` plus a
+        `type_id` naming the `type` declaration; unnamed composites
+        (`struct{...}`, `[]T`, `map`, `string`) carry no `type_id`
+        and stay closed. The binding's single dep set conflates all
+        fields — a sound over-approximation in both directions.
+        """
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "unsupported"
+            and bool(binding.type.type_id)
+            and self._pointee_type(binding.type.type_id) is not None
+        )
+
+    def _field_identity(self, field_ref: Any) -> Any | None:
+        """The field a selector's `field` reference declares — an
+        imported `var` member or a local `variable` binding."""
+        if field_ref is None:
+            return None
+        if field_ref.kind == "import":
+            member = self.members.get(field_ref.binding_id)
+            if member is not None and member.kind == "var":
+                return member
+            return None
+        return self._local_field(field_ref)
+
+    def _local_composite_base(
+        self, node: Any, locals_: dict[str, frozenset[int]]
+    ) -> tuple[Any, tuple[Any, ...]] | None:
+        """The `(root reference, resolved fields)` of a selector
+        chain `st.A.B` rooted at a tracked composite local.
+
+        Every selector level must resolve to a declared field —
+        a method value (`st.M` names a `func`, not a field) keeps
+        the chain closed — and every intermediate field (all but
+        the final one) must be non-pointer-typed: `st.A.B` on
+        `A *P2` auto-dereferences memory the conflated dep set
+        cannot represent, so the chain stays closed. The returned
+        fields are outermost-first.
+        """
+        fields: list[Any] = []
+        cur = node
+        while cur is not None and cur.type == "selector_expression":
+            fields.append(cur.child_by_field_name("field"))
+            cur = cur.child_by_field_name("operand")
+            while (
+                cur is not None
+                and cur.type == "parenthesized_expression"
+            ):
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+        if cur is None or cur.type != "identifier" or cur.text == b"_":
+            return None
+        ref = self.references.get(self.node_key(cur))
+        if ref is None or ref.binding_id not in locals_:
+            return None
+        if not self._is_local_composite(self.bindings.get(ref.binding_id)):
+            return None
+        resolved: list[Any] = []
+        for i, field in enumerate(fields):
+            field_ref = (
+                self.references.get(self.node_key(field))
+                if field is not None
+                else None
+            )
+            ident = self._field_identity(field_ref)
+            if (
+                ident is None
+                or field is None
+                or ident.name.encode("utf-8") != field.text
+            ):
+                return None
+            if i > 0 and ident.type.kind == "pointer":
+                return None
+            resolved.append(ident)
+        return ref, tuple(resolved)
+
     def _package_member(self, selector_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` selector names, or None.
 
@@ -1854,11 +1937,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
             resolved = self._bound_selector_pointees(
                 base, locals_, params
             )
-            if resolved is None:
+            if resolved is not None:
+                pointees, ref = resolved
+                self.pinned.update(p.id for p in pointees)
+                return pointees[-1].id, ref
+            # `st.A.B = v` on a tracked local composite: the store
+            # folds into st's conflated dep set — a local mutation,
+            # so the empty identity records no transfer.
+            local = self._local_composite_base(base, locals_)
+            if local is None:
                 return None
-            pointees, ref = resolved
-            self.pinned.update(p.id for p in pointees)
-            return pointees[-1].id, ref
+            ref, resolved_fields = local
+            # Every field in the base's chain is *traversed* to reach
+            # the store target — a pointer-typed one dereferences
+            # caller memory the conflated set cannot represent, so
+            # `st.A.B = v` on `A *P2` stays closed.
+            if any(
+                field.type.kind == "pointer"
+                for field in resolved_fields
+            ):
+                return None
+            return "", ref
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
         ref = self.references.get(self.node_key(base))
@@ -1868,6 +1967,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         binding = self.bindings.get(ref.binding_id)
         if binding is None or not binding.type.type_id:
+            return None
+        if self._is_local_composite(binding):
+            # `st.V = v` on a tracked local composite — the value
+            # folds into st's dep set; no external mutation records.
+            return "", ref
+        if binding.type.kind != "pointer":
             return None
         return binding.type.type_id, ref
 
@@ -2375,13 +2480,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ref = self.references.get(self.node_key(lhs))
                     if ref is not None and ref.binding_id:
                         binding = self.bindings.get(ref.binding_id)
-                if binding is None or binding.type.kind not in {
-                    "integer",
-                    "boolean",
-                    # A `p := t` binding inherits the pointer fact: it
-                    # still tracks one dep set, so the same stores apply.
-                    "pointer",
-                }:
+                if binding is None or (
+                    binding.type.kind
+                    not in {
+                        "integer",
+                        "boolean",
+                        # A `p := t` binding inherits the pointer fact: it
+                        # still tracks one dep set, so the same stores apply.
+                        "pointer",
+                    }
+                    # `st := P{...}` — a named composite local carries
+                    # one conflated dep set for every field.
+                    and not self._is_local_composite(binding)
+                ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 self._store(locals_, params, binding.id, value, conditional)
             return
@@ -2451,11 +2562,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if name.text == b"_":
                         continue
                     binding = self.bindings_by_span.get(self.node_key(name))
-                    if binding is None or binding.type.kind not in {
-                        "integer",
-                        "boolean",
-                        "pointer",
-                    }:
+                    if binding is None or (
+                        binding.type.kind
+                        not in {
+                            "integer",
+                            "boolean",
+                            "pointer",
+                        }
+                        and not self._is_local_composite(binding)
+                    ):
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
@@ -2665,19 +2780,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if write_target is not None:
                     type_id, ref = write_target
-                    transfers.append(
-                        CallTransfer(
-                            FileSpan(
-                                self.current_file,
-                                lhs.start_byte,
-                                lhs.end_byte,
-                            ),
-                            type_id,
-                            (),
-                            frozenset(),
-                            imported=True,
+                    # A local composite's field store reports no
+                    # external mutation — the empty identity skips
+                    # the transfer; only the dep fold applies.
+                    if type_id:
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    lhs.start_byte,
+                                    lhs.end_byte,
+                                ),
+                                type_id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
                         )
-                    )
                     # The store lands in the pointee's contents — a
                     # later `t.M()` may observe it — so the RHS's
                     # dependencies accumulate into the base binding
@@ -3170,19 +3289,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if write_target is not None:
                 type_id, _ref = write_target
-                transfers.append(
-                    CallTransfer(
-                        FileSpan(
-                            self.current_file,
-                            operand.start_byte,
-                            operand.end_byte,
-                        ),
-                        type_id,
-                        (),
-                        frozenset(),
-                        imported=True,
+                # `st.F++` on a local composite is provenance-
+                # preserving and local — no transfer records.
+                if type_id:
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                operand.start_byte,
+                                operand.end_byte,
+                            ),
+                            type_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
                     )
-                )
                 return
             raise _Unsupported(
                 "binding_unavailable"
@@ -3500,11 +3622,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     return field_index_deps
                 # `t.F` — a field read through a bound `*S`. Same
                 # dep-free external-state model: the field's value is
-                # caller memory the dep model never tracks (struct-
-                # typed bindings cannot exist, so the pointee can
-                # never alias one — no union needed), the transfer
-                # marks `effects` unknown, and redeclaring `S` or the
-                # field's type flags the summary.
+                # caller memory the dep model never tracks (a bound
+                # pointer can never alias a tracked composite — `&st`
+                # on one stays closed — so no union is needed), the
+                # transfer marks `effects` unknown, and redeclaring `S`
+                # or the field's type flags the summary.
                 bound = self._bound_field_read(node, locals_, params)
                 if bound is not None:
                     pointees, field_member, _root_ref = bound
@@ -3524,6 +3646,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                     return frozenset()
+                # `st.V` / `st.A.B` — a field of a tracked local
+                # composite: the binding's dep set conflates every
+                # field, so the read returns it whole. Local state —
+                # no transfer records, nothing pins.
+                local = self._local_composite_base(node, locals_)
+                if local is not None:
+                    ref, _fields = local
+                    return locals_.get(ref.binding_id, frozenset())
             if (
                 member is None
                 or member.kind != "const"
@@ -3535,6 +3665,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if kind == "parenthesized_expression" and len(children) == 1:
             return self.expression(
                 children[0], fn, params, locals_, transfers, count, depth + 1
+            )
+        if kind == "composite_literal":
+            # `P{V: x}` — the declared type node contributes nothing;
+            # the literal's stored elements union the result deps.
+            # Whether the composite value may bind at all is the
+            # declaration site's decision (`_is_local_composite`).
+            body = node.child_by_field_name("body")
+            if body is None:
+                raise _Unsupported("unsupported_expression", _span(node))
+            return self.expression(
+                body, fn, params, locals_, transfers, count, depth + 1
+            )
+        if kind in {"literal_value", "literal_element"}:
+            deps: frozenset[int] = frozenset()
+            for child in children:
+                deps |= self.expression(
+                    child, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+            return deps
+        if kind == "keyed_element":
+            # Keys are field names (or literal indexes), never
+            # expressions — only the `value` child evaluates.
+            value_node = node.child_by_field_name("value")
+            if value_node is None:
+                raise _Unsupported("unsupported_expression", _span(node))
+            return self.expression(
+                value_node, fn, params, locals_, transfers, count,
+                depth + 1,
             )
         if kind in {"binary_expression", "unary_expression"}:
             # `&x` is the one unary with pointer semantics: the result
@@ -3559,6 +3718,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # can write through it, so the binding is marked
                 # escaped for the deref-store dependency fold.
                 operand = node.child_by_field_name("operand")
+                # `&st` / `&st.V` on a tracked composite stays closed:
+                # the dep-free bound-pointer field read never sees
+                # st's conflated set, so letting a pointer alias it
+                # would under-approximate the read.
+                root = operand
+                while root is not None and root.type in {
+                    "parenthesized_expression",
+                    "selector_expression",
+                    "index_expression",
+                }:
+                    if root.type == "parenthesized_expression":
+                        root = next(
+                            (
+                                c
+                                for c in root.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    else:
+                        root = root.child_by_field_name("operand")
+                # `&P{...}` stays closed too: the literal carries the
+                # initializer's deps, but the bound-pointer field read
+                # reports dep-free — the fresh value's contents are
+                # not caller memory, so admitting would understate.
+                if root is not None and root.type == "composite_literal":
+                    raise _Unsupported("unsupported_operator", _span(node))
+                root_ref = (
+                    self.references.get(self.node_key(root))
+                    if root is not None and root.type == "identifier"
+                    else None
+                )
+                if root_ref is not None and self._is_local_composite(
+                    self.bindings.get(root_ref.binding_id)
+                ):
+                    raise _Unsupported("unsupported_operator", _span(node))
                 ref = (
                     self.references.get(self.node_key(operand))
                     if operand is not None

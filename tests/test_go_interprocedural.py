@@ -5748,12 +5748,12 @@ def test_local_named_pointee_composites_stay_closed(
     assert not result.available
 
 
-def test_local_struct_value_still_stays_closed(
+def test_local_struct_value_field_read_is_admitted(
     go_types_helper,
 ):
-    # `st := P{...}` — a local struct VALUE is a different slice
-    # (declaration admission + a field-dep model); the pointer
-    # paths touched here never see it.
+    # `st := P{...}` — a local struct value carries ONE conflated
+    # dep set for every field: `st.V` returns the binding's set —
+    # local state, so no transfer records and `effects` stays clean.
     files = {
         "a.go": "package p\ntype P struct{ V int64 }\n"
         "func F(x int64) int64 { st := P{V: x}; return st.V }\n"
@@ -5762,7 +5762,266 @@ def test_local_struct_value_still_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects != "unknown"
+
+
+def test_local_struct_value_field_write_conflates(
+    go_types_helper,
+):
+    # A partial field store unions the RHS into st's one dep set —
+    # `return st.W` reports both fields' deps (sound over-approx).
+    files = {
+        "a.go": "package p\ntype P struct{ V int64; W int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tst := P{V: x}\n"
+        "\tst.W = y\n"
+        "\treturn st.W\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects != "unknown" and not result.calls
+
+
+def test_local_struct_value_reassign_replaces(
+    go_types_helper,
+):
+    # `st = P{...}` overwrites the whole value — the fresh set
+    # replaces the old deps entirely.
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tst := P{V: x}\n"
+        "\tst = P{V: y}\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+@pytest.mark.parametrize(
+    "statement,deps",
+    [
+        ("st.V = y", {0, 1}),
+        ("st.V += y", {0, 1}),
+        ("st.A.N = y", {0, 1}),
+        # `++` is provenance-preserving — st's set gains nothing.
+        ("st.V++", {0}),
+    ],
+)
+def test_local_struct_value_write_forms(
+    go_types_helper, statement, deps
+):
+    # Every field-write form folds the value into st's set with no
+    # transfer — a local mutation is not an external effect.
+    files = {
+        "a.go": "package p\ntype N2 struct{ N int64 }\n"
+        "type P struct{ V int64; A N2 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        f"\tst := P{{V: x}}\n\t{statement}\n\treturn st.V + st.A.N\n}}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset(deps)
+    assert result.effects != "unknown" and not result.calls
+
+
+def test_local_struct_value_conditional_write_unions(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tst := P{V: x}\n"
+        "\tif x > 0 { st.V = y }\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_struct_value_var_decl(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar st P\n"
+        "\tst.V = x\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_struct_value_empty_literal(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\ntype P struct{ V int64 }\n"
+        "func F() int64 { st := P{}; return st.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+@pytest.mark.parametrize(
+    "addr", ["&st", "&st.V", "&st.A.N", "&P{V: x}", "&(P{V: x})"]
+)
+def test_local_struct_value_address_of_stays_closed(
+    go_types_helper, addr
+):
+    # `&st`/`&st.V` stay closed: the dep-free bound-pointer field
+    # read never sees st's conflated set, so letting a pointer
+    # alias it would under-approximate the read. `&P{...}` stays
+    # closed for the same reason — the literal's initializer deps
+    # would be invisible to the dep-free read of the fresh value.
+    files = {
+        "a.go": "package p\ntype N2 struct{ N int64 }\n"
+        "type P struct{ V int64; A N2 }\n"
+        "func F(x int64) int64 {\n"
+        f"\tst := P{{V: x}}\n\tp := {addr}\n\t_ = p\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
     assert not result.available
+
+
+def test_local_struct_value_pointer_field_chain_stays_closed(
+    go_types_helper,
+):
+    # `st.A.N` on `A *P2` dereferences memory the conflated set
+    # cannot represent — the chain stays closed.
+    files = {
+        "a.go": "package p\ntype P2 struct{ N int64 }\n"
+        "type P struct{ A *P2; V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tst := P{V: x}\n"
+        "\treturn st.A.N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+@pytest.mark.parametrize("statement", ["st.A.N = y", "st.A.N++"])
+def test_local_struct_value_pointer_intermediate_write_stays_closed(
+    go_types_helper, statement
+):
+    # `st.A.N = y` on `A *P2` writes through the pointer into caller
+    # memory — neither a local fold nor a pinnable transfer, so it
+    # stays closed.
+    files = {
+        "a.go": "package p\ntype P2 struct{ N int64 }\n"
+        "type P struct{ A *P2; V int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        f"\tst := P{{V: x}}\n\t{statement}\n\treturn st.V\n}}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_local_struct_value_deep_pointer_intermediate_stays_closed(
+    go_types_helper,
+):
+    # The pointer check applies to every traversed field, not just
+    # the innermost one.
+    files = {
+        "a.go": "package p\ntype P3 struct{ N int64 }\n"
+        "type P2 struct{ B *P3 }\n"
+        "type P struct{ A P2; V int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tst := P{V: x}\n"
+        "\tst.A.B.N = y\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_local_struct_value_pointer_leaf_field(
+    go_types_helper,
+):
+    # A pointer-typed *leaf* is fine: `st.A = p` folds p's deps into
+    # st's set — only *traversed* fields must be non-pointers.
+    files = {
+        "a.go": "package p\ntype P2 struct{ N int64 }\n"
+        "type P struct{ A *P2; V int64 }\n"
+        "func F(x int64, p *P2) int64 {\n"
+        "\tst := P{V: x}\n"
+        "\tst.A = p\n"
+        "\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_struct_value_boundaries(
+    go_types_helper,
+):
+    # Unnamed composites, named slices, method values and
+    # method calls all stay closed.
+    for decl, body in [
+        ("", "st := struct{ V int64 }{V: x}; return st.V"),
+        ("type S []int64", "sl := S{x}; return sl[0]"),
+        (
+            "type P struct{ V int64 }\n"
+            "func (P) M() int64 { return 0 }",
+            "st := P{V: x}; f := st.M; return f()",
+        ),
+        (
+            "type P struct{ V int64 }\n"
+            "func (p P) M2() int64 { return p.V }",
+            "st := P{V: x}; return st.M2()",
+        ),
+    ]:
+        files = {
+            "a.go": f"package p\n{decl}\n"
+            f"func F(x int64) int64 {{ {body} }}\n"
+        }
+        snapshot = _snapshot_for(go_types_helper, files)
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+        assert not result.available, body
 
 
 def test_local_pointer_deref_read_named_pointee_is_admitted(
