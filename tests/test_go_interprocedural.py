@@ -6170,10 +6170,10 @@ def test_local_struct_value_pointer_leaf_field(
 def test_local_struct_value_boundaries(
     go_types_helper,
 ):
-    # Unnamed composites, named slices, method values and
-    # method calls all stay closed.
+    # Named slices, method values and method calls all stay
+    # closed (anonymous `struct{...}` values admit — covered by
+    # the dedicated anonymous-struct tests below).
     for decl, body in [
-        ("", "st := struct{ V int64 }{V: x}; return st.V"),
         ("type S []int64", "sl := S{x}; return sl[0]"),
         (
             "type P struct{ V int64 }\n"
@@ -12092,13 +12092,105 @@ def test_anonymous_struct_pointee_pointer_field_stays_closed(
     assert not result.available
 
 
-def test_anonymous_struct_value_stays_closed(go_types_helper):
-    # `st := struct{...}{...}` — an anonymous struct VALUE names
-    # no `type_id`, so the conflated-binding gate keeps it closed.
+
+
+def test_anonymous_struct_value_field_read_is_admitted(go_types_helper):
+    # `st.V` on `st := struct{ V int64 }{V: x}` — an anonymous
+    # struct value carries one conflated dep set like a named
+    # composite; the type names no identity, so nothing pins.
     files = {
         "a.go": "package p\n"
         "func F(x int64) int64 {\n"
         "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_anonymous_struct_value_field_write_is_admitted(go_types_helper):
+    # `st.V = x` folds x's deps into st's conflated set — a local
+    # mutation, so no transfer records and `effects` stays honest.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{}\n\tst.V = x\n\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_anonymous_struct_value_var_decl_is_admitted(go_types_helper):
+    # `var st struct{...}` — the zero-value declaration carries an
+    # empty set until a store folds into it.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tvar st struct{ V int64 }\n\tst.V = x\n\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_value_nested_field_is_admitted(go_types_helper):
+    # `st.A.N` — a nested anonymous-struct field traverses two
+    # anonymous containers; both enumerate by source-order window.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ A struct{ N int64 } }{}\n"
+        "\tst.A.N = x\n\treturn st.A.N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_value_embedded_pointer_stays_closed(
+    go_types_helper,
+):
+    # `st.V` where `V` promotes through embedded `*Q` reads memory
+    # behind a pointer the conflated set cannot represent — the
+    # direct-field window excludes it, on reads AND stores.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ *Q }{}\n\treturn st.V\n}\n",
+        "b.go": "package p\n"
+        "func G(x int64) int64 {\n"
+        "\tst := struct{ *Q }{}\n\tst.V = x\n\treturn 0\n}\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    assert not named_package(files, snapshot, summaries, "F").available
+    assert not named_package(files, snapshot, summaries, "G").available
+
+
+def test_anonymous_struct_value_address_stays_closed(go_types_helper):
+    # `&st` on a tracked composite stays closed — a bound pointer
+    # must never alias tracked storage or the external-state models
+    # under-count.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{V: x}\n\tp := &st\n\treturn p.V\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     result = named_package(
@@ -12124,11 +12216,10 @@ def test_anonymous_struct_pointee_summary_is_not_self_stale(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset()
 
 
-def test_anonymous_struct_value_declares_unsupported_gap(go_types_helper):
-    # An anonymous `struct{...}` VALUE declaration still names value
-    # semantics the fragment cannot track — the producer's
-    # `unsupported_value_semantics` gap must keep firing even though
-    # the kind now classifies as `struct` for the pointee chain.
+def test_anonymous_struct_value_declares_no_gap(go_types_helper):
+    # An anonymous `struct{...}` VALUE declaration admits under the
+    # same conflated dep-set model as a named composite — the
+    # producer must NOT flag `unsupported_value_semantics` for it.
     snapshot = load_go_snapshot(
         compiler_report(
             go_types_helper,
@@ -12140,6 +12231,45 @@ def test_anonymous_struct_value_declares_unsupported_gap(go_types_helper):
         "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n",
         target_arch="amd64",
     )
-    assert any(
+    assert not any(
         gap.reason == "unsupported_value_semantics" for gap in snapshot.gaps
     )
+
+
+def test_anonymous_struct_value_pointer_field_deref_stays_closed(
+    go_types_helper,
+):
+    # `*st.P` — a pointer-typed field dereferences caller memory the
+    # conflated set cannot represent, same as `st.A.N` on `A *P2`.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *int64) int64 {\n"
+        "\tst := struct{ P *int64 }{P: p}\n\treturn *st.P\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_package_anonymous_struct_var_is_admitted(go_types_helper):
+    # `var GS struct{ V int64 }` — a package-level anonymous struct
+    # var is external state like a named composite var: reads are
+    # dep-free and stores fold the value's deps into the leaf.
+    files = {
+        "a.go": "package p\n"
+        "var GS struct{ V int64 }\n"
+        "func F() int64 { return GS.V }\n",
+        "b.go": "package p\n"
+        "func G(x int64) int64 { GS.V = x; return 0 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    read = named_package(files, snapshot, summaries, "F")
+    assert read.available
+    assert read.return_dependencies == frozenset()
+    assert read.effects == "unknown"
+    write = named_package(files, snapshot, summaries, "G")
+    assert write.available
+    assert write.effects == "unknown"

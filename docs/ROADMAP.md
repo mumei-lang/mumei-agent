@@ -2072,8 +2072,9 @@ struct-typed local values (conflated dep sets), composite package
 globals (named-type struct/array/map/pointer `var`s admit
 field/index/deref reads and writes under the same external-state
 model — the var's own binding identity records each mutation and
-`stale_dependents` stays honest; an anonymous `struct{...}` var's
-fields carry no resolvable identities and stay closed), multi-file
+`stale_dependents` stays honest; an anonymous `struct{...}` var
+admits the same way, with fields resolving through their own
+bindings instead of named identities), multi-file
 package
 units and audit wiring
 (`--enable-summaries`) have all landed
@@ -2113,10 +2114,18 @@ field access — `p.V`/`(*p).V` reads and `p.V = v`/`+=`/`++`
 stores — since the producer emits a `struct` fact for every
 struct underlying and each field still resolves through its own
 binding; the synthetic `<binding>/pointee` identity records the
-store and the pin, while whole-struct derefs (`*p` reads or
-stores), nested selections (`p.A.N` or `p.A.N` through a
-pointer-typed `A`) and anonymous `struct{...}` VALUES
-(`st := struct{...}{...}`) stay closed,
+store (never pinned — no declaration can redeclare it), while
+whole-struct derefs (`*p` reads or stores) and nested selections
+through a pointer-typed `A` stay closed. Anonymous `struct{...}`
+VALUES admit too — `st := struct{...}{...}`/`var st struct{...}`
+carry the same conflated dep set as a named composite (declaration,
+`st.V`/`st.A.N` reads and stores, `st.V++`), plus `var GS
+struct{...}` at package scope under the external-state model; the
+direct-field window enumerates the literal's fields by source
+order, so a field promoted through an embedded `*Q` still closes.
+Struct-typed parameters and results stay outside the scalar
+signature fragment, and `st.P`/`*st.P` on a pointer-typed field
+stays closed like `st.A.N` on `A *P2`,
 the remaining
 resource-state semantics (channels, `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
@@ -2964,10 +2973,16 @@ transfer records and `effects` stays honest); `st.V = y`,
 `st.V += y`, `st.A.N = y` and `st.V++` union the RHS in via the
 existing `(ref, accumulate)` slot — never a transfer, because a
 local mutation is not an external effect; `st = P{...}` replaces
-the set wholesale. Admission gates on `type.kind == "unsupported"`
-with a `type_id` that resolves to a local `type` binding — named
-composites only; anonymous `struct{...}`, named `[]T`/`map` and
-`type_id`-less bindings stay closed (`binding_unavailable`).
+the set wholesale. Admission gates on a composite `type.kind` —
+`"unsupported"` with a `type_id` resolving to a local `type`
+binding, or `"struct"` with no `type_id` for an anonymous
+`struct{...}` value (`st := struct{...}{...}`/`var st struct{...}`
+behave identically, and `st.A.N` traverses nested anonymous
+fields since each field's direct set enumerates by source order
+after its declaring name's span; a promoted field through an
+embedded `*Q` still fails the window). Other unnamed composites
+(`[]T`/`map` values, `type_id`-less bindings) stay closed
+(`binding_unavailable`).
 Struct params/results stay closed at the signature gate.
 
 The hard boundary is the aliasing invariant the dep-free bound-

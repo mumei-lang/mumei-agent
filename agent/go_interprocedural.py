@@ -755,24 +755,34 @@ class _Builder:
         return None
 
     def _is_local_composite(self, binding: Any) -> bool:
-        """A package-local named composite value — `st := P{...}`.
+        """A package-local composite value — `st := P{...}` or
+        `st := struct{...}{...}`.
 
         Named composite declarations (`struct`/`interface`/`chan`/
         `func` shapes) carry `type.kind == "unsupported"` plus a
-        `type_id` naming the `type` declaration; unnamed composites
-        (`struct{...}`, `[]T`, `map`, `string`) carry no `type_id`
-        and stay closed. The binding's single dep set conflates all
-        fields — a sound over-approximation in both directions. The
-        named type's identity pins on every admit so `stale_dependents`
-        flags the summary when the type is redeclared.
+        `type_id` naming the `type` declaration, and anonymous
+        `struct{...}` values carry `type.kind == "struct"` with no
+        `type_id`; other unnamed composites (`[]T`, `map`, `string`)
+        keep their own kinds and stay closed. The binding's single
+        dep set conflates all fields — a sound over-approximation in
+        both directions. The named type's identity pins on every
+        admit so `stale_dependents` flags the summary when the type
+        is redeclared; an anonymous struct has no identity to
+        redeclare, so nothing pins.
         """
-        composite = (
-            binding is not None
-            and binding.type is not None
-            and binding.type.kind in {"unsupported", "struct"}
-            and bool(binding.type.type_id)
-            and self._pointee_type(binding.type.type_id) is not None
-        )
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind not in {"unsupported", "struct"}
+        ):
+            return False
+        if not binding.type.type_id:
+            # Anonymous `struct{...}` value — `kind` alone carries the
+            # shape, and there is no `type` identity to pin or
+            # redeclare. Other anonymous composites keep their own
+            # kinds (`slice`/`map`/...) and already failed above.
+            return binding.type.kind == "struct"
+        composite = self._pointee_type(binding.type.type_id) is not None
         if composite:
             self.pinned.add(binding.type.type_id)
         return composite
@@ -873,6 +883,17 @@ class _Builder:
         span = type_binding.span
         if span is None:
             return ()
+        return self._fields_declared_after(span)
+
+    def _fields_declared_after(self, span: Any) -> tuple[Any, ...]:
+        """The field bindings declared in source order between
+        `span.end` and the next scoped declaration — a named type's
+        fields follow its name, and an anonymous `struct{...}`'s
+        fields follow the declaring variable's (or field's) own
+        name. A promoted field's binding lives inside its own
+        declaring type's span, so it never appears in this window —
+        which is what lets callers spot a write or read that must
+        cross an embedded pointer."""
         type_file = span.file if isinstance(span, FileSpan) else 0
         boundary: int | None = None
         direct: list[Any] = []
@@ -907,26 +928,49 @@ class _Builder:
         declaring type `Q` — the syntactic chain names no pointer,
         but the store crosses embedded `*Q` into memory the conflated
         dep set cannot represent. The same check closes `q.V = x` on
-        `var q Ptr` where `type Ptr *P` names no fields at all. An
-        imported or anonymous container cannot be enumerated, so a
-        write through it stays closed — reads remain sound under
-        conflation.
+        `var q Ptr` where `type Ptr *P` names no fields at all, and
+        an imported container cannot be enumerated, so a write
+        through it stays closed — reads remain sound under
+        conflation. An anonymous `struct{...}` names no `type`
+        member, but its fields still sit right after the declaring
+        name's span, so the same source-order window enumerates them.
         """
         root_binding = self.bindings.get(ref.binding_id)
         if root_binding is None or root_binding.type is None:
             return False
         n = len(resolved_fields)
         for j in range(n):
-            container_type = (
-                resolved_fields[j + 1].type
+            container_binding = (
+                resolved_fields[j + 1]
                 if j + 1 < n
-                else root_binding.type
+                else root_binding
             )
+            container_type = container_binding.type
             type_id = (
                 container_type.type_id if container_type is not None else ""
             )
             if not type_id:
-                return False
+                # An anonymous `struct{...}` names no `type` member —
+                # its fields still appear right after the declaring
+                # variable's (or parent field's) own name span, so the
+                # same source-order window enumerates them. A promoted
+                # field's binding lives inside its own declaring
+                # type's span, which a scoped declaration opens — it
+                # never lands in this window.
+                if (
+                    container_type is None
+                    or container_type.kind != "struct"
+                ):
+                    return False
+                span = getattr(container_binding, "span", None)
+                if span is None:
+                    return False
+                direct = {
+                    f.id for f in self._fields_declared_after(span)
+                }
+                if resolved_fields[j].id not in direct:
+                    return False
+                continue
             type_binding = self._pointee_type(type_id)
             span = getattr(type_binding, "span", None)
             if span is None:
@@ -2785,7 +2829,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         binding = self.bindings.get(ref.binding_id)
         if binding is None:
             return None
-        if not binding.type.type_id:
+        if not binding.type.type_id and binding.type.kind != "struct":
             # `t.V = v` on a bound `*struct{...}` — the anonymous
             # pointee names no `type` identity, but the store still
             # lands in caller memory the dep model never tracks:

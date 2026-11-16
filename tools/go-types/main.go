@@ -956,12 +956,7 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	ix.out.Bindings = append(ix.out.Bindings, binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
-	// An anonymous struct's `struct` kind still names value semantics the
-	// fragment cannot track (`st := struct{...}{...}`) — only a bound
-	// pointer's *pointee* shape admits field access, so the kind alone
-	// must keep flagging unnamed declarations. Named struct types carry
-	// a `type_id` and admit through the conflated dep-set model.
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" || tf.Kind == "struct" && tf.TypeID == "" {
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }
