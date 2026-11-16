@@ -192,8 +192,7 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
-        # Constructor builtins produce non-scalar resource state.
-        "func G(p *int64) int64 { return *p }; func F(x int64) int64 { return G(new(int64)) }",
+        # `make` still produces non-scalar resource state.
         "func F(x int64) int64 { var s []int64; _ = s; return x }",
         # A channel is resource state — `nil` has no binding either.
         "func G(c chan int64) int64 { return <-c }; func F(x int64) int64 { return G(nil) }",
@@ -1262,8 +1261,8 @@ def test_pure_builtin_dependencies(go_types_helper, declarations, expected):
         # bound in the scalar fragment anyway.
         "func F(x int64) int64 { return int64(len(\"ab\")) + x }",
         "func F(x int64) int64 { return int64(cap([3]int64{1, 2, 3})) }",
-        # make/new are allocation, not pure reads.
-        "func F(x int64) int64 { _ = new(int64); return x }",
+        # `make` is allocation of a composite value — still opaque.
+        "func F(x int64) int64 { _ = make([]int64, 2); return x }",
     ],
 )
 def test_impure_builtins_stay_opaque(go_types_helper, declarations):
@@ -11271,3 +11270,65 @@ def test_bound_pointee_range_element_sees_loop_store(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_builtin_new_scalar_pointee(
+    go_types_helper,
+):
+    # `p := new(int64)` — a pure `*int64` allocation: the result is
+    # dep-free, then `*p` reads/writes classify by the pointee's own
+    # gates (unnamed scalar pointee admits).
+    files = {
+        "a.go": "package p\n"
+        "func F(a int64) int64 {\n"
+        "\tp := new(int64)\n"
+        "\t*p = a\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_named_pointee_field(
+    go_types_helper,
+):
+    # `p := new(P)` — field access through the fresh `*P` uses the
+    # bound-pointer member gates like any other pointer binding.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "func F(a int64) int64 {\n"
+        "\tp := new(Q)\n"
+        "\tp.V = a\n"
+        "\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_make_stays_closed(
+    go_types_helper,
+):
+    # `make([]int64)` — a composite value the binding model cannot
+    # hold stays opaque like before.
+    files = {
+        "a.go": "package p\n"
+        "func F(a int64) int64 {\n"
+        "\ts := make([]int64, 3)\n"
+        "\ts[0] = a\n"
+        "\treturn s[0]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "unresolved_or_opaque_call"

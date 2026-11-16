@@ -2093,7 +2093,10 @@ carries deps(p) ∪ indirect stores for a bound pointer, dep-free
 for a package var) and `(*p)[i]++`/`--` — while nested element
 fields (`(*p)[i].F.G` reads or stores), anonymous `*struct{...}`
 pointees and nested `**p` derefs still stay closed), the remaining
-resource-state semantics (channels, constructors, bound closures),
+resource-state semantics (channels, `make`, bound closures —
+`new(T)` now admits as a dep-free `*T` allocation whose type
+argument pins, with the pointee's own use-site gates classifying
+what `*p`/`p.V`/`(*p)[i]` admit),
 per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
 TS's host-declared `--resolve-modules` relative-import resolution

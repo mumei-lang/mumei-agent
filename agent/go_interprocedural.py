@@ -5296,6 +5296,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         iter(function_node.named_children), None
                     )
                 name = function_node.text if function_node is not None else b""
+                if name == b"new":
+                    # `new(T)` — a pure allocation of a `*T`: its
+                    # argument is a type expression, never evaluated,
+                    # so the result carries no dependencies and no
+                    # transfer records. Pinning the argument's named
+                    # identities keeps `stale_dependents` honest; the
+                    # pointer's own use-site gates (`*p`, `(*p)[i]`)
+                    # classify what the pointee admits. `make` stays
+                    # opaque — its result is a composite value, which
+                    # the fragment's binding model cannot hold.
+                    if len(arguments) != 1 or not self._pin_type_node(
+                        arguments[0]
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    return frozenset()
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
                 if not arguments:
