@@ -2773,18 +2773,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # `f()` performs must already be visible when `g()`'s call
         # arguments record their dependencies.
         for extra in reversed(extras):
-            # The index value is unused — the write lands in package
-            # state — so only evaluation's side effects matter: calls,
-            # conversions and imported member reads record transfers
-            # and pins that `stale_dependents` later reads. An index
-            # holding none of those (a literal, a bound name, pure
-            # arithmetic) needs no evaluation at all; one that does
-            # evaluates through the normal expression gate and keeps
-            # the statement closed when its shape is unmodelled.
-            if self._index_extra_effects(extra, locals_, params):
+            # The write reads its index operands like the read side
+            # does: every non-literal extra evaluates through the
+            # normal expression gate — unmodelled shapes stay closed —
+            # and its dependencies attribute to the statement. Calls
+            # and member reads inside record their transfers and pins
+            # that `stale_dependents` later reads.
+            if extra.type in _INDEX_LITERALS:
+                continue
+            self._record_read(
                 self.expression(
                     extra, fn, params, locals_, transfers, count, 0
                 )
+            )
 
     def _record_package_write(
         self,
@@ -2818,89 +2819,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         for extra in reversed(extras):
             # Same rule as `_record_member_write`: indices evaluate
-            # inside-out, and only a shape that could record (a call,
-            # a member read) needs the evaluation pass at all.
-            if self._index_extra_effects(extra, locals_, params):
+            # inside-out, literals skip, and the read's dependencies
+            # attribute to the statement.
+            if extra.type in _INDEX_LITERALS:
+                continue
+            self._record_read(
                 self.expression(
                     extra, fn, params, locals_, transfers, count, 0
                 )
-
-    def _index_extra_effects(
-        self,
-        node: Any,
-        locals_: dict[str, frozenset[int]],
-        params: dict[str, int],
-    ) -> bool:
-        """Whether an index sub-expression's evaluation could record a
-        transfer or pin — a call, a name/selector that resolves to an
-        imported member, a bound or package pointer's dereference
-        (`*p` records an imported transfer on the pointee identity),
-        or an index read through either (`(*p)[i]`, `p[i]` sugar)."""
-        if node.type == "call_expression":
-            return True
-        if node.type == "unary_expression":
-            operator = node.child_by_field_name("operator")
-            if operator is not None and operator.text == b"*":
-                # `*p` — a dereference read records the pointee's
-                # transfer whenever the operand names a bound or
-                # package pointer; a non-pointer operand can never
-                # typecheck, so flagging broadly stays exact.
-                return True
-        if node.type == "index_expression":
-            operand = node.child_by_field_name("operand")
-            while (
-                operand is not None
-                and operand.type == "parenthesized_expression"
-            ):
-                operand = next(
-                    (
-                        c
-                        for c in operand.named_children
-                        if c.type != "comment"
-                    ),
-                    None,
-                )
-            if operand is not None and operand.type == "identifier":
-                # `p[i]` sugar on a bound or package `*[N]T` — the
-                # chain's root identifier never reaches the unary
-                # check above.
-                if (
-                    self._bound_container_pointee(
-                        operand, locals_, params
-                    )
-                    is not None
-                    or self._package_container_pointee(operand)
-                    is not None
-                ):
-                    return True
-        if (
-            node.type == "selector_expression"
-            and self._package_member(node) is not None
-        ):
-            return True
-        if node.type == "identifier":
-            ref = self.references.get(self.node_key(node))
-            if ref is not None and ref.kind == "import":
-                return True
-            binding = (
-                self.bindings.get(ref.binding_id)
-                if ref is not None and ref.binding_id
-                else None
             )
-            if (
-                binding is not None
-                and binding.kind == "variable"
-                and self._package_level(binding)
-            ):
-                # `GA[GI]` — a package var's read inside the index
-                # records its own transfer; skipping the evaluation
-                # drops it, so the store's stale tracking could not
-                # flag a redeclared `GI`.
-                return True
-        return any(
-            self._index_extra_effects(c, locals_, params)
-            for c in _children(node)
-        )
 
     def _opaque_write_target(
         self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]

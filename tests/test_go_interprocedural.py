@@ -13117,3 +13117,27 @@ def test_statement_reads_branch_reseat_unions_provenance(
     i = src.index("p.V = 0")
     assert reads[(i, i + 7)] == {1, 2}
 
+
+
+def test_statement_reads_container_write_reads_index(
+    go_types_helper,
+):
+    # `(*p)[i] = v` reads the pointer AND its index operand — the
+    # statement's reads cover both, like the read path does.
+    files = {
+        "a.go": "package p\n"
+        "func F(v int64, p *[]int64, i int64) int64 {\n"
+        "\t(*p)[i] = v\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    src = files["a.go"]
+    reads = {
+        (r.span.start, r.span.end): set(r.deps)
+        for r in result.statement_reads
+    }
+    i = src.index("(*p)[i] = v")
+    assert reads[(i, i + 11)] == {0, 1, 2}
