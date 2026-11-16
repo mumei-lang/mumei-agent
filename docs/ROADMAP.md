@@ -2091,9 +2091,14 @@ iteration and element inc/dec admit as well — `for range *p`/
 `for range p`/`for range *GP`/`for range GP` (the element name
 carries deps(p) ∪ indirect stores for a bound pointer, dep-free
 for a package var) and `(*p)[i]++`/`--` — while nested element
-fields (`(*p)[i].F.G` reads or stores) and anonymous `*struct{...}`
-pointees still stay closed, and nested `**p` derefs admit one
-level on reads and stores), the remaining
+fields (`(*p)[i].F.G` reads or stores), anonymous `*struct{...}`
+pointees and deeper nested derefs still stay closed (`**p` now
+admits one level — the inner `*p` operand must still be a bare
+identifier and the pointee chain resolves pointer →
+scalar/pointer under a `<binding>/pointee/pointee` identity or a
+named deep type, while `***p` and named-alias pointer chains
+(`type PP *T`, whose producer facts stay opaque) fail closed),
+the remaining
 resource-state semantics (channels, `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
 argument pins, with the pointee's own use-site gates classifying
