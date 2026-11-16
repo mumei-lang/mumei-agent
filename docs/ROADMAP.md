@@ -747,6 +747,35 @@ enter the request fingerprint or the report. Mid-run drift reports
 declared-path validation and basename redaction as the other spawn
 tools). C02/C10 stay partial.
 
+### C02/C10 declared native-evidence-recheck route (native-evidence-recheck)
+
+`python -m agent native-evidence-recheck --core <path> --bundle <dir>
+--source <path> --evidence <path> --expected-build-id <sha256>`
+declares the saved-Evidence replay as one attempt: `<core>
+native-bundle recheck-evidence --expected-build-id <id> <bundle>
+<source> <evidence>` under a
+`mumei.native-evidence-recheck-request/v1` fingerprint binding the
+Core executable's bytes, every bundle member the record declares (the
+same dynamic enumeration `native-recheck`/`native-accept` share —
+component `files` plus multifile `sources/<member>`), the source's
+bytes, the saved consumer-Evidence envelope's bytes (bounded at the
+Core's 1 MiB `MAX_EVIDENCE_BYTES`) and the trusted-channel build ID.
+`evidence_recheck` names only `0 → consistent` and
+`3 → inconclusive`; exit 1 conflates a genuine saved-vs-fresh
+mismatch (or an other-family envelope) with every static failure, so
+the route claims nothing for it. Mid-run drift — including the saved
+envelope itself, a fourth declared input — reports `inputs_changed`
+with no claimed outcome. A `consistent` run reports
+`discharged_checks` {`artifact_semantics`, `claim_truth`} — the fresh
+recheck re-establishes them — with the remaining checks in
+`checks_not_performed`. Consistency is not acceptance: the envelope's
+own `acceptance` stays `not_evaluated`, and no evidence candidate is
+emitted — the saved envelope is the replayed input, not a produced
+artifact. The route is also the `native_evidence_recheck` MCP tool
+(same `run_evidence_recheck` report production, declared-path
+validation and basename redaction as the other spawn tools).
+C02/C10 stay partial.
+
 ### C02 declared evidence file-identity route (evidence-identity-check)
 
 `python -m agent evidence-identity-check --evidence <path>

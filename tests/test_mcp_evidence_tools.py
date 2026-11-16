@@ -268,6 +268,11 @@ def _write_stub_core(tmp_path, exits: dict):
         '        printf \'%s\' \'{"schema_version":"mumei.native-evidence-acceptance/v1","accepted":true}\'\n'
         "    fi\n"
         f'    exit {exits.get("accept-artifact", 0)}\n'
+        'elif [ "$1" = "native-bundle" ] && [ "$2" = "recheck-evidence" ]; then\n'
+        f'    if [ {exits.get("recheck-evidence", 0)} -eq 0 ]; then\n'
+        '        printf \'%s\' \'Saved native Evidence consistent\'\n'
+        "    fi\n"
+        f'    exit {exits.get("recheck-evidence", 0)}\n'
         "fi\n"
         "exit 2\n"
     )
@@ -444,6 +449,72 @@ class TestNativeAcceptTool:
         out = json.loads(
             mcp_server.native_accept(
                 str(core), str(bundle), str(src), "a" * 64
+            )
+        )
+        assert out["status"] == "error"
+
+
+class TestNativeEvidenceRecheckTool:
+    def _bundle(self, tmp_path):
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        record = bundle / "native-bundle.json"
+        record.write_text(json.dumps({
+            "schema": "mumei.native-bundle/v1",
+            "files": {
+                "llvm_ir": {}, "object": {},
+                "certificate": {}, "executable": {},
+            },
+        }), encoding="utf-8")
+        for name in ("program.ll", "program.o", "proof-cert.json", "program"):
+            (bundle / name).write_text("x", encoding="utf-8")
+        return bundle, hashlib.sha256(record.read_bytes()).hexdigest()
+
+    def _evidence(self, tmp_path):
+        evidence = tmp_path / "saved.json"
+        evidence.write_text(
+            '{"schema_version":"mumei.native-consumer-evidence/v1"}',
+            encoding="utf-8",
+        )
+        return evidence
+
+    def test_consistent_outcome(self, tmp_path):
+        core = _write_stub_core(tmp_path, {"recheck-evidence": 0})
+        bundle, build_id = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        evidence = self._evidence(tmp_path)
+        out = json.loads(
+            mcp_server.native_evidence_recheck(
+                str(core), str(bundle), str(src), str(evidence), build_id
+            )
+        )
+        assert out["status"] == "ok"
+        assert out["report"]["evidence_recheck"] == "consistent"
+        assert "candidate" not in out["report"]
+
+    def test_missing_evidence_is_error(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        bundle, build_id = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        out = json.loads(
+            mcp_server.native_evidence_recheck(
+                str(core), str(bundle), str(src),
+                str(tmp_path / "absent.json"), build_id,
+            )
+        )
+        assert out["status"] == "error"
+
+    def test_bad_build_id_is_error(self, tmp_path):
+        core = _write_stub_core(tmp_path, {})
+        bundle, _ = self._bundle(tmp_path)
+        src = tmp_path / "s.mm"
+        src.write_text(SOURCE, encoding="utf-8")
+        evidence = self._evidence(tmp_path)
+        out = json.loads(
+            mcp_server.native_evidence_recheck(
+                str(core), str(bundle), str(src), str(evidence), "zz" * 32
             )
         )
         assert out["status"] == "error"
