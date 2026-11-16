@@ -47,6 +47,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `evidence-check` | 5 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
+| `evidence-acceptance-eval` | 2 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -652,6 +653,18 @@ Evaluate a declared evidence-check record against a restored attempt-sequence sn
 | `--sequence` | `<PATH>` | yes | — | Declared attempt-sequence snapshot (mumei.verifier-attempt-sequence/v1 JSON). |
 | `--check` | `<PATH>` | yes | — | Declared evidence-check record (mumei.verifier-evidence-check/v1 JSON). |
 | `--output` | `<PATH>` | no | — | Write the acceptance descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent evidence-acceptance-eval`
+
+Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--descriptor` | `<PATH>` | yes | — | Declared Core acceptance descriptor JSON (mumei.source-evidence-acceptance/v1 or mumei.native-evidence-acceptance/v1). |
+| `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent evidence-identity-check`
