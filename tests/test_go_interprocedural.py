@@ -5768,6 +5768,30 @@ def test_deref_write_unnamed_pointee_is_admitted(go_types_helper):
     assert write.target.endswith("/pointee")
 
 
+def test_synthetic_pointee_target_does_not_flag_stale_dependents(
+    go_types_helper,
+):
+    # A synthetic `<binding_id>/pointee` transfer target can never be
+    # redeclared: keeping it out of `call_targets` means a summary
+    # that recorded one is not flagged stale forever by
+    # `stale_dependents`.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64) int64 {\n"
+        "\tp := &b\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    (read,) = [c for c in result.calls if c.imported]
+    assert read.target.endswith("/pointee")
+    assert read.target not in result.call_targets
+    known = {b.id for b in snapshot.bindings}
+    assert read.target not in known
+    assert summaries.stale_dependents(known) == frozenset()
+
+
 def test_deref_write_then_deref_read_keeps_stored_deps(go_types_helper):
     # `*t = v; return *t` — the store lands in memory no binding
     # tracks, but the read may observe exactly that value: deps stored

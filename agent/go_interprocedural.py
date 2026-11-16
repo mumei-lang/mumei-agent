@@ -329,8 +329,20 @@ class FunctionSummary:
 
     @property
     def call_targets(self) -> frozenset[str]:
-        """Callee identities the recorded calls were resolved against."""
-        return frozenset(call.target for call in self.calls)
+        """Callee identities the recorded calls were resolved against.
+
+        Synthetic `<binding_id>/pointee` targets are excluded: they
+        name an unnamed pointee no declaration can redeclare, so
+        keeping one here would flag its summary stale forever —
+        `stale_dependents` treats any target outside `known` as
+        missing. (A real binding id is `sha256:<digest>:…`, never
+        slash-suffixed.)
+        """
+        return frozenset(
+            call.target
+            for call in self.calls
+            if not call.target.endswith("/pointee")
+        )
 
     def to_dict(self) -> dict:
         """Detached declared metadata only — no bytes, no acceptance claim.
