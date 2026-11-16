@@ -658,6 +658,18 @@ class _Builder:
         # `*t`/`*lib.PV` read unions this set back in (the escaped set
         # alone drops the deps when nothing took `&x`).
         self.indirect_writes: frozenset[int] = frozenset()
+        # Bound closures (`h := func()...`) whose literal references an
+        # enclosing pointer-typed binding: invoking one reads caller
+        # memory like a `*p` read, so `h()` records an imported
+        # transfer (effects unknown) and unions `indirect_writes`.
+        self.pointee_closures: set[str] = set()
+        # Bound name → the enclosing-scope binding ids its literal
+        # captured. `h()` resolves each captured id's CURRENT deps
+        # (params or locals at the call site) — freezing the dep set
+        # at bind time goes stale when a captured local is reassigned
+        # between the literal and the call (`p := &a; h := func(){*p};
+        # p = &b; h()` reads `b`, not `a`).
+        self.closure_captures: dict[str, frozenset[str]] = {}
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -3436,7 +3448,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     for rhs in rights
                 ]
-            for lhs, value in zip(lefts, values):
+            for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
                     continue
@@ -3456,6 +3468,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # A `p := t` binding inherits the pointer fact: it
                         # still tracks one dep set, so the same stores apply.
                         "pointer",
+                        # `h := func()...` — a bound closure carries its
+                        # captured free-variable deps like a value.
+                        "function",
                     }
                     # `st := P{...}` — a named composite local carries
                     # one conflated dep set for every field.
@@ -3463,6 +3478,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 self._store(locals_, params, binding.id, value, conditional)
+                # `h2 := h` — a copied closure keeps its captured
+                # bindings: propagate the capture record so `h2()`
+                # resolves them at call time like `h()` does. A
+                # non-closure RHS clears a capture set an earlier
+                # literal left on a reused name.
+                if (
+                    len(lefts) == len(rights)
+                    and rights[i].type == "identifier"
+                ):
+                    src_ref = self.references.get(
+                        self.node_key(rights[i])
+                    )
+                    src_id = (
+                        src_ref.binding_id if src_ref is not None else None
+                    )
+                    if (
+                        src_id is not None
+                        and src_id in self.closure_captures
+                    ):
+                        self.closure_captures[binding.id] = (
+                            self.closure_captures[src_id]
+                        )
+                    else:
+                        self.closure_captures.pop(binding.id, None)
+                    if (
+                        src_id is not None
+                        and src_id in self.pointee_closures
+                    ):
+                        self.pointee_closures.add(binding.id)
+                    else:
+                        self.pointee_closures.discard(binding.id)
             return
         if kind == "var_declaration":
             # Grouped `var (...)` declarations never reach here — the
@@ -3526,7 +3572,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ]
                 else:
                     values = [frozenset() for _ in names]
-                for name, value in zip(names, values):
+                for i, (name, value) in enumerate(zip(names, values)):
                     if name.text == b"_":
                         continue
                     binding = self.bindings_by_span.get(self.node_key(name))
@@ -3536,6 +3582,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "integer",
                             "boolean",
                             "pointer",
+                            # `var h func() T` / `var h = func()...` —
+                            # a bound closure like the short-decl form.
+                            "function",
                         }
                         and not self._is_local_composite(binding)
                     ):
@@ -3545,6 +3594,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._store(
                         locals_, params, binding.id, value, conditional
                     )
+                    # `var h2 = h` — a copied closure keeps its
+                    # captured bindings, like `h2 := h`.
+                    if (
+                        not multi
+                        and value_nodes
+                        and len(names) == len(value_nodes)
+                        and value_nodes[i].type == "identifier"
+                    ):
+                        src_ref = self.references.get(
+                            self.node_key(value_nodes[i])
+                        )
+                        src_id = (
+                            src_ref.binding_id
+                            if src_ref is not None
+                            else None
+                        )
+                        if (
+                            src_id is not None
+                            and src_id in self.closure_captures
+                        ):
+                            self.closure_captures[binding.id] = (
+                                self.closure_captures[src_id]
+                            )
+                        else:
+                            self.closure_captures.pop(binding.id, None)
+                        if (
+                            src_id is not None
+                            and src_id in self.pointee_closures
+                        ):
+                            self.pointee_closures.add(binding.id)
+                        else:
+                            self.pointee_closures.discard(binding.id)
             return
         if kind == "const_declaration":
             # Grouped `const (...)` declarations never reach here — like
@@ -3917,7 +3998,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for rhs in rights
                 ]
             )
-            for ref, value in zip(refs, values):
+            for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     continue
                 if ref is _ALIAS_FOLD:
@@ -3961,6 +4042,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if broadcast:
                     self.indirect_writes |= value
+                # `h2 = h` — an assignment copy propagates the
+                # closure's capture record like `h2 := h` does; a
+                # non-closure RHS clears a stale record on the name.
+                if (
+                    not compound
+                    and len(lefts) == len(rights)
+                    and rights[i].type == "identifier"
+                ):
+                    src_ref = self.references.get(
+                        self.node_key(rights[i])
+                    )
+                    src_id = (
+                        src_ref.binding_id if src_ref is not None else None
+                    )
+                    if (
+                        src_id is not None
+                        and src_id in self.closure_captures
+                    ):
+                        self.closure_captures[ref.binding_id] = (
+                            self.closure_captures[src_id]
+                        )
+                    else:
+                        self.closure_captures.pop(ref.binding_id, None)
+                    if (
+                        src_id is not None
+                        and src_id in self.pointee_closures
+                    ):
+                        self.pointee_closures.add(ref.binding_id)
+                    else:
+                        self.pointee_closures.discard(ref.binding_id)
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
@@ -5049,6 +5160,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return self.expression(
                 body, fn, params, locals_, transfers, count, depth + 1
             )
+        if kind == "func_literal":
+            return self._func_literal(node, params, locals_)
         if kind in {"literal_value", "literal_element"}:
             deps: frozenset[int] = frozenset()
             for child in children:
@@ -5183,7 +5296,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 call is None
                 or call.owner != fn.binding_id
                 or call.kind
-                not in {"direct_local", "direct_import", "conversion", "builtin"}
+                not in {
+                    "direct_local",
+                    "direct_import",
+                    "conversion",
+                    "builtin",
+                    "indirect_or_selector",
+                }
             ):
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
             arguments_node = node.child_by_field_name("arguments")
@@ -5192,6 +5311,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 _key3(a) for a in call.arguments
             ):
                 raise _Unsupported("call_mapping_unavailable", _span(node), call.target)
+            if call.kind == "indirect_or_selector":
+                # `h(args)` where `h` names a bound function literal —
+                # the record itself cannot say which shape the callee
+                # has, so the callee identifier's binding decides.
+                return self._bound_closure_call(
+                    node, arguments, fn, params, locals_, transfers,
+                    count, depth,
+                )
             if call.kind == "conversion":
                 # `T(e)` is effect-free for dependency purposes — the
                 # result inherits the operand's dependencies; the type
@@ -5613,6 +5740,243 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 depth + 1,
             )
         raise _Unsupported("unsupported_expression", _span(node))
+
+    def _func_literal(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        """`func(...) T { ... }` — a deferred body admitted by
+        conservative free-variable capture.
+
+        The literal's statements never sequence, so the literal's
+        deps are the union of every enclosing-scope binding it
+        references — what `h()`'s result depends on. A call inside
+        the literal defers an effect the sequencing model cannot
+        place, a write targets state the caller can observe out of
+        order, and a reference to anything but the enclosing
+        function's own params/locals (package vars, imported
+        members, fields the literal cannot pin) reads storage the
+        capture cannot describe — all stay closed. Names declared
+        inside the literal (its own params and locals) are not
+        captured: their span sits inside the literal's."""
+        deps: frozenset[int] = frozenset()
+        captured: set[str] = set()
+        captures_pointer = False
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if cur.type in {
+                "call_expression",
+                "assignment_statement",
+                "inc_statement",
+                "dec_statement",
+                "send_statement",
+                "go_statement",
+                "defer_statement",
+            }:
+                raise _Unsupported("unsupported_expression", _span(cur))
+            if cur.type == "identifier":
+                ref = self.references.get(self.node_key(cur))
+                if ref is not None and ref.kind != "universe":
+                    bid = ref.binding_id
+                    if bid in params:
+                        deps |= frozenset({params[bid]})
+                        captured.add(bid)
+                        binding = self.bindings.get(bid)
+                        captures_pointer |= (
+                            binding is not None
+                            and binding.type.kind == "pointer"
+                        )
+                    elif bid in locals_:
+                        deps |= locals_[bid]
+                        captured.add(bid)
+                        binding = self.bindings.get(bid)
+                        captures_pointer |= (
+                            binding is not None
+                            and binding.type.kind == "pointer"
+                        )
+                    else:
+                        binding = self.bindings.get(bid)
+                        if (
+                            binding is None
+                            or getattr(
+                                binding.span, "file", self.current_file
+                            )
+                            != self.current_file
+                            or not (
+                                node.start_byte
+                                <= binding.span.start
+                                <= node.end_byte
+                            )
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(cur)
+                            )
+            stack.extend(_children(cur))
+        # Find the name this literal binds (`h := func()...`,
+        # `var h = func()...`, `h = func()...`) and record which
+        # enclosing bindings it captured, so `h()` can resolve
+        # each capture's deps at CALL time — the dep set frozen
+        # here goes stale when a captured local is reassigned
+        # between the literal and the call. Record unconditionally:
+        # rebinding `h` to a literal that captures nothing must
+        # clear a capture set the earlier literal left behind.
+        # A literal with no bound name needs no record: only a
+        # bare identifier call admits, so the value can never be
+        # invoked through this summary. `node.parent` is the
+        # expression_list wrapper — climb past it (and any further
+        # list nesting) to the declaring statement.
+        parent = node.parent
+        while parent is not None and parent.type == "expression_list":
+            parent = parent.parent
+        name_node = None
+        if parent is not None and parent.type in {
+            "short_var_declaration",
+            "assignment_statement",
+        }:
+            left = parent.child_by_field_name("left")
+            right = parent.child_by_field_name("right")
+            if left is not None and right is not None:
+                names = _children(left)
+                values = _children(right)
+                index = next(
+                    (i for i, v in enumerate(values) if v == node),
+                    None,
+                )
+                if index is not None and index < len(names):
+                    name_node = names[index]
+        elif parent is not None and parent.type == "var_spec":
+            names = [
+                c
+                for i, c in enumerate(parent.children)
+                if parent.field_name_for_child(i) == "name"
+            ]
+            values = [
+                c
+                for i, c in enumerate(parent.children)
+                if parent.field_name_for_child(i) == "value"
+            ]
+            index = next(
+                (i for i, v in enumerate(values) if v == node), None
+            )
+            if index is not None and index < len(names):
+                name_node = names[index]
+        if name_node is not None and name_node.type == "identifier":
+            binding = self.bindings_by_span.get(
+                self.node_key(name_node)
+            )
+            bound_id = (
+                binding.id
+                if binding is not None
+                else (
+                    self.references[self.node_key(name_node)].binding_id
+                    if self.node_key(name_node) in self.references
+                    else None
+                )
+            )
+            if bound_id is not None:
+                self.closure_captures[bound_id] = frozenset(captured)
+                if captures_pointer:
+                    self.pointee_closures.add(bound_id)
+                else:
+                    # Rebinding `h` to a literal that captures no
+                    # pointer clears the flag the earlier literal set.
+                    self.pointee_closures.discard(bound_id)
+        return deps
+
+    def _bound_closure_call(
+        self,
+        node: Any,
+        arguments: list[Any],
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """`h(args)` where `h` names a bound function literal.
+
+        Only a bare-identifier callee whose binding is
+        function-typed admits — selector callees (`s.f()`) and
+        computed values keep the `indirect_or_selector` record
+        closed. The result resolves the literal's captured bindings
+        at the CALL site — `closure_captures` keeps the binding ids
+        so a captured local reassigned after the literal reports
+        its current deps — plus the argument's own evaluation; it
+        also unions
+        `indirect_writes`, since a literal may read caller memory
+        through a captured pointer and aliased pointee stores the
+        capture cannot name affect what it observes (an
+        over-approximation when the literal never dereferences — the
+        bind site does not record which literals do).
+        """
+        callee = node.child_by_field_name("function")
+        ref = (
+            self.references.get(self.node_key(callee))
+            if callee is not None and callee.type == "identifier"
+            else None
+        )
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None else None
+        )
+        if (
+            binding is None
+            or binding.type.kind != "function"
+            or (
+                ref.binding_id not in locals_
+                and ref.binding_id not in params
+            )
+        ):
+            # Only a function-local callee admits: a package-level
+            # `var Alias = Id` can be reassigned by any caller, so
+            # invoking it is an opaque external call — it keeps the
+            # `indirect_or_selector` record closed like before.
+            raise _Unsupported("unsupported_expression", _span(node))
+        captured = self.closure_captures.get(ref.binding_id)
+        if captured is not None:
+            # Resolve each captured binding's deps at the call site —
+            # reassignments between the literal and the call move
+            # what the call actually reads.
+            resolved: frozenset[int] = frozenset()
+            for cbid in captured:
+                if cbid in params:
+                    resolved |= frozenset({params[cbid]})
+                else:
+                    resolved |= locals_.get(cbid, frozenset())
+            deps = resolved
+        elif ref.binding_id in params:
+            deps = frozenset({params[ref.binding_id]})
+        else:
+            deps = locals_.get(ref.binding_id, frozenset())
+        deps |= self.indirect_writes
+        if ref.binding_id in self.pointee_closures:
+            # The literal captures a pointer — calling it reads caller
+            # memory like a `*p` read: record the external read on the
+            # closure's own binding identity (a real id in `known`, so
+            # `stale_dependents` stays honest) and mark effects
+            # unknown.
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file,
+                        node.start_byte,
+                        node.end_byte,
+                    ),
+                    ref.binding_id,
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+        for arg in arguments:
+            deps |= self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+        return deps
 
     def _direct_import_call(
         self,

@@ -2091,12 +2091,24 @@ iteration and element inc/dec admit as well — `for range *p`/
 `for range p`/`for range *GP`/`for range GP` (the element name
 carries deps(p) ∪ indirect stores for a bound pointer, dep-free
 for a package var) and `(*p)[i]++`/`--` — while nested element
-fields (`(*p)[i].F.G` reads or stores), anonymous `*struct{...}`
-pointees and nested `**p` derefs still stay closed), the remaining
-resource-state semantics (channels, `make`, bound closures —
+fields (`(*p)[i].F.G` reads or stores) and anonymous `*struct{...}`
+pointees still stay closed, and nested `**p` derefs admit one
+level on reads and stores), the remaining
+resource-state semantics (channels, `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
 argument pins, with the pointee's own use-site gates classifying
-what `*p`/`p.V`/`(*p)[i]` admit),
+what `*p`/`p.V`/`(*p)[i]` admit — and bound function values:
+a function literal bound to a local name
+(`h := func(...)...` / `var h = func(...)...`) now admits as a
+function-typed binding whose deps capture the enclosing bindings
+the literal references; invoking it through a bare-identifier
+call `h(args)` admits with deps(captured) ∪ deps(args) ∪
+indirect writes, and a literal that captures a pointer-typed
+enclosing binding records an imported transfer on the bound
+name's identity (effects unknown — the captured pointer may aim
+at caller memory). Calls or writes inside the literal,
+selector/computed callees, function-typed parameters and
+package-level `var Alias = Id` callables stay closed),
 per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
 TS's host-declared `--resolve-modules` relative-import resolution
