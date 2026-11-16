@@ -4184,6 +4184,26 @@ length, or a regressing pair is rejected on restore. Ordering is
 per `command_fingerprint` only; cross-adapter ordering stays the
 registry stamp's job, and probe acceptance remains open.
 
+### C11 declared probe-history evaluation
+
+`evaluate_probe_history(history)` folds a recorded
+`AdapterProbeHistory` into `mumei.probe-history-evaluation/v1` —
+the record itself carries the binding (every outcome bound its
+request's fingerprint and ordinal at `record()` time), so the
+fold needs no presented request. The descriptor reports what the
+record proves — `outcome_count`,
+`latest_attempt`/`latest_kind`, `latest_availability` re-derived
+through the same outcome mapping as `evaluate_probe_acceptance`,
+`ordered` (the declared stamps never regress) and `decisive` (the
+latest outcome answers `available`/`missing` rather than
+`unknown`). An empty history evaluates honestly; acceptance stays
+a single-outcome property and is not emitted here.
+`checks_not_performed` names what the fold leaves unassessed
+(freshness beyond the last stamp, cross-adapter ordering, stdout
+interpretation, tool-version truth, availability semantics,
+producer authenticity, Evidence acceptance) — declaration-level
+evaluation, not a verdict or routing authority.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
