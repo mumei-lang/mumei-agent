@@ -190,7 +190,7 @@ def _declared_members(bundle: Path) -> list[str]:
     record_bytes = (bundle / RECORD_FILE).read_bytes()
     try:
         record = json.loads(record_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError(f"cannot parse {RECORD_FILE}: {exc}") from exc
     if not isinstance(record, dict):
         raise ValueError(f"{RECORD_FILE} is not a JSON object")
@@ -438,9 +438,16 @@ def run_accept(args: argparse.Namespace) -> dict:
         argv,
         memory_bound_mb=args.memory_bound_mb,
     )
+    # Re-enumerate members from the CURRENT record before re-hashing:
+    # the member set derives from the record, so a record swapped
+    # mid-run may declare members the pre-run enumeration never
+    # fingerprinted. Only a same-set, same-bytes re-hash is consistent.
     try:
-        inputs_changed = _attempt_fingerprint(args, members) != fingerprint
-    except OSError:
+        drift_members = _declared_members(Path(args.bundle))
+        inputs_changed = (
+            _attempt_fingerprint(args, drift_members) != fingerprint
+        )
+    except (OSError, ValueError):
         inputs_changed = True
     record = dispatch.run.record
     exit_code = None

@@ -218,6 +218,83 @@ def test_multifile_members_enumerated_and_fingerprinted(tmp_path, capsys):
     assert "acceptance" not in report
 
 
+def test_mid_run_record_swap_declaring_new_member_is_drift(tmp_path, capsys):
+    """A record swapped mid-run may declare members the pre-run
+    enumeration never fingerprinted — the drift check re-enumerates
+    from the current record so the member-set change is caught."""
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "native-bundle" ] && [ "$2" = "accept-artifact" ]; then\n'
+        f"    printf '%s' '{json.dumps(MULTIFILE_RECORD)}' > \"$6/{RECORD_FILE}\"\n"
+        "    mkdir -p \"$6/sources/sub\"\n"
+        '    printf "atom body" > "$6/sources/app.mm"\n'
+        '    printf "atom body" > "$6/sources/dep.mm"\n'
+        '    printf "atom body" > "$6/sources/sub/extra.mm"\n'
+        f"    printf '%s' '{json.dumps(DESCRIPTOR)}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    # Pre-run record declares no sources at all.
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "acceptance" not in report
+
+
+def test_record_swap_inside_validation_window_is_drift(tmp_path, capsys, monkeypatch):
+    """A record swapped between member enumeration and fingerprinting
+    declares members the fingerprint never bound. Without re-enumerating
+    the post-run member set the run's consumed-but-unbound bytes pass
+    undetected — the drift check must enumerate the CURRENT record."""
+    import agent.native_accept as native_accept
+
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)  # record declares no `sources`
+    source = _write_source(tmp_path)
+
+    original = native_accept._attempt_fingerprint
+    swapped = {"done": False}
+
+    def swap_then_fingerprint(args, members):
+        if not swapped["done"]:
+            swapped["done"] = True
+            (bundle / RECORD_FILE).write_text(json.dumps(MULTIFILE_RECORD))
+            (bundle / "sources" / "sub").mkdir(parents=True)
+            for member in MULTIFILE_RECORD["sources"]:
+                (bundle / "sources" / member).write_text("atom body")
+        return original(args, members)
+
+    monkeypatch.setattr(
+        native_accept, "_attempt_fingerprint", swap_then_fingerprint
+    )
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "acceptance" not in report
+
+
+def test_deeply_nested_record_rejected_without_traceback(tmp_path, capsys):
+    """json.loads raises RecursionError on ~1200-deep nesting — a
+    static ValueError, not an unhandled traceback."""
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    depth = 2000
+    (bundle / RECORD_FILE).write_text(
+        '{"a":' * depth + "0" + "}" * depth
+    )
+    source = _write_source(tmp_path)
+    code, _, err = _run(capsys, _args(core, bundle, source))
+    assert code == 1
+    assert "Traceback" not in err
+
+
 def test_multifile_bundle_accepted_clean(tmp_path, capsys):
     core = _write_core(tmp_path)
     bundle = _write_bundle(tmp_path, record=MULTIFILE_RECORD)
