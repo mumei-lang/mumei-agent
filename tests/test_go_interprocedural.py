@@ -11972,3 +11972,174 @@ def test_computed_range_pointer_result_pins_both(go_types_helper):
     ]
     assert len(call_transfers) == 1
     assert call_transfers[0].arguments == (frozenset({0}),)
+
+
+def test_anonymous_struct_pointee_field_read(go_types_helper):
+    # `p.V` on a bound `*struct{...}` — the anonymous pointee names
+    # no `type` member, but the field resolves through its own
+    # binding and reads caller memory like a named pointee's.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }) int64 { return p.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_pointee_explicit_deref(go_types_helper):
+    # `(*p).V` — the explicit dereference spells out the same
+    # auto-deref `p.V` performs.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }) int64 { return (*p).V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_pointee_field_write(go_types_helper):
+    # `p.V = x` — the store lands in caller memory, so the
+    # synthetic `<binding>/pointee` identity records it and
+    # effects stay unknown like every bound-pointer field store.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }, x int64) int64 {\n"
+        "\tp.V = x\n\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    pointee_transfers = [
+        t for t in result.calls if t.target.endswith("/pointee")
+    ]
+    assert len(pointee_transfers) == 1
+
+
+def test_anonymous_struct_pointee_field_inc(go_types_helper):
+    # `p.V++` increments through the same write path.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }) int64 { p.V++; return 0 }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+
+
+def test_anonymous_struct_pointee_write_observable(go_types_helper):
+    # `p.V = x; return p.V` — the store broadcasts into
+    # `indirect_writes`, so the read reports the stored deps like
+    # `*p = v; return *p` does.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }, x int64) int64 {\n"
+        "\tp.V = x\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_anonymous_struct_pointee_nested_stays_closed(go_types_helper):
+    # `p.A.N` on a struct-typed field stays closed — a second
+    # selection crosses into the field's own contents.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ A struct{ N int64 } }) int64 {\n"
+        "\treturn p.A.N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_anonymous_struct_pointee_pointer_field_stays_closed(
+    go_types_helper,
+):
+    # `p.A.N` where `A` is `*struct{...}` — a pointer-typed field
+    # dereferences memory the model cannot conflate.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ A *struct{ N int64 } }) int64 {\n"
+        "\tif p.A == nil { return 0 }\n"
+        "\treturn p.A.N\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_anonymous_struct_value_stays_closed(go_types_helper):
+    # `st := struct{...}{...}` — an anonymous struct VALUE names
+    # no `type_id`, so the conflated-binding gate keeps it closed.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_anonymous_struct_pointee_summary_is_not_self_stale(go_types_helper):
+    # The synthetic `<binding>/pointee` identity a bound `*struct{...}`
+    # read records must never land in `pinned`: it names an unnamed
+    # pointee no declaration can redeclare, so `stale_dependents`
+    # would flag the summary stale against its own snapshot forever.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *struct{ V int64 }) int64 { return p.V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    known = {b.id for b in snapshot.bindings}
+    assert summaries.stale_dependents(known) == frozenset()
+
+
+def test_anonymous_struct_value_declares_unsupported_gap(go_types_helper):
+    # An anonymous `struct{...}` VALUE declaration still names value
+    # semantics the fragment cannot track — the producer's
+    # `unsupported_value_semantics` gap must keep firing even though
+    # the kind now classifies as `struct` for the pointee chain.
+    snapshot = load_go_snapshot(
+        compiler_report(
+            go_types_helper,
+            "package p;\nfunc F(x int64) int64 {\n"
+            "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n",
+            "amd64",
+        ),
+        "package p;\nfunc F(x int64) int64 {\n"
+        "\tst := struct{ V int64 }{V: x}\n\treturn st.V\n}\n",
+        target_arch="amd64",
+    )
+    assert any(
+        gap.reason == "unsupported_value_semantics" for gap in snapshot.gaps
+    )
