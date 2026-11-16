@@ -4662,7 +4662,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         old = locals_[ref.binding_id]
                     else:
                         old = frozenset({params[ref.binding_id]})
-                    self._record_read(old)
+                    if compound:
+                        # Only an `op=` assignment reads the old
+                        # value — the dep-fold accumulate (`st.V = v`,
+                        # `t.f = v`) unions the RHS into the binding's
+                        # continuing set without reading it.
+                        self._record_read(old)
                     value = old | value
                 if (
                     not compound

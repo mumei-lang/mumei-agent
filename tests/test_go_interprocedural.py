@@ -12974,7 +12974,7 @@ def test_statement_reads_composite_inc_and_compound(go_types_helper):
     files = {
         "a.go": "package p\ntype P struct{ V int64 }\n"
         "func F(x int64, y int64) int64 {\n"
-        "\tst := P{V: x}\n\tst.V++\n\tst.V += y\n"
+        "\tst := P{V: x}\n\tst.V++\n\tst.V += y\n\tst.V = 0\n"
         "\treturn st.V\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
@@ -12989,5 +12989,9 @@ def test_statement_reads_composite_inc_and_compound(go_types_helper):
     }
     i = src.index("st.V++")
     j = src.index("st.V += y")
+    k = src.index("st.V = 0")
     assert reads[(i, i + 6)] == {0}
     assert reads[(j, j + 9)] == {0, 1}
+    # A plain field store folds the RHS into st's set — it does not
+    # read the old contents.
+    assert reads[(k, k + 8)] == frozenset()
