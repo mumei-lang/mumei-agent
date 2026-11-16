@@ -2068,12 +2068,13 @@ analysis rather than supplying an effect-free or dependency-free result.
 C07 is **partially delivered**, not done. Fixed-point joins, bounded
 loop bodies, `&x` escape folds, `*p` stores/reads (named *and*
 unnamed scalar pointees), scalar package-level `var` reads/writes,
-multi-file package units and audit wiring
+struct-typed local values (conflated dep sets), multi-file package
+units and audit wiring
 (`--enable-summaries`) have all landed
 since this line was written — the honest residuals are composite-
-pointee state tracking (`*[]T`, `*struct{...}`, struct-typed local
-values; dep sets still union every escaped binding rather than track
-which pointee a write may hit), the remaining
+pointee state tracking (`*[]T`, `*struct{...}`; dep sets still union
+every escaped binding rather than track which pointee a write may
+hit), the remaining
 resource-state semantics (composite package globals,
 channels, constructors, bound closures), per-statement (rather than
 per-function) summary output, and cross-file dependencies beyond
@@ -2883,9 +2884,39 @@ and writes keep the existing `_member_write`/pointee-identity
 contracts — `effects` reports `unknown` everywhere, and every
 resolved identity lives in `known`, so `stale_dependents` flags a
 redeclared `type T` or renamed field without any synthetic ids.
-Boundaries hold: struct-typed local values (`st := P{...}`),
-unnamed composites (`*[]T`, `*struct{...}`), nested derefs (`**t`)
-and non-scalar fields stay closed.
+Boundaries hold: struct-typed local values (`st := P{...}` —
+admitted in the next slice), unnamed composites (`*[]T`,
+`*struct{...}`), nested derefs (`**t`) and non-scalar fields stay
+closed.
+
+### C07 struct-typed local values
+
+`st := P{...}` — a local variable bound to a named composite type
+(`type P struct{...}` in the same unit) — now admits declaration,
+field reads, field writes and reassignment under a **conflated
+dependency model**: the binding carries ONE dependency set covering
+every field, a sound over-approximation in both directions. `st :=
+P{V: x}` unions every literal field value's deps into `st`; `st.V`
+or a nested chain `st.A.N` reads the whole set (local state, so no
+transfer records and `effects` stays honest); `st.V = y`,
+`st.V += y`, `st.A.N = y` and `st.V++` union the RHS in via the
+existing `(ref, accumulate)` slot — never a transfer, because a
+local mutation is not an external effect; `st = P{...}` replaces
+the set wholesale. Admission gates on `type.kind == "unsupported"`
+with a `type_id` that resolves to a local `type` binding — named
+composites only; anonymous `struct{...}`, named `[]T`/`map` and
+`type_id`-less bindings stay closed (`binding_unavailable`).
+Struct params/results stay closed at the signature gate.
+
+The hard boundary is the aliasing invariant the dep-free bound-
+pointer field read relies on: a bound pointer must never alias a
+tracked composite. `&st` and `&st.V` therefore raise
+`unsupported_operator` (the `&` operand's root is walked through
+parens/selectors/indexes), and a chain through a *pointer-typed*
+intermediate field (`st.A.N` where `A *P2`) stays closed — the
+deref reads caller memory the conflated set cannot represent.
+Composite-typed package globals, method values (`f := st.M`),
+method calls (`st.M()`), `st[i]` and `*st.V` stay closed.
 
 ### C06 imported generic instantiations
 
