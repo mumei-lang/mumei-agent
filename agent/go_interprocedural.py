@@ -5008,11 +5008,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             frozenset({params[chan.id]})
                             | self.indirect_writes
                         )
-                        # The element name re-joins a *local* queue's
-                        # scope entry below; a parameter's queue lives
-                        # in `indirect_writes`, which `rdeps` already
-                        # carries, so no scope id is re-joined.
-                        chan = None
                     else:
                         rdeps = self.expression(
                             right, fn, params, scope, transfers, count, 0
@@ -5029,11 +5024,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # `for v := range ch` — the element
                                 # name re-joins the queue's widened
                                 # set each fixed-point pass, like the
-                                # bound-container element does.
+                                # bound-container element does. A
+                                # channel parameter's queue lives in
+                                # `indirect_writes`, not `scope`, so
+                                # it re-joins through the `None` arm.
                                 range_elem = (
                                     binding.id,
                                     rdeps,
-                                    chan.id,
+                                    (
+                                        chan.id
+                                        if chan.id in scope
+                                        else None
+                                    ),
                                 )
                         else:
                             ref = self.references.get(self.node_key(lefts[0]))
@@ -5051,7 +5053,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 range_elem = (
                                     ref.binding_id,
                                     rdeps,
-                                    chan.id,
+                                    (
+                                        chan.id
+                                        if chan.id in scope
+                                        else None
+                                    ),
                                 )
             elif clause is not None and clause.type == "for_clause":
                 init = clause.child_by_field_name("initializer")
@@ -6872,6 +6878,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
         else:
             deps = locals_.get(ref.binding_id, frozenset())
         deps |= self.indirect_writes
+        # A literal that captures a `chan` parameter may `<-ch` inside —
+        # receiving consumes a queue the caller shares, an external
+        # effect just like a captured pointer's deref. (A captured
+        # *local* channel's queue is local state, like `<-ch` at
+        # statement level — no external record.) `send_statement` and
+        # `close` are closed inside literals, so receive-side effects
+        # are the only ones a channel capture can hide.
+        chan_captured_external = any(
+            cbid in params and self._scalar_chan_binding(cbid)
+            for cbid in (captured or ())
+        )
         if ref.binding_id in self.pointee_closures:
             # The literal captures a pointer — calling it reads caller
             # memory like a `*p` read: union the escaped bindings'
@@ -6886,6 +6903,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     deps |= locals_[escaped_id]
                 elif escaped_id in params:
                     deps |= frozenset({params[escaped_id]})
+        if (
+            ref.binding_id in self.pointee_closures
+            or chan_captured_external
+        ):
             transfers.append(
                 CallTransfer(
                     FileSpan(
@@ -7041,6 +7062,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # deps at an opaque call; the same approximation at a local
         # callee with unknown effects).
         for arg_node in arguments:
+            # `G((ch))` names the same queue as `G(ch)` — unwrap
+            # parens before the shape checks below.
+            while (
+                arg_node is not None
+                and arg_node.type == "parenthesized_expression"
+            ):
+                arg_node = next(
+                    (
+                        c
+                        for c in arg_node.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if arg_node is None:
+                continue
             # `&` is an anonymous child — `_children` only yields the
             # named operand, so check the raw first child.
             if (
