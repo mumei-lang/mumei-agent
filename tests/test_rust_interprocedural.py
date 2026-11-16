@@ -1784,12 +1784,12 @@ def test_caller_let_does_not_shadow_callee_static_write():
 
 
 def test_destructured_param_shadows_ancestor_static():
-    # `f((a, b): ...)` binds `a`/`b` as function locals — a write
-    # to `a` must not be read as a write to an ancestor static.
+    # `f((mut a, b): ...)` binds `a`/`b` as function locals — a
+    # write to `a` targets the parameter, not the `use`-imported
+    # static of the same name.
     src = (
-        "mod b;\n"
-        "fn af((a, b): (u64, u64)) -> u64 {\n"
-        "    let mut a = a;\n"
+        "mod b;\nuse b::a;\n"
+        "fn af((mut a, b): (u64, u64)) -> u64 {\n"
         "    a = b;\n"
         "    a\n"
         "}\n"
