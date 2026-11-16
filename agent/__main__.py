@@ -51,6 +51,7 @@ _SUBCOMMANDS = {
     "sol-summaries-attempt",
     "evidence-check",
     "evidence-check-accept",
+    "evidence-acceptance-eval",
     "evidence-compare",
     "evidence-identity-check",
     "evidence-producer-check",
@@ -653,6 +654,23 @@ def main() -> None:
         evidence_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_accept_main(args))
+    elif command == "evidence-acceptance-eval":
+        import argparse
+        from agent.evidence_acceptance_eval import (
+            build_eval_parser as acceptance_eval_build_parser,
+            main_eval as acceptance_eval_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-acceptance-eval",
+            description=(
+                "Evaluate a declared Core acceptance descriptor and "
+                "emit the representation-level acceptance evaluation."
+            ),
+        )
+        acceptance_eval_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(acceptance_eval_main(args))
     elif command == "evidence-identity-check":
         import argparse
         from agent.evidence_identity import (
