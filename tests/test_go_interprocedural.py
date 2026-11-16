@@ -11786,3 +11786,189 @@ def test_double_pointer_deep_named_pointee(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_computed_range_pointer_result(go_types_helper):
+    # `for _, v := range *G()` — the callee's `*[]int64` result is
+    # outside the scalar signature fragment, so the range gets the
+    # opaque-callee model: elements carry the call's argument deps
+    # ∪ escaped ∪ indirect stores, and effects stay unknown.
+    files = {
+        "a.go": "package p\n"
+        "func G() *[]int64 { return nil }\n"
+        "func F(s int64) int64 {\n"
+        "\tfor _, v := range *G() { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_computed_range_container_result(go_types_helper):
+    # `for _, v := range G()` on a `[]int64` result — the same
+    # opaque-callee model without the `*` spelling.
+    files = {
+        "a.go": "package p\n"
+        "func G() []int64 { return nil }\n"
+        "func F(s int64) int64 {\n"
+        "\tfor _, v := range G() { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_computed_range_array_sugar(go_types_helper):
+    # `for range G()` on a `*[4]int64` result — Go auto-derefs a
+    # pointer-to-array, the same rule `for range p` follows.
+    files = {
+        "a.go": "package p\n"
+        "func G() *[4]int64 { return nil }\n"
+        "func F(s int64) int64 {\n"
+        "\tfor _, v := range G() { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_computed_range_argument_deps(go_types_helper):
+    # `for _, v := range *G(x)` — the opaque callee's argument deps
+    # union into the elements like an imported call's.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) *[]int64 { return nil }\n"
+        "func F(x, s int64) int64 {\n"
+        "\tfor _, v := range *G(x) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_computed_range_index_only(go_types_helper):
+    # `for i := range *G()` binds only the index — dep-free like
+    # every container range, while the call still records.
+    files = {
+        "a.go": "package p\n"
+        "func G() *[]int64 { return nil }\n"
+        "func F(s int64) int64 {\n"
+        "\tfor i := range *G() { s += int64(i) }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_computed_range_map_key_value(go_types_helper):
+    # `for k, v := range G()` on a map result — the key is dep-free
+    # and the element value carries the call's argument deps.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) map[int64]int64 { return nil }\n"
+        "func F(x, s int64) int64 {\n"
+        "\tfor k, v := range G(x) { s += int64(k) + v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_computed_range_imported_callee_stays_closed(go_types_helper):
+    # `for range *lib.G()` — the imported member's signature carries
+    # identities, not the result's kind, so the operand stays
+    # closed like `*lib.G()` itself.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(s int64) int64 {\n"
+        "\tfor _, v := range *lib.G() { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    libs = {
+        "lib": {
+            "g.go": "package lib\nfunc G() *[]int64 { return nil }\n",
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, libs),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_computed_range_transfer_carries_arguments(go_types_helper):
+    # `for range G(x)` on a direct container result — the single
+    # transfer on the callee's identity carries the evaluated
+    # argument deps, so the call's inputs stay on record.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) []int64 { return nil }\n"
+        "func F(x, s int64) int64 {\n"
+        "\tfor _, v := range G(x) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    call_transfers = [
+        t for t in result.calls if t.arguments == (frozenset({0}),)
+    ]
+    assert len(call_transfers) == 1
+
+
+def test_computed_range_pointer_result_pins_both(go_types_helper):
+    # `for range *G()` — two transfers: the container read pins the
+    # result pointee's identity, and the call pins the callee.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) *[]int64 { return nil }\n"
+        "func F(x, s int64) int64 {\n"
+        "\tfor _, v := range *G(x) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    pointee_transfers = [
+        t for t in result.calls if t.target.endswith("/pointee")
+    ]
+    assert len(pointee_transfers) == 1
+    assert pointee_transfers[0].arguments == (frozenset({0}),)
+    callee = pointee_transfers[0].target[: -len("/pointee")]
+    call_transfers = [
+        t for t in result.calls if t.target == callee
+    ]
+    assert len(call_transfers) == 1
+    assert call_transfers[0].arguments == (frozenset({0}),)
