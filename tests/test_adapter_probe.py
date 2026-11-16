@@ -13,6 +13,7 @@ from agent.adapter_probe import (
     MAX_PROBE_HISTORY,
     MAX_PLAN_ROUNDS,
     PROBE_SCHEMA,
+    evaluate_probe_acceptance,
     observe_probes,
     plan_with_probes,
     probe_request_for,
@@ -994,3 +995,64 @@ def test_plan_with_probes_retry_gate_stops_reprobe():
     assert out.plan.selected is None
     assert out.observations == ()
     assert out.histories[0].attempt_count == 1
+
+
+def test_probe_acceptance_decisive_outcomes_accept():
+    req = _req()
+    ok = evaluate_probe_acceptance(req, run_probe(req))
+    assert ok["schema_version"] == "mumei.probe-acceptance/v1"
+    assert ok["availability"] == "available"
+    assert ok["request_match"] is True
+    assert ok["accepted"] is True
+    assert ok["outcome"] == "exited"
+    missing = _req(argv=("/nonexistent-probe-binary",))
+    miss = evaluate_probe_acceptance(missing, run_probe(missing))
+    # `failed` → `missing` is a decisive answer too.
+    assert miss["accepted"] is True
+    assert miss["availability"] == "missing"
+
+
+def test_probe_acceptance_inconclusive_outcome_not_accepted():
+    req = _req(
+        argv=(sys.executable, "-c", "import time; time.sleep(10)"),
+        timeout_ms=150,
+    )
+    out = evaluate_probe_acceptance(req, run_probe(req))
+    assert out["outcome"] == "timed_out"
+    assert out["availability"] == "unknown"
+    assert out["request_match"] is True
+    assert out["accepted"] is False
+
+
+def test_probe_acceptance_stale_outcome_does_not_match():
+    first = _req(stamp=7)
+    outcome = run_probe(first)
+    later = AdapterProbeRequest(
+        first.adapter_id,
+        first.argv,
+        timeout_ms=first.timeout_ms,
+        stamp=8,
+        attempt_number=2,
+    )
+    out = evaluate_probe_acceptance(later, outcome)
+    assert out["request_match"] is False
+    assert out["accepted"] is False
+
+
+def test_probe_acceptance_rejects_foreign_adapter():
+    req = _req()
+    outcome = run_probe(req)
+    other = AdapterProbeRequest(
+        "zendingsol.host.other_adapter",
+        req.argv,
+        timeout_ms=req.timeout_ms,
+        stamp=req.stamp,
+    )
+    with pytest.raises(ValueError, match="adapter mismatch"):
+        evaluate_probe_acceptance(other, outcome)
+    for bad_req, bad_out in (
+        (object(), outcome),
+        (req, object()),
+    ):
+        with pytest.raises(ValueError, match="acceptance evaluation"):
+            evaluate_probe_acceptance(bad_req, bad_out)

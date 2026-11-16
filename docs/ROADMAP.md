@@ -3959,7 +3959,9 @@ outcome = run_probe(req)  # bounded by declared max_* budgets
 ```
 
 Still closed: plugin loading, adapter code execution beyond the declared
-probe, stdout interpretation, version truth and Evidence acceptance.
+probe, stdout interpretation, version truth and Evidence acceptance
+(the declared probe-outcome acceptance descriptor is covered by its
+own section below).
 
 
 ### C11 observation-driven probe scheduling
@@ -3978,7 +3980,9 @@ Scheduling stays declarative: it decides which declared probes would
 make excluded candidates observable — it runs nothing itself, keeps the
 argv host-declared verbatim text, and the emitted request still goes
 through `run_probe` for actual execution. Retry policy, concurrency,
-probe ordering across stamps and Evidence acceptance remain open.
+probe ordering across stamps and Evidence acceptance remain open
+(the declared probe-outcome acceptance descriptor is covered by its
+own section below).
 
 ### C11 probe execution driver
 
@@ -4019,7 +4023,8 @@ ordinal as `execution_request()`. The descriptor only names which
 running probe record a host proposes to stop — it never signals a
 process, confirms delivery or proves a stop; dispatch and stop
 observation remain host duties. C11 stays partial; Evidence
-acceptance remains open.
+acceptance remains open (the declared probe-outcome acceptance
+descriptor is covered by its own section below).
 
 ### C11 bounded probe outcome history
 
@@ -4033,7 +4038,8 @@ the history. `MAX_PROBE_HISTORY` (8) bounds the record.
 
 The history is replay evidence only: it says nothing about adapter
 health, authorizes nothing and never retries. C11 stays partial;
-Evidence acceptance remains open.
+Evidence acceptance remains open (the declared probe-outcome
+acceptance descriptor is covered by its own section below).
 
 ### C11 bounded probe-driven planning
 
@@ -4057,7 +4063,9 @@ chain further planning.
 
 The driver never authorizes, retries beyond `max_attempts`, or
 accepts Evidence — it only schedules and observes declared probes.
-C11 stays partial; Evidence acceptance remains open.
+C11 stays partial; Evidence acceptance remains open (the declared
+probe-outcome acceptance descriptor is covered by its own section
+below).
 
 ### C11 history-bounded probe retry scheduling
 
@@ -4073,7 +4081,9 @@ rather than authorizing a retry on stale evidence.
 
 Scheduling stays declarative: it runs nothing, invents no candidate the
 observation rules did not exclude, and retries only inside the declared
-bound. Concurrency and Evidence acceptance remain open.
+bound. Concurrency and Evidence acceptance remain open
+(the declared probe-outcome acceptance descriptor is covered by its
+own section below).
 
 ### C11 declared probe retry gate
 
@@ -4093,8 +4103,33 @@ First attempts are unaffected (no outcome exists to gate on) and
 emits or withholds requests; it runs nothing, invents no outcome,
 and accepts no Evidence. The `summaries-plan` route surface is
 unchanged (the gate is an opt-in scheduling argument, like
-`max_attempts`). Evidence acceptance of probe outcomes
-remains open.
+`max_attempts`). The declared probe-outcome acceptance descriptor
+is covered by its own section below.
+
+### C11 declared probe-outcome acceptance
+
+`agent.adapter_probe.evaluate_probe_acceptance(request, outcome)`
+normalizes a declared `AdapterProbeOutcome` into an acceptance
+descriptor `mumei.probe-acceptance/v1`: `request_match` holds only
+when the outcome binds the presented request — the same
+execution-fingerprint and attempt-ordinal binding
+`AdapterProbeHistory.record` enforces — so a stale or foreign
+outcome never counts, and `accepted` holds only when the outcome
+is current AND mapped decisive: an `exited`/`failed` probe answers
+`available`/`missing`, while a `timed_out`/`cancelled` one answers
+`unknown` — an inconclusive attempt that accepts nothing. An
+outcome naming another adapter fails statically rather than
+matching nothing.
+
+This is declaration-level acceptance, not Evidence: the
+descriptor names every check left unassessed
+(`checks_not_performed`: stdout interpretation, tool-version
+truth, availability semantics beyond the exit-code convention,
+freshness beyond the declared stamp, producer authenticity), and
+nothing here is a verdict, an adapter-health claim or a routing
+authority — `plan()` consumes observations unchanged and no route
+surface is added. C11 stays partial; Evidence acceptance of
+selected attempt outputs remains a Core duty.
 
 ## Roadmap authority and vocabulary
 
