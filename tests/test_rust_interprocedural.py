@@ -1254,3 +1254,224 @@ def test_review7_double_shadow_restores_first_capture():
     )
     assert s.available
     assert s.return_dependencies == frozenset({0})
+
+
+# -- cross-file module resolution (resolver contract) ------------
+
+_B_SRC = "fn bf(x: u64) -> u64 { x + 1 }\n"
+_A_SRC = "mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n"
+
+
+def _set_resolver(table):
+    """In-memory resolver: spec -> source bytes/str."""
+
+    def resolve(spec):
+        return table.get(spec)
+
+    return resolve
+
+
+def _path_resolver(table):
+    """Importer-aware resolver: (importer_path, spec) -> source."""
+
+    def resolve(spec, importer_path=None):
+        return table.get((importer_path, spec))
+
+    return resolve
+
+
+def test_mod_resolution_registers_module_functions():
+    r = summarize_rust(_A_SRC, resolver=_set_resolver({"b": _B_SRC}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert "b.bf" in {f.name for f in r.functions}
+
+
+def test_use_binding_resolves_bare_call():
+    src = "mod b;\nuse b::bf;\nfn af(x: u64) -> u64 { bf(x) }\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": _B_SRC}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_use_list_and_alias_bind():
+    src = (
+        "mod b;\nuse b::{bf, bf2 as h};\n"
+        "fn af(x: u64) -> u64 { bf(x) + h(x) }\n"
+    )
+    b = _B_SRC + "fn bf2(y: u64) -> u64 { y * 2 }\n"
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_same_module_bare_call_resolves():
+    # `caller` inside `b.rs` calls `hidden` bare — the same-module
+    # prefixed candidate resolves `b.hidden`.
+    src = (
+        "mod b;\n"
+        "fn af(x: u64) -> u64 { b::caller(x) }\n"
+    )
+    b = (
+        "fn hidden(y: u64) -> u64 { y }\n"
+        "fn caller(z: u64) -> u64 { hidden(z) }\n"
+    )
+    r = summarize_rust(src, resolver=_set_resolver({"b": b}))
+    s = next(f for f in r.functions if f.name == "b.caller")
+    assert s.available and s.return_dependencies == frozenset({0})
+    assert any(c.name and "hidden" in c.name for c in s.calls)
+
+
+def test_crate_self_super_heads_resolve():
+    src = (
+        "mod a {\n"
+        "    pub fn deep(x: u64) -> u64 { x }\n"
+        "    mod c {\n"
+        "        pub fn cf(y: u64) -> u64 { y }\n"
+        "        pub fn sup(z: u64) -> u64 { super::deep(z) }\n"
+        "        pub fn sf(z: u64) -> u64 { self::cf(z) }\n"
+        "    }\n"
+        "}\n"
+        "fn f(x: u64) -> u64 { crate::a::deep(x) + a::c::cf(x) }\n"
+    )
+    r = summarize_rust(src)
+    for n in ("a.c.sup", "a.c.sf", "f"):
+        s = next(x for x in r.functions if x.name == n)
+        assert s.available
+        assert s.return_dependencies == frozenset({0}), n
+
+
+def test_use_head_segment_in_scoped_call():
+    # `use a::c;` binds the head `c`, so `c::cf(x)` resolves
+    # `a.c.cf`.
+    src = (
+        "mod a {\n"
+        "    pub mod c {\n"
+        "        pub fn cf(y: u64) -> u64 { y }\n"
+        "    }\n"
+        "}\n"
+        "use a::c;\n"
+        "fn f(x: u64) -> u64 { c::cf(x) }\n"
+    )
+    r = summarize_rust(src)
+    s = next(f for f in r.functions if f.name == "f")
+    assert s.available and s.return_dependencies == frozenset({0})
+
+
+def test_unresolved_mod_stays_opaque():
+    r = summarize_rust(_A_SRC, resolver=_set_resolver({}))
+    s = next(f for f in r.functions if f.name == "af")
+    # `b::bf` unresolvable — the call records opaque deps, the
+    # function still summarizes with the arg union (never weaker
+    # than no resolver).
+    assert s.available
+    assert "b.bf" not in {f.name for f in r.functions}
+
+
+def test_no_resolver_mod_stays_opaque():
+    r = summarize_rust(_A_SRC)
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.available
+    assert "b.bf" not in {f.name for f in r.functions}
+
+
+def test_local_shadow_beats_module_item():
+    src = (
+        "mod b;\nuse b::bf;\n"
+        "fn af(x: u64, bf: u64) -> u64 { bf(x) }\n"
+    )
+    # A param named `bf` shadows the use binding — `bf(x)` stays
+    # opaque over the local's own deps.
+    r = summarize_rust(src, resolver=_set_resolver({"b": _B_SRC}))
+    s = next(f for f in r.functions if f.name == "af")
+    assert s.return_dependencies is None or frozenset(
+        {0, 1}
+    ) == s.return_dependencies or not s.available
+
+
+def test_nested_distinct_module_paths_resolve(tmp_path):
+    # `a::b::a` through real files: each `mod` declares a FRESH
+    # path — `a.b.a.af` is a distinct module, not a cycle.
+    (tmp_path / "a.rs").write_text("mod b;\n")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.rs").write_text("mod a;\n")
+    ba = tmp_path / "a" / "b" / "a.rs"
+    ba.parent.mkdir()
+    ba.write_text("fn af2(x: u64) -> u64 { x }\n")
+    root = tmp_path / "main.rs"
+    root.write_text("mod a;\n")
+    r = summarize_rust(
+        root.read_bytes(),
+        resolver=rust._fs_resolver,
+        source_path=str(root),
+    )
+    assert "a.b.a.af2" in {f.name for f in r.functions}
+
+
+def test_self_resolving_mod_terminates_opaque():
+    # A degenerate resolver returning the same bytes for the same
+    # declaration: `a.af` registers once, `a.a.af` never does.
+    src = "mod a;\nfn af(x: u64) -> u64 { a::af(x) }\n"
+    r = summarize_rust(src, resolver=lambda spec: src)
+    names = {f.name for f in r.functions}
+    assert "a.af" in names
+    assert "a.a.af" not in names
+
+
+def test_module_digests_feed_context_key():
+    src = "mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n"
+    d1, d2 = {}, {}
+    k1 = summarize_rust(
+        src, resolver=_set_resolver({"b": "fn bf(x: u64) -> u64 { x }"}),
+        module_digests=d1,
+    ).context_key
+    k2 = summarize_rust(
+        src, resolver=_set_resolver({"b": "fn bf(x: u64) -> u64 { 0 }"}),
+        module_digests=d2,
+    ).context_key
+    assert "b" in d1 and "b" in d2
+    assert k1 != k2
+
+
+def test_fs_resolver_layout_and_confinement(tmp_path):
+    # `a.rs` importer: `b` resolves `<dir>/a/b.rs` then
+    # `<dir>/a/b/mod.rs`; `mod.rs`/`main.rs` importers use their
+    # own directory. `..` specs never escape the base.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.rs").write_text("fn bf() {}\n")
+    (tmp_path / "a.rs").write_text("")
+    (tmp_path / "main.rs").write_text("")
+    (tmp_path / "c.rs").write_text("")
+    assert rust._fs_resolver(
+        "b", str(tmp_path / "a.rs")
+    ) == (tmp_path / "a" / "b.rs").resolve()
+    assert rust._fs_resolver(
+        "c", str(tmp_path / "main.rs")
+    ) == (tmp_path / "c.rs").resolve()
+    assert rust._fs_resolver("../etc/x", str(tmp_path / "a.rs")) is None
+    assert rust._fs_resolver("b", None) is None
+
+
+def test_cli_resolve_modules_route(tmp_path):
+    # `rust-summaries --resolve-modules` resolves through the
+    # filesystem resolver; without it the module stays opaque.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.rs").write_text(
+        "fn bf(x: u64) -> u64 { x }\n"
+    )
+    a = tmp_path / "a.rs"
+    a.write_text("mod b;\nfn af(x: u64) -> u64 { b::bf(x) }\n")
+    args = type(
+        "A",
+        (),
+        {"source": str(a), "resolve_modules": True},
+    )()
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rust.main(args)
+    out = __import__("json").loads(buf.getvalue())
+    names = {f["name"] for f in out["functions"]}
+    assert "b.bf" in names

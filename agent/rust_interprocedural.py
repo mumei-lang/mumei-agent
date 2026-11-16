@@ -5,7 +5,11 @@ source file: scalar params (`i*`/`u*`/`f*`/`bool`/`char`),
 `let` declarations, if/else joins, a one-pass loop
 may-analysis, intra-file function calls, and return/tail-
 expression dependency tracking. Everything outside the
-fragment stays closed (gap recorded).
+fragment stays closed (gap recorded). With a `resolver` (or
+`--resolve-modules` on the produce route), `mod NAME;` declarations
+resolve through it and `use` bindings alias names into the resolved
+modules — unresolvable declarations and paths stay opaque, the same
+over-approximation as no resolver.
 
 - `summarize_rust(source)` → `RustSummarySet` with
   `context_key`, `functions`, and `profile`.
@@ -22,6 +26,7 @@ MAX_NODES = 20000
 MAX_FUNCTIONS = 256
 MAX_INLINE_DEPTH = 48
 MAX_SOURCE_BYTES = 64 * 1024
+MAX_MODULE_DEPTH = 8
 
 _SCALAR = (
     lambda t: t.startswith(("i8", "i16", "i32", "i64", "i128",
@@ -388,7 +393,15 @@ def _scalar_type(tnode):
 
 
 class _Builder:
-    def __init__(self, source: bytes):
+    def __init__(
+        self,
+        source: bytes,
+        resolver=None,
+        resolving=frozenset(),
+        module_cache=None,
+        module_digests=None,
+        source_path=None,
+    ):
         self.source = source
         self.count = [0]
         self.functions: dict[str, object] = {}
@@ -405,6 +418,40 @@ class _Builder:
         self._type_envs: list = []
         self._mut_ref_params: list = []
         self._block_decls: list = []
+        # Optional module resolver — the same contract as the TS
+        # builder: maps a `mod NAME;` declaration's specifier to
+        # source text (bytes/str) or a resolved Path; None is both
+        # "no resolver" and "unresolvable" (names stay opaque).
+        self.resolver = resolver
+        # Ancestor (importer_path, spec) declaration keys — the
+        # cycle guard; `module_cache` shares resolved-module bytes
+        # across the unit; `module_digests` feeds `context_key`.
+        self.resolving = set(resolving)
+        self.module_cache = (
+            module_cache if module_cache is not None else {}
+        )
+        self.module_digests = (
+            module_digests if module_digests is not None else {}
+        )
+        self.source_path = source_path
+        if resolver is not None:
+            import inspect
+
+            try:
+                self._resolver_importer = (
+                    len(inspect.signature(resolver).parameters) > 1
+                )
+            except (TypeError, ValueError):
+                self._resolver_importer = False
+        else:
+            self._resolver_importer = False
+        # Registry key -> (use_map, mod_path) of the module that
+        # declared it; `_summarize` installs them as the current
+        # scope so call sites resolve `use` bindings and
+        # module-relative names.
+        self.mod_scopes: dict = {}
+        self._cur_use_map: dict = {}
+        self._cur_mod_path = ""
         # Per-scope `name -> deps` of outer bindings captured at the
         # point a `let` first shadows them: assignments before the
         # shadow reach the outer binding, so block exit restores this
@@ -413,38 +460,104 @@ class _Builder:
 
     # -- unit scan -------------------------------------------------
 
-    def build(self) -> RustSummarySet:
+    def _parse(self, source):
         from tree_sitter import Language, Parser
         import tree_sitter_rust
 
         parser = Parser(Language(tree_sitter_rust.language()))
-        root = parser.parse(self.source).root_node
-        for top in _children(root):
+        return parser.parse(source).root_node
+
+    def build(self) -> RustSummarySet:
+        root = self._parse(self.source)
+        self._scan_module(
+            _children(root), "", {}, "", self.source_path
+        )
+        if len(self.functions) > MAX_FUNCTIONS:
+            raise _Unsupported("analysis_limit", 0)
+        summaries = []
+        for name, fn_node in self.functions.items():
+            try:
+                summaries.append(self._summarize(name, fn_node))
+            except _Unsupported as u:
+                summaries.append(
+                    RustFunctionSummary(
+                        name=name, params=(), available=False,
+                        return_dependencies=None,
+                        gaps=[RustGap(u.reason, u.byte)],
+                        effects="unknown",
+                    )
+                )
+        # The context key folds every resolved module's bytes with
+        # the root source — a changed module invalidates reuse.
+        ctx = hashlib.sha256(self.source)
+        for ref, digest in sorted(self.module_digests.items()):
+            ctx.update(ref.encode())
+            ctx.update(b"\x00")
+            ctx.update(digest.encode())
+            ctx.update(b"\x00")
+        return RustSummarySet(
+            context_key=ctx.hexdigest(),
+            profile=PROFILE,
+            functions=summaries,
+        )
+
+    # -- module scan ----------------------------------------------
+
+    def _scan_module(
+        self, items, prefix, use_map, mod_path, importer_path
+    ):
+        """One module's top-level scan — the root file, an inline
+        `mod` body, or a resolved `mod NAME;` file. `prefix` is the
+        registry-key prefix (`"b."`); `mod_path` the dotted module
+        path (`"b.c"`) used for `self`/`super` and same-module
+        resolution. `use_map` collects this module's `use`
+        bindings; every registered function records `(use_map,
+        mod_path)` in `mod_scopes`. `methods` and `globals` stay
+        root-file scopes — receiver dispatch and compile-time
+        constants do not cross files."""
+        for top in items:
+            if top.type == "use_declaration":
+                self._scan_use(top, use_map, mod_path)
+                continue
             if top.type == "function_item":
                 name = top.child_by_field_name("name")
                 if name is None:
                     continue
-                self.functions[name.text.decode()] = top
+                base = name.text.decode()
+                ukey = f"{prefix}{base}"
+                n = 1
+                while ukey in self.functions:
+                    n += 1
+                    ukey = f"{prefix}{base}#{n}"
+                self.functions[ukey] = top
+                self.mod_scopes[ukey] = (use_map, mod_path)
                 continue
             if top.type == "mod_item":
                 decls = top.child_by_field_name("body")
                 mname = top.child_by_field_name("name")
-                if decls is None or mname is None:
+                if mname is None:
                     continue
                 mtext = mname.text.decode()
-                for item in _children(decls):
-                    if item.type != "function_item":
-                        continue
-                    fname = item.child_by_field_name("name")
-                    if fname is None:
-                        continue
-                    base = fname.text.decode()
-                    ukey = f"{mtext}.{base}"
-                    n = 1
-                    while ukey in self.functions:
-                        n += 1
-                        ukey = f"{mtext}.{base}#{n}"
-                    self.functions[ukey] = item
+                child_path = (
+                    f"{mod_path}.{mtext}" if mod_path else mtext
+                )
+                if decls is not None:
+                    self._scan_module(
+                        _children(decls),
+                        f"{prefix}{mtext}.",
+                        {},
+                        child_path,
+                        self._child_importer(
+                            importer_path, mtext
+                        ),
+                    )
+                else:
+                    self._resolve_mod(
+                        mtext,
+                        f"{prefix}{mtext}.",
+                        child_path,
+                        importer_path,
+                    )
                 continue
             if top.type in {"const_item", "static_item"}:
                 gname = top.child_by_field_name("name")
@@ -472,33 +585,230 @@ class _Builder:
                 if name is None:
                     continue
                 base = name.text.decode()
-                ukey = f"{tname}.{base}"
+                ukey = f"{prefix}{tname}.{base}"
                 n = 1
                 while ukey in self.functions:
                     n += 1
-                    ukey = f"{tname}.{base}#{n}"
+                    ukey = f"{prefix}{tname}.{base}#{n}"
                 self.functions[ukey] = item
-                self.methods.setdefault(base, set()).add(ukey)
-        if len(self.functions) > MAX_FUNCTIONS:
-            raise _Unsupported("analysis_limit", 0)
-        summaries = []
-        for name, fn_node in self.functions.items():
-            try:
-                summaries.append(self._summarize(name, fn_node))
-            except _Unsupported as u:
-                summaries.append(
-                    RustFunctionSummary(
-                        name=name, params=(), available=False,
-                        return_dependencies=None,
-                        gaps=[RustGap(u.reason, u.byte)],
-                        effects="unknown",
-                    )
-                )
-        return RustSummarySet(
-            context_key=hashlib.sha256(self.source).hexdigest(),
-            profile=PROFILE,
-            functions=summaries,
+                self.mod_scopes[ukey] = (use_map, mod_path)
+                if not mod_path:
+                    self.methods.setdefault(base, set()).add(ukey)
+
+    def _child_importer(self, importer_path, mname):
+        """Synthetic importer for an inline `mod` body: `mod b
+        { mod c; }` in `a.rs` resolves `c` beneath `a/b/`. A
+        suffix-less path makes `_fs_resolver` treat it as a stem
+        directory."""
+        if importer_path is None:
+            return None
+        return str(_mod_base(importer_path) / mname)
+
+    def _resolve_mod(self, mname, prefix, mod_path, importer_path):
+        """`mod b;` without a body — resolve through the module
+        resolver and scan the file under the `b.` prefix.
+        Unresolvable, oversized or cyclic declarations contribute
+        nothing: the names stay opaque, the same
+        over-approximation as no resolver."""
+        if self.resolver is None:
+            return
+        rkey = (
+            str(importer_path) if importer_path else "", mname
         )
+        # The ancestor check comes BEFORE the cache lookup — a
+        # degenerate resolver returning the same bytes for the
+        # same declaration would otherwise hit its own cache
+        # entry and recurse `a.a.a...` forever.
+        if rkey in self.resolving:
+            return
+        if rkey in self.module_cache:
+            child = self.module_cache[rkey]
+        else:
+            child = None
+            if len(self.resolving) < MAX_MODULE_DEPTH:
+                raw = (
+                    self.resolver(mname, importer_path)
+                    if self._resolver_importer
+                    else self.resolver(mname)
+                )
+                child_path = None
+                module_ref = mname
+                from pathlib import Path as _P
+
+                if isinstance(raw, _P):
+                    child_path = str(raw)
+                    module_ref = child_path
+                    try:
+                        raw = raw.read_bytes()
+                    except OSError:
+                        raw = None
+                if isinstance(raw, str):
+                    raw = raw.encode()
+                if (
+                    isinstance(raw, bytes)
+                    and len(raw) <= MAX_SOURCE_BYTES
+                ):
+                    self.module_digests[module_ref] = (
+                        hashlib.sha256(raw).hexdigest()
+                    )
+                    child = (raw, child_path)
+            self.module_cache[rkey] = child
+        if child is None:
+            return
+        raw, child_path = child
+        self.resolving.add(rkey)
+        try:
+            self._scan_module(
+                _children(self._parse(raw)),
+                prefix,
+                {},
+                mod_path,
+                child_path,
+            )
+        finally:
+            self.resolving.discard(rkey)
+
+    # -- `use` bindings and path resolution ------------------------
+
+    def _scan_use(self, decl, use_map, mod_path):
+        """`use` bindings for this module's scope: local name ->
+        normalized registry key. `use` paths are
+        crate-root-relative unless `self`/`super`/`crate`
+        prefixed; globs bind nothing (`use b::*` stays opaque)."""
+        self._use_tree(
+            decl.child_by_field_name("argument"),
+            [],
+            use_map,
+            mod_path,
+        )
+
+    def _use_tree(self, node, prefix, use_map, mod_path):
+        if node is None:
+            return
+        t = node.type
+        if t == "use_wildcard":
+            return
+        if t == "use_as_clause":
+            path = node.child_by_field_name("path")
+            alias = node.child_by_field_name("alias")
+            if path is not None and alias is not None:
+                segs = prefix + self._scoped_segments(path)
+                use_map[alias.text.decode()] = self._norm_key(
+                    segs, mod_path
+                )
+            return
+        if t == "scoped_use_list":
+            path = node.child_by_field_name("path")
+            lst = node.child_by_field_name("list")
+            base = prefix + (
+                self._scoped_segments(path)
+                if path is not None
+                else []
+            )
+            if lst is not None:
+                for c in _children(lst):
+                    self._use_tree(c, base, use_map, mod_path)
+            return
+        if t == "use_list":
+            for c in _children(node):
+                self._use_tree(c, prefix, use_map, mod_path)
+            return
+        if t == "scoped_identifier":
+            segs = prefix + self._scoped_segments(node)
+        elif t in {"identifier", "crate", "self", "super"}:
+            segs = prefix + [node.text.decode()]
+        else:
+            return
+        name = segs[-1]
+        if name == "self" and prefix:
+            # `use a::b::{self}` binds `b` itself.
+            name = prefix[-1]
+        use_map[name] = self._norm_key(segs, mod_path)
+
+    def _norm_key(self, segs, mod_path):
+        key = self._path_key(segs, mod_path)
+        return key if key is not None else ".".join(segs)
+
+    def _scoped_segments(self, node):
+        """`b::c::f` / `crate::b::f` -> `[b, c, f]` — walks the
+        nested `path`/`name` chain down to the leaf."""
+        segs = []
+        cur = node
+        while cur is not None and cur.type == "scoped_identifier":
+            name = cur.child_by_field_name("name")
+            path = cur.child_by_field_name("path")
+            if name is None:
+                break
+            segs.insert(0, name.text.decode())
+            cur = path
+        if cur is not None:
+            segs.insert(0, cur.text.decode())
+        return segs
+
+    def _path_key(self, segs, mod_path):
+        """Normalize a `crate`/`self`/`super`-headed path to a
+        registry key; None for an ordinary head (relative
+        resolution is `_resolve_scoped`'s job)."""
+        if not segs:
+            return None
+        head, rest = segs[0], segs[1:]
+        tail = ".".join(rest)
+        if head == "crate":
+            return tail
+        if head == "self":
+            return (
+                f"{mod_path}.{tail}" if mod_path else tail
+            )
+        if head == "super":
+            parent = (
+                mod_path.rsplit(".", 1)[0]
+                if "." in mod_path
+                else ""
+            )
+            return f"{parent}.{tail}" if parent else tail
+        return None
+
+    def _resolve_ident(self, name, locals_):
+        """Bare call name -> registry key. A local binding
+        shadows file/module items (None -> opaque); then `use`
+        bindings; then a same-module item (`b::f` called as `f`
+        inside `mod b`); then the crate root."""
+        if name in locals_:
+            return None
+        bound = self._cur_use_map.get(name)
+        if bound is not None:
+            return bound if bound in self.functions else None
+        if self._cur_mod_path:
+            cand = f"{self._cur_mod_path}.{name}"
+            if cand in self.functions:
+                return cand
+        return name if name in self.functions else None
+
+    def _resolve_scoped(self, path, nm):
+        """`b::c::f` / `crate::b::f` / `self::f` / `super::f`
+        -> registry key. Candidates, in order: `use`-bound head
+        segment, `crate`/`self`/`super`-normalized, same-module
+        prefixed, then the crate-root join."""
+        segs = self._scoped_segments(path)
+        segs.append(nm.text.decode())
+        if not segs:
+            return None
+        cands = []
+        bound = self._cur_use_map.get(segs[0])
+        if bound is not None:
+            cands.append(".".join([bound] + segs[1:]))
+        key = self._path_key(segs, self._cur_mod_path)
+        if key is not None:
+            cands.append(key)
+        if self._cur_mod_path:
+            cands.append(
+                f"{self._cur_mod_path}.{'.'.join(segs)}"
+            )
+        cands.append(".".join(segs))
+        for cand in cands:
+            if cand in self.functions:
+                return cand
+        return None
 
     # -- per-function summary --------------------------------------
 
@@ -506,6 +816,10 @@ class _Builder:
         # `T.m` / `T.m#n` — the impl type `self` binds to.
         stem = name.split("#", 1)[0]
         self_type = stem.rsplit(".", 1)[0] if "." in stem else None
+        prev_scope = (self._cur_use_map, self._cur_mod_path)
+        self._cur_use_map, self._cur_mod_path = (
+            self.mod_scopes.get(name, ({}, ""))
+        )
         self._in_progress.add(name)
         self._writes.append(set())
         self._decls.append(set())
@@ -601,6 +915,7 @@ class _Builder:
             self._writes.pop()
             self._decls.pop()
             self._in_progress.discard(name)
+            self._cur_use_map, self._cur_mod_path = prev_scope
 
     # -- statements -------------------------------------------------
 
@@ -1199,25 +1514,25 @@ class _Builder:
                     recv_deps = frozenset()
             actual_union |= recv_deps
         name = None
+        raw_ident = None
         if (
             fn_expr is not None
             and fn_expr.type == "identifier"
         ):
-            name = fn_expr.text.decode()
+            # Bare name: locals shadow -> `use` bindings ->
+            # same-module -> crate root.
+            raw_ident = fn_expr.text.decode()
+            name = self._resolve_ident(raw_ident, locals_)
         elif (
             fn_expr is not None
             and fn_expr.type == "scoped_identifier"
         ):
-            # `T::f(args)` — resolve `T.f` among impl methods.
+            # `T::f` / `b::f` / `crate::b::f` / `self::f` /
+            # `super::f` — normalize the path to a registry key.
             path = fn_expr.child_by_field_name("path")
             nm = fn_expr.child_by_field_name("name")
             if path is not None and nm is not None:
-                cand = (
-                    f"{path.text.decode()}."
-                    f"{nm.text.decode()}"
-                )
-                if cand in self.functions:
-                    name = cand
+                name = self._resolve_scoped(path, nm)
         elif (
             fn_expr is not None
             and fn_expr.type == "generic_function"
@@ -1229,7 +1544,16 @@ class _Builder:
                 inner_fn is not None
                 and inner_fn.type == "identifier"
             ):
-                name = inner_fn.text.decode()
+                raw_ident = inner_fn.text.decode()
+                name = self._resolve_ident(raw_ident, locals_)
+            elif (
+                inner_fn is not None
+                and inner_fn.type == "scoped_identifier"
+            ):
+                path = inner_fn.child_by_field_name("path")
+                nm = inner_fn.child_by_field_name("name")
+                if path is not None and nm is not None:
+                    name = self._resolve_scoped(path, nm)
         elif (
             fn_expr is not None
             and fn_expr.type == "field_expression"
@@ -1288,14 +1612,14 @@ class _Builder:
         if (
             name is None
             or name not in self.functions
-            or name in locals_
         ):
             # method calls, fn-pointers, enum constructors
-            # (`Some(x)`), external `crate::f`, and locals
-            # shadowing a file-level function name — opaque record.
+            # (`Some(x)`), external `crate::f`, unresolved
+            # module paths, and locals shadowing a file-level
+            # function name — opaque record.
             bound = (
-                locals_.get(name, frozenset())
-                if name is not None
+                locals_.get(raw_ident, frozenset())
+                if raw_ident is not None
                 else frozenset()
             )
             result = actual_union | bound
@@ -1586,12 +1910,70 @@ _EXPR_TYPES = {
 }
 
 
-def summarize_rust(source) -> RustSummarySet:
+def summarize_rust(
+    source,
+    resolver=None,
+    source_path=None,
+    module_digests=None,
+) -> RustSummarySet:
     if isinstance(source, str):
         source = source.encode()
     if len(source) > MAX_SOURCE_BYTES:
         raise _Unsupported("analysis_limit", 0)
-    return _Builder(source).build()
+    return _Builder(
+        source,
+        resolver=resolver,
+        source_path=source_path,
+        module_digests=module_digests,
+    ).build()
+
+
+def _mod_base(importer_path):
+    """The directory a `mod` declaration resolves beneath: a
+    `mod.rs`/`main.rs`/`lib.rs` importer uses its own directory;
+    `a.rs` (or a suffix-less synthetic path for an inline `mod`)
+    uses `<dir>/a/`."""
+    from pathlib import Path
+
+    imp = Path(importer_path)
+    if imp.name in {"mod.rs", "main.rs", "lib.rs"}:
+        return imp.parent
+    return imp.parent / imp.stem
+
+
+def _fs_resolver(spec, importer_path):
+    """Filesystem `mod` resolver for `--resolve-modules`:
+    `<base>/<spec>.rs` then `<base>/<spec>/mod.rs`, confined to
+    the importer's base tree and MAX_SOURCE_BYTES. Returns the
+    resolved Path so the child module resolves its own `mod`
+    declarations against its own directory; None leaves the
+    declaration opaque."""
+    if importer_path is None or not spec:
+        return None
+    try:
+        base = _mod_base(importer_path).resolve()
+    except OSError:
+        return None
+    for cand in (
+        base / f"{spec}.rs",
+        base / spec / "mod.rs",
+    ):
+        try:
+            real = cand.resolve()
+        except OSError:
+            continue
+        try:
+            inside = real.is_relative_to(base)
+        except ValueError:
+            inside = False
+        if not inside or not real.is_file():
+            continue
+        try:
+            if real.stat().st_size <= MAX_SOURCE_BYTES:
+                return real
+        except OSError:
+            continue
+    return None
 
 
 # Opt-in CLI routes — `python -m agent rust-summaries <file>` prints
@@ -1625,6 +2007,15 @@ def build_parser(parser=None):
     parser.add_argument(
         "source",
         help="Path to a single Rust source file (at most 64 KiB).",
+    )
+    parser.add_argument(
+        "--resolve-modules",
+        action="store_true",
+        help=(
+            "Resolve `mod NAME;` declarations from the importer's "
+            "directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); "
+            "unresolved declarations stay opaque."
+        ),
     )
     return parser
 
@@ -1843,9 +2234,13 @@ def _read_declared_manifest(path, schema=ACCEPT_PROFILE):
         )
 
 
-def _summarize_declared(raw, schema):
+def _summarize_declared(
+    raw, schema, resolver=None, source_path=None
+):
     try:
-        return summarize_rust(raw)
+        return summarize_rust(
+            raw, resolver=resolver, source_path=source_path
+        )
     except _Unsupported as exc:
         _emit(
             {
@@ -1856,15 +2251,32 @@ def _summarize_declared(raw, schema):
         )
 
 
+def _resolver_for(args):
+    """The filesystem resolver for `--resolve-modules` — shared by
+    every route that re-derives the live summary set so a resolved
+    manifest's context key matches across produce, check, reuse
+    and accept."""
+    if getattr(args, "resolve_modules", False):
+        return _fs_resolver
+    return None
+
+
 def main(args=None) -> None:
     import json
 
     if args is None:
         args = build_parser().parse_args()
     raw = _read_declared_source(args.source, PROFILE)
+    resolver = _resolver_for(args)
     print(
         json.dumps(
-            _summarize_declared(raw, PROFILE).to_dict(), sort_keys=True
+            _summarize_declared(
+                raw,
+                PROFILE,
+                resolver=resolver,
+                source_path=args.source,
+            ).to_dict(),
+            sort_keys=True,
         )
     )
 
@@ -1927,7 +2339,12 @@ def main_accept(args=None) -> None:
         args = build_accept_parser().parse_args()
     declared = _read_declared_manifest(args.manifest)
     raw = _read_declared_source(args.source, ACCEPT_PROFILE)
-    live = _summarize_declared(raw, ACCEPT_PROFILE)
+    live = _summarize_declared(
+        raw,
+        ACCEPT_PROFILE,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+    )
     _emit(
         summary_accept_document(declared, live, args.function), 0
     )
@@ -1997,7 +2414,12 @@ def main_check(args=None) -> None:
         (args.source, args.manifest),
         CHECK_PROFILE,
     )
-    live = _summarize_declared(raw, CHECK_PROFILE)
+    live = _summarize_declared(
+        raw,
+        CHECK_PROFILE,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+    )
     document = json.dumps(
         summary_check_document(declared, live), sort_keys=True
     )
@@ -2051,7 +2473,12 @@ def main_reuse(args=None) -> None:
         (args.source, args.manifest),
         CHECK_PROFILE,
     )
-    live = _summarize_declared(raw, CHECK_PROFILE)
+    live = _summarize_declared(
+        raw,
+        CHECK_PROFILE,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+    )
     document = json.dumps(
         summary_reuse_set(declared, live).to_dict(),
         sort_keys=True,
@@ -2211,6 +2638,21 @@ def main_attempt(args=None) -> None:
         args.output, (args.source,), ATTEMPT_REPORT_PROFILE
     )
     raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
+    if getattr(args, "resolve_modules", False):
+        _emit(
+            {
+                "schema_version": ATTEMPT_REPORT_PROFILE,
+                "error": {
+                    "reason": "unsupported_option",
+                    "detail": (
+                        "--resolve-modules resolves files "
+                        "implicitly; the attempt request "
+                        "fingerprint cannot bind undeclared bytes"
+                    ),
+                },
+            },
+            2,
+        )
     try:
         report = run_attempt(
             args.source,
