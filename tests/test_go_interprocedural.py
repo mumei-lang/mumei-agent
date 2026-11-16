@@ -12992,9 +12992,9 @@ def test_statement_reads_composite_inc_and_compound(go_types_helper):
     k = src.index("st.V = 0")
     assert reads[(i, i + 6)] == {0}
     assert reads[(j, j + 9)] == {0, 1}
-    # A plain field store folds the RHS into st's set — it does not
-    # read the old contents.
-    assert reads[(k, k + 8)] == frozenset()
+    # A plain field store folds the RHS into st's continuing set —
+    # the merge reads the old contents the same way `+=` does.
+    assert reads[(k, k + 8)] == {0, 1}
 
 
 def test_statement_reads_pointer_field_write_reads_pointer(
@@ -13228,3 +13228,40 @@ def test_statement_reads_pointer_arg_reseats_escaped_pointer(
     }
     i = src.index("p.V = 0")
     assert reads[(i, i + 7)] == {0, 1}
+
+
+def test_statement_reads_composite_dest_reads_old(go_types_helper):
+    # `st.V = x` merges the RHS into the binding's continuing dep
+    # set — the merge reads the OLD contents like `st.V += x` does,
+    # so the store statement attributes st's existing deps too.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type N struct{ V int64 }\n"
+            "func F(y int64, x int64) int64 {\n"
+            "\tst := N{V: y}\n"
+            "\tst.V = x\n"
+            "\treturn st.V\n}\n",
+        )
+    )
+    assert result.available
+    reads = {r.deps for r in result.statement_reads}
+    assert frozenset({0, 1}) in reads  # `st.V = x` reads old st and x
+
+
+def test_statement_reads_parallel_dest_uses_old_binding(go_types_helper):
+    # `p, p.V = q, 0` resolves `p.V` against the OLD `p` — the
+    # destination read snapshots pre-state, so the statement still
+    # attributes the old pointer's provenance alongside the RHS.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type N struct{ V int64 }\n"
+            "func F(p *N, q *N, x int64) int64 {\n"
+            "\tp, p.V = q, x\n"
+            "\treturn p.V\n}\n",
+        )
+    )
+    assert result.available
+    reads = {r.deps for r in result.statement_reads}
+    assert frozenset({0, 1, 2}) in reads

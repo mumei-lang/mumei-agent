@@ -4733,6 +4733,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if nested_tgt:
                             dest = dest | self.indirect_writes
+                    elif isinstance(r, tuple):
+                        # A local-composite destination (`st.V = v`)
+                        # merges the RHS into the binding's
+                        # continuing set — the merge reads the old
+                        # contents like `st.V += v` does.
+                        dest = locals_.get(
+                            tgt.binding_id,
+                            frozenset({params[tgt.binding_id]})
+                            if tgt.binding_id in params
+                            else frozenset(),
+                        )
                 dest_reads.append(dest)
                 if (
                     len(rights) == len(refs)
@@ -4824,18 +4835,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         old = locals_[ref.binding_id]
                     else:
                         old = frozenset({params[ref.binding_id]})
-                    if compound or broadcast:
+                    if dest_reads[i] is not None:
                         # An `op=` assignment reads the old value,
-                        # and a bound-pointer target (`p.V = v`,
+                        # a bound-pointer target (`p.V = v`,
                         # `*p = v`) reads the pointer's pre-state
                         # provenance to compute the destination —
                         # snapshotted in `dest_reads` because `p,
                         # p.V = q, 0` resolves `p.V` against the OLD
                         # `p` and `p.V = x; p.V = 0` must not read
-                        # x's fold as the pointer. Only a dep-fold
-                        # accumulate on a local composite
-                        # (`st.V = v`) unions the RHS into the
-                        # binding's continuing set without a read.
+                        # x's fold as the pointer — and a local
+                        # composite (`st.V = v`) reads its old
+                        # contents: the merge carries them into the
+                        # binding's continuing set.
                         self._record_read(dest_reads[i])
                     value = old | value
                 if (
