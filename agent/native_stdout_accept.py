@@ -20,7 +20,7 @@ comparing the SHA-256 of its captured stdout against the
 record's `expected_stdout_sha256` pin. On a matching observation it reports the
 whole chain through a bounded acceptance descriptor
 (``mumei.native-evidence-acceptance/v1``) — emitted on stdout only on
-an accepted outcome — with ``os_exit_status_observation`` in
+an accepted outcome — with ``os_stdout_observation`` in
 ``checks_performed``. One run under one environment is an observation,
 not a history: the descriptor keeps ``historical_execution`` and
 ``abi_runtime_semantics`` in ``checks_not_performed``, and the route

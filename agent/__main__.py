@@ -68,6 +68,8 @@ _SUBCOMMANDS = {
     "native-exit-status-accept",
     "native-stdout-recheck",
     "native-stdout-accept",
+    "native-stderr-recheck",
+    "native-stderr-accept",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -975,6 +977,42 @@ def main() -> None:
         native_osa_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_osa_main(args))
+    elif command == "native-stderr-recheck":
+        import argparse
+        from agent.native_stderr_recheck import (
+            build_stderr_recheck_parser as native_oxr_build_parser,
+            main_stderr_recheck as native_oxr_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-stderr-recheck",
+            description=(
+                "Run a declared Core native stderr recheck as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared recheck outcome."
+            ),
+        )
+        native_oxr_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_oxr_main(args))
+    elif command == "native-stderr-accept":
+        import argparse
+        from agent.native_stderr_accept import (
+            build_stderr_accept_parser as native_oxa_build_parser,
+            main_stderr_accept as native_oxa_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-stderr-accept",
+            description=(
+                "Run a declared Core native stderr acceptance as "
+                "one attempt and emit the reconciled lineage plus the "
+                "declared acceptance outcome."
+            ),
+        )
+        native_oxa_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_oxa_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (
