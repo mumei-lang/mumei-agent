@@ -66,6 +66,8 @@ _SUBCOMMANDS = {
     "native-artifact-recheck",
     "native-exit-status-recheck",
     "native-exit-status-accept",
+    "native-stdout-recheck",
+    "native-stdout-accept",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -937,6 +939,42 @@ def main() -> None:
         native_esa_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_esa_main(args))
+    elif command == "native-stdout-recheck":
+        import argparse
+        from agent.native_stdout_recheck import (
+            build_stdout_recheck_parser as native_osr_build_parser,
+            main_stdout_recheck as native_osr_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-stdout-recheck",
+            description=(
+                "Run a declared Core native stdout recheck as one "
+                "attempt and emit the reconciled lineage plus the "
+                "declared recheck outcome."
+            ),
+        )
+        native_osr_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_osr_main(args))
+    elif command == "native-stdout-accept":
+        import argparse
+        from agent.native_stdout_accept import (
+            build_stdout_accept_parser as native_osa_build_parser,
+            main_stdout_accept as native_osa_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-stdout-accept",
+            description=(
+                "Run a declared Core native stdout acceptance as "
+                "one attempt and emit the reconciled lineage plus the "
+                "declared acceptance outcome."
+            ),
+        )
+        native_osa_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_osa_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (
