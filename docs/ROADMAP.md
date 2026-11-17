@@ -826,6 +826,59 @@ design, so no `candidate` is emitted. The route is also the
 report production, declared-path validation and basename redaction as
 the other spawn tools). C02/C10 stay partial.
 
+### C02/C10 declared native-stdout-recheck route (native-stdout-recheck)
+
+`python -m agent native-stdout-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the adjacent
+channel-observation replay as one attempt: `<core> native-bundle
+recheck-stdout --expected-build-id <id> <bundle> <source>` under a
+`mumei.native-stdout-recheck-request/v1` fingerprint binding the
+bundle record plus every member it declares (the component files and,
+for a multifile record, each `sources/` member the merge is re-derived
+from) and the declared source. `stdout_recheck` is claimed only
+for uniquely-mapped exit codes (`0 → reproduced`, `3 → inconclusive`);
+exit 1 conflates a mismatched stdout digest with every static failure
+and claims nothing, mid-run drift reports `inputs_changed` with no
+claimed outcome, and the drift check re-enumerates the member set from
+the current record. A `reproduced` run reports `discharged_checks` —
+`artifact_semantics` and `claim_truth` — with the remaining checks in
+`checks_not_performed`; the stdout digest match itself is an OS-level
+observation bound by the record pin, discharging no additional
+category since the vocabulary has no runtime/ABI/process-semantics
+claim for it. The command's stdout is a fixed diagnostic line rather
+than an evidence record, so no `candidate` is emitted and a successful
+run selects only lineage. The route is also the
+`native_stdout_recheck` MCP tool (same `run_stdout_recheck`
+report production, declared-path validation and basename redaction as
+the other spawn tools). C02/C10 stay partial.
+
+### C02/C10 declared native-stdout-accept route (native-stdout-accept)
+
+`python -m agent native-stdout-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the adjacent
+channel-observation acceptance as one attempt: `<core> native-bundle
+accept-stdout --expected-build-id <id> --json <bundle> <source>`
+under a `mumei.native-stdout-accept-request/v1` fingerprint
+binding the bundle record plus every member it declares (the
+component files and, for a multifile record, each `sources/` member
+the merge is re-derived from) and the declared source. `acceptance`
+is claimed only for uniquely-mapped exit codes (`0 → accepted`,
+`3 → inconclusive`); exit 1 conflates a mismatched stdout digest with
+every static failure and claims nothing, mid-run drift reports
+`inputs_changed` with no claimed outcome, and the drift check
+re-enumerates the member set from the current record. An `accepted`
+run reports `discharged_checks` — `artifact_semantics` and
+`claim_truth` — with the remaining checks in `checks_not_performed`;
+the stdout digest match itself is an OS-level observation bound by the
+record pin, discharging no additional category since the vocabulary
+has no runtime/ABI/process-semantics claim for it. Only an `exited`
+run with `exit_code == 0` selects the produced
+`mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
+design, so no `candidate` is emitted. The route is also the
+`native_stdout_accept` MCP tool (same `run_stdout_accept`
+report production, declared-path validation and basename redaction as
+the other spawn tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-check route (native-check)
 
 `python -m agent native-check --core <path> --bundle <dir>
