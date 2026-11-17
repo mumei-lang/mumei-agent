@@ -3,6 +3,7 @@ artifact recheck through the C11 attempt lifecycle."""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -363,38 +364,56 @@ def test_cli_dispatch():
     assert "--expected-build-id" in proc.stdout
 
 
-@pytest.mark.skipif(
-    not os.path.exists("/home/ubuntu/repos/mumei/target/debug/mumei"),
-    reason="real Core binary not built",
-)
-def test_real_core_end_to_end(tmp_path, capsys):
-    """Build a real bundle with the real Core, then replay the artifact
-    recheck as a declared attempt — reproduced + discharged checks."""
-    core = Path("/home/ubuntu/repos/mumei/target/debug/mumei")
-    source = tmp_path / "main.mm"
+@pytest.fixture
+def real_core():
+    path = os.environ.get("MUMEI_BIN")
+    if path and Path(path).is_absolute() and Path(path).is_file():
+        return path
+    found = shutil.which("mumei")
+    if found:
+        return found
+    pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+
+
+def _require_bundle(built: subprocess.CompletedProcess) -> None:
+    """Skip only on the documented unsupported-host rejection; every
+    other build failure is a genuine incompatibility the test must
+    surface, not skip."""
+    if built.returncode == 0:
+        return
+    if "unsupported host for first native profile" in built.stderr:
+        pytest.skip("native-bundle build needs linux/x86_64")
+    pytest.fail(f"native-bundle build failed: {built.stderr}")
+
+
+def _build_real_bundle(tmp_path: Path, real_core: str) -> tuple[Path, Path]:
+    source = tmp_path / "native-source.mm"
     source.write_text(SOURCE)
     bundle = tmp_path / "bundle"
-    build = subprocess.run(
-        [str(core), "native-bundle", "build", str(source), "-o", str(bundle)],
+    built = subprocess.run(
+        [real_core, "native-bundle", "build", str(source), "-o", str(bundle)],
         capture_output=True,
         text=True,
+        timeout=300,
     )
-    assert build.returncode == 0, build.stderr
+    _require_bundle(built)
+    return bundle, source
+
+
+@pytest.mark.integration
+def test_real_core_reproduces_stdout(tmp_path, capsys, real_core):
+    """End-to-end against the real Core: build a real native bundle,
+    then replay its stdout recheck as a declared attempt — a consistent
+    bundle yields `reproduced` with the discharged-check partition."""
+    bundle, source = _build_real_bundle(tmp_path, real_core)
     record = json.loads((bundle / RECORD_FILE).read_bytes())
+    assert record["schema"] == "mumei.native-bundle/v1"
     build_id = __import__("hashlib").sha256(
         (bundle / RECORD_FILE).read_bytes()
     ).hexdigest()
-    assert record["schema"] == "mumei.native-bundle/v1"
-    code, out, err = _run(
-        capsys,
-        [
-            "--core", str(core),
-            "--bundle", str(bundle),
-            "--source", str(source),
-            "--expected-build-id", build_id,
-            "--attempt-timeout", "120000",
-        ],
-    )
+    argv = _args(Path(real_core), bundle, source)
+    argv[argv.index("--expected-build-id") + 1] = build_id
+    code, out, err = _run(capsys, argv)
     assert code == 0, err
     report = json.loads(out)
     assert report["stdout_recheck"] == "reproduced"
@@ -402,4 +421,19 @@ def test_real_core_end_to_end(tmp_path, capsys):
         "artifact_semantics",
         "claim_truth",
     ]
+
+
+@pytest.mark.integration
+def test_real_core_rejects_wrong_build_id(tmp_path, capsys, real_core):
+    """A wrong expected-build-id fails the pinned-record gate — exit 1,
+    the ambiguous code: no claimed outcome, no selection."""
+    bundle, source = _build_real_bundle(tmp_path, real_core)
+    argv = _args(Path(real_core), bundle, source)
+    argv[argv.index("--expected-build-id") + 1] = "b" * 64
+    code, out, _ = _run(capsys, argv)
+    assert code == 0
+    report = json.loads(out)
+    assert "stdout_recheck" not in report
+    assert report["normalized"]["exit_code"] == 1
+    assert report["sequence"].get("selected_result") is None
 
