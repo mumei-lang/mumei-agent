@@ -3761,15 +3761,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     named_pointee = False
         if named_pointee:
             target = self._pointee_type(pointee_id) if pointee_id else None
-            if (
-                pointee_id
-                and (
-                    target is None
-                    or target.type.kind
-                    not in {"integer", "boolean", "pointer"}
+            if pointee_id:
+                # `type PP *X` — the member IS the pointer type, so
+                # the value this read returns is the pointee X: its
+                # own kind classifies the read, not PP's `pointer`
+                # kind (a `*func`/`*chan`/`*[]T` elem admits nothing
+                # a plain `*T` wouldn't).
+                read_fact = (
+                    target.type.elem
+                    if target is not None
+                    and target.type.kind == "pointer"
+                    else target.type if target is not None else None
                 )
-            ):
-                raise _Unsupported("non_parameter_reference", _span(node))
+                if read_fact is None or read_fact.kind not in {
+                    "integer",
+                    "boolean",
+                    "pointer",
+                }:
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
         if bound_ref is not None:
             # The pointee read touches memory outside the fragment —
             # record it like an imported member read so `effects`

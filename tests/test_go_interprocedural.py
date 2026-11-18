@@ -14314,3 +14314,59 @@ def test_named_pointer_underlying_callee_param_pins_pointee(
         if snapshot.binding(f.binding_id).name == "F"
     )
     assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_named_pointer_underlying_func_elem_deref_stays_closed(
+    go_types_helper,
+):
+    # `type PF *func(*int64, int64) int64` — `*p` reads a FUNCTION,
+    # not a pointer value: classifying PP's own `pointer` kind
+    # instead of the elem's `function` kind would admit `h := *p`
+    # and drop every write `h(&a, y)` performs through its
+    # parameter.
+    files = {
+        "a.go": "package p\n"
+        "type PF *func(*int64, int64) int64\n"
+        "func F(p PF, x, y int64) int64 {\n"
+        "\ta := x\n\th := *p\n\th(&a, y)\n\treturn a\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_named_pointer_underlying_imported_param_field_read(
+    go_types_helper,
+):
+    # `func F(p lib.PP)` with `type PP *S` — the importer never
+    # references S, but the producer declares S with PP's member so
+    # `p.V` resolves through the elem exactly like a local `PP`.
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype S struct{ V int64 }\ntype PP *S\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p lib.PP) int64 {\n"
+        "\treturn p.V\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    # S rides into the member set under PP's fact even though the
+    # importer names only PP.
+    assert "S" in members
+    assert members["PP"]["type"]["elem"]["type_id"] == members["S"]["id"]
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert members["S"]["id"] in result.pinned

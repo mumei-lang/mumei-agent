@@ -585,6 +585,17 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 		}
 	}
 	ix.importMembers[id] = m
+	if kind == "type" {
+		// `type PP *T` — the member's `elem` names the pointee a
+		// resolved use of PP needs (an admitted `p.V` on an imported
+		// `p lib.PP` parameter resolves S through PP's fact), so
+		// declare it with the member — `recordPointeeMembers`
+		// dedupes and the `importMembers` check stops cycles
+		// (`type A *B` / `type B *A`).
+		if p, ok := obj.Type().Underlying().(*types.Pointer); ok {
+			ix.recordPointeeMembers(p.Elem(), map[string]bool{})
+		}
+	}
 	if kind == "var" {
 		// A pointer-typed var's pointee identity must be declared too:
 		// the consumer needs the pointee's own fact to classify a
