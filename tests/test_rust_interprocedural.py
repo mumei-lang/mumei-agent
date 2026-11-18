@@ -1863,9 +1863,10 @@ def test_statement_reads_call_actual_records():
     assert frozenset({0}) in _reads(s).values()
 
 
-def test_statement_reads_inlined_callee_attribution():
-    # An inlined callee's body statements attribute to the caller
-    # under the callee's own spans — a local `fn` value path.
+def test_statement_reads_callee_composed_not_inlined():
+    # A call composed from the callee's summary keeps the
+    # callee's own statements in ITS statement_reads — the
+    # caller's records carry only the call site.
     src = (
         "fn g(v: u64) -> u64 {\n"
         "    let y = v + 1;\n"
@@ -1876,18 +1877,88 @@ def test_statement_reads_inlined_callee_attribution():
         "    z\n"
         "}\n"
     )
-    s = _fn(src, "f")
-    assert s.available
-    reads = _reads(s)
+    r = summarize_rust(src)
+    f = next(fn for fn in r.functions if fn.name == "f")
+    g = next(fn for fn in r.functions if fn.name == "g")
     callee_span = (
         src.index("let y = v + 1"),
         src.index("let y = v + 1") + len("let y = v + 1;"),
     )
-    # Whether the callee inlines or is recorded as a call site,
-    # the caller's statement still reads {0} for `a`.
-    assert frozenset({0}) in reads.values()
-    if callee_span in reads:
-        assert reads[callee_span] <= frozenset({0})
+    assert callee_span not in _reads(f)
+    assert _reads(g).get(callee_span) == frozenset({0})
+    assert frozenset({0}) in _reads(f).values()
+
+
+def test_statement_reads_compound_assign_lhs():
+    # `x += v` reads the old LHS slot — `_assign` bypasses
+    # `_expr`, so the read must be recorded explicitly.
+    src = (
+        "fn f(a: u64, b: u64) -> u64 {\n"
+        "    let mut x = a;\n"
+        "    x += b;\n"
+        "    x\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    idx = src.index("x += b")
+    aug = next(
+        r for span, r in _reads(s).items()
+        if span[0] <= idx < span[1]
+    )
+    assert aug == frozenset({0, 1})
+
+
+def test_statement_reads_fn_pointer_call_target():
+    # `cb();` reads the bound callee value even though the call
+    # is opaque and its result voided.
+    src = (
+        "fn f(cb: fn(u64) -> u64, a: u64) -> u64 {\n"
+        "    cb(a);\n"
+        "    0\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    if not s.available:
+        pytest.skip("fn-pointer params unsupported")
+    idx = src.index("cb(a)")
+    call = next(
+        r for span, r in _reads(s).items()
+        if span[0] <= idx < span[1]
+    )
+    assert frozenset({0}) <= call
+
+
+def test_statement_reads_deep_expression_no_overflow():
+    # ~600 chained additions stay under the recursion limit —
+    # the `_expr` wrapper must not double the frame count.
+    expr = " + ".join(["a"] * 600)
+    src = f"fn f(a: u64) -> u64 {{ {expr} }}"
+    s = _fn(src, "f")
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_statement_reads_failure_keeps_partial():
+    # A mid-body `_Unsupported` keeps the reads recorded before
+    # it — the failed summary is not rebuilt empty.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let x = a;\n"
+        "    let y = qq;\n"
+        "    x\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert not s.available
+    assert s.gaps
+    idx = src.index("let x = a")
+    rec = next(
+        (r for span, r in _reads(s).items()
+         if span[0] <= idx < span[1]),
+        None,
+    )
+    assert rec == frozenset({0})
 
 
 def test_statement_reads_roundtrip():
