@@ -135,6 +135,37 @@ class RustCall:
         )
 
 
+@dataclass(frozen=True)
+class RustStatementRead:
+    """Parameter ordinals read while evaluating one statement.
+
+    `span` is the statement node's `(start_byte, end_byte)` —
+    stable within the file that produced it and meaningless
+    across modules, so manifests only compare spans inside a
+    single summary set."""
+
+    span: tuple
+    deps: frozenset
+
+    def to_dict(self) -> dict:
+        return {
+            "span": [self.span[0], self.span[1]],
+            "deps": sorted(self.deps),
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "RustStatementRead":
+        v = _manifest_record(value, ("span", "deps"))
+        span = _list(v["span"])
+        _require_manifest(
+            len(span) == 2
+            and all(type(b) is int and b >= 0 for b in span)
+        )
+        return cls(
+            (span[0], span[1]), _deps_from_list(v["deps"])
+        )
+
+
 @dataclass
 class RustFunctionSummary:
     name: str
@@ -144,6 +175,7 @@ class RustFunctionSummary:
     calls: list = field(default_factory=list)
     gaps: list = field(default_factory=list)
     effects: str = "none_in_supported_fragment"
+    statement_reads: tuple = ()
 
     def to_dict(self) -> dict:
         return {
@@ -158,6 +190,9 @@ class RustFunctionSummary:
             "calls": [c.to_dict() for c in self.calls],
             "gaps": [g.to_dict() for g in self.gaps],
             "effects": self.effects,
+            "statement_reads": [
+                r.to_dict() for r in self.statement_reads
+            ],
         }
 
     @classmethod
@@ -173,6 +208,7 @@ class RustFunctionSummary:
                 "gaps",
                 "effects",
             ),
+            ("statement_reads",),
         )
         parameters = _list(v["parameters"])
         calls = _list(v["calls"])
@@ -185,6 +221,11 @@ class RustFunctionSummary:
         deps = v["return_dependencies"]
         restored_deps = None if deps is None else _deps_from_list(deps)
         restored_gaps = [RustGap.from_dict(g) for g in gaps]
+        statement_reads = [
+            RustStatementRead.from_dict(r)
+            for r in _list(v.get("statement_reads", []))
+        ]
+        _require_manifest(len(statement_reads) <= MAX_MANIFEST_MEMBERS)
         available = _boolean(v["available"])
         # A manifest may not contradict itself: `available` tracks
         # exactly "a result was derived and no gap was recorded" —
@@ -201,6 +242,7 @@ class RustFunctionSummary:
             [RustCall.from_dict(c) for c in calls],
             restored_gaps,
             _string(v["effects"]),
+            tuple(statement_reads),
         )
 
 
@@ -410,6 +452,13 @@ class _Builder:
         self._inline_depth = 0
         self._writes: list = []
         self._decls: list = []
+        # Per-statement read attribution: `_statement` pushes one
+        # frame per in-flight statement; `_expr` unions every
+        # evaluated dep set into every open frame, so a statement's
+        # reads cover its nested expressions and any inlined
+        # callee bodies (keyed by the callee's own spans).
+        self._read_stack: list = []
+        self._stmt_reads: dict = {}
         self.methods: dict = {}
         # `const K` / `static S` — compile-time constant, so a
         # read is dep-free; `static mut` writes mark unknown.
@@ -488,15 +537,24 @@ class _Builder:
         for name, fn_node in self.functions.items():
             try:
                 summaries.append(self._summarize(name, fn_node))
-            except _Unsupported as u:
-                summaries.append(
-                    RustFunctionSummary(
+            except (_Unsupported, RecursionError) as u:
+                if isinstance(u, _Unsupported):
+                    gap = RustGap(u.reason, u.byte)
+                else:
+                    gap = RustGap("analysis_limit", _span(fn_node))
+                partial = getattr(u, "partial_summary", None)
+                if partial is None:
+                    partial = RustFunctionSummary(
                         name=name, params=(), available=False,
                         return_dependencies=None,
-                        gaps=[RustGap(u.reason, u.byte)],
+                        gaps=[],
                         effects="unknown",
                     )
-                )
+                # A failed walk can't characterize its effects —
+                # stay fail-closed.
+                partial.effects = "unknown"
+                partial.gaps.append(gap)
+                summaries.append(partial)
         if self.resolved_paths is not None:
             self.resolved_paths.update(
                 entry[1]
@@ -918,7 +976,16 @@ class _Builder:
         # names, or its write to a `use`-imported static would look
         # like a write to the caller's local.
         prev_block_decls = self._block_decls
+        prev_reads = self._stmt_reads
+        prev_stack = self._read_stack
         self._block_decls = [set()]
+        self._read_stack = []
+        self._stmt_reads = {}
+        # Read records are per-function: a callee summarized
+        # through `_call` collects its own `statement_reads` —
+        # the caller's frames never see the callee body's spans,
+        # only the actuals' deps at the call site.
+        summary = None
         try:
             params = fn_node.child_by_field_name("parameters")
             param_names = []
@@ -985,8 +1052,12 @@ class _Builder:
                     # index stays aligned with the entry at that
                     # position.
                     idx += 1
+            # `params` is fixed before the body walk — a
+            # partial summary carried on `_Unsupported` keeps
+            # the names its dep indexes refer to.
             summary = RustFunctionSummary(
-                name=name, params=(), available=False,
+                name=name, params=tuple(param_names),
+                available=False,
                 return_dependencies=None,
             )
             body = fn_node.child_by_field_name("body")
@@ -1003,10 +1074,20 @@ class _Builder:
             ):
                 raise _Unsupported("missing_return", _span(fn_node))
             ret = (ret or frozenset()) | (ret_mark or frozenset())
-            summary.params = tuple(param_names)
             summary.return_dependencies = ret
             summary.available = True
             return summary
+        except (_Unsupported, RecursionError) as exc:
+            # Carry the partially built summary so `build` can
+            # keep the reads recorded before the failure. The
+            # dep indexes on `partial_deps` name THIS function's
+            # parameters — its own reads already landed in its
+            # `statement_reads`, so a caller composing this
+            # summary through `_call` must not inherit them.
+            exc.partial_deps = frozenset()
+            if summary is not None:
+                exc.partial_summary = summary
+            raise
         finally:
             self._type_envs.pop()
             self._mut_ref_params.pop()
@@ -1015,6 +1096,18 @@ class _Builder:
             self._in_progress.discard(name)
             self._cur_use_map, self._cur_mod_path = prev_scope
             self._block_decls = prev_block_decls
+            # Reads recorded up to the point of failure still
+            # attach — a gapped walk's partial attribution stays
+            # truthful about what was read before the gap.
+            if summary is not None:
+                summary.statement_reads = tuple(
+                    RustStatementRead(span, deps)
+                    for span, deps in sorted(
+                        self._stmt_reads.items()
+                    )
+                )
+            self._read_stack = prev_stack
+            self._stmt_reads = prev_reads
 
     # -- statements -------------------------------------------------
 
@@ -1076,7 +1169,28 @@ class _Builder:
         # handled inside _statement's expression arm.
         return ret
 
+    def _record_read(self, deps) -> None:
+        for i in range(len(self._read_stack)):
+            self._read_stack[i] = self._read_stack[i] | deps
+
     def _statement(self, st, locals_, param_index, summary):
+        # Every expression evaluated under this statement — its
+        # own and any inlined callee body's — lands in the open
+        # frames; nested statements pop their own record under
+        # their own span.
+        self._read_stack.append(frozenset())
+        try:
+            return self._statement_inner(
+                st, locals_, param_index, summary
+            )
+        finally:
+            frame = self._read_stack.pop()
+            key = (st.start_byte, st.end_byte)
+            self._stmt_reads[key] = self._stmt_reads.get(
+                key, frozenset()
+            ) | frame
+
+    def _statement_inner(self, st, locals_, param_index, summary):
         t = st.type
         if t == "let_declaration":
             pat = st.child_by_field_name("pattern")
@@ -1226,6 +1340,20 @@ class _Builder:
                     inner, locals_, param_index, summary, void=True
                 )
                 return None
+            if (
+                inner.type in _EXPR_TYPES
+                and inner.type not in _STMT_EXPR_TYPES
+            ):
+                # A plain expression under `...;` records once —
+                # on this statement's own span; a nested
+                # `_statement` frame would duplicate the record
+                # for every `0;`-style statement. Control-flow
+                # expressions keep the `_statement` path — their
+                # value-less forms return None, which `_expr`
+                # cannot record.
+                return self._expr(
+                    inner, locals_, param_index, summary
+                )
             r = self._statement(inner, locals_, param_index, summary)
             if r is not None:
                 return r
@@ -1261,7 +1389,10 @@ class _Builder:
                     deps |= self._expr(
                         c, locals_, param_index, summary
                     )
-                except _Unsupported:
+                except _Unsupported as exc:
+                    deps |= getattr(
+                        exc, "partial_deps", frozenset()
+                    )
                     continue
             return deps
         if t == "continue_expression":
@@ -1493,7 +1624,12 @@ class _Builder:
             name = left.text.decode()
             is_local = self._is_local_name(name, param_index)
             if expr.type == "compound_assignment_expr":
-                deps |= locals_.get(name, frozenset())
+                # `x += v` reads the old slot — the LHS never
+                # passes through `_expr` on the statement path,
+                # so record it here.
+                lhs_read = locals_.get(name, frozenset())
+                deps |= lhs_read
+                self._record_read(lhs_read)
             locals_[name] = deps
             if self._writes:
                 self._writes[-1].add(name)
@@ -1526,8 +1662,10 @@ class _Builder:
                 deps |= self._expr(
                     left, locals_, param_index, summary
                 )
-            except _Unsupported:
-                pass
+            except _Unsupported as exc:
+                deps |= getattr(
+                    exc, "partial_deps", frozenset()
+                )
             root = _arg_root(left)
             if root is not None:
                 if root in locals_:
@@ -1629,8 +1767,10 @@ class _Builder:
                     recv_deps = self._expr(
                         recv, locals_, param_index, summary
                     )
-                except _Unsupported:
-                    recv_deps = frozenset()
+                except _Unsupported as exc:
+                    recv_deps = getattr(
+                        exc, "partial_deps", frozenset()
+                    )
             actual_union |= recv_deps
         name = None
         raw_ident = None
@@ -1760,6 +1900,10 @@ class _Builder:
                 if raw_ident is not None
                 else frozenset()
             )
+            # `cb(...)` through a bound name reads the function
+            # pointer/closure value — a voided call drops that
+            # read from its result, so record it here.
+            self._record_read(bound)
             result = actual_union | bound
             cname = fn_expr.text.decode() if fn_expr is not None else None
             summary.calls.append(
@@ -1862,6 +2006,20 @@ class _Builder:
     # -- expressions -------------------------------------------------
 
     def _expr(self, node, locals_, param_index, summary):
+        try:
+            deps = self._expr_inner(node, locals_, param_index, summary)
+        except _Unsupported as exc:
+            # Reads evaluated before a mid-expression failure
+            # still attribute to the open statement frames —
+            # `_expr_inner` loops carry them on `partial_deps`.
+            partial = getattr(exc, "partial_deps", None)
+            if partial:
+                self._record_read(partial)
+            raise
+        self._record_read(deps)
+        return deps
+
+    def _expr_inner(self, node, locals_, param_index, summary):
         self.count[0] += 1
         if self.count[0] > MAX_NODES:
             raise _Unsupported("analysis_limit", _span(node))
@@ -1884,9 +2042,19 @@ class _Builder:
         }:
             deps = frozenset()
             for c in _children(node):
-                deps |= self._expr(
-                    c, locals_, param_index, summary
-                )
+                # `_expr_inner` recursion stays one frame per
+                # level — `_expr`'s record on the way out
+                # captures this subtree's union anyway.
+                try:
+                    deps |= self._expr_inner(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported as exc:
+                    exc.partial_deps = (
+                        getattr(exc, "partial_deps", frozenset())
+                        | deps
+                    )
+                    raise
             return deps
         if t in {
             "unary_expression", "reference_expression",
@@ -1897,9 +2065,16 @@ class _Builder:
             for c in _children(node):
                 if c.type in _TYPE_NAMES:
                     continue
-                deps |= self._expr(
-                    c, locals_, param_index, summary
-                )
+                try:
+                    deps |= self._expr_inner(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported as exc:
+                    exc.partial_deps = (
+                        getattr(exc, "partial_deps", frozenset())
+                        | deps
+                    )
+                    raise
             return deps
         if t == "call_expression":
             return self._call(
@@ -1923,10 +2098,13 @@ class _Builder:
             deps = frozenset()
             for c in _children(node):
                 try:
-                    deps |= self._expr(
+                    deps |= self._expr_inner(
                         c, locals_, param_index, summary
                     )
-                except _Unsupported:
+                except _Unsupported as exc:
+                    deps |= getattr(
+                        exc, "partial_deps", frozenset()
+                    )
                     continue
             return deps
         if t == "continue_expression":
@@ -1952,10 +2130,16 @@ class _Builder:
                     elif p.type == "identifier":
                         inner[p.text.decode()] = frozenset()
             try:
-                return self._expr(
+                return self._expr_inner(
                     cbody, inner, param_index, summary
                 )
-            except _Unsupported:
+            except _Unsupported as exc:
+                # An unanalyzable closure body is an opaque
+                # value, but reads evaluated before the failure
+                # still attribute to the enclosing statement.
+                self._record_read(
+                    getattr(exc, "partial_deps", frozenset())
+                )
                 return frozenset()
 
         if t == "unsafe_block":
@@ -1985,10 +2169,13 @@ class _Builder:
                     continue
                 for tok in _children(c):
                     try:
-                        deps |= self._expr(
+                        deps |= self._expr_inner(
                             tok, locals_, param_index, summary
                         )
-                    except _Unsupported:
+                    except _Unsupported as exc:
+                        deps |= getattr(
+                            exc, "partial_deps", frozenset()
+                        )
                         continue
             summary.calls.append(
                 RustCall(_span(node), cname, (deps,), deps)
@@ -2009,9 +2196,16 @@ class _Builder:
             for c in _children(node):
                 if c.type in _TYPE_NAMES:
                     continue
-                deps |= self._expr(
-                    c, locals_, param_index, summary
-                )
+                try:
+                    deps |= self._expr_inner(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported as exc:
+                    exc.partial_deps = (
+                        getattr(exc, "partial_deps", frozenset())
+                        | deps
+                    )
+                    raise
             return deps
         raise _Unsupported("unsupported_expression", _span(node))
 
@@ -2050,6 +2244,17 @@ _EXPR_TYPES = {
     "field_expression", "index_expression", "await_expression",
     "macro_invocation", "generic_function", "closure_expression",
     "let_condition",
+}
+
+# Expression types that carry statement semantics: as an
+# `expression_statement`'s inner they keep the `_statement`
+# path — their value-less forms return None, which `_expr`
+# cannot record.
+_STMT_EXPR_TYPES = {
+    "if_expression", "match_expression",
+    "while_expression", "loop_expression", "for_expression",
+    "block", "unsafe_block",
+    "break_expression", "continue_expression",
 }
 
 

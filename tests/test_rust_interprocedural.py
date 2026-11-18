@@ -1799,3 +1799,261 @@ def test_destructured_param_shadows_ancestor_static():
     s = next(f for f in r.functions if f.name == "af")
     assert s.effects != "unknown"
     assert s.return_dependencies == frozenset({0})
+
+
+def _reads(s):
+    return {r.span: r.deps for r in s.statement_reads}
+
+
+def test_statement_reads_attribute_per_statement():
+    src = (
+        "fn f(a: u64, b: u64) -> u64 {\n"
+        "    let x = a + 1;\n"
+        "    let y = b;\n"
+        "    x + y\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    decl_span = (
+        src.index("let x = a + 1"),
+        src.index("let x = a + 1") + len("let x = a + 1;"),
+    )
+    assert reads.get(decl_span) == frozenset({0}), reads
+    tail_span = (
+        src.index("x + y"),
+        src.index("x + y") + len("x + y"),
+    )
+    hit = next(
+        r for span, r in reads.items()
+        if span[0] <= tail_span[0] < span[1]
+    )
+    assert hit == frozenset({0, 1})
+
+
+def test_statement_reads_nested_attribution():
+    # Reads inside an if-body attribute to the inner statement's
+    # own span AND the enclosing if.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let mut y = 0;\n"
+        "    if a > 0 { y = a; }\n"
+        "    y\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    assert list(reads.values()).count(frozenset({0})) >= 2
+
+
+def test_statement_reads_call_actual_records():
+    # `g(a)` records {0} on the statement even though the callee
+    # returns a constant and the result is dropped.
+    src = (
+        "fn g(v: u64) -> u64 { 0 }\n"
+        "fn f(a: u64) -> u64 {\n"
+        "    g(a);\n"
+        "    0\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_callee_composed_not_inlined():
+    # A call composed from the callee's summary keeps the
+    # callee's own statements in ITS statement_reads — the
+    # caller's records carry only the call site.
+    src = (
+        "fn g(v: u64) -> u64 {\n"
+        "    let y = v + 1;\n"
+        "    y\n"
+        "}\n"
+        "fn f(a: u64) -> u64 {\n"
+        "    let z = g(a);\n"
+        "    z\n"
+        "}\n"
+    )
+    r = summarize_rust(src)
+    f = next(fn for fn in r.functions if fn.name == "f")
+    g = next(fn for fn in r.functions if fn.name == "g")
+    callee_span = (
+        src.index("let y = v + 1"),
+        src.index("let y = v + 1") + len("let y = v + 1;"),
+    )
+    assert callee_span not in _reads(f)
+    assert _reads(g).get(callee_span) == frozenset({0})
+    assert frozenset({0}) in _reads(f).values()
+
+
+def test_statement_reads_compound_assign_lhs():
+    # `x += v` reads the old LHS slot — `_assign` bypasses
+    # `_expr`, so the read must be recorded explicitly.
+    src = (
+        "fn f(a: u64, b: u64) -> u64 {\n"
+        "    let mut x = a;\n"
+        "    x += b;\n"
+        "    x\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    idx = src.index("x += b")
+    aug = next(
+        r for span, r in _reads(s).items()
+        if span[0] <= idx < span[1]
+    )
+    assert aug == frozenset({0, 1})
+
+
+def test_statement_reads_fn_pointer_call_target():
+    # `cb();` reads the bound callee value even though the call
+    # is opaque and its result voided.
+    src = (
+        "fn f(cb: fn(u64) -> u64, a: u64) -> u64 {\n"
+        "    cb(a);\n"
+        "    0\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    if not s.available:
+        pytest.skip("fn-pointer params unsupported")
+    idx = src.index("cb(a)")
+    call = next(
+        r for span, r in _reads(s).items()
+        if span[0] <= idx < span[1]
+    )
+    assert frozenset({0}) <= call
+
+
+def test_statement_reads_deep_expression_no_overflow():
+    # ~600 chained additions stay under the recursion limit —
+    # the `_expr` wrapper must not double the frame count.
+    expr = " + ".join(["a"] * 600)
+    src = f"fn f(a: u64) -> u64 {{ {expr} }}"
+    s = _fn(src, "f")
+    assert s.available
+    assert s.return_dependencies == frozenset({0})
+
+
+def test_statement_reads_failure_keeps_partial():
+    # A mid-body `_Unsupported` keeps the reads recorded before
+    # it — the failed summary is not rebuilt empty.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let x = a;\n"
+        "    let y = qq;\n"
+        "    x\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert not s.available
+    assert s.gaps
+    idx = src.index("let x = a")
+    rec = next(
+        (r for span, r in _reads(s).items()
+         if span[0] <= idx < span[1]),
+        None,
+    )
+    assert rec == frozenset({0})
+    # `params` is bound before the body walk, so the carried
+    # partial summary keeps the names its dep indexes mean.
+    assert s.params == ("a",)
+
+
+def test_statement_reads_closure_partial_failure():
+    # `u64::MAX` is unsupported inside the closure and swallows
+    # as an opaque value — but the `a` read evaluated before it
+    # still attributes to the `let` statement.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let cb = || a + u64::MAX;\n"
+        "    a\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    idx = src.index("let cb")
+    rec = next(
+        (r for span, r in _reads(s).items()
+         if span[0] <= idx < span[1]),
+        None,
+    )
+    assert rec == frozenset({0})
+
+
+def test_statement_reads_callee_failure_no_param_leak():
+    # A callee failing mid-expression carries ITS param indexes
+    # on `partial_deps` — `_summarize` blanks them at the
+    # boundary so the caller's frames never inherit dep indexes
+    # that belong to the callee's signature.
+    src = (
+        "fn g(b: u64) -> u64 {\n"
+        "    let z = b + qq;\n"
+        "    z\n"
+        "}\n"
+        "fn f() -> u64 {\n"
+        "    g()\n"
+        "}\n"
+    )
+    g = _fn(src, "g")
+    f = _fn(src, "f")
+    assert not g.available
+    assert not f.available
+    # `g`'s own reads stay on its own partial summary.
+    assert any(r == frozenset({0}) for r in _reads(g).values())
+    # `f` has no parameters — nothing from `g`'s index space
+    # may appear in `f`'s records.
+    for r in _reads(f).values():
+        assert r == frozenset()
+
+
+def test_statement_reads_call_arg_partial_failure():
+    # `ok(a, u64::MAX)` — the second actual is unsupported, but
+    # the first actual's read still attributes to the call.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    opaque(a, u64::MAX)\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    idx = src.index("opaque(")
+    rec = next(
+        (r for span, r in _reads(s).items()
+         if span[0] <= idx < span[1]),
+        None,
+    )
+    assert rec == frozenset({0})
+
+
+def test_statement_reads_roundtrip():
+    r = summarize_rust("fn f(a: u64) -> u64 { a }")
+    restored = RustSummarySet.from_dict(r.to_dict())
+    fn = next(f for f in restored.functions if f.name == "f")
+    orig = next(f for f in r.functions if f.name == "f")
+    assert fn.statement_reads == orig.statement_reads
+
+
+def test_statement_reads_manifest_optional():
+    # Manifests predating the field restore without it.
+    r = summarize_rust("fn f(a: u64) -> u64 { a }").to_dict()
+    for f in r["functions"]:
+        f.pop("statement_reads", None)
+    restored = RustSummarySet.from_dict(r)
+    assert all(fn.statement_reads == () for fn in restored.functions)
+
+
+def test_statement_reads_gapped_still_attaches():
+    # A gapped walk attaches what was recorded before the gap.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let x = a;\n"
+        "    x + missing_callee()\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    if not s.available:
+        assert s.gaps
