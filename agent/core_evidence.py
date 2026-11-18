@@ -624,6 +624,72 @@ def verify_signature_envelope(
     return verification
 
 
+# Evidence-binding schema: pin a subject-bearing document to the record
+# bytes it is said to cover.
+EVIDENCE_BINDING_SCHEMA = "mumei.evidence-binding/v1"
+
+# Which declared field of each subject-bearing schema carries the
+# record's SHA-256 digest. Both conventions hash the record's raw
+# bytes: `subject_digest` on a producer-signature envelope and
+# `evidence_fingerprint` on a Core acceptance descriptor are the same
+# SHA-256 a consumer reproduces with `sha256sum`.
+_BINDING_CARRIERS: dict = {
+    PRODUCER_SIGNATURE_SCHEMA: "subject_digest",
+    "mumei.source-evidence-acceptance/v1": "evidence_fingerprint",
+    "mumei.native-evidence-acceptance/v1": "evidence_fingerprint",
+}
+
+
+def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
+    """Pin a declared subject-bearing document to record bytes.
+
+    Emits ``mumei.evidence-binding/v1``: `record_digest` is the
+    SHA-256 lowercase hex of the supplied record's raw bytes —
+    recomputed by the fold, never trusted from a declared pin.
+    `carrier_match` holds only when `document` is an object whose
+    `schema_version` names a declared subject-bearing schema (a
+    producer-signature envelope's `subject_digest`, or a Core
+    acceptance descriptor's `evidence_fingerprint`). `subject_declared`
+    holds only when the matched carrier's subject field carries a
+    64-char lowercase-hex value. `bound` holds only when all three
+    hold AND the declared digest equals `record_digest` — a mismatched
+    or missing subject reports `false` observations, never an error,
+    since a document may honestly describe a different record.
+
+    This is representation-level: the document is trusted as declared
+    (`carrier_authenticity` — the fold never verifies the document's
+    own checks or signature) and the report gates nothing itself
+    (`binding_enforcement` stays in `checks_not_performed`)."""
+    import hashlib
+
+    if type(record) is not bytes:
+        raise ValueError("unsupported evidence binding record")
+    if type(document) is not dict:
+        raise ValueError("unsupported evidence binding document")
+    record_digest = hashlib.sha256(record).hexdigest()
+    schema = document.get("schema_version")
+    field = (
+        _BINDING_CARRIERS.get(schema) if type(schema) is str else None
+    )
+    match = field is not None
+    declared = (
+        _is_fingerprint(document.get(field)) if match else False
+    )
+    return {
+        "schema_version": EVIDENCE_BINDING_SCHEMA,
+        "record_digest": record_digest,
+        "carrier_match": match,
+        "subject_declared": declared,
+        "bound": match
+        and declared
+        and document[field] == record_digest,
+        "checks_not_performed": [
+            "carrier_authenticity",
+            "binding_enforcement",
+        ],
+    }
+
+
 # Unperformed-check recovery schema (the composition fold issue
 # mumei-agent#897's memo fixes): which of a record's declared
 # ``checks_not_performed`` a set of supporting documents covers.
@@ -656,6 +722,9 @@ _CHECK_PERFORMERS: dict = {
     ],
     "freshness": [
         ("mumei.freshness-evaluation/v1", "within_window"),
+    ],
+    "evidence_binding": [
+        (EVIDENCE_BINDING_SCHEMA, "bound"),
     ],
 }
 
