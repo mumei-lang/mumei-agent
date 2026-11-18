@@ -2553,9 +2553,18 @@ now admit at any depth (`**p`/`***p`/`****q` — the chain of unary
 `*` operands must still end at a bare identifier, each pointee
 level resolves through the pointer fact's `elem` or a named type
 identity, and the deepest element classifies scalar/pointer under
-a `<binding>/pointee`*depth identity or a named deep type),
-while named-alias pointer chains
-(`type PP *T`, whose producer facts stay opaque) fail closed).
+a `<binding>/pointee`*depth identity or a named deep type).
+Named-alias
+pointer chains now admit one hop — `type PP *T` emits a
+`pointer` fact on PP's own member (type_id keeps PP, `elem`
+carries the pointee), so `*p`/`p.V`/`p.V = v`, `(*p)[i]` and
+the range/auto-deref sugar on `type PS *[]T`/`type PA *[N]T`,
+an anonymous `*struct{...}` elem, and imported `var V PP`
+derefs all resolve like their `*T` spellings, pinning PP and
+every identity `elem` names (a `PP` signature parameter pins
+the pointee through `signature_type_ids` too), while a pointee
+that is itself a named pointer (`type PP *PS`) and any
+unmodelled elem kind stay closed.
 Anonymous `*struct{...}` pointees now admit single-level scalar
 field access — `p.V`/`(*p).V` reads and `p.V = v`/`+=`/`++`
 stores — since the producer emits a `struct` fact for every

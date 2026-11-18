@@ -6580,12 +6580,12 @@ def test_local_struct_value_embedded_pointer_leaf_write_stays_closed(
 @pytest.mark.parametrize(
     "statement", ["q.V = x", "q.V++", "q.V += x"]
 )
-def test_local_struct_value_named_pointer_write_stays_closed(
+def test_local_struct_value_named_pointer_write_is_admitted(
     go_types_helper, statement
 ):
     # `type Ptr *P` — `var q Ptr = p` binds a pointer under a named
-    # alias: `q.V` names a field of `*P`, so the store crosses the
-    # pointer into caller memory and stays closed.
+    # alias: `q.V` names a field of `*P` through Ptr's own member
+    # fact, so the store crosses into caller memory like `p.V` does.
     files = {
         "a.go": "package p\n"
         "type P struct{ V int64 }\ntype Ptr *P\n"
@@ -6596,7 +6596,9 @@ def test_local_struct_value_named_pointer_write_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
 
 
 def test_local_struct_value_map_literal_key_side_effect(
@@ -12242,12 +12244,12 @@ def test_double_pointer_store_observed(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_double_pointer_named_chain_stays_closed(
+def test_double_pointer_named_chain_is_admitted(
     go_types_helper,
 ):
-    # `type PP *int64; pp *PP` — the producer records the named
-    # alias's fact as opaque (`unsupported`), so the pointee chain
-    # cannot resolve pointer → scalar and the read fails closed.
+    # `type PP *int64; pp *PP` — PP's own member fact reads
+    # `pointer`, so the chain resolves pointer → named pointer →
+    # scalar and `**pp` reads deps on pp like `pp **int64` does.
     files = {
         "a.go": "package p\n"
         "type PP *int64\n"
@@ -12257,8 +12259,8 @@ def test_double_pointer_named_chain_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
-    assert result.gaps[0].reason == "non_parameter_reference"
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_triple_pointer_read(
@@ -12314,12 +12316,13 @@ def test_triple_pointer_parenthesized_read(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_triple_pointer_named_chain_stays_closed(
+def test_triple_pointer_named_chain_admits(
     go_types_helper,
 ):
-    # `type PT *int64; ppp **PT` — the producer records PT's fact
-    # as opaque (`unsupported`), so the third-level descent cannot
-    # resolve and the read fails closed.
+    # `type PT *int64; ppp **PT` — PT now emits a `pointer` fact
+    # (named-alias one-hop), so the arbitrary-depth descent resolves
+    # `*PT` → PT → `int64` and the read admits like `***q` on
+    # `q ***int64`.
     files = {
         "a.go": "package p\n"
         "type PT *int64\n"
@@ -12329,8 +12332,8 @@ def test_triple_pointer_named_chain_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
-    assert result.gaps[0].reason == "non_parameter_reference"
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_triple_pointer_computed_operand_stays_closed(
@@ -13866,3 +13869,554 @@ def test_statement_reads_parallel_dest_uses_old_binding(go_types_helper):
     assert result.available
     reads = {r.deps for r in result.statement_reads}
     assert frozenset({0, 1, 2}) in reads
+
+
+def test_named_pointer_underlying_scalar_deref_read(go_types_helper):
+    # `type PP *int64` — the declared name IS the pointer type:
+    # `*p` resolves one hop through PP's member fact and records
+    # deps on p exactly like a declared `*int64`.
+    files = {
+        "a.go": "package p\n"
+        "type PP *int64\n"
+        "func F(p PP) int64 {\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    pp_id = next(
+        b.id
+        for b in snapshot.bindings
+        if b.name == "PP" and b.kind == "type"
+    )
+    assert pp_id in result.pinned
+
+
+def test_named_pointer_underlying_scalar_deref_write(go_types_helper):
+    # `*p = x` on `type PP *int64` — the write side folds x into p's
+    # continuing dep set through the same hop the read admits.
+    files = {
+        "a.go": "package p\n"
+        "type PP *int64\n"
+        "func F(p PP, x int64) int64 {\n"
+        "\t*p = x\n\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_named_pointer_underlying_scalar_deref_inc(go_types_helper):
+    # `*p++` reads and stores through the named pointer like `*p` does.
+    files = {
+        "a.go": "package p\n"
+        "type PP *int64\n"
+        "func F(p PP) int64 {\n"
+        "\t(*p)++\n\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_underlying_struct_field_read(go_types_helper):
+    # `type PP *S` — `p.V` selects through the named pointer the way
+    # `p *S` does; `(*p).V` is the same selection spelled out.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\ntype PP *S\n"
+        "func F(p PP) int64 {\n"
+        "\treturn p.V + (*p).V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    s_id = next(
+        b.id
+        for b in snapshot.bindings
+        if b.name == "S" and b.kind == "type"
+    )
+    assert s_id in result.pinned
+
+
+def test_named_pointer_underlying_struct_field_write(go_types_helper):
+    # `p.V = x` on `type PP *S` — the write transfers through the
+    # named pointee and the read side observes the store.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\ntype PP *S\n"
+        "func F(p PP, x int64) int64 {\n"
+        "\tp.V = x\n\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_named_pointer_underlying_slice_index_read(go_types_helper):
+    # `(*p)[i]` on `type PS *[]int64` — the bound container pointee
+    # resolves through PS's elem to the slice.
+    files = {
+        "a.go": "package p\n"
+        "type PS *[]int64\n"
+        "func F(p PS, i int64) int64 {\n"
+        "\treturn (*p)[i]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_named_pointer_underlying_slice_index_write(go_types_helper):
+    # `(*p)[i] = x` on `type PS *[]int64` — the write transfers into
+    # caller memory like `p *[]int64` does.
+    files = {
+        "a.go": "package p\n"
+        "type PS *[]int64\n"
+        "func F(p PS, i, x int64) int64 {\n"
+        "\t(*p)[i] = x\n\treturn (*p)[0]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_named_pointer_underlying_array_index_read(go_types_helper):
+    # `(*p)[i]` and the auto-deref sugar `p[i]` on `type PA *[4]int64`
+    # admit through PA's elem like they do on `*[4]int64`.
+    files = {
+        "a.go": "package p\n"
+        "type PA *[4]int64\n"
+        "func F(p PA, i int64) int64 {\n"
+        "\treturn (*p)[i] + p[i]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_pointer_underlying_slice_element_field_read(
+    go_types_helper,
+):
+    # `(*p)[i].V` on `type PS *[]S` — the container hop lands on the
+    # slice, and the element field read proceeds exactly like it
+    # does on `p *[]S`.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\ntype PS *[]S\n"
+        "func F(p PS, i int64) int64 {\n"
+        "\treturn (*p)[i].V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_pointer_underlying_slice_nested_element_field(
+    go_types_helper,
+):
+    # `(*p)[i].V.G` on `type PS *[]Q` — one deeper level through the
+    # named pointer's container pointee like the direct `*[]Q`.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ G int64 }\ntype Q struct{ V S }\ntype PS *[]Q\n"
+        "func F(p PS, i int64) int64 {\n"
+        "\treturn (*p)[i].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_pointer_underlying_range_read(go_types_helper):
+    # `for _, v := range *p` on `type PS *[]int64` iterates the same
+    # caller-memory elements `*p` exposes on `*[]int64`.
+    files = {
+        "a.go": "package p\n"
+        "type PS *[]int64\n"
+        "func F(p PS) int64 {\n"
+        "\ts := int64(0)\n"
+        "\tfor _, v := range *p { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_underlying_nested_pointer(go_types_helper):
+    # `**pp` on `type PP2 **int64` — PP2's elem is an unnamed `*int64`,
+    # so the second hop resolves the same pointee `**int64` does.
+    files = {
+        "a.go": "package p\n"
+        "type PP2 **int64\n"
+        "func F(pp PP2) int64 {\n"
+        "\treturn **pp\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_underlying_anonymous_struct(go_types_helper):
+    # `type PA *struct{ V int64 }` — the unnamed pointee resolves
+    # under the binding's `/pointee` synthetic identity like a
+    # declared `p *struct{...}` does.
+    files = {
+        "a.go": "package p\n"
+        "type PA *struct{ V int64 }\n"
+        "func F(p PA) int64 {\n"
+        "\treturn p.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_underlying_unmodelled_elem_stays_closed(
+    go_types_helper,
+):
+    # `type PC *chan int64` — the pointee is a channel, a kind the
+    # dep model does not carry, so `*p` still fails closed.
+    files = {
+        "a.go": "package p\n"
+        "type PC *chan int64\n"
+        "func F(p PC) chan int64 {\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_named_pointer_underlying_pointer_named_elem_stays_closed(
+    go_types_helper,
+):
+    # `type PP *PS` with `type PS *[]int64` — the pointee is ANOTHER
+    # named pointer, and `(*(*p))[i]` would need a second hop the
+    # model deliberately does not take: it stays closed.
+    files = {
+        "a.go": "package p\n"
+        "type PS *[]int64\ntype PP *PS\n"
+        "func F(p PP, i int64) int64 {\n"
+        "\treturn (*(*p))[i]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_named_pointer_underlying_imported_var_deref(go_types_helper):
+    # `var lib.V PP` with `type PP *T` — `*lib.V` reads and writes
+    # resolve through the named pointer var the way `var lib.V *T`
+    # does, and pin PP, T and the pointee kind.
+    lib = {
+        "lib": {
+            "v.go": "package lib\ntype PP *T\nvar V PP\nvar VS PS\n",
+            "t.go": "package lib\ntype T int64\ntype S struct{ F int64 }\ntype PS *S\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T) int64 {\n"
+        "\t*lib.V = x\n\treturn int64(*lib.V)\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["V"]["type"]["kind"] == "pointer"
+    assert members["V"]["type"]["type_id"] == members["PP"]["id"]
+    assert members["V"]["pointee_kind"] == "integer"
+    assert members["V"]["pointee_type_ids"] == [members["T"]["id"]]
+    assert members["PP"]["type"]["kind"] == "pointer"
+    assert members["PP"]["type"]["elem"]["type_id"] == members["T"]["id"]
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert members["PP"]["id"] in result.pinned
+    assert members["T"]["id"] in result.pinned
+
+
+def test_named_pointer_underlying_imported_var_flags_stale(
+    go_types_helper,
+):
+    # Redeclaring PP (or the pointee T it underlies) stales a summary
+    # that read `*lib.V` — the pin rides PP's declared fact.
+    lib = {
+        "lib": {
+            "v.go": "package lib\ntype PP *T\nvar V PP\n",
+            "t.go": "package lib\ntype T int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn int64(*lib.V)\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(lib["lib"])
+    lib2["t.go"] = "package lib\ntype T int32\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_named_pointer_underlying_imported_struct_field(
+    go_types_helper,
+):
+    # `var lib.VS PS` with `type PS *S` — `lib.VS.F` selects the
+    # named pointer var's struct pointee like `var lib.VS *S` does.
+    lib = {
+        "lib": {
+            "v.go": "package lib\ntype PS *S\nvar VS PS\n",
+            "t.go": "package lib\ntype S struct{ F int64 }\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn int64(lib.VS.F)\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_named_pointer_underlying_callee_param_pins_pointee(
+    go_types_helper,
+):
+    # `func G(v PP)` on `type PP *T` — the signature_type_ids pin
+    # PP AND T, so redeclaring T stales a caller that relies on
+    # PP's `*T` shape.
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G(v PP) int64 { return int64(*v) }\n",
+            "t.go": "package lib\ntype T int64\ntype PP *T\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v lib.PP) int64 {\n"
+        "\treturn lib.G(v)\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    g_pins = members["G"]["signature_type_ids"]
+    assert members["PP"]["id"] in g_pins
+    # T names no member of its own — the importer never references
+    # it — but its declared identity still pins through PP's elem.
+    lib_snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, lib["lib"]),
+        lib["lib"],
+        target_arch="amd64",
+    )
+    t_id = next(
+        b.id
+        for b in lib_snapshot.bindings
+        if b.name == "T" and b.kind == "type"
+    )
+    assert t_id in g_pins
+    lib2 = dict(lib["lib"])
+    lib2["t.go"] = "package lib\ntype T int32\ntype PP *T\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_named_pointer_underlying_func_elem_deref_stays_closed(
+    go_types_helper,
+):
+    # `type PF *func(*int64, int64) int64` — `*p` reads a FUNCTION,
+    # not a pointer value: classifying PP's own `pointer` kind
+    # instead of the elem's `function` kind would admit `h := *p`
+    # and drop every write `h(&a, y)` performs through its
+    # parameter.
+    files = {
+        "a.go": "package p\n"
+        "type PF *func(*int64, int64) int64\n"
+        "func F(p PF, x, y int64) int64 {\n"
+        "\ta := x\n\th := *p\n\th(&a, y)\n\treturn a\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_named_pointer_underlying_imported_param_field_read(
+    go_types_helper,
+):
+    # `func F(p lib.PP)` with `type PP *S` — the importer never
+    # references S, but the producer declares S with PP's member so
+    # `p.V` resolves through the elem exactly like a local `PP`.
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype S struct{ V int64 }\ntype PP *S\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p lib.PP) int64 {\n"
+        "\treturn p.V\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    # S rides into the member set under PP's fact even though the
+    # importer names only PP.
+    assert "S" in members
+    assert members["PP"]["type"]["elem"]["type_id"] == members["S"]["id"]
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert members["S"]["id"] in result.pinned
+
+
+def test_named_pointer_underlying_pointer_pointee_deref_admits(
+    go_types_helper,
+):
+    # `type PS *[]int64; func F(p *PS) PS { return *p }` — `*p`
+    # returns the PS VALUE, a pointer-kind result, not a slice:
+    # the dereferenced pointer's own `elem` (PS's {pointer} fact)
+    # classifies the read, not PS's `elem`.
+    files = {
+        "a.go": "package p\n"
+        "type PS *[]int64\n"
+        "func F(p *PS) PS {\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_underlying_imported_named_pointer_var(
+    go_types_helper,
+):
+    # `var V *PS` imported — `*lib.V` returns a PS pointer value,
+    # so the read admits the same way a bound `*PS` does.
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype PS *[]int64\nvar V *PS\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tv := *lib.V\n\t_ = v\n\treturn x\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
