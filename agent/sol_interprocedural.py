@@ -61,6 +61,7 @@ profile so reuse requires identical input.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 
 PROFILE = "mumei.sol-scalar-parameter-deps/v1"
@@ -333,6 +334,13 @@ class SolFunctionSummary:
             available == (restored_deps is not None)
             and available == (not restored_gaps)
         )
+        # An ordinal outside the declared parameter range can never
+        # come from an honest derivation — the record is malformed
+        # rather than merely unmatchable.
+        _require_manifest(
+            restored_deps is None
+            or max(restored_deps, default=-1) < len(parameters)
+        )
         return cls(
             _string(v["name"]),
             _string(v["contract"]),
@@ -351,13 +359,22 @@ class SolSummarySet:
     context_key: str
     functions: list[SolFunctionSummary]
     profile: str = PROFILE
+    # `--summary-aware-calls` reporting: present only on manifests
+    # derived with a declared callee manifest — advisory counts
+    # (`summary_modeled_calls` folded, `opaque_calls` left opaque,
+    # `summary_unmatched` manifest entries never referenced), never
+    # a verdict or a gate.
+    call_modeling: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        doc = {
             "schema_version": self.profile,
             "context_key": self.context_key,
             "functions": [f.to_dict() for f in self.functions],
         }
+        if self.call_modeling is not None:
+            doc["call_modeling"] = self.call_modeling
+        return doc
 
     @classmethod
     def from_dict(cls, value) -> "SolSummarySet":
@@ -370,10 +387,15 @@ class SolSummarySet:
         v = _manifest_record(
             value,
             ("schema_version", "context_key", "functions"),
+            ("call_modeling",),
         )
         _require_manifest(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
         _require_manifest(len(functions) <= MAX_MANIFEST_MEMBERS)
+        call_modeling = v.get("call_modeling")
+        _require_manifest(
+            call_modeling is None or type(call_modeling) is dict
+        )
         restored = [
             SolFunctionSummary.from_dict(f) for f in functions
         ]
@@ -385,6 +407,7 @@ class SolSummarySet:
         return cls(
             _string(v["context_key"]),
             restored,
+            call_modeling=call_modeling,
         )
 
 
@@ -460,6 +483,7 @@ class _Builder:
         module_cache=None,
         module_digests=None,
         resolved_paths=None,
+        declared=None,
     ):
         self.source = source
         self.count = [0]
@@ -522,6 +546,21 @@ class _Builder:
         # Out-param: resolved filesystem paths — routes refuse
         # `--output` targets that would overwrite one.
         self.resolved_paths = resolved_paths
+        # `--summary-aware-calls`: the declared callee manifest's
+        # name -> entry map; `_declared_seen` feeds
+        # `summary_unmatched`.
+        self._declared = (
+            {f.name: f for f in declared.functions}
+            if declared is not None
+            else {}
+        )
+        self._declared_set = declared
+        self._declared_seen: set[str] = set()
+        # Advisory call accounting, deduped by call-site span
+        # (module, start, end) so a body re-walked after an
+        # unavailable cache hit does not double-count its calls.
+        self._modeled_spans: set[tuple[str, int, int]] = set()
+        self._opaque_spans: set[tuple[str, int, int]] = set()
         if resolver is not None:
             import inspect
 
@@ -578,6 +617,38 @@ class _Builder:
         )
         return parser.parse(source).root_node
 
+    def _declared_entry(self, callee: str):
+        """Declared manifest entry for an opaque call's recorded name.
+
+        A call recorded as `tok.<rest>` also matches a manifest
+        entry named `rest` — the module token prefixes the callee's
+        standalone name (a manifest produced for `lib.sol` alone
+        names `C.f`, folded back when the caller records
+        `lib.C.f`). A deeper match — `a.b.f` for an entry named
+        `f` — never folds: the qualifier is not a single module
+        token."""
+        if not self._declared:
+            return None
+        entry = self._declared.get(callee)
+        if entry is None and "." in callee:
+            entry = self._declared.get(callee.split(".", 1)[1])
+        if entry is not None:
+            self._declared_seen.add(entry.name)
+        return entry
+
+    def _call_modeling(self):
+        """The `call_modeling` advisory block — only on manifests
+        derived with a declared callee manifest."""
+        if self._declared_set is None:
+            return None
+        return {
+            "summary_modeled_calls": len(self._modeled_spans),
+            "opaque_calls": len(self._opaque_spans),
+            "summary_unmatched": (
+                len(self._declared) - len(self._declared_seen)
+            ),
+        }
+
     @staticmethod
     def _qual(tok, name):
         """Internal registry name — the root module keeps bare
@@ -592,7 +663,27 @@ class _Builder:
         summaries = []
         for name, fn_node in self.functions.items():
             try:
-                summaries.append(self._summarize(name, fn_node))
+                # A callee already summarized inline for an
+                # earlier caller is reused — re-walking it would
+                # double-count its calls in the `call_modeling`
+                # advisory. An inline walk cut short by the depth
+                # limit caches an unavailable entry, so it is
+                # re-derived at top level; its calls were already
+                # counted on the first walk, so the advisory
+                # counters are restored after the fresh pass.
+                cached = self.summaries.get(name)
+                if cached is not None and cached.available:
+                    summaries.append(cached)
+                elif cached is not None:
+                    # The advisory counters dedup by call-site
+                    # span, so re-deriving is idempotent for
+                    # calls already counted and still picks up
+                    # calls the first walk never reached.
+                    fresh = self._summarize(name, fn_node)
+                    self.summaries[name] = fresh
+                    summaries.append(fresh)
+                else:
+                    summaries.append(self._summarize(name, fn_node))
             except RecursionError:
                 summaries.append(
                     SolFunctionSummary(
@@ -606,16 +697,27 @@ class _Builder:
                 )
         # The context key folds every resolved module's bytes with
         # the root source — a changed module invalidates reuse. A
-        # resolver-free unit hashes exactly as before.
+        # resolver-free unit hashes exactly as before. Under
+        # `--summary-aware-calls` the callee manifest's canonical
+        # bytes fold in too — it is a derivation input like the
+        # sources, so a changed manifest invalidates the strict
+        # whole-context gate.
         ctx = hashlib.sha256(self.source + PROFILE.encode())
         for ref, digest in sorted(self.module_digests.items()):
             ctx.update(ref.encode())
             ctx.update(b"\x00")
             ctx.update(digest.encode())
             ctx.update(b"\x00")
+        if self._declared_set is not None:
+            ctx.update(
+                json.dumps(
+                    self._declared_set.to_dict(), sort_keys=True
+                ).encode()
+            )
         return SolSummarySet(
             context_key=f"{PROFILE}:{ctx.hexdigest()}",
             functions=summaries,
+            call_modeling=self._call_modeling(),
         )
 
     # -- module scan --------------------------------------------------
@@ -3191,11 +3293,64 @@ class _Builder:
                 )
             except _Unsupported:
                 base_deps = frozenset()
-            result_deps = actual_union | base_deps
+            callee_name = (
+                f"{ext_member[0].text.decode()}.{ext_member[1]}"
+            )
+            # `f{value: b}(a)` appends the call options as one
+            # trailing actual entry — they are not parameters,
+            # so arity and ordinals are checked against the real
+            # argument prefix only.
+            param_actual = actual[: len(args)]
+            declared_entry = self._declared_entry(callee_name)
+            foldable = (
+                declared_entry is not None
+                and not void
+                and not named_args
+                and declared_entry.available
+                and len(declared_entry.params) == len(param_actual)
+                and max(
+                    declared_entry.return_dependencies,
+                    default=-1,
+                )
+                < len(param_actual)
+            )
+            if foldable:
+                # `--summary-aware-calls` fold: the declared
+                # return_dependencies replace the opaque
+                # every-argument union; the receiver deps stay
+                # (the base object is still opaque), and
+                # `effects` stays `unknown` — the manifest cannot
+                # bound writes through argument objects, so the
+                # opaque write approximation never narrows. Call
+                # options stay in the result too — the manifest
+                # does not describe them either.
+                folded = frozenset().union(
+                    *(param_actual[i] for i in declared_entry.return_dependencies)
+                ) if declared_entry.return_dependencies else frozenset()
+                result_deps = folded | opt_deps | base_deps
+                self._modeled_spans.add(
+                    (
+                        self._mod_stack[-1] if self._mod_stack else "",
+                        node.start_byte,
+                        node.end_byte,
+                    )
+                )
+            else:
+                result_deps = actual_union | base_deps
+                if self._declared_set is not None:
+                    self._opaque_spans.add(
+                        (
+                            self._mod_stack[-1]
+                            if self._mod_stack
+                            else "",
+                            node.start_byte,
+                            node.end_byte,
+                        )
+                    )
             summary.calls.append(
                 SolCall(
                     _span(node),
-                    f"{ext_member[0].text.decode()}.{ext_member[1]}",
+                    callee_name,
                     actual_t,
                     result_deps if not void else None,
                 )
@@ -3324,6 +3479,7 @@ def summarize_solidity(
     source_path=None,
     module_digests=None,
     resolved_paths=None,
+    declared=None,
 ) -> SolSummarySet:
     """Summarize a Solidity source string — see the module
     docstring for the admitted fragment and its limits.
@@ -3333,7 +3489,13 @@ def summarize_solidity(
     `(spec)` -> source text (str/bytes) or a resolved Path; None
     leaves the directive's symbols opaque. `module_digests` and
     `resolved_paths` are out-params recording the resolved
-    modules' digests and filesystem paths."""
+    modules' digests and filesystem paths. `declared` is a
+    `SolSummarySet` callee manifest: an opaque external-member
+    call whose recorded name an entry covers folds the entry's
+    declared `return_dependencies` instead of the opaque
+    every-argument union — trusted as declared; a callee the
+    manifest misses keeps opaque behavior, so a partial manifest
+    can never narrow below today's width."""
     data = source.encode() if isinstance(source, str) else source
     builder = _Builder(
         data,
@@ -3341,6 +3503,7 @@ def summarize_solidity(
         source_path=source_path,
         module_digests=module_digests,
         resolved_paths=resolved_paths,
+        declared=declared,
     )
     try:
         return builder.build()
@@ -3348,7 +3511,12 @@ def summarize_solidity(
         # A unit-level failure closes the whole source — one
         # summary per registered function is still emitted
         # with the gap attached to the first.
-        key = hashlib.sha256(data + PROFILE.encode()).hexdigest()
+        ctx = hashlib.sha256(data + PROFILE.encode())
+        if declared is not None:
+            ctx.update(
+                json.dumps(declared.to_dict(), sort_keys=True).encode()
+            )
+        key = ctx.hexdigest()
         return SolSummarySet(
             context_key=f"{PROFILE}:{key}",
             functions=[
@@ -3362,6 +3530,7 @@ def summarize_solidity(
                 )
                 for name in builder.functions
             ],
+            call_modeling=builder._call_modeling(),
         )
 
 
@@ -3452,6 +3621,21 @@ def build_parser(parser=None):
             "bounded by the source-size cap, and the context key "
             "folds every resolved file's bytes. Unresolvable "
             "directives keep their symbols opaque."
+        ),
+    )
+    parser.add_argument(
+        "--summary-aware-calls",
+        metavar="<MANIFEST>",
+        default=None,
+        help=(
+            "Callee summary manifest "
+            "(mumei.sol-scalar-parameter-deps/v1): an opaque "
+            "external-member call whose recorded name a manifest "
+            "entry covers folds the entry's declared "
+            "return_dependencies instead of the opaque "
+            "every-argument union. The manifest is trusted as "
+            "declared; its canonical bytes fold into the context "
+            "key."
         ),
     )
     return parser
@@ -3671,6 +3855,27 @@ def _read_declared_manifest(path, schema=ACCEPT_PROFILE):
         )
 
 
+def _callee_manifest(args, schema=PROFILE):
+    """The `--summary-aware-calls` manifest — declared, trusted
+    as asserted; malformed fails statically like the primary
+    manifest."""
+    path = getattr(args, "summary_aware_calls", None)
+    if path is None:
+        return None
+    return _read_declared_manifest(path, schema)
+
+
+def _declared_input_paths(args) -> list:
+    """Every declared input the route consumes — `--output` may
+    not overwrite one."""
+    paths = [args.source]
+    for extra in ("manifest", "summary_aware_calls"):
+        path = getattr(args, extra, None)
+        if path is not None:
+            paths.append(path)
+    return paths
+
+
 def main(args=None) -> None:
     import json
 
@@ -3683,6 +3888,7 @@ def main(args=None) -> None:
                 raw,
                 resolver=_resolver_for(args),
                 source_path=args.source,
+                declared=_callee_manifest(args),
             ).to_dict(),
             sort_keys=True,
         )
@@ -3750,6 +3956,7 @@ def main_accept(args=None) -> None:
         raw,
         resolver=_resolver_for(args),
         source_path=args.source,
+        declared=_callee_manifest(args, ACCEPT_PROFILE),
     )
     _emit(
         summary_accept_document(declared, live, args.function), 0
@@ -3816,7 +4023,9 @@ def summary_reuse_set(declared, live) -> SolSummarySet:
         declared_by_name.get(f.name, f) if f.name in reusable else f
         for f in live.functions
     ]
-    return SolSummarySet(live.context_key, merged)
+    return SolSummarySet(
+        live.context_key, merged, call_modeling=live.call_modeling
+    )
 
 
 def main_check(args=None) -> None:
@@ -3835,7 +4044,7 @@ def main_check(args=None) -> None:
         args = build_check_parser().parse_args()
     _reject_overwrite(
         getattr(args, "output", None),
-        [args.manifest, args.source],
+        _declared_input_paths(args),
         CHECK_PROFILE,
     )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
@@ -3846,6 +4055,7 @@ def main_check(args=None) -> None:
         resolver=_resolver_for(args),
         source_path=args.source,
         resolved_paths=resolved,
+        declared=_callee_manifest(args, CHECK_PROFILE),
     )
     _reject_overwrite(
         getattr(args, "output", None), resolved, CHECK_PROFILE
@@ -3877,7 +4087,7 @@ def main_reuse(args=None) -> None:
         args = build_reuse_parser().parse_args()
     _reject_overwrite(
         getattr(args, "output", None),
-        [args.manifest, args.source],
+        _declared_input_paths(args),
         CHECK_PROFILE,
     )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
@@ -3888,6 +4098,7 @@ def main_reuse(args=None) -> None:
         resolver=_resolver_for(args),
         source_path=args.source,
         resolved_paths=resolved,
+        declared=_callee_manifest(args, CHECK_PROFILE),
     )
     _reject_overwrite(
         getattr(args, "output", None), resolved, CHECK_PROFILE
@@ -3941,10 +4152,15 @@ def build_attempt_parser(parser=None):
     return parser
 
 
-def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
-    """Bind the request's declared input into one request identity."""
+def _attempt_fingerprint(
+    source_path: str,
+    raw: bytes,
+    summary_aware_calls: "str | None" = None,
+) -> str:
+    """Bind the request's declared inputs into one request identity."""
     import hashlib
     import json
+    from pathlib import Path
 
     request_doc = {
         "schema_version": ATTEMPT_REQUEST_PROFILE,
@@ -3953,6 +4169,25 @@ def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
     }
+    if summary_aware_calls is not None:
+        # The callee manifest is a declared input like the
+        # source: bound by bytes, unreadable is a lifecycle
+        # failure, never a silently wider request.
+        try:
+            with open(summary_aware_calls, "rb") as handle:
+                blob = handle.read(MAX_MANIFEST_BYTES + 1)
+        except OSError as exc:
+            raise ValueError(
+                "summary-aware-calls manifest unreadable"
+            ) from exc
+        if len(blob) > MAX_MANIFEST_BYTES:
+            raise ValueError(
+                "summary-aware-calls manifest too large"
+            )
+        request_doc["summary_aware_calls"] = {
+            "path": summary_aware_calls,
+            "sha256": hashlib.sha256(blob).hexdigest(),
+        }
     return hashlib.sha256(
         json.dumps(
             request_doc, sort_keys=True, separators=(",", ":")
@@ -3960,7 +4195,13 @@ def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
     ).hexdigest()
 
 
-def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
+def run_attempt(
+    source_path,
+    raw,
+    attempt_timeout,
+    memory_bound_mb=None,
+    summary_aware_calls=None,
+):
     """Run the produce route as one declared attempt → report dict.
 
     Shared by ``sol-summaries-attempt`` and the
@@ -3983,13 +4224,20 @@ def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
         AttemptSequenceStore,
     )
 
-    fingerprint = _attempt_fingerprint(source_path, raw)
+    fingerprint = _attempt_fingerprint(
+        source_path, raw, summary_aware_calls
+    )
     argv = (
         sys.executable,
         "-m",
         "agent",
         "sol-summaries",
         source_path,
+        *(
+            ("--summary-aware-calls", summary_aware_calls)
+            if summary_aware_calls is not None
+            else ()
+        ),
     )
     sequence = AttemptSequence(fingerprint, attempt_timeout)
     store = AttemptSequenceStore()
@@ -4003,11 +4251,13 @@ def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
     try:
         drifted = (
             _attempt_fingerprint(
-                source_path, Path(source_path).read_bytes()
+                source_path,
+                Path(source_path).read_bytes(),
+                summary_aware_calls,
             )
             != fingerprint
         )
-    except OSError:
+    except (OSError, ValueError):
         drifted = True
     if dispatch.run.record.state == "exited" and not drifted:
         updated = dispatch.sequence.select_result(
@@ -4048,7 +4298,7 @@ def main_attempt(args=None) -> None:
     if args is None:
         args = build_attempt_parser().parse_args()
     _reject_overwrite(
-        args.output, [args.source], ATTEMPT_REPORT_PROFILE
+        args.output, _declared_input_paths(args), ATTEMPT_REPORT_PROFILE
     )
     if getattr(args, "resolve_modules", False):
         # The attempt route fingerprints only the declared source —
@@ -4075,6 +4325,9 @@ def main_attempt(args=None) -> None:
             raw,
             args.attempt_timeout,
             memory_bound_mb=args.memory_bound_mb,
+            summary_aware_calls=getattr(
+                args, "summary_aware_calls", None
+            ),
         )
     except ValueError as exc:
         _emit(

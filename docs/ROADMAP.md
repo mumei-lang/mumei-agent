@@ -4386,6 +4386,37 @@ C11 probe boundary, not the route.
 Producing or accepting a summary is not a proof, an audit or a
 verification verdict — the routes emit declared routing evidence only.
 
+### sol-summaries `--summary-aware-calls` (issue #900 Option B, Sol port)
+
+`sol-summaries --summary-aware-calls <MANIFEST>` declares a callee
+summary manifest (`mumei.sol-scalar-parameter-deps/v1`). An opaque
+external-member call — `ext.g(x)` or `ext.Lib.g(x)` — whose recorded
+name an entry covers folds the entry's declared `return_dependencies`
+instead of the opaque every-argument union: matching is the recorded
+name exactly, or one module-token prefix over the callee's standalone
+name (`ext.Lib.g` folds a manifest entry named `Lib.g`), never a
+deeper qualifier. The entry must be `available`, arity-matched and
+have every declared return ordinal inside the call's actual count.
+The fold only narrows the recorded result set — `effects` still
+reports `unknown` since the manifest cannot bound writes through
+argument objects — and the discarded-result path, named arguments
+and gapped/arity-mismatched/out-of-range entries keep today's opaque
+record, so a partial or stale manifest can never narrow below the
+width a run without the flag would report.
+
+A manifest derived with the flag carries `call_modeling` —
+`summary_modeled_calls` (folded), `opaque_calls` (left opaque),
+`summary_unmatched` (manifest entries no call referenced) — advisory
+counts only, never a verdict; manifests without the block load
+unchanged. The callee manifest's canonical bytes fold into the
+produced `context_key`, so a changed callee manifest invalidates the
+strict whole-context gate; check and reuse re-derive with the same
+flag and reuse keeps the counts in the merged manifest.
+`sol-summaries-attempt` forwards the flag to the child and binds the
+manifest's bytes into the request fingerprint like every other
+declared input; the manifest path joins the declared inputs, so
+`--output` can never overwrite it. The Rust port stays open.
+
 ### C06 declared summaries in directory audits (audit --enable-summaries)
 
 `python -m agent audit --code-file <dir> --enable-summaries` connects the
