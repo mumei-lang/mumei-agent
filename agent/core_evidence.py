@@ -551,7 +551,10 @@ def verify_signature_envelope(
 
     `expected_subject`/`expected_key` declare the same subject/key-id
     pins as the evaluation fold and emit `subject_bound`/`key_pinned`
-    under the same rules. `signature_valid` says only that the
+    under the same rules. A matched document also echoes the envelope's
+    `subject_digest` so a consumer can bind the verification to the
+    record bytes it covers — the same carrier convention the envelope
+    itself pins. `signature_valid` says only that the
     signature cryptographically binds the declared key to the declared
     digest — the key's own authenticity stays unassessed
     (`key_authenticity` stays in `checks_not_performed`, as do
@@ -612,6 +615,12 @@ def verify_signature_envelope(
             "key_revocation",
         ],
     }
+    if match:
+        # The envelope's declared digest is emitted so a consumer can
+        # bind this document to the record the signature covers — the
+        # same carrier convention `subject_digest` already pins on the
+        # envelope itself.
+        verification["subject_digest"] = envelope["subject_digest"]
     if expected_subject is not None:
         verification["subject_bound"] = (
             match and envelope["subject_digest"] == expected_subject
@@ -642,6 +651,10 @@ _BINDING_CARRIERS: dict = {
     # diagnostic stays anonymous and non-reusable, but its fingerprint
     # pins the consistency verdict to the record it was derived from.
     "mumei.source-evidence-recheck/v1": "evidence_fingerprint",
+    # The verification doc echoes the envelope's `subject_digest` — the
+    # record digest the signature covers — so it binds to the record
+    # bytes like the envelope itself.
+    SIGNATURE_VERIFICATION_SCHEMA: "subject_digest",
 }
 
 
@@ -798,6 +811,14 @@ _CHECK_PERFORMERS: dict = {
          "normalized.stdout.sha256"),
     ],
     "producer_authenticity": [
+        # A verifying signature binds SOME key to the digest, so it
+        # only performs producer_authenticity when the doc also pins
+        # the producer key (`key_pinned` under a caller-declared
+        # `--expected-producer-key`) — the key's own authenticity still
+        # stays unperformed — and the doc's `subject_digest` carrier
+        # names this record's bytes.
+        ("mumei.signature-verification/v1",
+         ("signature_valid", "key_pinned"), True, "subject_digest"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
         ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
@@ -991,8 +1012,12 @@ def evaluate_unperformed_check_recovery(
                 continue
             if status == "no_evidence":
                 status = "evidence_failed"
+            fields = field if type(field) is tuple else (field,)
             if any(
-                _outcome_matches(_dotted(doc, field), expected)
+                all(
+                    _outcome_matches(_dotted(doc, path), expected)
+                    for path in fields
+                )
                 and _performer_document_applies(
                     bind_path, doc, comparison_digest
                 )

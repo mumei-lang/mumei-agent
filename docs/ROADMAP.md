@@ -4875,7 +4875,13 @@ is the digest's lowercase-hex ASCII bytes, the same message
 convention Core's `crypto_verify_signature` FFI signs
 (`message.as_bytes()`). `--expected-subject`/`--expected-producer-key`
 declare the same pins the evaluation fold takes and emit
-`subject_bound`/`key_pinned` under identical rules.
+`subject_bound`/`key_pinned` under identical rules. A matched
+document also echoes the envelope's `subject_digest`, letting a
+consumer bind the verification to the record bytes it covers — the
+carrier convention `evidence-binding` and `recovery-eval` already
+use (`mumei.signature-verification/v1` pins `subject_digest` in
+`_BINDING_CARRIERS`, and a bound doc with `signature_valid` +
+`key_pinned` performs `producer_authenticity` in the recovery fold).
 
 `signature_verification` leaves `checks_not_performed`, but the fold
 still claims nothing more: `key_authenticity` stays (the supplied key
@@ -4939,7 +4945,13 @@ and all five non-artifact checks — `file_identity`,
 `claim_truth` — ← an accepted `verify-attempt-report/v1`, whose
 attempt sequence is also the recorded execution lineage, so the
 same bound report performs `historical_execution` on the record its
-run produced. Bound
+run produced. `producer_authenticity` also recovers through a
+`mumei.signature-verification/v1` doc — the only multi-outcome
+performer: a verifying signature alone binds SOME key to the digest,
+so the doc must hold `signature_valid` AND `key_pinned` (the
+producer-key pin the caller declared with `--expected-producer-key`),
+and it counts only when its `subject_digest` carrier — echoed from
+the matched envelope — equals the record's bound digest. Bound
 documents match through a declared carrier pinned per schema:
 `evidence_fingerprint` on a Core descriptor, `record_digest` on a
 binding document, `normalized.stdout.sha256` (the produced bytes'
