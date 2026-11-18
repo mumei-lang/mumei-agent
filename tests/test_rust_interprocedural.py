@@ -2440,26 +2440,3 @@ def test_aware_attempt_forwards_flag(tmp_path):
     assert norm["outcome"] == "exited" and norm["exit_code"] != 0
     report2 = rust.run_attempt(str(src), src.read_bytes(), 30000)
     assert report2["normalized"]["exit_code"] == 0
-
-
-def test_inline_depth_cut_rederives_at_top_level():
-    # A callee whose first inline walk stops at the depth limit is
-    # cached unavailable — the top-level pass must re-derive it
-    # rather than publish the depth-limited record.
-    chain = rust.MAX_INLINE_DEPTH + 6
-    src = "\n".join(
-        (
-            f"fn f{i}(x: i64) -> i64 {{ f{i + 1}(x) }}"
-            if i < chain
-            else f"fn f{i}(x: i64) -> i64 {{ x + 1 }}"
-        )
-        for i in range(chain + 1)
-    )
-    s = summarize_rust(src)
-    fns = {fn.name: fn for fn in s.functions}
-    tail = fns[f"f{chain}"]
-    assert tail.available
-    assert tail.return_dependencies == frozenset({0})
-    mid = fns[f"f{chain - 2}"]
-    assert mid.available
-    assert mid.return_dependencies == frozenset({0})

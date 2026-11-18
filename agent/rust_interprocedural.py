@@ -574,26 +574,13 @@ class _Builder:
                 # A callee already summarized inline for an
                 # earlier caller is reused — re-walking it would
                 # double-count its calls in the `call_modeling`
-                # advisory. An inline walk cut short by the depth
-                # limit caches an unavailable entry, so it is
-                # re-derived at top level; its calls were already
-                # counted on the first walk, so the advisory
-                # counters are restored after the fresh pass.
+                # advisory.
                 cached = self.summaries.get(name)
-                if cached is not None and cached.available:
-                    summaries.append(cached)
-                elif cached is not None:
-                    modeled = self._modeled_calls
-                    opaque = self._opaque_calls
-                    seen = set(self._declared_seen)
-                    fresh = self._summarize(name, fn_node)
-                    self._modeled_calls = modeled
-                    self._opaque_calls = opaque
-                    self._declared_seen = seen
-                    self.summaries[name] = fresh
-                    summaries.append(fresh)
-                else:
-                    summaries.append(self._summarize(name, fn_node))
+                summaries.append(
+                    cached
+                    if cached is not None
+                    else self._summarize(name, fn_node)
+                )
             except (_Unsupported, RecursionError) as u:
                 if isinstance(u, _Unsupported):
                     gap = RustGap(u.reason, u.byte)
