@@ -763,3 +763,133 @@ class TestEvidenceCheckTool:
         )
         assert out["status"] == "error"
         assert str(missing) not in out["error"]
+
+
+_SCHEDULE_PROFILE = "mumei.test/v1"
+_SCHEDULE_SOURCE = b"FAKE_PRIVATE_SOURCE_NOT_EVIDENCE"
+
+
+def _schedule_inputs(tmp_path):
+    def write(name, doc):
+        path = tmp_path / f"FAKE_PRIVATE_{name}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    def manifest(adapter_id):
+        return {
+            "schema_version": "mumei.verifier-adapter/v1",
+            "adapter_id": adapter_id,
+            "adapter_version": "1.0.0",
+            "profiles": [_SCHEDULE_PROFILE],
+            "methods": ["deductive_proof"],
+            "result_contracts": [
+                {
+                    "profile": _SCHEDULE_PROFILE,
+                    "method": "deductive_proof",
+                    "scope": "unbounded",
+                    "correspondence_relation": "exact_model",
+                    "correspondence_status": "assumed",
+                }
+            ],
+            "input_formats": ["mumei.source-text/v1"],
+            "required_permissions": [],
+        }
+
+    source = tmp_path / "FAKE_PRIVATE_SOURCE.mm"
+    source.write_bytes(_SCHEDULE_SOURCE)
+    import sys
+
+    py = sys.executable
+    return {
+        "request": write(
+            "request",
+            {
+                "profile": _SCHEDULE_PROFILE,
+                "method": "deductive_proof",
+                "result_contract": {
+                    "profile": _SCHEDULE_PROFILE,
+                    "method": "deductive_proof",
+                    "scope": "unbounded",
+                    "correspondence_relation": "exact_model",
+                    "correspondence_status": "assumed",
+                },
+                "input_format": "mumei.source-text/v1",
+            },
+        ),
+        "adapters": write("adapters", [manifest("alpha"), manifest("beta")]),
+        "argv_map": write(
+            "argv",
+            {
+                "alpha": [py, "-c", "import sys; sys.exit(3)"],
+                "beta": [py, "-c", "import sys; sys.exit(0)"],
+            },
+        ),
+        "policy": write("policy", {"allowed_permissions": [], "timeout_ms": 10000}),
+        "observations": write(
+            "obs",
+            [
+                {"adapter_id": "alpha", "availability": "available",
+                 "tool_version": "1.0.0", "stamp": 1},
+                {"adapter_id": "beta", "availability": "available",
+                 "tool_version": "1.0.0", "stamp": 2},
+            ],
+        ),
+        "source": str(source),
+    }
+
+
+class TestVerifyScheduleTool:
+    def test_selected_result_reports_descriptor(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"],
+                inputs["adapters"],
+                inputs["argv_map"],
+                inputs["policy"],
+                inputs["source"],
+                observations_path=inputs["observations"],
+            )
+        )
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["schema_version"] == "mumei.attempt-schedule/v1"
+        assert report["outcome"] == "selected"
+        assert report["selected_adapter_id"] == "beta"
+        assert "FAKE_PRIVATE" not in json.dumps(report)
+
+    def test_bad_args_are_errors(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        out = json.loads(mcp_server.verify_schedule("", inputs["adapters"],
+                                                    inputs["argv_map"],
+                                                    inputs["policy"],
+                                                    inputs["source"]))
+        assert out["status"] == "error"
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"], inputs["adapters"], inputs["argv_map"],
+                inputs["policy"], inputs["source"], max_attempts=0,
+            )
+        )
+        assert out["status"] == "error"
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"], inputs["adapters"], inputs["argv_map"],
+                inputs["policy"], inputs["source"], max_attempts=99,
+            )
+        )
+        assert out["status"] == "error"
+
+    def test_error_redacts_declared_paths(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        missing = str(tmp_path / "missing.json")
+        out = json.loads(
+            mcp_server.verify_schedule(
+                missing, inputs["adapters"], inputs["argv_map"],
+                inputs["policy"], inputs["source"],
+            )
+        )
+        assert out["status"] == "error"
+        for path in inputs.values():
+            assert path not in out["error"]
+        assert missing not in out["error"]

@@ -2877,6 +2877,98 @@ def verify_accept(
 
 
 @mcp.tool()
+def verify_schedule(
+    request_path: str,
+    adapters_path: str,
+    argv_map_path: str,
+    policy_path: str,
+    source_path: str,
+    observations_path: str | None = None,
+    max_attempts: int = 8,
+    memory_bound_mb: int | None = None,
+) -> str:
+    """Run the declared plan/dispatch/observe/fallback schedule.
+
+    The same wiring as the `verify-schedule` CLI route: declared
+    route requirements, adapter manifests, planner policy, optional
+    stamped runtime observations, the source and the host's argv map
+    (adapter_id → argv) feed `run_attempt_schedule`, and the
+    `mumei.attempt-schedule/v1` descriptor is returned. The schedule
+    is a dispatch record only — a `selected` outcome names which
+    adapter produced a declared-success exit, never an Evidence
+    acceptance.
+
+    Args:
+        request_path: Absolute path to the declared
+            RouteRequirements/ResultContract JSON.
+        adapters_path: Absolute path to the declared JSON array of
+            adapter manifests.
+        argv_map_path: Absolute path to the declared JSON object
+            mapping adapter_id to its argv array.
+        policy_path: Absolute path to the declared PlannerPolicy JSON.
+        source_path: Absolute path to the declared .mm source file.
+        observations_path: Optional absolute path to a declared JSON
+            array of stamped runtime observations.
+        max_attempts: Bounded schedule attempts across all adapters
+            (at most 8).
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling per
+            attempt child.
+
+    Returns:
+        JSON with `report` — the `mumei.attempt-schedule/v1`
+        descriptor — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS
+        from agent.verify_schedule import run_schedule
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    paths = {
+        "request_path": request_path,
+        "adapters_path": adapters_path,
+        "argv_map_path": argv_map_path,
+        "policy_path": policy_path,
+        "source_path": source_path,
+    }
+    if observations_path is not None:
+        paths["observations_path"] = observations_path
+    for name, path in paths.items():
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if (
+        type(max_attempts) is not int
+        or max_attempts < 1
+        or max_attempts > MAX_SCHEDULE_ATTEMPTS
+    ):
+        return _err("max_attempts must be an integer in [1, 8]")
+    if memory_bound_mb is not None and (
+        type(memory_bound_mb) is not int or memory_bound_mb < 1
+    ):
+        return _err("memory_bound_mb must be a positive integer")
+
+    args = argparse.Namespace(
+        request=request_path,
+        adapters=adapters_path,
+        argv_map=argv_map_path,
+        policy=policy_path,
+        observations=observations_path,
+        source=source_path,
+        max_attempts=max_attempts,
+        success_exit_code=None,
+        memory_bound_mb=memory_bound_mb,
+        output=None,
+    )
+    try:
+        report = run_schedule(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), list(paths.values()))
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def evidence_check(
     core_path: str,
     evidence_path: str,
