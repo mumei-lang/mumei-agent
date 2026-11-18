@@ -135,6 +135,37 @@ class RustCall:
         )
 
 
+@dataclass(frozen=True)
+class RustStatementRead:
+    """Parameter ordinals read while evaluating one statement.
+
+    `span` is the statement node's `(start_byte, end_byte)` —
+    stable within the file that produced it and meaningless
+    across modules, so manifests only compare spans inside a
+    single summary set."""
+
+    span: tuple
+    deps: frozenset
+
+    def to_dict(self) -> dict:
+        return {
+            "span": [self.span[0], self.span[1]],
+            "deps": sorted(self.deps),
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "RustStatementRead":
+        v = _manifest_record(value, ("span", "deps"))
+        span = _list(v["span"])
+        _require_manifest(
+            len(span) == 2
+            and all(type(b) is int and b >= 0 for b in span)
+        )
+        return cls(
+            (span[0], span[1]), _deps_from_list(v["deps"])
+        )
+
+
 @dataclass
 class RustFunctionSummary:
     name: str
@@ -144,6 +175,7 @@ class RustFunctionSummary:
     calls: list = field(default_factory=list)
     gaps: list = field(default_factory=list)
     effects: str = "none_in_supported_fragment"
+    statement_reads: tuple = ()
 
     def to_dict(self) -> dict:
         return {
@@ -158,6 +190,9 @@ class RustFunctionSummary:
             "calls": [c.to_dict() for c in self.calls],
             "gaps": [g.to_dict() for g in self.gaps],
             "effects": self.effects,
+            "statement_reads": [
+                r.to_dict() for r in self.statement_reads
+            ],
         }
 
     @classmethod
@@ -173,6 +208,7 @@ class RustFunctionSummary:
                 "gaps",
                 "effects",
             ),
+            ("statement_reads",),
         )
         parameters = _list(v["parameters"])
         calls = _list(v["calls"])
@@ -185,6 +221,11 @@ class RustFunctionSummary:
         deps = v["return_dependencies"]
         restored_deps = None if deps is None else _deps_from_list(deps)
         restored_gaps = [RustGap.from_dict(g) for g in gaps]
+        statement_reads = [
+            RustStatementRead.from_dict(r)
+            for r in _list(v.get("statement_reads", []))
+        ]
+        _require_manifest(len(statement_reads) <= MAX_MANIFEST_MEMBERS)
         available = _boolean(v["available"])
         # A manifest may not contradict itself: `available` tracks
         # exactly "a result was derived and no gap was recorded" —
@@ -201,6 +242,7 @@ class RustFunctionSummary:
             [RustCall.from_dict(c) for c in calls],
             restored_gaps,
             _string(v["effects"]),
+            tuple(statement_reads),
         )
 
 
@@ -410,6 +452,13 @@ class _Builder:
         self._inline_depth = 0
         self._writes: list = []
         self._decls: list = []
+        # Per-statement read attribution: `_statement` pushes one
+        # frame per in-flight statement; `_expr` unions every
+        # evaluated dep set into every open frame, so a statement's
+        # reads cover its nested expressions and any inlined
+        # callee bodies (keyed by the callee's own spans).
+        self._read_stack: list = []
+        self._stmt_reads: dict = {}
         self.methods: dict = {}
         # `const K` / `static S` — compile-time constant, so a
         # read is dep-free; `static mut` writes mark unknown.
@@ -918,7 +967,12 @@ class _Builder:
         # names, or its write to a `use`-imported static would look
         # like a write to the caller's local.
         prev_block_decls = self._block_decls
+        prev_reads = self._stmt_reads
+        prev_stack = self._read_stack
         self._block_decls = [set()]
+        self._read_stack = []
+        self._stmt_reads = {}
+        summary = None
         try:
             params = fn_node.child_by_field_name("parameters")
             param_names = []
@@ -1015,6 +1069,18 @@ class _Builder:
             self._in_progress.discard(name)
             self._cur_use_map, self._cur_mod_path = prev_scope
             self._block_decls = prev_block_decls
+            # Reads recorded up to the point of failure still
+            # attach — a gapped walk's partial attribution stays
+            # truthful about what was read before the gap.
+            if summary is not None:
+                summary.statement_reads = tuple(
+                    RustStatementRead(span, deps)
+                    for span, deps in sorted(
+                        self._stmt_reads.items()
+                    )
+                )
+            self._read_stack = prev_stack
+            self._stmt_reads = prev_reads
 
     # -- statements -------------------------------------------------
 
@@ -1076,7 +1142,28 @@ class _Builder:
         # handled inside _statement's expression arm.
         return ret
 
+    def _record_read(self, deps) -> None:
+        for i in range(len(self._read_stack)):
+            self._read_stack[i] = self._read_stack[i] | deps
+
     def _statement(self, st, locals_, param_index, summary):
+        # Every expression evaluated under this statement — its
+        # own and any inlined callee body's — lands in the open
+        # frames; nested statements pop their own record under
+        # their own span.
+        self._read_stack.append(frozenset())
+        try:
+            return self._statement_inner(
+                st, locals_, param_index, summary
+            )
+        finally:
+            frame = self._read_stack.pop()
+            key = (st.start_byte, st.end_byte)
+            self._stmt_reads[key] = self._stmt_reads.get(
+                key, frozenset()
+            ) | frame
+
+    def _statement_inner(self, st, locals_, param_index, summary):
         t = st.type
         if t == "let_declaration":
             pat = st.child_by_field_name("pattern")
@@ -1862,6 +1949,11 @@ class _Builder:
     # -- expressions -------------------------------------------------
 
     def _expr(self, node, locals_, param_index, summary):
+        deps = self._expr_inner(node, locals_, param_index, summary)
+        self._record_read(deps)
+        return deps
+
+    def _expr_inner(self, node, locals_, param_index, summary):
         self.count[0] += 1
         if self.count[0] > MAX_NODES:
             raise _Unsupported("analysis_limit", _span(node))

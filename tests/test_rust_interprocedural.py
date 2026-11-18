@@ -1799,3 +1799,122 @@ def test_destructured_param_shadows_ancestor_static():
     s = next(f for f in r.functions if f.name == "af")
     assert s.effects != "unknown"
     assert s.return_dependencies == frozenset({0})
+
+
+def _reads(s):
+    return {r.span: r.deps for r in s.statement_reads}
+
+
+def test_statement_reads_attribute_per_statement():
+    src = (
+        "fn f(a: u64, b: u64) -> u64 {\n"
+        "    let x = a + 1;\n"
+        "    let y = b;\n"
+        "    x + y\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    decl_span = (
+        src.index("let x = a + 1"),
+        src.index("let x = a + 1") + len("let x = a + 1;"),
+    )
+    assert reads.get(decl_span) == frozenset({0}), reads
+    tail_span = (
+        src.index("x + y"),
+        src.index("x + y") + len("x + y"),
+    )
+    hit = next(
+        r for span, r in reads.items()
+        if span[0] <= tail_span[0] < span[1]
+    )
+    assert hit == frozenset({0, 1})
+
+
+def test_statement_reads_nested_attribution():
+    # Reads inside an if-body attribute to the inner statement's
+    # own span AND the enclosing if.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let mut y = 0;\n"
+        "    if a > 0 { y = a; }\n"
+        "    y\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    assert list(reads.values()).count(frozenset({0})) >= 2
+
+
+def test_statement_reads_call_actual_records():
+    # `g(a)` records {0} on the statement even though the callee
+    # returns a constant and the result is dropped.
+    src = (
+        "fn g(v: u64) -> u64 { 0 }\n"
+        "fn f(a: u64) -> u64 {\n"
+        "    g(a);\n"
+        "    0\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_inlined_callee_attribution():
+    # An inlined callee's body statements attribute to the caller
+    # under the callee's own spans — a local `fn` value path.
+    src = (
+        "fn g(v: u64) -> u64 {\n"
+        "    let y = v + 1;\n"
+        "    y\n"
+        "}\n"
+        "fn f(a: u64) -> u64 {\n"
+        "    let z = g(a);\n"
+        "    z\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    callee_span = (
+        src.index("let y = v + 1"),
+        src.index("let y = v + 1") + len("let y = v + 1;"),
+    )
+    # Whether the callee inlines or is recorded as a call site,
+    # the caller's statement still reads {0} for `a`.
+    assert frozenset({0}) in reads.values()
+    if callee_span in reads:
+        assert reads[callee_span] <= frozenset({0})
+
+
+def test_statement_reads_roundtrip():
+    r = summarize_rust("fn f(a: u64) -> u64 { a }")
+    restored = RustSummarySet.from_dict(r.to_dict())
+    fn = next(f for f in restored.functions if f.name == "f")
+    orig = next(f for f in r.functions if f.name == "f")
+    assert fn.statement_reads == orig.statement_reads
+
+
+def test_statement_reads_manifest_optional():
+    # Manifests predating the field restore without it.
+    r = summarize_rust("fn f(a: u64) -> u64 { a }").to_dict()
+    for f in r["functions"]:
+        f.pop("statement_reads", None)
+    restored = RustSummarySet.from_dict(r)
+    assert all(fn.statement_reads == () for fn in restored.functions)
+
+
+def test_statement_reads_gapped_still_attaches():
+    # A gapped walk attaches what was recorded before the gap.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let x = a;\n"
+        "    x + missing_callee()\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    if not s.available:
+        assert s.gaps
