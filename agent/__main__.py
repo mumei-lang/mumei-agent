@@ -55,6 +55,7 @@ _SUBCOMMANDS = {
     "evidence-check-consistency",
     "evidence-acceptance-eval",
     "signature-eval",
+    "signature-verify",
     "evidence-compare",
     "evidence-identity-check",
     "evidence-producer-check",
@@ -742,6 +743,24 @@ def main() -> None:
         signature_eval_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(signature_eval_main(args))
+    elif command == "signature-verify":
+        import argparse
+        from agent.signature_verify import (
+            build_verify_parser as signature_verify_build_parser,
+            main_verify as signature_verify_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent signature-verify",
+            description=(
+                "Verify a declared producer-signature envelope's "
+                "ed25519 signature under a declared public key and "
+                "emit the verification descriptor."
+            ),
+        )
+        signature_verify_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(signature_verify_main(args))
     elif command == "evidence-identity-check":
         import argparse
         from agent.evidence_identity import (

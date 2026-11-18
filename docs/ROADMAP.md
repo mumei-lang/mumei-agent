@@ -4720,6 +4720,33 @@ stale-but-well-formed envelope still matches) or revocation
 (`key_revocation` stays). Signing, key generation, rotation and the
 Core producer side are separate later slices; C11 stays partial.
 
+### C11 declared producer-signature verification
+
+`agent.core_evidence.verify_signature_envelope(envelope,
+producer_key, expected_subject, expected_key)` and the
+`signature-verify` route restore one declared
+`mumei.producer-signature/v1` envelope plus a raw ed25519 public key
+(`--producer-key`, 64-char lowercase hex) supplied over a separately
+trusted channel, and emit `mumei.signature-verification/v1`.
+`signature_valid` holds only when the envelope matched the closed
+five-field shape AND the declared key cryptographically verifies the
+envelope's `signature` over the `subject_digest` — the signed payload
+is the digest's lowercase-hex ASCII bytes, the same message
+convention Core's `crypto_verify_signature` FFI signs
+(`message.as_bytes()`). `--expected-subject`/`--expected-producer-key`
+declare the same pins the evaluation fold takes and emit
+`subject_bound`/`key_pinned` under identical rules.
+
+`signature_verification` leaves `checks_not_performed`, but the fold
+still claims nothing more: `key_authenticity` stays (the supplied key
+is trusted as declared — a verifying signature binds that key to the
+digest, it does not establish the key is the producer's),
+`envelope_freshness` stays (a stale-but-signed envelope verifies) and
+`key_revocation` stays. An unmatched envelope or a failed verify
+reports `false` observations, never an error. Signing, key
+generation, rotation and the Core producer side are separate later
+slices; C11 stays partial.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

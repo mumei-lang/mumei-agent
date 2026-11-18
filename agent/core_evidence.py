@@ -520,3 +520,104 @@ def evaluate_signature_envelope(
         )
         evaluation["checks_not_performed"].remove("key_binding")
     return evaluation
+
+
+SIGNATURE_VERIFICATION_SCHEMA = "mumei.signature-verification/v1"
+
+# An ed25519 public key is 32 bytes.
+_PRODUCER_KEY_HEX_LEN = 64
+
+
+def verify_signature_envelope(
+    envelope: dict,
+    producer_key: str,
+    expected_subject: str | None = None,
+    expected_key: str | None = None,
+) -> dict:
+    """Verify a declared producer-signature envelope's ed25519 signature.
+
+    Emits ``mumei.signature-verification/v1``. `envelope_match` is the
+    same closed-shape test `evaluate_signature_envelope` performs; a
+    foreign or malformed document never counts. `signature_valid`
+    holds only when the envelope matched AND the declared
+    `producer_key` (a 64-char lowercase-hex raw ed25519 public key the
+    caller supplies over a separately trusted channel) verifies the
+    envelope's `signature` over the `subject_digest` — the signed
+    payload is the digest's lowercase-hex ASCII bytes, matching the
+    Core `crypto_verify_signature` FFI convention that signs
+    `message.as_bytes()`.
+
+    `expected_subject`/`expected_key` declare the same subject/key-id
+    pins as the evaluation fold and emit `subject_bound`/`key_pinned`
+    under the same rules. `signature_valid` says only that the
+    signature cryptographically binds the declared key to the declared
+    digest — the key's own authenticity stays unassessed
+    (`key_authenticity` stays in `checks_not_performed`, as do
+    `envelope_freshness` and `key_revocation`), and an unmatched
+    envelope or a failed verify reports `false` observations, never an
+    error."""
+    if type(envelope) is not dict:
+        raise ValueError("unsupported signature verification request")
+    if not _is_hex(producer_key, _PRODUCER_KEY_HEX_LEN):
+        raise ValueError("invalid producer key")
+    if expected_subject is not None and not _is_fingerprint(
+        expected_subject
+    ):
+        raise ValueError("invalid expected subject digest")
+    if expected_key is not None and (
+        type(expected_key) is not str or expected_key == ""
+    ):
+        raise ValueError("invalid expected producer key")
+    fields = frozenset(envelope)
+    match = (
+        fields == _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
+        and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
+        and _is_fingerprint(envelope["subject_digest"])
+        and _is_hex(
+            envelope["signature"], _PRODUCER_SIGNATURE_HEX_LEN
+        )
+        and type(envelope["producer_key_id"]) is str
+        and envelope["producer_key_id"] != ""
+    )
+    signature_valid = False
+    if match:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
+
+        verifying_key = Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(producer_key)
+        )
+        try:
+            verifying_key.verify(
+                bytes.fromhex(envelope["signature"]),
+                envelope["subject_digest"].encode("ascii"),
+            )
+            signature_valid = True
+        except InvalidSignature:
+            signature_valid = False
+    verification = {
+        "schema_version": SIGNATURE_VERIFICATION_SCHEMA,
+        "envelope_match": match,
+        "signature_valid": signature_valid,
+        "checks_not_performed": [
+            "subject_binding",
+            "key_binding",
+            "key_authenticity",
+            "envelope_freshness",
+            "key_revocation",
+        ],
+    }
+    if expected_subject is not None:
+        verification["subject_bound"] = (
+            match and envelope["subject_digest"] == expected_subject
+        )
+        verification["checks_not_performed"].remove("subject_binding")
+    if expected_key is not None:
+        verification["key_pinned"] = (
+            match and envelope["producer_key_id"] == expected_key
+        )
+        verification["checks_not_performed"].remove("key_binding")
+    return verification
