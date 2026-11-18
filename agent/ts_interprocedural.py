@@ -4883,6 +4883,10 @@ class _Builder:
         must never capture them). The shared `transfers`/`count`
         accumulators keep call records and the node budget
         global across the chain."""
+        # The callee's own deps (captured bindings, a function
+        # parameter's ordinal) read on the call statement like the
+        # Go model's binding resolution at the call site.
+        self._record_read(_scalar_of(cval))
         if self._invoke_depth >= MAX_INVOKE_DEPTH:
             # Recursive or deeply nested call chains — beyond
             # the bound the result over-approximates to the
@@ -5155,6 +5159,11 @@ class _Builder:
         actual_values=None,
     ) -> frozenset[int]:
         if cval.origin is not None and cval.origin is not self:
+            # The delegation runs the callee under the imported
+            # module's builder, whose read state is its own — the
+            # callee's deps still attribute to the importer's
+            # call statement here.
+            self._record_read(_scalar_of(cval))
             return cval.origin._invoke_callable(
                 cval,
                 actual,
@@ -6020,9 +6029,14 @@ class _Builder:
             value = self._eval(
                 arg_node, params, locals_, transfers, count
             )
+            deps = _scalar_of(value)
+            # Each actual's reads attribute to the call statement
+            # even when the result drops them (an inlined callee
+            # returning a constant reads nothing of its result).
+            self._record_read(deps)
             if values_out is not None:
                 values_out.append(value)
-            return _scalar_of(value)
+            return deps
 
         if arguments.type == "template_string":
             actuals: list = [frozenset()]
@@ -6050,6 +6064,7 @@ class _Builder:
                 sval = self._eval(
                     operand, params, locals_, transfers, count
                 )
+                self._record_read(_scalar_of(sval))
                 if isinstance(sval, _Composite):
                     spread_items = [
                         (int(k), v)
@@ -7070,13 +7085,13 @@ class _Builder:
             # unknown (dep-free).
             operand = next(iter(_children(node)), None)
             if operand is not None:
-                self.yield_deps.append(
-                    _scalar_of(
-                        self._eval(
-                            operand, params, locals_, transfers, count
-                        )
+                operand_deps = _scalar_of(
+                    self._eval(
+                        operand, params, locals_, transfers, count
                     )
                 )
+                self._record_read(operand_deps)
+                self.yield_deps.append(operand_deps)
             return frozenset()
         if kind in {
             "arrow_function",
