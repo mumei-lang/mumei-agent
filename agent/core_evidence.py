@@ -728,8 +728,25 @@ _CHECK_PERFORMERS: dict = {
 }
 
 
+def _performer_document_applies(
+    schema: str, doc: dict, record_digest: str | None
+) -> bool:
+    """Whether a performer-schema document counts for *this* record.
+
+    A binding document pins itself to one record's digest, so it only
+    applies when the fold has a declared `record_digest` the document
+    matches; every other performer schema applies record-agnostically
+    (their own binding is a separate, still-declared check)."""
+    if schema == EVIDENCE_BINDING_SCHEMA:
+        return (
+            record_digest is not None
+            and doc.get("record_digest") == record_digest
+        )
+    return True
+
+
 def evaluate_unperformed_check_recovery(
-    record: dict, evidence: list
+    record: dict, evidence: list, record_digest: str | None = None
 ) -> dict:
     """Fold a record's declared ``checks_not_performed`` over the
     supporting documents into a recovery report.
@@ -757,9 +774,21 @@ def evaluate_unperformed_check_recovery(
     they are trusted as declared), and does not bind a document to the
     record it is said to cover (`evidence_binding` stays — a
     freshness doc counts whether or not it was produced for this
-    record)."""
+    record).
+
+    `record_digest` declares the SHA-256 of the record's bytes (the
+    `recovery-eval` route recomputes it from the record file; dict
+    callers declare it like `expected_fingerprint`). An
+    `mumei.evidence-binding/v1` performer document then counts only
+    when it is `bound` AND its `record_digest` equals the declared
+    digest — a bound document for a *different* record can never
+    recover this record's `evidence_binding`. Without a declared
+    digest no binding document can be attributed, so the check stays
+    unrecovered."""
     if type(record) is not dict:
         raise ValueError("unsupported check-recovery request")
+    if record_digest is not None and not _is_fingerprint(record_digest):
+        raise ValueError("invalid record digest")
     evidence = evidence or []
     if any(type(doc) is not dict for doc in evidence):
         raise ValueError("unsupported check-recovery evidence document")
@@ -788,7 +817,11 @@ def evaluate_unperformed_check_recovery(
             if status == "no_evidence":
                 status = "evidence_failed"
             if any(
-                doc.get(field) is True for doc in schema_to_docs[schema]
+                doc.get(field) is True
+                and _performer_document_applies(
+                    schema, doc, record_digest
+                )
+                for doc in schema_to_docs[schema]
             ):
                 status = "recovered"
                 break

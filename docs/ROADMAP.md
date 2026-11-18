@@ -4847,7 +4847,12 @@ an error — since a document may honestly describe a different record.
 A `bound` binding document now performs `evidence_binding` in the
 recovery fold (`_CHECK_PERFORMERS`), so subject-bound recovery
 composes: `recovery-eval` plus `binding-eval` reports which recovered
-documents actually cover this record. The fold stays
+documents actually cover this record. The recovery fold only counts a
+binding document whose `record_digest` equals the record's own
+SHA-256 — the `recovery-eval` route recomputes it from the record
+file, dict callers declare it like `expected_fingerprint` — so a bound
+document for a different record can never recover this record's
+`evidence_binding`. The fold stays
 representation-level: `carrier_authenticity` (the document is trusted
 as declared — its own checks and signature are not re-verified) and
 `binding_enforcement` (the report is an observation; gating is a host

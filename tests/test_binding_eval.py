@@ -129,23 +129,114 @@ def test_request_validation():
 
 def test_binding_doc_recovers_evidence_binding():
     # Subject-bound recovery: a bound binding document performs the
-    # `evidence_binding` check a record declares unperformed.
+    # `evidence_binding` check a record declares unperformed — but
+    # only when the fold pins it to THIS record's digest.
     record = {"checks_not_performed": ["evidence_binding"]}
     bound_doc = evaluate_evidence_binding(_RECORD, _envelope())
-    recovery = evaluate_unperformed_check_recovery(record, [bound_doc])
+    recovery = evaluate_unperformed_check_recovery(
+        record, [bound_doc], record_digest=_DIGEST
+    )
     assert recovery["checks"]["evidence_binding"] == "recovered"
 
     unbound_doc = evaluate_evidence_binding(_RECORD, _envelope(_OTHER))
     recovery = evaluate_unperformed_check_recovery(
-        record, [unbound_doc]
+        record, [unbound_doc], record_digest=_DIGEST
     )
     assert recovery["checks"]["evidence_binding"] == "evidence_failed"
 
     # A document only *claiming* the schema without a true outcome
     # can never recover the check.
     forged = {"schema_version": "mumei.evidence-binding/v1"}
-    recovery = evaluate_unperformed_check_recovery(record, [forged])
+    recovery = evaluate_unperformed_check_recovery(
+        record, [forged], record_digest=_DIGEST
+    )
     assert recovery["checks"]["evidence_binding"] == "evidence_failed"
+
+
+def test_binding_recovery_requires_this_records_digest():
+    record = {"checks_not_performed": ["evidence_binding"]}
+    bound_doc = evaluate_evidence_binding(_RECORD, _envelope())
+
+    # A bound document for record A never recovers record B's
+    # `evidence_binding`.
+    recovery = evaluate_unperformed_check_recovery(
+        record, [bound_doc], record_digest=_OTHER
+    )
+    assert recovery["checks"]["evidence_binding"] == "evidence_failed"
+
+    # Without a declared digest no binding document can be
+    # attributed — the check stays unrecovered rather than trusting
+    # an unattributable bound result.
+    recovery = evaluate_unperformed_check_recovery(record, [bound_doc])
+    assert recovery["checks"]["evidence_binding"] == "evidence_failed"
+
+    # A malformed declared digest fails statically.
+    with pytest.raises(ValueError):
+        evaluate_unperformed_check_recovery(
+            record, [bound_doc], record_digest="not-hex"
+        )
+
+    # Other performer checks stay record-agnostic.
+    record = {
+        "checks_not_performed": ["evidence_binding", "subject_binding"]
+    }
+    subject_doc = {
+        "schema_version": "mumei.signature-verification/v1",
+        "subject_bound": True,
+    }
+    recovery = evaluate_unperformed_check_recovery(
+        record, [bound_doc, subject_doc], record_digest=_DIGEST
+    )
+    assert recovery["checks"]["evidence_binding"] == "recovered"
+    assert recovery["checks"]["subject_binding"] == "recovered"
+
+
+def test_route_composes_with_recovery_eval(tmp_path, capsys):
+    import argparse
+
+    from agent.recovery_eval import (
+        build_eval_parser as build_recovery_parser,
+        main_eval as recovery_main,
+    )
+
+    # The record under recovery declares `evidence_binding`; the
+    # signature envelope was issued over this file's exact bytes.
+    record_bytes = (
+        b'{"schema_version":"mumei.example/v1",'
+        b'"checks_not_performed":["evidence_binding"]}'
+    )
+    record = tmp_path / "record.json"
+    record.write_bytes(record_bytes)
+    envelope = tmp_path / "env.json"
+    envelope.write_text(
+        json.dumps(_envelope(hashlib.sha256(record_bytes).hexdigest()))
+    )
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    binding_out = tmp_path / "binding.json"
+    assert (
+        main_eval(
+            _args(parser, record, envelope, "--output", str(binding_out))
+        )
+        == 0
+    )
+    assert json.loads(binding_out.read_text())["bound"] is True
+
+    rec_parser = argparse.ArgumentParser()
+    build_recovery_parser(rec_parser)
+
+    # recovery-eval recomputes the record's digest and only counts
+    # the bound document when the digests match — a rewritten record
+    # (same declared check, different bytes) is not covered.
+    for suffix, expected in ((b"", "recovered"), (b"\n", "evidence_failed")):
+        record.write_bytes(record_bytes + suffix)
+        args = rec_parser.parse_args(
+            ["--record", str(record), "--evidence", str(binding_out)]
+        )
+        assert recovery_main(args) == 0
+        emitted = json.loads(capsys.readouterr().out)
+        assert emitted["checks"]["evidence_binding"] == expected
 
 
 def test_route_emits_binding(tmp_path, capsys):
