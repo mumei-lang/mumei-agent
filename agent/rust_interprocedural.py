@@ -571,7 +571,16 @@ class _Builder:
         summaries = []
         for name, fn_node in self.functions.items():
             try:
-                summaries.append(self._summarize(name, fn_node))
+                # A callee already summarized inline for an
+                # earlier caller is reused — re-walking it would
+                # double-count its calls in the `call_modeling`
+                # advisory.
+                cached = self.summaries.get(name)
+                summaries.append(
+                    cached
+                    if cached is not None
+                    else self._summarize(name, fn_node)
+                )
             except (_Unsupported, RecursionError) as u:
                 if isinstance(u, _Unsupported):
                     gap = RustGap(u.reason, u.byte)
@@ -1991,7 +2000,11 @@ class _Builder:
             cname = fn_expr.text.decode() if fn_expr is not None else None
             declared_entry = (
                 None
-                if fld is not None or bound
+                if fld is not None
+                or (
+                    raw_ident is not None
+                    and raw_ident in locals_
+                )
                 else self._declared_entry(cname)
             )
             foldable = (
@@ -2019,7 +2032,7 @@ class _Builder:
                     *(actual[i] for i in declared_entry.return_dependencies)
                 ) if declared_entry.return_dependencies else frozenset()
                 self._modeled_calls += 1
-            elif self._declared:
+            elif self._declared_set is not None:
                 self._opaque_calls += 1
             summary.calls.append(
                 RustCall(_span(node), cname, actual_t,
@@ -3088,11 +3101,17 @@ def _attempt_fingerprint(
     }
     if summary_aware_calls is not None:
         try:
-            manifest_raw = Path(summary_aware_calls).read_bytes()
+            with open(summary_aware_calls, "rb") as handle:
+                manifest_raw = handle.read(MAX_MANIFEST_BYTES + 1)
         except OSError as exc:
+            # `str(exc)` would carry the checkout-local path into
+            # the attempt report's error detail.
             raise ValueError(
-                f"declared callee manifest unreadable: {exc}"
+                "declared callee manifest unreadable: "
+                f"{exc.strerror or 'I/O error'}"
             ) from exc
+        if len(manifest_raw) > MAX_MANIFEST_BYTES:
+            raise ValueError("declared callee manifest too large")
         request_doc["callee_manifest"] = {
             "path": summary_aware_calls,
             "sha256": hashlib.sha256(manifest_raw).hexdigest(),

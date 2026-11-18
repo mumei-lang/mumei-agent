@@ -2171,6 +2171,48 @@ def test_aware_local_bound_never_folds():
     assert r.call_modeling["summary_modeled_calls"] == 0
 
 
+def test_aware_empty_bound_local_never_folds():
+    # A local bound to a dependency-free value still shadows the
+    # callee name — an empty `bound` set must not read as "not a
+    # local" and let the manifest fold the call away.
+    src = (
+        "fn caller(x: u64) -> u64 {\n"
+        "    let f = 1;\n"
+        "    f(x)\n"
+        "}\n"
+    )
+    declared = _callee_manifest(_decl_fn("f", ["a"], set()))
+    r = summarize_rust(src, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0})
+    assert r.call_modeling["summary_modeled_calls"] == 0
+    assert r.call_modeling["opaque_calls"] == 1
+
+
+def test_aware_empty_manifest_counts_opaque():
+    # A declared-but-empty manifest still counts the calls it did
+    # not model — `opaque_calls` reports the requests the manifest
+    # was consulted for, not dict truthiness.
+    r = summarize_rust(_SRC, declared=_callee_manifest())
+    assert r.call_modeling == {
+        "summary_modeled_calls": 0,
+        "opaque_calls": 1,
+        "summary_unmatched": 0,
+    }
+
+
+def test_aware_opaque_call_counted_once_per_call():
+    # `caller` is walked before `helper`; helper's inline
+    # summarization for that call must not recount its opaque call
+    # when the top-level loop reaches it.
+    src = (
+        "fn caller() -> u64 {\n    helper(1)\n}\n"
+        "fn helper(x: u64) -> u64 {\n    m::f(x)\n}\n"
+    )
+    r = summarize_rust(src, declared=_callee_manifest())
+    assert r.call_modeling["opaque_calls"] == 1
+
+
 def test_aware_gapped_callee_stays_opaque():
     declared = _callee_manifest(_decl_fn("f", ["a", "b"], None))
     r = summarize_rust(_SRC, declared=declared)
@@ -2357,6 +2399,30 @@ def test_aware_attempt_fingerprint_binds_manifest(tmp_path):
         rust._attempt_fingerprint(
             str(src), raw,
             summary_aware_calls=str(tmp_path / "missing.json"))
+
+
+def test_aware_fingerprint_bounds_manifest_read(tmp_path, monkeypatch):
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    man = tmp_path / "big.json"
+    man.write_bytes(b"x" * 64)
+    monkeypatch.setattr(rust, "MAX_MANIFEST_BYTES", 8)
+    with pytest.raises(ValueError, match="too large"):
+        rust._attempt_fingerprint(
+            str(src), src.read_bytes(), summary_aware_calls=str(man))
+
+
+def test_aware_fingerprint_error_hides_path(tmp_path):
+    # The attempt report carries this message — a checkout-local
+    # path must never reach it.
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    missing = tmp_path / "missing.json"
+    with pytest.raises(ValueError) as exc:
+        rust._attempt_fingerprint(
+            str(src), src.read_bytes(),
+            summary_aware_calls=str(missing))
+    assert str(missing) not in str(exc.value)
 
 
 def test_aware_attempt_forwards_flag(tmp_path):
