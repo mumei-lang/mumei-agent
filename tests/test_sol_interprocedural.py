@@ -3242,3 +3242,387 @@ def test_statement_reads_module_tag_roundtrip():
     restored = sol.SolSummarySet.from_dict(s.to_dict())
     rfn = next(f for f in restored.functions if f.name.endswith(".f"))
     assert rfn.statement_reads == fn.statement_reads
+
+
+# --- slice: --summary-aware-calls fold (issue #900, Sol port) ----------------
+
+def _callee_manifest(*functions) -> sol.SolSummarySet:
+    return sol.SolSummarySet.from_dict(
+        {
+            "schema_version": sol.PROFILE,
+            "context_key": "declared-context",
+            "functions": list(functions),
+        }
+    )
+
+
+def _decl_fn(name, params, deps, effects="none_in_supported_fragment", **over):
+    d = {
+        "name": name,
+        "contract": "",
+        "available": True,
+        "parameters": list(params),
+        "return_dependencies": None if deps is None else sorted(deps),
+        "calls": [],
+        "gaps": [],
+        "effects": effects,
+        "statement_reads": [],
+    }
+    if deps is None:
+        d["available"] = False
+        d["gaps"] = [{"reason": "binding_unavailable", "byte": 0}]
+    d.update(over)
+    return d
+
+
+_CALLER = (
+    "contract C {"
+    " function f(uint256 a, uint256 b) public returns (uint256) {"
+    "   return ext.g(a, b); } }"
+)
+
+
+def _aware(source, *functions) -> sol.SolSummarySet:
+    return sol.summarize_solidity(
+        source, declared=_callee_manifest(*functions)
+    )
+
+
+def _result(s: sol.SolSummarySet, name="C.f") -> sol.SolFunctionSummary:
+    return next(f for f in s.functions if f.name == name)
+
+
+def test_summary_aware_call_folds_declared_return_dependencies():
+    s = _aware(_CALLER, _decl_fn("g", ("a", "b"), {0}))
+    f = _result(s)
+    # The opaque approximation unions both actuals; the declared
+    # summary folds only `a` (= actual 0).
+    assert f.available and f.return_dependencies == frozenset({0})
+    (call,) = f.calls
+    assert call.callee == "ext.g"
+    assert call.result_dependencies == frozenset({0})
+    # `effects` stays `unknown` — the manifest cannot bound writes
+    # through argument objects.
+    assert f.effects == "unknown"
+    assert s.call_modeling == {
+        "summary_modeled_calls": 1,
+        "opaque_calls": 0,
+        "summary_unmatched": 0,
+    }
+
+
+def test_summary_aware_call_module_token_prefix_matches():
+    # `ext.Lib.g` — the base's last segment is a module token
+    # prefix over the callee's standalone name `Lib.g`.
+    src = (
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.Lib.g(a, b); } }"
+    )
+    s = _aware(src, _decl_fn("Lib.g", ("a", "b"), {0}))
+    f = _result(s)
+    assert f.return_dependencies == frozenset({0})
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0})
+
+
+def test_summary_aware_call_deep_qualifier_never_folds():
+    # `a.b.g` splits as token `a` + name `b.g` — a bare `g` entry
+    # never folds: the qualifier is not a single module token.
+    src = (
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return a.b.g(a, b); } }"
+    )
+    s = _aware(src, _decl_fn("g", ("a", "b"), {0}))
+    f = _result(s)
+    assert f.return_dependencies == frozenset({0, 1})
+    assert s.call_modeling["summary_unmatched"] == 1
+
+
+def test_summary_aware_call_unmatched_name_stays_opaque():
+    s = _aware(_CALLER, _decl_fn("h", ("a", "b"), {0}))
+    f = _result(s)
+    assert f.return_dependencies == frozenset({0, 1})
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0, 1})
+    assert s.call_modeling == {
+        "summary_modeled_calls": 0,
+        "opaque_calls": 1,
+        "summary_unmatched": 1,
+    }
+
+
+def test_summary_aware_call_gapped_entry_stays_opaque():
+    s = _aware(_CALLER, _decl_fn("g", ("a", "b"), None))
+    f = _result(s)
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0, 1})
+    # A name hit still counts as referenced, folded or not.
+    assert s.call_modeling["summary_unmatched"] == 0
+
+
+def test_summary_aware_call_arity_mismatch_stays_opaque():
+    s = _aware(_CALLER, _decl_fn("g", ("a",), {0}))
+    f = _result(s)
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0, 1})
+
+
+def test_summary_aware_call_out_of_range_dep_stays_opaque():
+    s = _aware(_CALLER, _decl_fn("g", ("a", "b"), {2}))
+    f = _result(s)
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0, 1})
+
+
+def test_summary_aware_call_named_arguments_stay_opaque():
+    src = (
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.g({a: a, b: b}); } }"
+    )
+    s = _aware(src, _decl_fn("g", ("a", "b"), {0}))
+    f = _result(s)
+    (call,) = f.calls
+    # Declared ordinals are positional — named arguments rebind
+    # them, so the call keeps the opaque union.
+    assert call.result_dependencies == frozenset({0, 1})
+
+
+def test_summary_aware_call_discarded_result_stays_opaque():
+    src = (
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   ext.g(a, b); return a; } }"
+    )
+    s = _aware(src, _decl_fn("g", ("a", "b"), {0}))
+    f = _result(s)
+    (call,) = f.calls
+    assert call.result_dependencies is None
+    assert s.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_summary_aware_calls_absent_manifest_has_no_modeling():
+    s = sol.summarize_solidity(_CALLER)
+    assert s.call_modeling is None
+    assert "call_modeling" not in s.to_dict()
+
+
+def test_summary_aware_calls_context_key_binds_manifest():
+    a = _aware(_CALLER, _decl_fn("g", ("a", "b"), {0}))
+    b = _aware(_CALLER, _decl_fn("g", ("a", "b"), {1}))
+    assert a.context_key != b.context_key
+    same = _aware(_CALLER, _decl_fn("g", ("a", "b"), {0}))
+    assert a.context_key == same.context_key
+    plain = sol.summarize_solidity(_CALLER)
+    assert a.context_key != plain.context_key
+
+
+def test_summary_aware_calls_manifest_roundtrips_modeling():
+    s = _aware(_CALLER, _decl_fn("g", ("a", "b"), {0}))
+    restored = sol.SolSummarySet.from_dict(s.to_dict())
+    assert restored.call_modeling == s.call_modeling
+
+
+def _sol_aware_args(source, manifest, callee, output=None):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest),
+            "output": str(output) if output else None,
+            "summary_aware_calls": str(callee),
+        },
+    )()
+
+
+_LIB_SRC = (
+    "contract Lib {"
+    " function g(uint256 a, uint256 b) public returns (uint256) {"
+    "   return a; } }"
+)
+
+
+def _produce(tmp_path, capsys, src_path):
+    sol.main(_sol_args(src_path))
+    manifest = tmp_path / (src_path.stem + "-manifest.json")
+    manifest.write_text(capsys.readouterr().out)
+    return manifest
+
+
+def test_check_route_folded_manifest_stays_checkable(tmp_path, capsys):
+    lib = tmp_path / "lib.sol"
+    lib.write_text(_LIB_SRC)
+    lib_manifest = _produce(tmp_path, capsys, lib)
+    caller = tmp_path / "caller.sol"
+    caller.write_text(
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.Lib.g(a, b); } }"
+    )
+    caller_manifest = _produce(tmp_path, capsys, caller)
+    # Re-derive with the flag and compare — folded records are
+    # checkable like any other.
+    out_manifest = tmp_path / "aware.json"
+    sol.main(
+        type(
+            "A",
+            (),
+            {
+                "source": str(caller),
+                "resolve_modules": False,
+                "summary_aware_calls": str(lib_manifest),
+            },
+        )()
+    )
+    out_manifest.write_text(capsys.readouterr().out)
+    doc = json.loads(out_manifest.read_text())
+    assert doc["call_modeling"]["summary_modeled_calls"] == 1
+    sol.main_check(
+        _sol_aware_args(caller, out_manifest, lib_manifest)
+    )
+    check = json.loads(capsys.readouterr().out)
+    assert check["context_match"] is True
+    assert check["reusable"] == ["C.f"]
+
+
+def test_check_route_changed_callee_manifest_breaks_context(
+    tmp_path, capsys
+):
+    lib = tmp_path / "lib.sol"
+    lib.write_text(_LIB_SRC)
+    lib_manifest = _produce(tmp_path, capsys, lib)
+    caller = tmp_path / "caller.sol"
+    caller.write_text(
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.Lib.g(a, b); } }"
+    )
+    sol.main(
+        type(
+            "A",
+            (),
+            {
+                "source": str(caller),
+                "resolve_modules": False,
+                "summary_aware_calls": str(lib_manifest),
+            },
+        )()
+    )
+    caller_manifest = tmp_path / "caller-manifest.json"
+    caller_manifest.write_text(capsys.readouterr().out)
+    # Flip a declared dep ordinal — same sources, changed manifest.
+    doc = json.loads(lib_manifest.read_text())
+    doc["functions"][0]["return_dependencies"] = [1]
+    lib_manifest.write_text(json.dumps(doc))
+    sol.main_check(
+        _sol_aware_args(caller, caller_manifest, lib_manifest)
+    )
+    check = json.loads(capsys.readouterr().out)
+    assert check["context_match"] is False
+
+
+def test_reuse_route_keeps_call_modeling(tmp_path, capsys):
+    lib = tmp_path / "lib.sol"
+    lib.write_text(_LIB_SRC)
+    lib_manifest = _produce(tmp_path, capsys, lib)
+    caller = tmp_path / "caller.sol"
+    caller.write_text(
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.Lib.g(a, b); } }"
+    )
+    sol.main(
+        type(
+            "A",
+            (),
+            {
+                "source": str(caller),
+                "resolve_modules": False,
+                "summary_aware_calls": str(lib_manifest),
+            },
+        )()
+    )
+    caller_manifest = tmp_path / "caller-manifest.json"
+    caller_manifest.write_text(capsys.readouterr().out)
+    sol.main_reuse(
+        _sol_aware_args(caller, caller_manifest, lib_manifest)
+    )
+    merged = json.loads(capsys.readouterr().out)
+    assert merged["call_modeling"]["summary_modeled_calls"] == 1
+
+
+def test_output_may_not_overwrite_callee_manifest(tmp_path, capsys):
+    lib = tmp_path / "lib.sol"
+    lib.write_text(_LIB_SRC)
+    lib_manifest = _produce(tmp_path, capsys, lib)
+    caller = tmp_path / "caller.sol"
+    caller.write_text(_CALLER)
+    with pytest.raises(SystemExit) as exc:
+        sol.main_check(
+            _sol_aware_args(
+                caller,
+                caller_manifest_or_stub(tmp_path, caller),
+                lib_manifest,
+                output=lib_manifest,
+            )
+        )
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"
+
+
+def caller_manifest_or_stub(tmp_path, caller):
+    m = tmp_path / "m.json"
+    if not m.exists():
+        m.write_text(
+            json.dumps(sol.summarize_solidity(_CALLER).to_dict())
+        )
+    return m
+
+
+def test_attempt_fingerprint_binds_callee_manifest(tmp_path):
+    src = tmp_path / "a.sol"
+    src.write_text(_CALLER)
+    raw = src.read_bytes()
+    lib = tmp_path / "lib.json"
+    lib.write_text(json.dumps({"x": 1}))
+    fp1 = sol._attempt_fingerprint(str(src), raw)
+    fp2 = sol._attempt_fingerprint(str(src), raw, str(lib))
+    assert fp1 != fp2
+    lib.write_text(json.dumps({"x": 2}))
+    fp3 = sol._attempt_fingerprint(str(src), raw, str(lib))
+    assert fp3 != fp2
+    with pytest.raises(ValueError):
+        sol._attempt_fingerprint(
+            str(src), raw, str(tmp_path / "absent.json")
+        )
+
+
+def test_attempt_route_forwards_summary_aware_calls(tmp_path, capsys):
+    caller = tmp_path / "caller.sol"
+    caller.write_text(_CALLER)
+    args = _attempt_args(caller)
+    sol.main_attempt(args)
+    base = json.loads(capsys.readouterr().out)
+    fp = base["sequence"]["request_fingerprint"]
+    lib = tmp_path / "lib.sol"
+    lib.write_text(_LIB_SRC)
+    lib_manifest = _produce(tmp_path, capsys, lib)
+    args = _attempt_args(caller)
+    args.summary_aware_calls = str(lib_manifest)
+    sol.main_attempt(args)
+    report = json.loads(capsys.readouterr().out)
+    assert report["sequence"]["request_fingerprint"] != fp
+    # The flag reached the child: a malformed manifest fails its
+    # produce run (a forwarded declared input), where the same
+    # source without the flag exits 0.
+    bad = tmp_path / "bad.json"
+    bad.write_text("{")
+    args = _attempt_args(caller)
+    args.summary_aware_calls = str(bad)
+    sol.main_attempt(args)
+    norm = json.loads(capsys.readouterr().out)["normalized"]
+    assert norm["outcome"] == "exited" and norm["exit_code"] != 0
