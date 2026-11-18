@@ -787,7 +787,7 @@ Pin a declared subject-bearing document to record bytes and emit the binding des
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--record` | `<PATH>` | yes | — | Record file whose raw bytes the document should cover. The bytes are hashed, never parsed. |
-| `--evidence` | `<PATH>` | yes | — | Declared JSON document carrying a subject digest — a producer-signature envelope or a Core acceptance descriptor. |
+| `--evidence` | `<PATH>` | yes | — | Declared JSON document carrying a subject digest — a producer-signature envelope, a Core acceptance descriptor, or a recheck diagnostic. |
 | `--output` | `<PATH>` | no | — | Write the binding descriptor to PATH instead of stdout. |
 
 

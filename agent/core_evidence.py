@@ -638,6 +638,10 @@ _BINDING_CARRIERS: dict = {
     PRODUCER_SIGNATURE_SCHEMA: "subject_digest",
     "mumei.source-evidence-acceptance/v1": "evidence_fingerprint",
     "mumei.native-evidence-acceptance/v1": "evidence_fingerprint",
+    # `recheck-source --json` emits the same binding convention — the
+    # diagnostic stays anonymous and non-reusable, but its fingerprint
+    # pins the consistency verdict to the record it was derived from.
+    "mumei.source-evidence-recheck/v1": "evidence_fingerprint",
 }
 
 
