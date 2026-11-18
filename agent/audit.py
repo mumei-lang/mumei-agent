@@ -748,7 +748,11 @@ class AuditPipeline:
                 go_types,
                 manifest_map=summaries_manifest_map,
                 attempt_timeout_ms=(
-                    summary_attempt_timeout_ms
+                    (
+                        summary_attempt_timeout_ms
+                        if summary_attempt_timeout_ms is not None
+                        else _SUMMARY_ROUTE_TIMEOUT_SECONDS * 1000
+                    )
                     if enable_summary_attempts
                     else None
                 ),

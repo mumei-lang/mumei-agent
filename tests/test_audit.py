@@ -3211,6 +3211,60 @@ def test_audit_directory_collects_summary_audits(
     assert "summary_audits:" in result.summary
 
 
+def test_audit_directory_summary_attempts_default_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enable_summary_attempts=True with no explicit timeout must
+    still run the attempt route — the default bound applies."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "util.ts").write_text("export const g = () => 1\n", encoding="utf-8")
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        "agent.audit._run_summary_route",
+        lambda argv: seen.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src, enable_summaries=True, enable_summary_attempts=True)
+
+    assert seen == [
+        [
+            "ts-summaries-attempt",
+            str(src / "util.ts"),
+            "--attempt-timeout",
+            "120000",
+        ]
+    ]
+    assert result.summary_audits == [
+        {
+            "route": "ts-summaries",
+            "unit": "util.ts",
+            "status": "emitted",
+            "mode": "attempt",
+            "selected": True,
+            "manifest_sha256": "b" * 64,
+            "check_outcome": "valid",
+            "accepted": True,
+        }
+    ]
+
+
 def test_audit_directory_summaries_opt_in(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
