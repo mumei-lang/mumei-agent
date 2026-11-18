@@ -249,6 +249,11 @@ def run_attempt_schedule(
             break
         adapter_id = plan.selected.adapter_id
         ordinal += 1
+        if cancel_event is not None and cancel_event.is_set():
+            # A host stop declared before the round: it must hold for a
+            # `not_dispatched` round too, not just a spawned attempt.
+            outcome = "cancelled"
+            break
         prepared = PreparedSourceRequest(
             plan, source, expected_source_sha256
         )
@@ -308,7 +313,12 @@ def run_attempt_schedule(
             outcome = "fallback_denied"
             break
         excluded.append(adapter_id)
-        plan = registry.replan(plans[-1], tuple(excluded), observations=None)
+        # Reuse the caller's declarations: `replan(observations=None)`
+        # replays only stamped records, which would drop unstamped
+        # availability and strand every later candidate.
+        plan = registry.replan(
+            plans[-1], tuple(excluded), observations=current_observations or None
+        )
         plans.append(plan)
 
     return AttemptScheduleResult(
