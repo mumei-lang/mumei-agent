@@ -1635,7 +1635,7 @@ def test_accept_route_emits_the_live_record_not_the_forged_one(
     src.write_text(_SOL_SRC)
     manifest = tmp_path / "m.json"
     forged = sol.summarize_solidity(_SOL_SRC).to_dict()
-    forged["functions"][0]["return_dependencies"] = [1, 2, 3]
+    forged["functions"][0]["return_dependencies"] = []
     manifest.write_text(json.dumps(forged))
     with pytest.raises(SystemExit):
         sol.main_accept(_sol_args(src, manifest, "f"))
@@ -3370,10 +3370,31 @@ def test_summary_aware_call_arity_mismatch_stays_opaque():
 
 
 def test_summary_aware_call_out_of_range_dep_stays_opaque():
-    s = _aware(_CALLER, _decl_fn("g", ("a", "b"), {2}))
+    # `from_dict` rejects the entry as malformed — the runtime gate
+    # is exercised through a directly built set.
+    bad = sol.SolFunctionSummary(
+        name="g",
+        contract="",
+        params=("a", "b"),
+        available=True,
+        return_dependencies=frozenset({2}),
+        calls=[],
+        gaps=[],
+    )
+    s = sol.summarize_solidity(
+        _CALLER,
+        declared=sol.SolSummarySet("declared-context", [bad]),
+    )
     f = _result(s)
     (call,) = f.calls
     assert call.result_dependencies == frozenset({0, 1})
+
+
+def test_manifest_rejects_an_out_of_range_ordinal():
+    s = sol.summarize_solidity(_SOL_SRC).to_dict()
+    s["functions"][0]["return_dependencies"] = [1]
+    with pytest.raises(ValueError, match="malformed"):
+        sol.SolSummarySet.from_dict(s)
 
 
 def test_summary_aware_call_named_arguments_stay_opaque():
