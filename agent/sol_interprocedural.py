@@ -1537,9 +1537,16 @@ class _Builder:
                     )
                     if not shadowed and sv in mlocals:
                         locals_[sv] = mlocals[sv]
-                return self._run_body(
-                    body, locals_, param_index, summary, rest
-                )
+                # The rest of the chain and then the function
+                # body run under the function's own module — the
+                # modifier's token is still on the stack here.
+                self._mod_stack.append(self._mod_stack[0])
+                try:
+                    return self._run_body(
+                        body, locals_, param_index, summary, rest
+                    )
+                finally:
+                    self._mod_stack.pop()
 
             self._placeholder.append(_wrapped)
             # The modifier's statements live in its declaring

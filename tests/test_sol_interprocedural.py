@@ -3166,15 +3166,24 @@ def test_statement_reads_augmented_and_update_operands():
     src = """contract C {
   function f(uint256 a, uint256 b) public pure returns (uint256) {
     uint256 x = a;
-    x += b;
     x++;
+    x += b;
     return x;
   }
 }"""
     s = _fn(src, "f")
     assert s.available
     reads = _reads(s)
-    assert any(frozenset({0, 1}) <= r for r in reads.values())
+    inc = next(
+        r for span, r in reads.items()
+        if span[0] <= src.index("x++") < span[1]
+    )
+    assert inc == frozenset({0})
+    aug = next(
+        r for span, r in reads.items()
+        if span[0] <= src.index("x += b") < span[1]
+    )
+    assert aug == frozenset({0, 1})
 
 
 def test_statement_reads_bare_return_named_result():
@@ -3187,7 +3196,36 @@ def test_statement_reads_bare_return_named_result():
 }"""
     s = _fn(src, "f")
     assert s.available
-    assert frozenset({0}) in _reads(s).values()
+    idx = src.index("return;")
+    ret = next(
+        r for span, r in _reads(s).items()
+        if span[0] <= idx < span[1]
+    )
+    assert ret == frozenset({0})
+
+
+def test_statement_reads_imported_modifier_module_tag():
+    # A modifier inlined from another module records under that
+    # module's token; the function body reached via `_;` keeps
+    # the importer's "".
+    b_mod = """contract Base {
+  modifier m(uint256 v) {
+    uint256 t = v + 1;
+    _;
+  }
+}"""
+    src = """import "./b.sol";
+contract A is Base {
+  function f(uint256 a) public m(a) returns (uint256) {
+    return a;
+  }
+}"""
+    s = _summarize_mods(src, {"./b.sol": b_mod})
+    fn = next(f for f in s.functions if f.name == "A.f")
+    assert fn.available
+    mods = {r.module for r in fn.statement_reads}
+    assert "b" in mods
+    assert "" in mods
 
 
 def test_statement_reads_module_tag_roundtrip():
