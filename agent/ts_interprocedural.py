@@ -4521,6 +4521,10 @@ class _Builder:
                 raise _Unsupported("binding_unavailable", _span(node))
         else:
             old = target.get(base)
+        # A member write reads its destination object — the base's
+        # current deps attribute to the statement like the Go
+        # model's destination-operand reads.
+        self._record_read(_scalar_of(old))
         if isinstance(old, _Class) and has_dynamic:
             # `C[k] = v` — every static field is a may-write and
             # every static setter may run.

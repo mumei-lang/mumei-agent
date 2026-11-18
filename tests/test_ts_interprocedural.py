@@ -7212,3 +7212,19 @@ def test_statement_reads_roundtrip():
     d = s.to_dict()
     del d["statement_reads"]
     assert ts.TsFunctionSummary.from_dict(d).statement_reads == ()
+
+
+def test_statement_reads_member_write_reads_destination():
+    # `o.f = v` reads the destination object — the base's deps
+    # attribute to the statement alongside the value's.
+    s = _fn(
+        "function f(a: number, b: number): number {"
+        " let o = { f: a };"
+        " o.f = b;"
+        " return o.f; }"
+    )
+    assert s.available
+    reads = _reads(s)
+    # `o.f = b` reads the destination base ({0} from `a`) and the
+    # value ({1}): union {0, 1}.
+    assert frozenset({0, 1}) in reads.values(), reads
