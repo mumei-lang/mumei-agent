@@ -2,6 +2,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from agent.verify_schedule import (
 )
 
 PY = sys.executable
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE = b"FAKE_PRIVATE_SOURCE_NOT_EVIDENCE"
 PROFILE = "mumei.test/v1"
 
@@ -243,11 +245,43 @@ def test_cli_subcommand_dispatches(tmp_path):
          "--request", paths["request"], "--adapters", paths["adapters"],
          "--argv-map", paths["argv"], "--policy", paths["policy"],
          "--observations", paths["obs"], "--source", str(source)],
-        capture_output=True, text=True, cwd="/home/ubuntu/repos/mumei-agent",
-        env={"PYTHONPATH": "/home/ubuntu/repos/mumei-agent", "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, cwd=REPO_ROOT,
+        env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
     )
     assert out.returncode == 0, out.stderr
     doc = json.loads(out.stdout)
     assert doc["schema_version"] == "mumei.attempt-schedule/v1"
     assert doc["outcome"] == "selected"
     assert "FAKE_PRIVATE" not in out.stdout + out.stderr
+
+
+def test_output_must_not_overwrite_declared_input(inputs, capsys):
+    args = args_for(inputs, output=inputs["source"])
+    with pytest.raises(SystemExit):
+        main_schedule(args)
+    err = capsys.readouterr().err
+    assert err.startswith("verify-schedule:")
+    assert "FAKE_PRIVATE" not in err
+    # The source survives untouched.
+    assert open(inputs["source"], "rb").read() == SOURCE
+
+
+def test_policy_requires_explicit_allowed_permissions(inputs, tmp_path, capsys):
+    policy = tmp_path / "FAKE_PRIVATE_policy.json"
+    policy.write_text(json.dumps({"timeout_ms": 10_000}))
+    args = args_for({**inputs, "policy": str(policy)})
+    with pytest.raises(SystemExit):
+        main_schedule(args)
+    assert capsys.readouterr().err.startswith("verify-schedule:")
+
+
+def test_empty_allowed_locations_is_rejected(inputs, capsys):
+    policy = json.loads(open(inputs["policy"]).read())
+    policy["allowed_locations"] = []
+    path = inputs["policy"].replace("policy", "polnoloc")
+    with open(path, "w") as f:
+        json.dump(policy, f)
+    args = args_for({**inputs, "policy": path})
+    with pytest.raises(SystemExit):
+        main_schedule(args)
+    assert capsys.readouterr().err.startswith("verify-schedule:")

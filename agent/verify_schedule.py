@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -112,13 +113,18 @@ def _load_policy(path: str) -> PlannerPolicy:
         type(pin) is not list or len(pin) != 2 for pin in pins
     ):
         raise ValueError("invalid tool version pin declaration")
-    allowed = document.get("allowed_permissions")
+    if "allowed_permissions" not in document:
+        raise ValueError(
+            "planner policy requires an explicit allowed_permissions list"
+        )
+    allowed = document["allowed_permissions"]
+    locations = document.get("allowed_locations")
     return PlannerPolicy(
         selected_adapter=document.get("selected_adapter"),
         allow_fallback=document.get("allow_fallback", False),
         disabled_adapters=frozenset(document.get("disabled_adapters") or ()),
         allowed_locations=frozenset(
-            document.get("allowed_locations") or {"local"}
+            {"local"} if locations is None else locations
         ),
         tool_version_pins=tuple(tuple(pin) for pin in pins),
         timeout_ms=document.get("timeout_ms", 30_000),
@@ -199,8 +205,7 @@ def build_schedule_parser(
         "--policy", required=True, metavar="PATH",
         help=(
             "Declared planner policy JSON. allowed_permissions must be "
-            "declared for attempt binding; omit it only to exclude all "
-            "permission-requiring adapters."
+            "declared (an empty list permits only permission-free adapters)."
         ),
     )
     parser.add_argument(
@@ -266,16 +271,51 @@ def run_schedule(args: argparse.Namespace) -> dict:
     return result.to_dict()
 
 
+def _declared_paths(args: argparse.Namespace) -> list[str]:
+    paths = [args.request, args.adapters, args.argv_map, args.policy,
+             args.source]
+    if args.observations is not None:
+        paths.append(args.observations)
+    if args.output is not None:
+        paths.append(args.output)
+    return paths
+
+
+def _redact_declared_paths(text: str, declared: list[str]) -> str:
+    # Failure text must not carry checkout-local paths: inputs may sit
+    # inside private directories whose names are not evidence.
+    for path in declared:
+        if not path:
+            continue
+        for form in (path, os.path.realpath(path)):
+            text = text.replace(form, "<declared path>")
+    return text
+
+
 def main_schedule(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_schedule_parser().parse_args()
+    declared = _declared_paths(args)
     try:
+        if args.output is not None:
+            target = os.path.realpath(args.output)
+            inputs = [args.request, args.adapters, args.argv_map,
+                      args.policy, args.source]
+            if args.observations is not None:
+                inputs.append(args.observations)
+            if any(os.path.realpath(p) == target for p in inputs):
+                raise ValueError(
+                    "--output must not overwrite a declared input"
+                )
         document = json.dumps(run_schedule(args), indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             Path(args.output).write_text(document, encoding="utf-8")
         else:
             sys.stdout.write(document)
     except (OSError, ValueError, UnicodeDecodeError) as exc:
-        print(f"verify-schedule: {exc}", file=sys.stderr)
+        print(
+            f"verify-schedule: {_redact_declared_paths(str(exc), declared)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return 0
