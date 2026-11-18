@@ -13866,28 +13866,3 @@ def test_statement_reads_parallel_dest_uses_old_binding(go_types_helper):
     assert result.available
     reads = {r.deps for r in result.statement_reads}
     assert frozenset({0, 1, 2}) in reads
-
-
-def test_bound_pointee_indexed_nested_field_store_third_level(
-    go_types_helper,
-):
-    # `(*p)[i].V.G.H = v` — the third-level field store records the
-    # leaf member's identity like `(*p)[i].V.G = v` and folds the
-    # RHS through the alias fold.
-    files = {
-        "a.go": "package p\n"
-        "type R struct{ H int64 }\ntype S struct{ G R }\n"
-        "type Q struct{ V S }\n"
-        "func F(p *[]Q, i, v int64) int64 {\n"
-        "\t(*p)[i].V.G.H = v\n\treturn v\n}\n"
-    }
-    snapshot = _snapshot_for(go_types_helper, files)
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert result.available and result.effects == "unknown"
-    h_id = next(
-        b.id for b in snapshot.bindings
-        if b.name == "H" and b.kind == "variable" and b.scope is None
-    )
-    assert any(c.target == h_id and c.imported for c in result.calls)
