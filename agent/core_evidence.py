@@ -723,6 +723,14 @@ _CHECK_PERFORMERS: dict = {
     "descriptor_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
     ],
+    # Core acceptance descriptors declare `record_freshness` — whether
+    # the accepted record itself was recently produced. A freshness
+    # evaluation over the record's `produced_at` performs it, like
+    # `freshness`/`descriptor_freshness` (record-agnostic: the doc is
+    # trusted as declared and binds no record at this layer).
+    "record_freshness": [
+        ("mumei.freshness-evaluation/v1", "within_window", True, None),
+    ],
     "freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
         ("mumei.source-evidence-recheck/v1", "recheck", "consistent",

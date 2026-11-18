@@ -306,6 +306,20 @@ def test_attempt_report_requires_accepted_and_bound():
     assert evaluation["checks"]["file_identity"] == "evidence_failed"
 
 
+def test_record_freshness_recovers_via_freshness_eval():
+    record = _record("record_freshness")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.freshness-evaluation/v1", within_window=True)],
+    )
+    assert evaluation["checks"]["record_freshness"] == "recovered"
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.freshness-evaluation/v1", within_window=False)],
+    )
+    assert evaluation["checks"]["record_freshness"] == "evidence_failed"
+
+
 def test_foreign_schema_never_counts():
     record = _record("signature_verification")
     evaluation = evaluate_unperformed_check_recovery(
