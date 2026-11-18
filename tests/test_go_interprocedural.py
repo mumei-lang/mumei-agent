@@ -13254,6 +13254,50 @@ def test_local_channel_alias_swap_keeps_queue_contents(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_chan_parameter_reseat_bare_read_follows_queue(
+    go_types_helper,
+):
+    # `p = q` reseats the parameter's name onto q's queue — a bare
+    # `G(p)` argument read surfaces q's queue provenance, not p's.
+    files = {
+        "a.go": "package p\n"
+        "func G(ch chan int64) int64 { return 0 }\n"
+        "func F(p, q chan int64) int64 {\n"
+        "\tp = q\n"
+        "\treturn G(p)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert frozenset({1}) in {
+        r.deps for r in result.statement_reads
+    }
+
+
+def test_local_channel_alias_closure_call_follows_reseat(
+    go_types_helper,
+):
+    # `h := func() int64 { return <-ch }; ch2 <- y; ch = ch2; h()`
+    # — the captured channel name reseated between the literal and
+    # the call, so the call reads the queue `ch` names now.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, y int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := make(chan int64)\n"
+            "\th := func() int64 { return <-ch }\n"
+            "\tch2 <- y\n"
+            "\tch = ch2\n"
+            "\treturn h()\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
 def test_chan_parameter_alias_send_recv(go_types_helper):
     # `ch2 := p` on a `chan` parameter aliases the caller-shared
     # queue: the send records the imported transfer on p's

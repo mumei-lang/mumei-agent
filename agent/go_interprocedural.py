@@ -6382,6 +6382,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     return frozenset()
                 return locals_[ref.binding_id]
             if ref is not None and ref.binding_id in params:
+                chan_root = (
+                    self._chan_root(ref.binding_id)
+                    if self._is_chan_binding(ref.binding_id)
+                    else ref.binding_id
+                )
+                if chan_root != ref.binding_id:
+                    # `p = q` reseated the parameter's name onto
+                    # another queue — the read surfaces that queue's
+                    # contents, not p's own provenance slot.
+                    if chan_root in locals_:
+                        return locals_[chan_root]
+                    if chan_root in params:
+                        return (
+                            frozenset({params[chan_root]})
+                            | self.indirect_writes
+                        )
+                    return frozenset()
                 deps = frozenset({params[ref.binding_id]})
                 binding = self.bindings.get(ref.binding_id)
                 if (
@@ -7684,10 +7701,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # value under its binding id.
             resolved: frozenset[int] = frozenset()
             for cbid in captured:
-                if cbid in locals_:
-                    resolved |= locals_[cbid]
-                elif cbid in params:
-                    resolved |= frozenset({params[cbid]})
+                # A captured channel name may have been reseated
+                # between the literal and the call (`ch = ch2`) —
+                # resolve the queue it names NOW, not the one its
+                # own slot still holds.
+                root = (
+                    self._chan_root(cbid)
+                    if self._is_chan_binding(cbid)
+                    else cbid
+                )
+                if root in locals_:
+                    resolved |= locals_[root]
+                elif root in params:
+                    resolved |= frozenset({params[root]})
             deps = resolved
         elif ref.binding_id in params:
             deps = frozenset({params[ref.binding_id]})
