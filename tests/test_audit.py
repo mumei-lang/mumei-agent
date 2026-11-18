@@ -1824,6 +1824,8 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         enable_summaries=False,
         go_types=None,
         summaries_manifest_map=None,
+        enable_summary_attempts=False,
+        summary_attempt_timeout_ms=120000,
     )
 
 
@@ -2845,6 +2847,43 @@ def _manifest_json(functions: int = 2) -> str:
     )
 
 
+def _attempt_report_json(
+    *,
+    selected: bool = True,
+    accepted: bool | None = True,
+    check_outcome: str | None = "valid",
+    sha256: str = "b" * 64,
+) -> str:
+    report: dict = {
+        "schema_version": "mumei.verify-attempt-report/v1",
+        "sequence": {
+            "schema_version": "mumei.verifier-attempt-sequence/v1",
+            "request_fingerprint": "a" * 64,
+            "timeout_ms": 120000,
+            "attempts": [],
+        },
+        "normalized": {
+            "schema_version": "mumei.verifier-run-result/v1",
+            "request_fingerprint": "a" * 64,
+            "attempt_number": 1,
+            "timeout_ms": 120000,
+            "outcome": "exited",
+            "elapsed_ms": 10,
+            "stdout": {"sha256": sha256, "size_bytes": 12},
+        },
+    }
+    if selected:
+        report["sequence"]["selected_result"] = {
+            "attempt_number": 1,
+            "output_fingerprint": "c" * 64,
+        }
+    if check_outcome is not None:
+        report["evidence_check"] = {"outcome": check_outcome}
+    if accepted is not None:
+        report["acceptance"] = {"accepted": accepted}
+    return json.dumps(report)
+
+
 def test_summary_audit_units_groups_go_by_directory(tmp_path: Path) -> None:
     from agent.audit import _summary_audit_units
 
@@ -2922,6 +2961,133 @@ def test_collect_summary_audits_passes_go_types_helper(tmp_path: Path) -> None:
 
     assert entries[0]["status"] == "emitted"
     assert calls[0][:3] == ["go-summaries", "--go-types", "/opt/go-types"]
+
+
+def test_collect_summary_audits_attempt_runs_attempt_route(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        attempt_timeout_ms=90000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    assert calls == [
+        ["ts-summaries-attempt", str(ts), "--attempt-timeout", "90000"]
+    ]
+    assert entries == [
+        {
+            "route": "ts-summaries",
+            "unit": "main.ts",
+            "status": "emitted",
+            "mode": "attempt",
+            "selected": True,
+            "manifest_sha256": "b" * 64,
+            "check_outcome": "valid",
+            "accepted": True,
+        }
+    ]
+
+
+def test_collect_summary_audits_attempt_records_envelope_absence(
+    tmp_path: Path,
+) -> None:
+    """An attempt report without the acceptance envelope still
+    records emitted — the fields are simply absent, never errors."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        attempt_timeout_ms=1000,
+        runner=lambda argv: _fake_completed(
+            argv,
+            stdout=_attempt_report_json(
+                selected=False, accepted=None, check_outcome=None
+            ),
+        ),
+    )
+    assert entries == [
+        {
+            "route": "ts-summaries",
+            "unit": "main.ts",
+            "status": "emitted",
+            "mode": "attempt",
+            "selected": False,
+            "manifest_sha256": "b" * 64,
+        }
+    ]
+
+
+def test_collect_summary_audits_attempt_passes_go_types_helper(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    go = tmp_path / "pkg" / "a.go"
+    go.parent.mkdir()
+    go.write_text("x", encoding="utf-8")
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [go],
+        "/opt/go-types",
+        attempt_timeout_ms=5000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    assert entries[0]["status"] == "emitted"
+    assert calls[0][:3] == [
+        "go-summaries-attempt",
+        "--go-types",
+        "/opt/go-types",
+    ]
+    assert calls[0][-2:] == ["--attempt-timeout", "5000"]
+
+
+def test_collect_summary_audits_attempt_failures_stay_advisory(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    rs = tmp_path / "lib.rs"
+    rs.write_text("x", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        if argv[0] == "ts-summaries-attempt":
+            return _fake_completed(argv, rc=1, stderr="refused")
+        return _fake_completed(argv, stdout="not json")
+
+    entries = _collect_summary_audits(
+        tmp_path, [ts, rs], None, attempt_timeout_ms=1000, runner=runner
+    )
+    assert [entry["status"] for entry in entries] == ["failed", "failed"]
+    assert entries[0]["error"] == "Expecting value: line 1 column 1 (char 0)"
+    assert entries[1]["error"] == "refused"
+    # runner failure is advisory too — never raises
+    def exploding(argv: list[str]):
+        raise OSError("spawn failed")
+
+    entries = _collect_summary_audits(
+        tmp_path, [ts], None, attempt_timeout_ms=1000, runner=exploding
+    )
+    assert entries[0]["status"] == "failed"
+    assert "spawn failed" in entries[0]["error"]
 
 
 def test_collect_summary_audits_failure_redacts_checkout_path(
@@ -3043,6 +3209,60 @@ def test_audit_directory_collects_summary_audits(
     assert "functions" not in result.summary_audits[0]
     assert asdict(result)["summary_audits"] == result.summary_audits
     assert "summary_audits:" in result.summary
+
+
+def test_audit_directory_summary_attempts_default_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enable_summary_attempts=True with no explicit timeout must
+    still run the attempt route — the default bound applies."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "util.ts").write_text("export const g = () => 1\n", encoding="utf-8")
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        "agent.audit._run_summary_route",
+        lambda argv: seen.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src, enable_summaries=True, enable_summary_attempts=True)
+
+    assert seen == [
+        [
+            "ts-summaries-attempt",
+            str(src / "util.ts"),
+            "--attempt-timeout",
+            "120000",
+        ]
+    ]
+    assert result.summary_audits == [
+        {
+            "route": "ts-summaries",
+            "unit": "util.ts",
+            "status": "emitted",
+            "mode": "attempt",
+            "selected": True,
+            "manifest_sha256": "b" * 64,
+            "check_outcome": "valid",
+            "accepted": True,
+        }
+    ]
 
 
 def test_audit_directory_summaries_opt_in(tmp_path: Path) -> None:
@@ -3382,3 +3602,52 @@ def test_summaries_manifest_map_requires_enable_summaries(
     )
     with pytest.raises(SystemExit):
         main(no_enable)
+
+
+def test_summary_attempts_flag_gating(tmp_path: Path) -> None:
+    from agent.audit import build_parser, main
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.ts").write_text("x", encoding="utf-8")
+    map_path = tmp_path / "map.json"
+    map_path.write_text("{}", encoding="utf-8")
+
+    # attempts require --enable-summaries
+    no_enable = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summary-attempts",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(no_enable)
+
+    # attempts cannot combine with the manifest map — there is no
+    # attempt variant of *-summaries-reuse
+    combined = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summaries",
+            "--enable-summary-attempts",
+            "--summaries-manifest-map",
+            str(map_path),
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(combined)
+
+    ok = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summaries",
+            "--enable-summary-attempts",
+            "--summary-attempt-timeout",
+            "45000",
+        ]
+    )
+    assert ok.enable_summary_attempts is True
+    assert ok.summary_attempt_timeout == 45000

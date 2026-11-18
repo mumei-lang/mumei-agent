@@ -250,6 +250,8 @@ class AuditPipeline:
         enable_summaries: bool = False,
         go_types: str | None = None,
         summaries_manifest_map: dict | None = None,
+        enable_summary_attempts: bool = False,
+        summary_attempt_timeout_ms: int | None = None,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -266,6 +268,8 @@ class AuditPipeline:
                 enable_summaries=enable_summaries,
                 go_types=go_types,
                 summaries_manifest_map=summaries_manifest_map,
+                enable_summary_attempts=enable_summary_attempts,
+                summary_attempt_timeout_ms=summary_attempt_timeout_ms,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -621,6 +625,8 @@ class AuditPipeline:
         enable_summaries: bool = False,
         go_types: str | None = None,
         summaries_manifest_map: dict | None = None,
+        enable_summary_attempts: bool = False,
+        summary_attempt_timeout_ms: int | None = None,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
@@ -647,6 +653,8 @@ class AuditPipeline:
                 enable_summaries=enable_summaries,
                 go_types=go_types,
                 summaries_manifest_map=summaries_manifest_map,
+                enable_summary_attempts=enable_summary_attempts,
+                summary_attempt_timeout_ms=summary_attempt_timeout_ms,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -673,6 +681,8 @@ class AuditPipeline:
         enable_summaries: bool = False,
         go_types: str | None = None,
         summaries_manifest_map: dict | None = None,
+        enable_summary_attempts: bool = False,
+        summary_attempt_timeout_ms: int | None = None,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -737,6 +747,15 @@ class AuditPipeline:
                 code_files,
                 go_types,
                 manifest_map=summaries_manifest_map,
+                attempt_timeout_ms=(
+                    (
+                        summary_attempt_timeout_ms
+                        if summary_attempt_timeout_ms is not None
+                        else _SUMMARY_ROUTE_TIMEOUT_SECONDS * 1000
+                    )
+                    if enable_summary_attempts
+                    else None
+                ),
             )
             if enable_summaries and code_files
             else []
@@ -1058,6 +1077,28 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         ),
     )
     parser.add_argument(
+        "--enable-summary-attempts",
+        action="store_true",
+        help=(
+            "Directory audits only, requires --enable-summaries: run "
+            "each summary unit through its declared <route>-attempt "
+            "route and record the attempt report's acceptance envelope "
+            "(mode/accepted/check_outcome/manifest_sha256) instead of "
+            "manifest metadata — advisory; report bytes are not stored. "
+            "Cannot combine with --summaries-manifest-map."
+        ),
+    )
+    parser.add_argument(
+        "--summary-attempt-timeout",
+        type=int,
+        default=_SUMMARY_ROUTE_TIMEOUT_SECONDS * 1000,
+        metavar="<MS>",
+        help=(
+            "Declared attempt bound in milliseconds passed to each "
+            "<route>-attempt unit (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
         "--go-types",
         default=None,
         metavar="<PATH>",
@@ -1071,6 +1112,23 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
     args = args or build_parser().parse_args()
+    if getattr(args, "enable_summary_attempts", False) and not getattr(
+        args, "enable_summaries", False
+    ):
+        print(
+            "audit: --enable-summary-attempts requires --enable-summaries",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if getattr(args, "enable_summary_attempts", False) and getattr(
+        args, "summaries_manifest_map", None
+    ) is not None:
+        print(
+            "audit: --enable-summary-attempts cannot combine with "
+            "--summaries-manifest-map",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     manifest_map = None
     manifest_map_path = getattr(args, "summaries_manifest_map", None)
     if manifest_map_path is not None:
@@ -1101,6 +1159,12 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         enable_summaries=bool(getattr(args, "enable_summaries", False)),
         go_types=getattr(args, "go_types", None),
         summaries_manifest_map=manifest_map,
+        enable_summary_attempts=bool(
+            getattr(args, "enable_summary_attempts", False)
+        ),
+        summary_attempt_timeout_ms=getattr(
+            args, "summary_attempt_timeout", None
+        ),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
@@ -1226,6 +1290,7 @@ def _collect_summary_audits(
     go_types: str | None,
     *,
     manifest_map: dict | None = None,
+    attempt_timeout_ms: int | None = None,
     runner: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
 ) -> list[dict]:
     """Run each declared produce route on its unit and keep only the
@@ -1260,6 +1325,69 @@ def _collect_summary_audits(
         if route == "go-summaries":
             argv += ["--go-types", cast(str, go_types)]
         argv += argv_tail
+
+        if attempt_timeout_ms is not None:
+            # Attempt mode: the <route>-attempt lifecycle — the report's
+            # acceptance envelope is recorded instead of manifest
+            # metadata. There is no attempt variant of *-summaries-reuse,
+            # so manifest replay stays out of this mode.
+            attempt_argv = [f"{route}-attempt"]
+            if route == "go-summaries":
+                attempt_argv += ["--go-types", cast(str, go_types)]
+            attempt_argv += argv_tail + [
+                "--attempt-timeout",
+                str(attempt_timeout_ms),
+            ]
+            try:
+                completed = run(attempt_argv)
+            except Exception as exc:  # runner failure (spawn, timeout)
+                entry["status"] = "failed"
+                entry["error"] = _summary_error_text(exc, source_path, go_types)
+                entries.append(entry)
+                continue
+            if completed.returncode != 0:
+                entry["status"] = "failed"
+                entry["error"] = _summary_error_text(
+                    _route_failure_text(completed), source_path, go_types
+                )
+                entries.append(entry)
+                continue
+            try:
+                report = json.loads(completed.stdout)
+                if type(report) is not dict:
+                    raise ValueError("attempt report is not a JSON object")
+            except (json.JSONDecodeError, ValueError) as exc:
+                entry["status"] = "failed"
+                entry["error"] = _summary_error_text(
+                    str(exc), source_path, go_types
+                )
+                entries.append(entry)
+                continue
+            sequence = report.get("sequence")
+            selected = (
+                type(sequence) is dict
+                and sequence.get("selected_result") is not None
+            )
+            entry["status"] = "emitted"
+            entry["mode"] = "attempt"
+            entry["selected"] = bool(selected)
+            normalized = report.get("normalized")
+            if type(normalized) is dict:
+                stdout_meta = normalized.get("stdout")
+                if type(stdout_meta) is dict and type(
+                    stdout_meta.get("sha256")
+                ) is str:
+                    entry["manifest_sha256"] = stdout_meta["sha256"]
+            evidence_check = report.get("evidence_check")
+            if type(evidence_check) is dict and type(
+                evidence_check.get("outcome")
+            ) is str:
+                entry["check_outcome"] = evidence_check["outcome"]
+            acceptance = report.get("acceptance")
+            if type(acceptance) is dict:
+                entry["accepted"] = acceptance.get("accepted")
+            entries.append(entry)
+            continue
 
         prior_manifest: dict | None = None
         manifest_path = (manifest_map or {}).get(label)
