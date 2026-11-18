@@ -24,6 +24,7 @@ from agent.audit import (
     build_parser,
     main,
 )
+from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS
 from agent.audit_reporting import (
     _finding_counts,
     _finding_counts_text,
@@ -4064,6 +4065,26 @@ def test_audit_scheduled_verification_flag_validation(
     assert "--schedule-argv-map" in err
     assert "--schedule-policy" in err
 
+
+
+
+def test_audit_scheduled_verification_default_max_attempts_requires_enable(
+    tmp_path: Path, capsys
+) -> None:
+    src = tmp_path / "calc.py"
+    src.write_text("def calc():\n    return 0\n", encoding="utf-8")
+
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--schedule-max-attempts",
+            str(MAX_SCHEDULE_ATTEMPTS),
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(args)
+    assert "--enable-scheduled-verification" in capsys.readouterr().err
 
 
 def test_audit_scheduled_verification_output_overwrite_rejected(

@@ -287,7 +287,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--schedule-argv-map` | `<<PATH>>` | no | — | Declared JSON object mapping adapter_id to its argv prefix for --enable-scheduled-verification; the unit's generated spec path is appended as the final argument. |
 | `--schedule-policy` | `<<PATH>>` | no | — | Declared planner policy JSON for --enable-scheduled-verification; allowed_permissions must be declared. |
 | `--schedule-observations` | `<<PATH>>` | no | — | Optional declared JSON array of runtime observations for --enable-scheduled-verification. |
-| `--schedule-max-attempts` | `<<N>>` | no | 8 | Bounded schedule attempts per unit for --enable-scheduled-verification (default: 8). |
+| `--schedule-max-attempts` | `<<N>>` | no | — | Bounded schedule attempts per unit for --enable-scheduled-verification (default: 8). |
 | `--schedule-success-exit-code` | `<<N>>` | no | — | Declared exit code counting as a scheduling success for --enable-scheduled-verification (repeatable; default {0}). |
 | `--schedule-memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per scheduled attempt child. |
 

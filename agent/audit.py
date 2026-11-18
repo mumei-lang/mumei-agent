@@ -1278,11 +1278,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--schedule-max-attempts",
         type=int,
-        default=MAX_SCHEDULE_ATTEMPTS,
+        default=None,
         metavar="<N>",
         help=(
             "Bounded schedule attempts per unit for "
-            "--enable-scheduled-verification (default: %(default)s)."
+            f"--enable-scheduled-verification (default: {MAX_SCHEDULE_ATTEMPTS})."
         ),
     )
     parser.add_argument(
@@ -1354,7 +1354,11 @@ def _load_scheduled_verification(args: argparse.Namespace) -> _ScheduledVerifica
         argv_map=_load_argv_map(args.schedule_argv_map),
         policy=_load_policy(args.schedule_policy),
         observations=_load_observations(args.schedule_observations),
-        max_attempts=args.schedule_max_attempts,
+        max_attempts=(
+            args.schedule_max_attempts
+            if args.schedule_max_attempts is not None
+            else MAX_SCHEDULE_ATTEMPTS
+        ),
         success_exit_codes=(
             frozenset({0})
             if args.schedule_success_exit_code is None
@@ -1458,12 +1462,11 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 "schedule_argv_map",
                 "schedule_policy",
                 "schedule_observations",
+                "schedule_max_attempts",
                 "schedule_success_exit_code",
                 "schedule_memory_bound_mb",
             )
         )
-        or getattr(args, "schedule_max_attempts", MAX_SCHEDULE_ATTEMPTS)
-        != MAX_SCHEDULE_ATTEMPTS
     )
     enable_scheduled = bool(getattr(args, "enable_scheduled_verification", False))
     if scheduled_requested and not enable_scheduled:
