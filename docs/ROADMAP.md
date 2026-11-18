@@ -4944,6 +4944,29 @@ manifest can never weaken the audit, and manifest bytes still never
 land in the report. Reuse counts are observed metadata only:
 `summary_audits` stays advisory and carries no verdict.
 
+### audit `--enable-summary-attempts` — summary units through the attempt lifecycle
+
+`audit --enable-summaries --enable-summary-attempts` runs each summary
+unit through its declared `<route>-attempt` route
+(`ts-summaries-attempt`, `rust-summaries-attempt`,
+`sol-summaries-attempt`, `go-summaries-attempt` — the go unit keeps
+its per-directory shape and `--go-types`) instead of the produce
+route, and the audit entry records the attempt report's acceptance
+envelope: `mode: "attempt"`, `selected`, `manifest_sha256` (the
+normalized stdout digest the report binds), `check_outcome` and
+`accepted` when the route emits an evidence check and acceptance.
+`--summary-attempt-timeout <MS>` declares the attempt bound passed
+to every unit (default 120000 — the same bound the bounded
+subprocess runner applies).
+
+The flag requires `--enable-summaries` and cannot combine with
+`--summaries-manifest-map`: there is no attempt variant of
+`*-summaries-reuse`, so manifest replay stays out of the attempt
+mode. Entries remain advisory by construction — a refused,
+malformed or unparseable attempt report records `status: "failed"`
+without failing the audit, and report bytes never land in the
+output.
+
 ### go-summaries `--summary-aware-calls` (issue #900 Option B, Go first)
 
 `go-summaries --summary-aware-calls <MANIFEST>` declares a callee
