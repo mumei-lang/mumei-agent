@@ -61,6 +61,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `verify-accept` | 8 | Run a declared Core source-evidence acceptance evaluation as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
+| `verify-schedule` | 10 | Run the declared plan/dispatch/observe/fallback schedule over declared adapter manifests and emit mumei.attempt-schedule/v1. The schedule is a dispatch record, not an Evidence acceptance. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
 | `native-accept` | 7 | Run a declared Core native artifact acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
@@ -896,6 +897,26 @@ Run a declared Core source-evidence acceptance evaluation as one attempt and emi
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the acceptance report JSON here instead of stdout. |
+
+
+## `mumei-agent verify-schedule`
+
+Run the declared plan/dispatch/observe/fallback schedule over declared adapter manifests and emit mumei.attempt-schedule/v1. The schedule is a dispatch record, not an Evidence acceptance.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--request` | `<PATH>` | yes | — | Declared route requirements JSON (profile, method, result_contract, input_format). |
+| `--adapters` | `<PATH>` | yes | — | Declared JSON array of adapter manifests to register. |
+| `--argv-map` | `<PATH>` | yes | — | Declared JSON object mapping adapter_id to its argv array. |
+| `--policy` | `<PATH>` | yes | — | Declared planner policy JSON. allowed_permissions must be declared for attempt binding; omit it only to exclude all permission-requiring adapters. |
+| `--observations` | `<PATH>` | no | — | Optional declared JSON array of runtime observations. |
+| `--source` | `<PATH>` | yes | — | Declared .mm source file (absolute path). |
+| `--max-attempts` | `<<N>>` | no | 8 | Bounded schedule attempts across all adapters. |
+| `--success-exit-code` | `<<N>>` | no | — | Declared exit code counting as a scheduling success (repeatable; default {0}). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per attempt child. |
+| `--output` | `<PATH>` | no | — | Write the schedule document here instead of stdout. |
 
 
 ## `mumei-agent native-recheck`

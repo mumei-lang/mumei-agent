@@ -65,6 +65,7 @@ _SUBCOMMANDS = {
     "verify-attempt",
     "verify-recheck",
     "verify-accept",
+    "verify-schedule",
     "native-attempt",
     "native-recheck",
     "native-accept",
@@ -926,6 +927,24 @@ def main() -> None:
         verify_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(verify_accept_main(args))
+    elif command == "verify-schedule":
+        import argparse
+        from agent.verify_schedule import (
+            build_schedule_parser as verify_schedule_build_parser,
+            main_schedule as verify_schedule_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-schedule",
+            description=(
+                "Run the declared plan/dispatch/observe/fallback schedule "
+                "over declared adapter manifests and emit "
+                "mumei.attempt-schedule/v1."
+            ),
+        )
+        verify_schedule_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(verify_schedule_main(args))
     elif command == "native-recheck":
         import argparse
         from agent.native_recheck import (
