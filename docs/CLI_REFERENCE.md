@@ -910,7 +910,7 @@ Run the declared plan/dispatch/observe/fallback schedule over declared adapter m
 | `--request` | `<PATH>` | yes | — | Declared route requirements JSON (profile, method, result_contract, input_format). |
 | `--adapters` | `<PATH>` | yes | — | Declared JSON array of adapter manifests to register. |
 | `--argv-map` | `<PATH>` | yes | — | Declared JSON object mapping adapter_id to its argv array. |
-| `--policy` | `<PATH>` | yes | — | Declared planner policy JSON. allowed_permissions must be declared for attempt binding; omit it only to exclude all permission-requiring adapters. |
+| `--policy` | `<PATH>` | yes | — | Declared planner policy JSON. allowed_permissions must be declared (an empty list permits only permission-free adapters). |
 | `--observations` | `<PATH>` | no | — | Optional declared JSON array of runtime observations. |
 | `--source` | `<PATH>` | yes | — | Declared .mm source file (absolute path). |
 | `--max-attempts` | `<<N>>` | no | 8 | Bounded schedule attempts across all adapters. |
