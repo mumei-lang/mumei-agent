@@ -537,15 +537,24 @@ class _Builder:
         for name, fn_node in self.functions.items():
             try:
                 summaries.append(self._summarize(name, fn_node))
-            except _Unsupported as u:
-                summaries.append(
-                    RustFunctionSummary(
+            except (_Unsupported, RecursionError) as u:
+                if isinstance(u, _Unsupported):
+                    gap = RustGap(u.reason, u.byte)
+                else:
+                    gap = RustGap("analysis_limit", _span(fn_node))
+                partial = getattr(u, "partial_summary", None)
+                if partial is None:
+                    partial = RustFunctionSummary(
                         name=name, params=(), available=False,
                         return_dependencies=None,
-                        gaps=[RustGap(u.reason, u.byte)],
+                        gaps=[],
                         effects="unknown",
                     )
-                )
+                # A failed walk can't characterize its effects —
+                # stay fail-closed.
+                partial.effects = "unknown"
+                partial.gaps.append(gap)
+                summaries.append(partial)
         if self.resolved_paths is not None:
             self.resolved_paths.update(
                 entry[1]
@@ -972,6 +981,10 @@ class _Builder:
         self._block_decls = [set()]
         self._read_stack = []
         self._stmt_reads = {}
+        # Read records are per-function: a callee summarized
+        # through `_call` collects its own `statement_reads` —
+        # the caller's frames never see the callee body's spans,
+        # only the actuals' deps at the call site.
         summary = None
         try:
             params = fn_node.child_by_field_name("parameters")
@@ -1061,6 +1074,12 @@ class _Builder:
             summary.return_dependencies = ret
             summary.available = True
             return summary
+        except (_Unsupported, RecursionError) as exc:
+            # Carry the partially built summary so `build` can
+            # keep the reads recorded before the failure.
+            if summary is not None:
+                exc.partial_summary = summary
+            raise
         finally:
             self._type_envs.pop()
             self._mut_ref_params.pop()
@@ -1313,6 +1332,20 @@ class _Builder:
                     inner, locals_, param_index, summary, void=True
                 )
                 return None
+            if (
+                inner.type in _EXPR_TYPES
+                and inner.type not in _STMT_EXPR_TYPES
+            ):
+                # A plain expression under `...;` records once —
+                # on this statement's own span; a nested
+                # `_statement` frame would duplicate the record
+                # for every `0;`-style statement. Control-flow
+                # expressions keep the `_statement` path — their
+                # value-less forms return None, which `_expr`
+                # cannot record.
+                return self._expr(
+                    inner, locals_, param_index, summary
+                )
             r = self._statement(inner, locals_, param_index, summary)
             if r is not None:
                 return r
@@ -1580,7 +1613,12 @@ class _Builder:
             name = left.text.decode()
             is_local = self._is_local_name(name, param_index)
             if expr.type == "compound_assignment_expr":
-                deps |= locals_.get(name, frozenset())
+                # `x += v` reads the old slot — the LHS never
+                # passes through `_expr` on the statement path,
+                # so record it here.
+                lhs_read = locals_.get(name, frozenset())
+                deps |= lhs_read
+                self._record_read(lhs_read)
             locals_[name] = deps
             if self._writes:
                 self._writes[-1].add(name)
@@ -1847,6 +1885,10 @@ class _Builder:
                 if raw_ident is not None
                 else frozenset()
             )
+            # `cb(...)` through a bound name reads the function
+            # pointer/closure value — a voided call drops that
+            # read from its result, so record it here.
+            self._record_read(bound)
             result = actual_union | bound
             cname = fn_expr.text.decode() if fn_expr is not None else None
             summary.calls.append(
@@ -1976,7 +2018,10 @@ class _Builder:
         }:
             deps = frozenset()
             for c in _children(node):
-                deps |= self._expr(
+                # `_expr_inner` recursion stays one frame per
+                # level — `_expr`'s record on the way out
+                # captures this subtree's union anyway.
+                deps |= self._expr_inner(
                     c, locals_, param_index, summary
                 )
             return deps
@@ -1989,7 +2034,7 @@ class _Builder:
             for c in _children(node):
                 if c.type in _TYPE_NAMES:
                     continue
-                deps |= self._expr(
+                deps |= self._expr_inner(
                     c, locals_, param_index, summary
                 )
             return deps
@@ -2015,7 +2060,7 @@ class _Builder:
             deps = frozenset()
             for c in _children(node):
                 try:
-                    deps |= self._expr(
+                    deps |= self._expr_inner(
                         c, locals_, param_index, summary
                     )
                 except _Unsupported:
@@ -2044,7 +2089,7 @@ class _Builder:
                     elif p.type == "identifier":
                         inner[p.text.decode()] = frozenset()
             try:
-                return self._expr(
+                return self._expr_inner(
                     cbody, inner, param_index, summary
                 )
             except _Unsupported:
@@ -2077,7 +2122,7 @@ class _Builder:
                     continue
                 for tok in _children(c):
                     try:
-                        deps |= self._expr(
+                        deps |= self._expr_inner(
                             tok, locals_, param_index, summary
                         )
                     except _Unsupported:
@@ -2101,7 +2146,7 @@ class _Builder:
             for c in _children(node):
                 if c.type in _TYPE_NAMES:
                     continue
-                deps |= self._expr(
+                deps |= self._expr_inner(
                     c, locals_, param_index, summary
                 )
             return deps
@@ -2142,6 +2187,17 @@ _EXPR_TYPES = {
     "field_expression", "index_expression", "await_expression",
     "macro_invocation", "generic_function", "closure_expression",
     "let_condition",
+}
+
+# Expression types that carry statement semantics: as an
+# `expression_statement`'s inner they keep the `_statement`
+# path — their value-less forms return None, which `_expr`
+# cannot record.
+_STMT_EXPR_TYPES = {
+    "if_expression", "match_expression",
+    "while_expression", "loop_expression", "for_expression",
+    "block", "unsafe_block",
+    "break_expression", "continue_expression",
 }
 
 
