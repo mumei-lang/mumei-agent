@@ -4864,20 +4864,26 @@ checks (`recovery_enforcement`), does not verify the supporting
 documents (`evidence_authenticity` — trusted as declared) and does
 not pin a document to the record it covers (`evidence_binding`).
 
-The C02 semantic checks recover through the fingerprint-carrying
-Core descriptors, mirroring each attempt route's `discharged_checks`:
-`claim_truth`, `freshness` and `semantic_correspondence` ← a
-consistent `source-evidence-recheck/v1` or an accepted
+The six C02 semantic checks all recover through bound documents,
+mirroring each attempt route's `discharged_checks`: `claim_truth`,
+`freshness` and `semantic_correspondence` ← a consistent
+`source-evidence-recheck/v1` or an accepted
 `source-evidence-acceptance/v1`; `claim_truth` and
-`artifact_semantics` ← an accepted `native-evidence-acceptance/v1`.
-Each descriptor counts only when its `evidence_fingerprint` equals
-the record's digest — a descriptor produced for different bytes (or
-an anonymous one with no record input) applies to nothing, and
-without a declared `record_digest` no bound document can be
-attributed. `file_identity` and `producer_authenticity` stay
-unperformed: no emitted descriptor binds them to a record at
-representation level (the verify-attempt report discharges them only
-through its request fingerprint, a layer below this fold).
+`artifact_semantics` ← an accepted `native-evidence-acceptance/v1`;
+and all five non-artifact checks — `file_identity`,
+`producer_authenticity`, `freshness`, `semantic_correspondence` and
+`claim_truth` — ← an accepted `verify-attempt-report/v1`. Bound
+documents match through a declared carrier pinned per schema:
+`evidence_fingerprint` on a Core descriptor, `record_digest` on a
+binding document, `candidate.output_fingerprint` on the attempt
+report — and each counts only when the carrier equals the record's
+bound digest, so a document produced for different bytes (or an
+anonymous artifact acceptance with no record input) applies to
+nothing, and without a declared `record_digest` or declared carrier
+no bound document can be attributed. `claim_truth` and
+`artifact_semantics` recovering here is still representation-level
+composition — the fold re-verifies nothing the descriptor declares
+(`recovery_enforcement`/`evidence_authenticity` stay).
 
 ### C11 declared freshness evaluation
 

@@ -250,6 +250,62 @@ def test_declared_carrier_only_binds_that_artifact():
     assert evaluation["checks"]["claim_truth"] == "evidence_failed"
 
 
+def _attempt_report(fingerprint, accepted=True):
+    return _doc(
+        "mumei.verify-attempt-report/v1",
+        acceptance={"accepted": accepted},
+        candidate={
+            "schema_version": "mumei.verifier-evidence-candidate/v1",
+            "output_fingerprint": fingerprint,
+        },
+    )
+
+
+def test_attempt_report_recovers_five_checks():
+    digest = "a" * 64
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth", "artifact_semantics",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest)], record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "file_identity": "recovered",
+        "producer_authenticity": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        "claim_truth": "recovered",
+        # the artifact layer needs the native descriptor
+        "artifact_semantics": "no_evidence",
+    }
+
+
+def test_attempt_report_requires_accepted_and_bound():
+    digest = "a" * 64
+    record = _record("file_identity", "claim_truth")
+    # not accepted
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest, accepted=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "evidence_failed"
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+    # accepted but bound to a different record
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report("b" * 64)], record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "evidence_failed"
+    # no candidate at all
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.verify-attempt-report/v1",
+              acceptance={"accepted": True})],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "evidence_failed"
+
+
 def test_foreign_schema_never_counts():
     record = _record("signature_verification")
     evaluation = evaluate_unperformed_check_recovery(

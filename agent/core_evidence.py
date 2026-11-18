@@ -704,52 +704,78 @@ UNPERFORMED_CHECK_RECOVERY_SCHEMA = "mumei.unperformed-check-recovery/v1"
 # emitted schema, so a foreign document claiming a check cannot count.
 _CHECK_PERFORMERS: dict = {
     "attempt_binding": [
-        ("mumei.core-acceptance-evaluation/v1", "attempt_bound", True),
+        ("mumei.core-acceptance-evaluation/v1", "attempt_bound", True, None),
     ],
     "subject_binding": [
-        ("mumei.signature-envelope-evaluation/v1", "subject_bound", True),
-        ("mumei.signature-verification/v1", "subject_bound", True),
+        ("mumei.signature-envelope-evaluation/v1", "subject_bound", True, None),
+        ("mumei.signature-verification/v1", "subject_bound", True, None),
     ],
     "key_binding": [
-        ("mumei.signature-envelope-evaluation/v1", "key_pinned", True),
-        ("mumei.signature-verification/v1", "key_pinned", True),
+        ("mumei.signature-envelope-evaluation/v1", "key_pinned", True, None),
+        ("mumei.signature-verification/v1", "key_pinned", True, None),
     ],
     "signature_verification": [
-        ("mumei.signature-verification/v1", "signature_valid", True),
+        ("mumei.signature-verification/v1", "signature_valid", True, None),
     ],
     "envelope_freshness": [
-        ("mumei.freshness-evaluation/v1", "within_window", True),
+        ("mumei.freshness-evaluation/v1", "within_window", True, None),
     ],
     "descriptor_freshness": [
-        ("mumei.freshness-evaluation/v1", "within_window", True),
+        ("mumei.freshness-evaluation/v1", "within_window", True, None),
     ],
     "freshness": [
-        ("mumei.freshness-evaluation/v1", "within_window", True),
-        ("mumei.source-evidence-recheck/v1", "recheck", "consistent"),
-        ("mumei.source-evidence-acceptance/v1", "accepted", True),
+        ("mumei.freshness-evaluation/v1", "within_window", True, None),
+        ("mumei.source-evidence-recheck/v1", "recheck", "consistent",
+         "evidence_fingerprint"),
+        ("mumei.source-evidence-acceptance/v1", "accepted", True,
+         "evidence_fingerprint"),
+        ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "candidate.output_fingerprint"),
     ],
     "evidence_binding": [
-        (EVIDENCE_BINDING_SCHEMA, "bound", True),
+        (EVIDENCE_BINDING_SCHEMA, "bound", True, "record_digest"),
     ],
     # The semantic C02 checks recover through the fingerprint-carrying
-    # Core descriptors, mirroring the discharged_checks sets the
-    # declared attempt routes report: a consistent source recheck or an
-    # accepted source acceptance re-establishes the record's claims
-    # within its declared profile; a native acceptance descriptor adds
-    # the compiled-artifact layer. Each document only counts when its
-    # `evidence_fingerprint` equals the record's digest — an anonymous
-    # or differently-bound descriptor can never recover this record.
+    # Core descriptors and the verify-attempt report, mirroring the
+    # discharged_checks sets the declared attempt routes report: a
+    # consistent source recheck or an accepted source acceptance
+    # re-establishes the record's claims within its declared profile; a
+    # native acceptance descriptor adds the compiled-artifact layer; an
+    # accepted verify-attempt report discharges every check of the
+    # produced record but the artifact layer. Each bound document only
+    # counts when its carrier — `evidence_fingerprint`, `record_digest`
+    # or the report's `candidate.output_fingerprint` — equals the
+    # record's bound digest, so an anonymous or differently-bound
+    # document can never recover this record.
     "claim_truth": [
-        ("mumei.source-evidence-recheck/v1", "recheck", "consistent"),
-        ("mumei.source-evidence-acceptance/v1", "accepted", True),
-        ("mumei.native-evidence-acceptance/v1", "accepted", True),
+        ("mumei.source-evidence-recheck/v1", "recheck", "consistent",
+         "evidence_fingerprint"),
+        ("mumei.source-evidence-acceptance/v1", "accepted", True,
+         "evidence_fingerprint"),
+        ("mumei.native-evidence-acceptance/v1", "accepted", True,
+         "evidence_fingerprint"),
+        ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "candidate.output_fingerprint"),
     ],
     "semantic_correspondence": [
-        ("mumei.source-evidence-recheck/v1", "recheck", "consistent"),
-        ("mumei.source-evidence-acceptance/v1", "accepted", True),
+        ("mumei.source-evidence-recheck/v1", "recheck", "consistent",
+         "evidence_fingerprint"),
+        ("mumei.source-evidence-acceptance/v1", "accepted", True,
+         "evidence_fingerprint"),
+        ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "candidate.output_fingerprint"),
     ],
     "artifact_semantics": [
-        ("mumei.native-evidence-acceptance/v1", "accepted", True),
+        ("mumei.native-evidence-acceptance/v1", "accepted", True,
+         "evidence_fingerprint"),
+    ],
+    "file_identity": [
+        ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "candidate.output_fingerprint"),
+    ],
+    "producer_authenticity": [
+        ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "candidate.output_fingerprint"),
     ],
 }
 
@@ -780,29 +806,35 @@ def _record_bound_digest(record: dict, record_digest: str | None) -> str | None:
     return record_digest
 
 
+def _dotted(doc: dict, path: str) -> object:
+    """Resolve a dot-separated field path; a non-dict hop yields None."""
+    current: object = doc
+    for part in path.split("."):
+        if type(current) is not dict:
+            return None
+        current = current.get(part)
+    return current
+
+
 def _performer_document_applies(
-    schema: str, doc: dict, bound_digest: str | None
+    bind_path: str | None, doc: dict, bound_digest: str | None
 ) -> bool:
     """Whether a performer-schema document counts for *this* record.
 
-    A binding document pins itself to one record's digest, so it only
-    applies when the fold has a declared `record_digest` the document
-    matches. The same holds for every subject-bearing schema in
-    `_BINDING_CARRIERS` — a recheck or acceptance descriptor only
-    recovers a check on the record its declared digest names (an
-    anonymous descriptor, e.g. an artifact acceptance with no record
-    input, applies to nothing). Every other performer schema applies
-    record-agnostically (their own binding is a separate,
-    still-declared check)."""
-    if schema == EVIDENCE_BINDING_SCHEMA:
-        return (
-            bound_digest is not None
-            and doc.get("record_digest") == bound_digest
-        )
-    carrier = _BINDING_CARRIERS.get(schema)
-    if carrier is not None:
-        return bound_digest is not None and doc.get(carrier) == bound_digest
-    return True
+    A bound performer pins itself to one record's artifact through its
+    declared carrier — `evidence_fingerprint` on a Core descriptor,
+    `record_digest` on a binding document, `candidate.output_fingerprint`
+    on a verify-attempt report — so it only applies when the carrier's
+    declared digest equals the record's bound digest (an anonymous
+    descriptor, e.g. an artifact acceptance with no record input,
+    applies to nothing). A `None` bind path applies record-agnostically
+    (the document's own binding is a separate, still-declared check)."""
+    if bind_path is None:
+        return True
+    return (
+        bound_digest is not None
+        and _dotted(doc, bind_path) == bound_digest
+    )
 
 
 def evaluate_unperformed_check_recovery(
@@ -839,17 +871,18 @@ def evaluate_unperformed_check_recovery(
     `record_digest` declares the SHA-256 of the record's bytes (the
     `recovery-eval` route recomputes it from the record file; dict
     callers declare it like `expected_fingerprint`). Bound performer
-    documents — `mumei.evidence-binding/v1` and every subject-bearing
-    schema in `_BINDING_CARRIERS` — count only when their declared
-    carrier equals the record's bound digest: the record's own
-    declared carrier (`evidence_fingerprint`/`subject_digest`/
-    `record_digest`) when it pins another artifact, else
-    `record_digest`. So a Core acceptance descriptor folded as the
-    record is recovered by a recheck doc bound to the *same
-    evidence*, while a bound document for different bytes can never
-    recover this record's checks. Without a declared digest and no
-    declared carrier no bound document can be attributed, so those
-    checks stay unrecovered."""
+    documents — each carrying the dotted `bind_path` its entry
+    declares — count only when that carrier equals the record's bound
+    digest: the record's own declared carrier
+    (`evidence_fingerprint`/`subject_digest`/`record_digest`) when it
+    pins another artifact, else `record_digest`. So a Core acceptance
+    descriptor folded as the record is recovered by a recheck doc
+    bound to the *same evidence*, and a verify-attempt report counts
+    for the record its `candidate.output_fingerprint` produced, while
+    a bound document for different bytes can never recover this
+    record's checks. Without a declared digest and no declared
+    carrier no bound document can be attributed, so those checks stay
+    unrecovered."""
     if type(record) is not dict:
         raise ValueError("unsupported check-recovery request")
     if record_digest is not None and not _is_fingerprint(record_digest):
@@ -878,15 +911,15 @@ def evaluate_unperformed_check_recovery(
     for name in check_names:
         performers = _CHECK_PERFORMERS.get(name, [])
         status = "no_evidence"
-        for schema, field, expected in performers:
+        for schema, field, expected, bind_path in performers:
             if schema not in schema_to_docs:
                 continue
             if status == "no_evidence":
                 status = "evidence_failed"
             if any(
-                _outcome_matches(doc.get(field), expected)
+                _outcome_matches(_dotted(doc, field), expected)
                 and _performer_document_applies(
-                    schema, doc, bound_digest
+                    bind_path, doc, bound_digest
                 )
                 for doc in schema_to_docs[schema]
             ):
