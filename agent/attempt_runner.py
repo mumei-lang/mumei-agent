@@ -4,8 +4,8 @@
 for one `AttemptExecutionRequest`, waits bounded by the declared timeout,
 terminates runaways and honors one cancellation event. The runner reports
 what it observed as `AttemptRecord` events — it does not interpret stdout,
-decide success, schedule attempts or publish canonical values. Captured
-bytes are truncated at `MAX_STDOUT_BYTES`; `complete` only declares whether
+decide success, schedule attempts or publish canonical values. Each captured
+stream is truncated at `MAX_STDOUT_BYTES`; `complete` only declares whether
 truncation happened, not that the producer stopped writing.
 """
 
@@ -270,15 +270,18 @@ class _BoundedCollector:
 class AttemptRunResult:
     """One observed run: a terminal record plus the bounded captured bytes.
 
-    `stdout`/`complete` are collection observations, not success or Evidence
-    claims; a dispatched run binds its snapshot through
-    `AttemptDispatch.captured_output()`, and hosts still own canonical
+    `stdout`/`complete` and `stderr`/`stderr_complete` are collection
+    observations, not success or Evidence claims; a dispatched run binds its
+    snapshots through `AttemptDispatch.captured_output()` and
+    `AttemptDispatch.captured_stderr()`, and hosts still own canonical
     publication. The record is terminal by construction.
     """
 
     record: AttemptRecord
     stdout: bytes = field(repr=False)
     complete: bool
+    stderr: bytes = field(repr=False)
+    stderr_complete: bool
 
     def __post_init__(self) -> None:
         if type(self.record) is not AttemptRecord or not self.record.is_terminal:
@@ -286,6 +289,10 @@ class AttemptRunResult:
         if type(self.stdout) is not bytes or len(self.stdout) > MAX_STDOUT_BYTES:
             raise ValueError("attempt run result requires bounded bytes")
         if type(self.complete) is not bool:
+            raise ValueError("invalid attempt run completeness declaration")
+        if type(self.stderr) is not bytes or len(self.stderr) > MAX_STDOUT_BYTES:
+            raise ValueError("attempt run result requires bounded bytes")
+        if type(self.stderr_complete) is not bool:
             raise ValueError("invalid attempt run completeness declaration")
 
     def normalized(self) -> AttemptNormalizedResult:
@@ -414,7 +421,7 @@ class AttemptRunner:
                 spawn_argv,
                 stdin=subprocess.PIPE if feed_bytes is not None else None,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 preexec_fn=preexec,
                 start_new_session=_PROCESS_GROUP,
             )
@@ -423,6 +430,8 @@ class AttemptRunner:
                 record.record(AttemptEvent("started", 0)).record(
                     AttemptEvent("failed", 0)
                 ),
+                b"",
+                True,
                 b"",
                 True,
             )
@@ -438,6 +447,8 @@ class AttemptRunner:
         started_at = time.monotonic()
         collector = _BoundedCollector(process.stdout)
         collector.start()
+        stderr_collector = _BoundedCollector(process.stderr)
+        stderr_collector.start()
         events = [AttemptEvent("started", 0)]
         cancel_at: int | None = None
         while True:
@@ -482,12 +493,19 @@ class AttemptRunner:
             except subprocess.TimeoutExpired:
                 pass
         collector.join(COLLECTOR_JOIN_SECONDS)
+        stderr_collector.join(COLLECTOR_JOIN_SECONDS)
         if feeder is not None:
             feed_stop.set()
             feeder.join(COLLECTOR_JOIN_SECONDS)
         for event in events:
             record = record.record(event)
-        return AttemptRunResult(record, collector.data, not collector.truncated)
+        return AttemptRunResult(
+            record,
+            collector.data,
+            not collector.truncated,
+            stderr_collector.data,
+            not stderr_collector.truncated,
+        )
 
 
 @dataclass(frozen=True)
@@ -540,6 +558,24 @@ class AttemptDispatch:
             self.run.stdout,
             hashlib.sha256(self.run.stdout).hexdigest(),
             complete=self.run.complete,
+        )
+        self.sequence.check_output_binding(output)
+        return output
+
+    def captured_stderr(self) -> AttemptOutput:
+        """Bind the run's captured stderr as an `AttemptOutput` snapshot.
+
+        Same host-claim snapshot as `captured_output()` with `stream`
+        declaring `stderr` and `complete` declaring the stderr collection
+        stayed within the byte bound. A non-`exited` terminal run fails
+        statically for the same reason — no output exists to snapshot.
+        """
+        output = AttemptOutput(
+            self.sequence.current,
+            self.run.stderr,
+            hashlib.sha256(self.run.stderr).hexdigest(),
+            stream="stderr",
+            complete=self.run.stderr_complete,
         )
         self.sequence.check_output_binding(output)
         return output
