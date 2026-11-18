@@ -54,6 +54,7 @@ _SUBCOMMANDS = {
     "evidence-check-list",
     "evidence-check-consistency",
     "evidence-acceptance-eval",
+    "signature-eval",
     "evidence-compare",
     "evidence-identity-check",
     "evidence-producer-check",
@@ -724,6 +725,23 @@ def main() -> None:
         acceptance_eval_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(acceptance_eval_main(args))
+    elif command == "signature-eval":
+        import argparse
+        from agent.signature_eval import (
+            build_eval_parser as signature_eval_build_parser,
+            main_eval as signature_eval_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent signature-eval",
+            description=(
+                "Evaluate a declared producer-signature envelope and "
+                "emit the representation-level evaluation."
+            ),
+        )
+        signature_eval_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(signature_eval_main(args))
     elif command == "evidence-identity-check":
         import argparse
         from agent.evidence_identity import (

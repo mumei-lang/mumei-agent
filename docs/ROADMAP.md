@@ -4688,6 +4688,38 @@ stays) nor that any check ran again (`unperformed_check_recovery`
 stays). The caller-side pin is trusted as declared — matching an
 attempt's own pin is the caller's duty, not the fold's.
 
+### C11 declared producer-signature envelope fold
+
+`agent.core_evidence.evaluate_signature_envelope(envelope,
+expected_subject, expected_key)` and the `signature-eval` route restore
+one declared `mumei.producer-signature/v1` envelope — the detached
+authenticity record the issue #886 design memo fixes — and fold it into
+`mumei.signature-envelope-evaluation/v1`. `envelope_match` holds only
+for the closed five-field shape naming `algorithm: "ed25519"` (the only
+admitted algorithm — no negotiation) with a 64-char lowercase-hex
+`subject_digest`, a 128-char hex `signature` and a non-empty
+`producer_key_id`; a foreign or malformed document never counts, and a
+matched envelope whose declared pins disagree reports `false`
+observations, never an error.
+
+`--expected-subject` declares the record digest the signature should
+cover — e.g. an accepted descriptor's `evidence_fingerprint` or a
+record's own `sha256` — and the fold emits `subject_bound`;
+`--expected-producer-key` declares the producer key fingerprint the
+caller trusts, arriving over a separately trusted channel exactly like
+`--expected-adapter`/`--expected-build-id` pins, and the fold emits
+`key_pinned`. Either pin left out stays declared-unperformed
+(`subject_binding`/`key_binding` remain in `checks_not_performed`).
+
+This is representation-level evaluation, not producer authenticity:
+the fold checks the envelope's shape and declared pins, never the
+ed25519 signature bytes (`signature_verification` stays), the pinned
+key's own authenticity (`key_authenticity` stays — the caller-side pin
+is trusted as declared), freshness (`envelope_freshness` stays — a
+stale-but-well-formed envelope still matches) or revocation
+(`key_revocation` stays). Signing, key generation, rotation and the
+Core producer side are separate later slices; C11 stays partial.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

@@ -50,6 +50,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-check-consistency` | 6 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
+| `signature-eval` | 4 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -713,6 +714,20 @@ Evaluate a declared Core acceptance descriptor and emit the representation-level
 |---|---|---|---|---|
 | `--descriptor` | `<PATH>` | yes | — | Declared Core acceptance descriptor JSON (mumei.source-evidence-acceptance/v1 or mumei.native-evidence-acceptance/v1). |
 | `--expected-fingerprint` | `<HEX>` | no | — | Declared record pin an attempt binds to (64-char lowercase SHA-256 hex of the record bytes, e.g. the evidence-check request's evidence.sha256). When supplied the evaluation emits attempt_bound comparing it to the descriptor's evidence_fingerprint. |
+| `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent signature-eval`
+
+Evaluate a declared producer-signature envelope and emit the representation-level evaluation.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--envelope` | `<PATH>` | yes | — | Declared producer-signature envelope JSON (mumei.producer-signature/v1). |
+| `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex, e.g. an accepted descriptor's evidence_fingerprint). When supplied the evaluation emits subject_bound comparing it to the envelope's subject_digest. |
+| `--expected-producer-key` | `<ID>` | no | — | Declared producer key fingerprint the caller trusts, arriving over a separately trusted channel. When supplied the evaluation emits key_pinned comparing it to the envelope's producer_key_id. |
 | `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
 
 
