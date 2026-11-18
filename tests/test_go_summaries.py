@@ -1589,3 +1589,61 @@ def test_mcp_consume_tool_error_redacts_declared_paths(tmp_path):
     assert str(missing) not in out["error"]
     assert str(src) not in out["error"]
     assert str(tmp_path) not in out["error"]
+
+
+def test_context_key_binds_callee_manifest(tmp_path, capsys, real_go_types):
+    """A changed callee manifest must invalidate the strict
+    whole-context gate — its bytes are a derivation input."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    g = lib / "g.go"
+    g.write_text(
+        "package lib\nfunc G(a int64) int64 { return a }\n",
+        encoding="utf-8",
+    )
+    lib_manifest = _produce_manifest(tmp_path, capsys, real_go_types, g)
+    caller = _write_source(
+        tmp_path,
+        "a.go",
+        "package p\n"
+        'import l "lib"\n'
+        "func F(x int64) int64 { return l.G(x) }\n",
+    )
+    filler = _write_source(
+        tmp_path, "b.go", "package p\nfunc Z(y int64) int64 { return y }\n"
+    )
+    aware = [
+        "--import",
+        f"lib={g}",
+        "--summary-aware-calls",
+        str(lib_manifest),
+    ]
+    code, out, err = _run(
+        capsys, _args(real_go_types, caller, filler, extra=aware)
+    )
+    assert code == 0 and err == ""
+    manifest_path = tmp_path / "caller-manifest.json"
+    manifest_path.write_text(out, encoding="utf-8")
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            real_go_types, manifest_path, caller, filler, extra=aware
+        ),
+    )
+    assert code == 0 and err == ""
+    assert json.loads(out)["context_match"] is True
+    # Flip a declared dep ordinal — same source, changed manifest.
+    lib_doc = json.loads(lib_manifest.read_text())
+    entry = lib_doc["functions"][0]
+    entry["return_dependencies"] = []
+    lib_manifest.write_text(
+        json.dumps(lib_doc, indent=2, sort_keys=True) + "\n"
+    )
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            real_go_types, manifest_path, caller, filler, extra=aware
+        ),
+    )
+    assert code == 0 and err == ""
+    assert json.loads(out)["context_match"] is False

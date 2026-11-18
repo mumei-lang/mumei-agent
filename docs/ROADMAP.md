@@ -4868,7 +4868,11 @@ the callee manifest's declared identities as `known`, so a folded dep
 the caller's helper never emits (an import's import, or a type only
 the callee's unit pins) stays checkable instead of flagging its caller
 stale on identical inputs — a regenerated manifest's churned ids still
-flag it. The TS/Sol/Rust ports stay open.
+flag it. The callee manifest's canonical bytes also fold into the
+produced `context_key`, so a changed callee manifest invalidates the
+strict whole-context gate — `for_function`/`for_package_function`
+take the same declared set when the manifest was derived with one.
+The TS/Sol/Rust ports stay open.
 
 
 ## Roadmap authority and vocabulary

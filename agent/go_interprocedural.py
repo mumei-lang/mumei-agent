@@ -567,6 +567,22 @@ def _package_context(
     return raws, hashlib.sha256(payload).hexdigest()
 
 
+def _declared_context_key(key: str, declared: "GoSummarySet | None") -> str:
+    """Fold the callee manifest's canonical bytes into the context key.
+
+    Under `--summary-aware-calls` the declared manifest is a
+    derivation input like the source snapshot: without it in the
+    key, a changed callee manifest leaves the strict whole-context
+    gate accepting records derived from different declared deps.
+    """
+    if declared is None:
+        return key
+    payload = json.dumps(
+        [key, declared.to_dict()], sort_keys=True
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class GoSummarySet:
     context_key: str
@@ -584,10 +600,19 @@ class GoSummarySet:
     call_modeling: dict | None = None
 
     def for_function(
-        self, source: str, snapshot: GoTypeSnapshot, binding_id: str
+        self,
+        source: str,
+        snapshot: GoTypeSnapshot,
+        binding_id: str,
+        declared: "GoSummarySet | None" = None,
     ) -> FunctionSummary:
         """Reject reuse after any source, target, compiler or report change."""
-        if _context(source, snapshot)[1] != self.context_key:
+        if (
+            _declared_context_key(
+                _context(source, snapshot)[1], declared
+            )
+            != self.context_key
+        ):
             raise SnapshotError("Go summary context unavailable or stale")
         result = next((f for f in self.functions if f.binding_id == binding_id), None)
         if result is None:
@@ -599,9 +624,15 @@ class GoSummarySet:
         sources: "dict[str, str] | list[str]",
         snapshot: GoPackageSnapshot,
         binding_id: str,
+        declared: "GoSummarySet | None" = None,
     ) -> FunctionSummary:
         """The package-unit variant of `for_function` — same staleness rule."""
-        if _package_context(snapshot, sources)[1] != self.context_key:
+        if (
+            _declared_context_key(
+                _package_context(snapshot, sources)[1], declared
+            )
+            != self.context_key
+        ):
             raise SnapshotError("Go summary context unavailable or stale")
         result = next((f for f in self.functions if f.binding_id == binding_id), None)
         if result is None:
@@ -7918,6 +7949,7 @@ def summarize_go(
     never narrow below today's width.
     """
     raw, key = _context(source, snapshot)
+    key = _declared_context_key(key, declared)
     builder = _Builder(
         {0: raw},
         snapshot,
@@ -7990,6 +8022,7 @@ def summarize_go_package(
     already unmodelled.
     """
     raws, key = _package_context(snapshot, sources)
+    key = _declared_context_key(key, declared)
     builder = _Builder(
         dict(enumerate(raws)),
         snapshot,

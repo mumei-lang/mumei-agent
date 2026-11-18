@@ -1774,11 +1774,13 @@ def test_cross_file_call_resolves_direct_local(go_types_helper):
     assert callee.name == "G" and callee.span.file == 1
 
 
-def named_package(files, snapshot, summaries, name="F"):
+def named_package(files, snapshot, summaries, name="F", declared=None):
     fn = next(
         f for f in snapshot.functions if snapshot.binding(f.binding_id).name == name
     )
-    return summaries.for_package_function(files, snapshot, fn.binding_id)
+    return summaries.for_package_function(
+        files, snapshot, fn.binding_id, declared=declared
+    )
 
 
 def test_callee_in_other_file_change_churns_only_its_file(go_types_helper):
@@ -2278,7 +2280,7 @@ def test_summary_aware_call_folds_declared_return_dependencies(go_types_helper):
     )
     declared = _declared_lib_set(go_types_helper, lib["lib"])
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     # The opaque approximation would union both arguments into the
     # call's result; the declared summary folds only `a` (= actual 0).
     assert result.available and result.return_dependencies == frozenset({0})
@@ -2317,7 +2319,7 @@ def test_summary_aware_call_records_transitive_fold_targets(
     )
     declared = _declared_lib_set(go_types_helper, lib["lib"])
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     (transfer,) = result.calls
     g_entry = next(f for f in declared.functions if f.call_targets)
     (h_id,) = g_entry.call_targets
@@ -2380,7 +2382,7 @@ def test_summary_aware_call_partial_manifest_leaves_unmatched_opaque(
     # union, lib.G folds.
     declared = _declared_lib_set(go_types_helper, lib)
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     assert result.available and result.return_dependencies == frozenset({0, 1})
     assert {t.imported for t in result.calls} == {False, True}
     assert summaries.call_modeling["summary_modeled_calls"] == 1
@@ -2407,7 +2409,7 @@ def test_summary_aware_call_stale_callee_id_never_matches(go_types_helper):
     }
     declared = _declared_lib_set(go_types_helper, stale_lib["lib"])
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     assert result.return_dependencies == frozenset({0, 1})
     assert result.calls[0].imported
     assert summaries.call_modeling["summary_modeled_calls"] == 0
@@ -2430,7 +2432,7 @@ def test_summary_aware_call_unavailable_entry_keeps_opaque(go_types_helper):
         declared.context_key, (gapped,), declared.target_arch
     )
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     assert result.available
     assert result.calls[0].imported
     assert summaries.call_modeling["summary_modeled_calls"] == 0
@@ -2461,7 +2463,7 @@ def test_summary_aware_call_arity_mismatch_keeps_opaque(go_types_helper):
         declared.context_key, (mismatched,), declared.target_arch
     )
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     assert result.calls[0].imported
     assert summaries.call_modeling["summary_modeled_calls"] == 0
 
@@ -2482,7 +2484,7 @@ def test_summary_aware_call_out_of_range_return_dependency_keeps_opaque(
         declared.context_key, (corrupt,), declared.target_arch
     )
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     # A declared ordinal the call site cannot supply widens back to
     # the opaque approximation rather than indexing out of range.
     assert result.calls[0].imported
@@ -2512,7 +2514,7 @@ def test_summary_aware_call_folds_statement_reads(go_types_helper):
     )
     declared = _declared_lib_set(go_types_helper, lib["lib"])
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     assert result.available
     # The call statement itself evaluates both arguments, so its row
     # reads {0, 1} under the fold exactly as it did opaquely — the
@@ -2538,7 +2540,7 @@ def test_summary_aware_call_method_call_stays_opaque(go_types_helper):
     snapshot = load_go_package_snapshot(report, files, target_arch="amd64")
     declared = _declared_lib_set(go_types_helper, lib["lib"])
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     # A receiver-carrying call can never fold — the manifest's ordinals
     # do not describe the receiver.
     assert summaries.call_modeling["summary_modeled_calls"] == 0
@@ -2567,7 +2569,7 @@ def test_summary_aware_call_unknown_effects_stays_imported(go_types_helper):
         declared.context_key, (effectful,), declared.target_arch
     )
     summaries = ip.summarize_go_package(files, snapshot, declared=declared)
-    result = named_package(files, snapshot, summaries, "F")
+    result = named_package(files, snapshot, summaries, "F", declared=declared)
     assert result.calls[0].imported
     assert result.effects == "unknown"
     assert summaries.call_modeling["summary_modeled_calls"] == 1
