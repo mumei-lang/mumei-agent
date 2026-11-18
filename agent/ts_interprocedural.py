@@ -8074,6 +8074,19 @@ def summarize_typescript(
         context.update(b"\x00")
         context.update(digest.encode())
         context.update(b"\x00")
+    if declared is not None:
+        # The declared callee manifest is a derivation input like a
+        # resolved module: folding its canonical bytes into the
+        # context key means a changed manifest invalidates the
+        # strict whole-context gate instead of silently accepting
+        # records derived from different declared deps.
+        import json
+
+        context.update(
+            json.dumps(
+                declared.to_dict(), sort_keys=True
+            ).encode()
+        )
     return TsSummarySet(
         context.hexdigest(),
         functions,

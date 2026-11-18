@@ -7574,3 +7574,14 @@ def test_summary_aware_fold_keeps_opaque_arg_writes():
     # keeps the full actual union.
     assert fn.return_dependencies == frozenset({0, 1})
 
+
+def test_summary_aware_context_key_binds_manifest():
+    m1 = _callee_manifest(_decl_fn("g", ["a"], [0]))
+    m2 = _callee_manifest(_decl_fn("g", ["a"], []))
+    src = (
+        "import {g} from './m';\n"
+        "function f(x: number): number { return g(x); }"
+    )
+    s1 = ts.summarize_typescript(src, declared=m1)
+    s2 = ts.summarize_typescript(src, declared=m2)
+    assert s1.context_key != s2.context_key
