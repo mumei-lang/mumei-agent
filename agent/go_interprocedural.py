@@ -1634,10 +1634,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         or None. The element the last level reaches must resolve the
         field through its own reference — a named struct's `var`
         member like `_bound_field_read`'s leaf, scalar-or-pointer.
-        `(*p)[i].F.G` admits one deeper level: the intermediate `F`
-        must be a `var` member whose named struct type pins, and `G`
-        resolves through its own reference like any leaf — a third
-        selection and an anonymous intermediate struct stay closed.
+        `(*p)[i].F.G` (and deeper: `.F.G.H`, …) admits arbitrary
+        intermediate levels: each intermediate must be a `var`
+        member whose named struct type pins, and the leaf resolves
+        through its own reference like any leaf — an anonymous
+        `struct{...}` intermediate stays closed.
         """
         operand = node.child_by_field_name("operand")
         field = node.child_by_field_name("field")
@@ -1650,8 +1651,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if operand is None:
                 return None
-        mid_member = None
-        if operand.type == "selector_expression":
+        # Intermediate field selections (`(*p)[i].F.G` → `F`,
+        # `(*p)[i].F.G.H` → `G` then `F`) collect leaf-adjacent
+        # first: each must be a `var` member whose named struct type pins,
+        # so a redeclaration of any traversed struct flags
+        # `stale_dependents`. An anonymous `struct{...}` or a
+        # scalar intermediate stops the chain (closed).
+        mid_members: list[Any] = []
+        while operand is not None and operand.type == "selector_expression":
             mid_operand = operand.child_by_field_name("operand")
             mid_field = operand.child_by_field_name("field")
             if mid_operand is None or mid_field is None:
@@ -1665,9 +1672,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ),
                     None,
                 )
-                if mid_operand is None:
-                    return None
-            if mid_operand.type != "index_expression":
+            if mid_operand is None:
                 return None
             mid_ref = self.references.get(self.node_key(mid_field))
             if mid_ref is not None and mid_ref.kind == "import":
@@ -1683,6 +1688,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or not mid_member.type.type_id
             ):
                 return None
+            mid_members.append(mid_member)
             operand = mid_operand
         if operand.type != "index_expression":
             return None
@@ -1775,7 +1781,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             fact,
             tuple(extras),
             field_member,
-            (mid_member,) if mid_member is not None else (),
+            tuple(mid_members),
             ref,
         )
 
