@@ -188,6 +188,13 @@ class CallTransfer:
     # `imported` marks a `direct_import` call: the callee body is opaque to
     # the fragment, so its effects cannot be claimed `none`.
     imported: bool = False
+    # `folded_targets` records the callee identities a
+    # `--summary-aware-calls` fold embedded into `result` — the declared
+    # callee's own `call_targets` transitively through the manifest —
+    # so `stale_dependents` flags this summary when any folded dep
+    # churns, not only the directly named callee. Emitted only when
+    # non-empty; reports lacking the field load unchanged.
+    folded_targets: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         result = {
@@ -198,23 +205,33 @@ class CallTransfer:
         }
         if self.imported:
             result["imported"] = True
+        if self.folded_targets:
+            result["folded_targets"] = sorted(self.folded_targets)
         return result
 
     @classmethod
     def from_dict(cls, value: Any) -> "CallTransfer":
         v = _manifest_record(
-            value, ("span", "target", "arguments", "result"), ("imported",)
+            value,
+            ("span", "target", "arguments", "result"),
+            ("imported", "folded_targets"),
         )
         span = _span_from_dict(v["span"])
         _require_restore(span is not None)
         arguments = _list(v["arguments"])
         _require_restore(len(arguments) <= MAX_MANIFEST_MEMBERS)
+        folded = ()
+        if "folded_targets" in v:
+            folded_list = _list(v["folded_targets"])
+            _require_restore(len(folded_list) <= MAX_MANIFEST_MEMBERS)
+            folded = tuple(_string(t) for t in folded_list)
         return cls(
             span,
             _string(v["target"]),
             tuple(_deps_from_list(a) for a in arguments),
             _deps_from_list(v["result"]),
             _boolean(v["imported"]) if "imported" in v else False,
+            folded,
         )
 
 
@@ -399,9 +416,10 @@ class FunctionSummary:
         slash-suffixed.)
         """
         return frozenset(
-            call.target
+            target
             for call in self.calls
-            if not call.target.endswith("/pointee")
+            for target in (call.target, *call.folded_targets)
+            if not target.endswith("/pointee")
         )
 
     def to_dict(self) -> dict:
@@ -549,6 +567,22 @@ def _package_context(
     return raws, hashlib.sha256(payload).hexdigest()
 
 
+def _declared_context_key(key: str, declared: "GoSummarySet | None") -> str:
+    """Fold the callee manifest's canonical bytes into the context key.
+
+    Under `--summary-aware-calls` the declared manifest is a
+    derivation input like the source snapshot: without it in the
+    key, a changed callee manifest leaves the strict whole-context
+    gate accepting records derived from different declared deps.
+    """
+    if declared is None:
+        return key
+    payload = json.dumps(
+        [key, declared.to_dict()], sort_keys=True
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class GoSummarySet:
     context_key: str
@@ -558,12 +592,27 @@ class GoSummarySet:
     # must declare it for a reuse route to refuse a mismatched unit.
     target_arch: str | None = None
     profile: str = PROFILE
+    # `--summary-aware-calls` reporting: present only on manifests the
+    # route derived with a declared callee manifest — advisory counts
+    # (`summary_modeled_calls` folded, `opaque_calls` left opaque,
+    # `summary_unmatched` manifest entries never referenced), never a
+    # verdict or a gate.
+    call_modeling: dict | None = None
 
     def for_function(
-        self, source: str, snapshot: GoTypeSnapshot, binding_id: str
+        self,
+        source: str,
+        snapshot: GoTypeSnapshot,
+        binding_id: str,
+        declared: "GoSummarySet | None" = None,
     ) -> FunctionSummary:
         """Reject reuse after any source, target, compiler or report change."""
-        if _context(source, snapshot)[1] != self.context_key:
+        if (
+            _declared_context_key(
+                _context(source, snapshot)[1], declared
+            )
+            != self.context_key
+        ):
             raise SnapshotError("Go summary context unavailable or stale")
         result = next((f for f in self.functions if f.binding_id == binding_id), None)
         if result is None:
@@ -575,9 +624,15 @@ class GoSummarySet:
         sources: "dict[str, str] | list[str]",
         snapshot: GoPackageSnapshot,
         binding_id: str,
+        declared: "GoSummarySet | None" = None,
     ) -> FunctionSummary:
         """The package-unit variant of `for_function` — same staleness rule."""
-        if _package_context(snapshot, sources)[1] != self.context_key:
+        if (
+            _declared_context_key(
+                _package_context(snapshot, sources)[1], declared
+            )
+            != self.context_key
+        ):
             raise SnapshotError("Go summary context unavailable or stale")
         result = next((f for f in self.functions if f.binding_id == binding_id), None)
         if result is None:
@@ -632,6 +687,8 @@ class GoSummarySet:
         }
         if self.target_arch is not None:
             result["target_arch"] = self.target_arch
+        if self.call_modeling is not None:
+            result["call_modeling"] = self.call_modeling
         return result
 
     @classmethod
@@ -648,7 +705,7 @@ class GoSummarySet:
         v = _manifest_record(
             value,
             ("schema_version", "context_key", "functions"),
-            ("target_arch",),
+            ("target_arch", "call_modeling"),
         )
         _require_restore(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
@@ -658,7 +715,34 @@ class GoSummarySet:
         target_arch = (
             _string(v["target_arch"]) if "target_arch" in v else None
         )
-        return cls(_string(v["context_key"]), restored, target_arch)
+        call_modeling = None
+        if "call_modeling" in v:
+            m = _manifest_record(
+                v["call_modeling"],
+                ("summary_modeled_calls", "opaque_calls", "summary_unmatched"),
+            )
+            for key_ in (
+                "summary_modeled_calls",
+                "opaque_calls",
+                "summary_unmatched",
+            ):
+                _require_restore(
+                    isinstance(m[key_], int) and m[key_] >= 0
+                )
+            call_modeling = {
+                k: m[k]
+                for k in (
+                    "summary_modeled_calls",
+                    "opaque_calls",
+                    "summary_unmatched",
+                )
+            }
+        return cls(
+            _string(v["context_key"]),
+            restored,
+            target_arch,
+            call_modeling=call_modeling,
+        )
 
 
 class _Unsupported(Exception):
@@ -706,8 +790,20 @@ class _Builder:
         snapshot: GoTypeSnapshot | GoPackageSnapshot,
         key: str,
         cfg_fn: Any,
+        declared: "dict[tuple[str, int], FunctionSummary] | None" = None,
     ):
         self.snapshot, self.key, self.cfg_fn = snapshot, key, cfg_fn
+        # Declared callee summaries (`--summary-aware-calls`): folded
+        # into `direct_import` calls whose target binding identity the
+        # manifest covers — trusted as declared, like every declared
+        # input. Keyed by (file digest, declaration start), which a
+        # manifest mints identically under either unit shape, so no
+        # context key gates and a single-file callee manifest folds
+        # into package-minted call targets too.
+        self.declared = declared or {}
+        self._declared_seen: set[str] = set()
+        self._modeled_spans: set[tuple[int, int, int]] = set()
+        self._opaque_spans: set[tuple[int, int, int]] = set()
         self.bindings = {b.id: b for b in snapshot.bindings}
         # Package reports may declare the imported objects the unit
         # referenced; single-file snapshots never have them.
@@ -7513,6 +7609,57 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             )
         actual = tuple(actual)
+        declared = self._declared_call_summary(call, receiver, actual)
+        if declared is not None:
+            # The manifest covers this callee: fold its declared
+            # `return_dependencies` through the actual arguments
+            # instead of the opaque every-argument union. `imported`
+            # follows the callee's declared effects exactly like a
+            # local callee's own transfers — a bounded callee leaves
+            # the caller's `effects` bounded too.
+            result = (
+                frozenset().union(
+                    *(actual[i] for i in declared.return_dependencies)
+                )
+                if declared.return_dependencies
+                else frozenset()
+            ) | receiver_deps
+            transfers.append(
+                CallTransfer(
+                    call.span,
+                    call.target,
+                    actual,
+                    result,
+                    imported=declared.effects == "unknown",
+                    folded_targets=self._declared_transitive_targets(
+                        declared
+                    ),
+                )
+            )
+            if declared.effects == "unknown":
+                # An effectful declared callee may store through an
+                # `&x` argument — the same conservative union a local
+                # callee with unknown effects applies.
+                self._store_call_writes(
+                    arguments,
+                    frozenset().union(*actual) if actual else frozenset(),
+                    locals_,
+                    params,
+                )
+            # The callee's declared type pins fold like a local
+            # call's — redeclaring any of them flags this summary.
+            self.pinned.update(declared.pinned)
+            # The callee's declared statement reads need no fold:
+            # every one maps through actual arguments to a subset of
+            # the deps the call-site statement already records by
+            # evaluating those arguments.
+            member = self.members.get(call.target)
+            if member is not None:
+                self.pinned.update(member.signature_type_ids)
+            self.pinned.update(getattr(call, "type_arg_type_ids", ()))
+            self._modeled_spans.add(_key3(call.span))
+            return result
+        self._opaque_spans.add(_key3(call.span))
         result = (
             frozenset().union(*actual) if actual else frozenset()
         ) | receiver_deps
@@ -7537,6 +7684,72 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # record's declared signature names only the type parameter.
         self.pinned.update(getattr(call, "type_arg_type_ids", ()))
         return result
+
+    def _declared_call_summary(
+        self, call: Any, receiver: Any, actual: tuple
+    ) -> "FunctionSummary | None":
+        """The declared callee summary an imported call may fold.
+
+        Only a plain `lib.F(args)` call folds: a method or method-
+        expression carries a receiver the manifest's parameter
+        ordinals do not describe. The entry must be `available` —
+        a gapped or bodyless declared summary widens nothing — and
+        declare exactly the call's arity; otherwise the call keeps
+        today's opaque every-argument approximation.
+        """
+        if (
+            not self.declared
+            or receiver is not None
+            or getattr(call, "method", False)
+            or getattr(call, "method_expr", False)
+        ):
+            return None
+        key = _declared_key(call.target)
+        if key is None:
+            return None
+        summary = self.declared.get(key)
+        if summary is None:
+            return None
+        self._declared_seen.add(summary.binding_id)
+        if (
+            not summary.available
+            or summary.return_dependencies is None
+            or len(summary.parameters) != len(actual)
+            or len(actual) > 0
+            and max(summary.return_dependencies, default=-1) >= len(actual)
+        ):
+            return None
+        return summary
+
+    def _declared_transitive_targets(
+        self, summary: "FunctionSummary"
+    ) -> tuple[str, ...]:
+        """Callee identities a folded summary's declared deps ride on.
+
+        The fold embeds the callee's declared result through the actual
+        arguments, so this summary's staleness now covers whatever the
+        callee's own `call_targets` reached — the manifest's declared
+        entries followed transitively, plus any outside it (the
+        callee's own imports stay valid anchors: the declared input
+        asserted them). Keeping the chain in `call_targets` lets
+        `stale_dependents` flag this summary when a transitive dep
+        churns even though the directly named callee's own bytes did
+        not change.
+        """
+        seen = set()
+        stack = list(summary.call_targets)
+        while stack:
+            target = stack.pop()
+            if target in seen:
+                continue
+            seen.add(target)
+            key = _declared_key(target)
+            if key is not None:
+                nxt = self.declared.get(key)
+                if nxt is not None:
+                    stack.extend(nxt.call_targets)
+        seen.discard(summary.binding_id)
+        return tuple(sorted(seen))
 
     def _store_call_writes(
         self,
@@ -7657,16 +7870,92 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.indirect_writes |= stored
 
 
-def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
+def _declared_key(binding_id: str) -> tuple[str, int] | None:
+    """A binding identity reduced to the unit-shape-invariant parts.
+
+    Binding ids serialize `sha256:<file digest>:<decl start>:<scope>`
+    for a single-file unit and `sha256:<file digest>:<file index>:<decl
+    start>:<scope>` for a package unit — the same declaration mints a
+    different string under each shape, and imported call targets always
+    carry the package shape. (File digest, decl start) is injective for
+    function summaries: two declarations in one file never share a byte
+    offset, and identical file bytes mint identical digests.
+    """
+    parts = binding_id.split(":")
+    if len(parts) not in (5, 6) or parts[0] != "sha256":
+        return None
+    try:
+        return parts[1], int(parts[2] if len(parts) == 5 else parts[3])
+    except ValueError:
+        return None
+
+
+def _declared_map(
+    declared: "GoSummarySet | None",
+) -> dict[tuple[str, int], FunctionSummary] | None:
+    if declared is None:
+        return None
+    result: dict[tuple[str, int], FunctionSummary] = {}
+    ambiguous: set[tuple[str, int]] = set()
+    for entry in declared.functions:
+        key = _declared_key(entry.binding_id)
+        if key is None or key in result or key in ambiguous:
+            # Two manifest entries resolving to one declaration position
+            # describe the same callee under contradictory declared
+            # data — monotone widening: neither may fold.
+            ambiguous.add(key)
+            result.pop(key, None)
+            continue
+        result[key] = entry
+    return result
+
+
+def _call_modeling(
+    builder: "_Builder", declared: "GoSummarySet | None"
+) -> dict | None:
+    """The advisory `--summary-aware-calls` counts, or None without a
+    declared callee manifest."""
+    if declared is None:
+        return None
+    return {
+        "summary_modeled_calls": len(builder._modeled_spans),
+        "opaque_calls": len(builder._opaque_spans),
+        "summary_unmatched": len(
+            [
+                f
+                for f in declared.functions
+                if f.binding_id not in builder._declared_seen
+            ]
+        ),
+    }
+
+
+def summarize_go(
+    source: str,
+    snapshot: GoTypeSnapshot,
+    declared: "GoSummarySet | None" = None,
+) -> GoSummarySet:
     """Compose conservative dependencies only; never infer equality or safety.
 
     A nonempty set can overapproximate dependence (e.g. x*0 still includes x).
     Empty means parameter-independent in this fragment, not a known constant.
     None means unavailable, never a parameter-independent or effect-free result.
+
+    `declared` (`--summary-aware-calls`) is a declared callee manifest:
+    a `direct_import` call whose target binding identity it covers folds
+    the declared `return_dependencies`/`statement_reads` instead of the
+    opaque every-argument approximation — trusted as declared; a callee
+    the manifest misses keeps opaque behavior, so a partial manifest can
+    never narrow below today's width.
     """
     raw, key = _context(source, snapshot)
+    key = _declared_context_key(key, declared)
     builder = _Builder(
-        {0: raw}, snapshot, key, lambda bid: snapshot.cfg_for_function(source, bid)
+        {0: raw},
+        snapshot,
+        key,
+        lambda bid: snapshot.cfg_for_function(source, bid),
+        declared=_declared_map(declared),
     )
     if len(snapshot.functions) > MAX_FUNCTIONS:
         results = tuple(
@@ -7678,11 +7967,18 @@ def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
             builder.summarize(f.binding_id)
             for f in sorted(snapshot.functions, key=lambda f: f.binding_id)
         )
-    return GoSummarySet(key, results, snapshot.target_arch)
+    return GoSummarySet(
+        key,
+        results,
+        snapshot.target_arch,
+        call_modeling=_call_modeling(builder, declared),
+    )
 
 
 def summarize_go_package(
-    sources: "dict[str, str] | list[str]", snapshot: GoPackageSnapshot
+    sources: "dict[str, str] | list[str]",
+    snapshot: GoPackageSnapshot,
+    declared: "GoSummarySet | None" = None,
 ) -> GoSummarySet:
     """The multi-file package variant of `summarize_go`.
 
@@ -7726,11 +8022,13 @@ def summarize_go_package(
     already unmodelled.
     """
     raws, key = _package_context(snapshot, sources)
+    key = _declared_context_key(key, declared)
     builder = _Builder(
         dict(enumerate(raws)),
         snapshot,
         key,
         lambda bid: snapshot.cfg_for_function(sources, bid),
+        declared=_declared_map(declared),
     )
     if len(snapshot.functions) > MAX_FUNCTIONS:
         results = tuple(
@@ -7742,4 +8040,9 @@ def summarize_go_package(
             builder.summarize(f.binding_id)
             for f in sorted(snapshot.functions, key=lambda f: f.binding_id)
         )
-    return GoSummarySet(key, results, snapshot.target_arch)
+    return GoSummarySet(
+        key,
+        results,
+        snapshot.target_arch,
+        call_modeling=_call_modeling(builder, declared),
+    )

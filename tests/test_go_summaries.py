@@ -494,6 +494,80 @@ def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
     assert calls and any(call["result"] for call in calls)
 
 
+def test_summary_aware_calls_folds_a_declared_callee(
+    tmp_path, capsys, real_go_types
+):
+    """`--summary-aware-calls` end-to-end: the lib manifest produced by
+    an earlier run folds `lib.G`'s declared return deps into the
+    caller, so `y` leaves F's result even though the call resolves to
+    an import."""
+    lib_dir = tmp_path / "libunit"
+    lib_dir.mkdir()
+    lib_src = _write_source(
+        lib_dir, "g.go", "package lib\nfunc G(a, b int64) int64 { return a }\n"
+    )
+    code, out, err = _run(capsys, _args(real_go_types, lib_src))
+    assert code == 0 and err == ""
+    lib_manifest = tmp_path / "lib.json"
+    lib_manifest.write_text(out)
+    caller = _write_source(
+        tmp_path,
+        "a.go",
+        "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 { return lib.G(x, y) + x }\n",
+    )
+    other = _write_source(tmp_path, "b.go", "package p\nfunc H() int64 { return 0 }\n")
+    code, out, err = _run(
+        capsys,
+        _args(
+            real_go_types,
+            caller,
+            other,
+            extra=[
+                "--import", f"lib={lib_src}",
+                "--summary-aware-calls", str(lib_manifest),
+            ],
+        ),
+    )
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    (f,) = [e for e in manifest["functions"] if e["calls"]]
+    assert f["return_dependencies"] == [0]
+    assert manifest["call_modeling"] == {
+        "summary_modeled_calls": 1,
+        "opaque_calls": 0,
+        "summary_unmatched": 0,
+    }
+    # Without the flag the same call stays the opaque union.
+    code, out, err = _run(
+        capsys,
+        _args(
+            real_go_types, caller, other, extra=["--import", f"lib={lib_src}"]
+        ),
+    )
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    (f,) = [e for e in manifest["functions"] if e["calls"]]
+    assert f["return_dependencies"] == [0, 1]
+    assert "call_modeling" not in manifest
+
+
+def test_summary_aware_calls_malformed_manifest_fails_statically(
+    tmp_path, capsys, real_go_types
+):
+    bad = _write_source(tmp_path, "bad.json", "{")
+    caller = _write_source(tmp_path, "a.go", "package p\nfunc F() int64 { return 0 }\n")
+    code, out, err = _run(
+        capsys,
+        _args(
+            real_go_types,
+            caller,
+            extra=["--summary-aware-calls", str(bad)],
+        ),
+    )
+    assert code == 1 and "go-summaries" in err
+
+
 def test_check_round_trip_marks_everything_reusable(tmp_path, capsys):
     files = {
         "a.go": "package p\nfunc F0() int64 { return 1 }\n",
@@ -652,6 +726,35 @@ def test_reuse_merges_declared_and_fresh_summaries(tmp_path, capsys):
     assert all(
         f["binding_id"] != "gone-fn" for f in merged["functions"]
     )
+
+
+def test_reuse_carries_call_modeling(tmp_path, capsys):
+    """A `--summary-aware-calls` reuse run keeps the modeling counts
+    the fresh derivation recorded in the merged manifest."""
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    code, out, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper,
+            manifest_path,
+            source,
+            extra=["--summary-aware-calls", str(manifest_path)],
+        ),
+    )
+    assert code == 0 and err == ""
+    merged = json.loads(out)
+    assert merged["call_modeling"] == {
+        "summary_modeled_calls": 0,
+        "opaque_calls": 0,
+        "summary_unmatched": len(merged["functions"]),
+    }
+    code, out, err = _run_reuse(
+        capsys, _reuse_args(helper, manifest_path, source)
+    )
+    assert code == 0 and err == ""
+    assert "call_modeling" not in json.loads(out)
 
 
 def test_reuse_output_declares_its_target_arch(tmp_path, capsys):
@@ -911,6 +1014,78 @@ def test_real_helper_import_round_trip(tmp_path, capsys, real_go_types):
     assert calls and any(call.get("imported") for call in calls)
 
 
+def test_check_reuses_folded_transitive_targets(tmp_path, capsys, real_go_types):
+    """A folded callee dep the helper never emits (an import's import)
+    is still checkable through the callee manifest's declared
+    identities: identical inputs keep the caller reusable."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    g = lib / "g.go"
+    g.write_text(
+        "package lib\nfunc G(a int64) int64 { return H(a) }\n",
+        encoding="utf-8",
+    )
+    h = lib / "h.go"
+    h.write_text(
+        "package lib\nfunc H(a int64) int64 { return a }\n",
+        encoding="utf-8",
+    )
+    lib_manifest = _produce_manifest(tmp_path, capsys, real_go_types, g, h)
+    # A folded dep only the callee manifest names — e.g. an identity
+    # minted inside the callee's own unit for one of its imports. The
+    # caller's helper never emits it, so without the manifest's ids in
+    # `known` the caller is flagged stale on identical inputs.
+    foreign = "sha256:" + "00" * 32
+    lib_doc = json.loads(lib_manifest.read_text())
+    callee = next(f for f in lib_doc["functions"] if f["calls"])
+    callee["pinned"] = [*callee.get("pinned", []), foreign]
+    lib_manifest.write_text(
+        json.dumps(lib_doc, indent=2, sort_keys=True) + "\n"
+    )
+    caller = _write_source(
+        tmp_path,
+        "a.go",
+        "package p\n"
+        'import l "lib"\n'
+        "func F(x int64) int64 { return l.G(x) }\n",
+    )
+    filler = _write_source(
+        tmp_path, "b.go", "package p\nfunc Z(y int64) int64 { return y }\n"
+    )
+    # Both lib files must be declared imports for the caller's unit to
+    # typecheck; the manifest-only `pinned` id above is what the fresh
+    # report never emits.
+    aware = [
+        "--import",
+        f"lib={g}",
+        "--import",
+        f"lib={h}",
+        "--summary-aware-calls",
+        str(lib_manifest),
+    ]
+    code, out, err = _run(
+        capsys, _args(real_go_types, caller, filler, extra=aware)
+    )
+    assert code == 0 and err == ""
+    manifest_path = tmp_path / "caller-manifest.json"
+    manifest_path.write_text(out, encoding="utf-8")
+    caller_f = next(
+        f
+        for f in json.loads(out)["functions"]
+        if f["calls"] and any("folded_targets" in c for c in f["calls"])
+    )
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            real_go_types, manifest_path, caller, filler, extra=aware
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert caller_f["binding_id"] in report["reusable"]
+    assert report["stale"] == []
+
+
 # --- go-summaries-attempt ----------------------------------------------------
 
 
@@ -985,6 +1160,76 @@ def test_attempt_binds_declared_input_bytes(tmp_path, capsys):
     assert code == 0
     fp2 = json.loads(out2)["sequence"]["request_fingerprint"]
     assert fp != fp2
+
+
+def test_attempt_binds_and_forwards_summary_aware_calls(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = tmp_path / "callee.json"
+    manifest.write_text(json.dumps(schema_fixture()))
+    code, out, _ = _run_attempt(capsys, _attempt_args(helper, source))
+    assert code == 0
+    fp = json.loads(out)["sequence"]["request_fingerprint"]
+    code, out2, err = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(manifest)],
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out2)
+    assert report["sequence"]["request_fingerprint"] != fp
+    # The flag reached the child: a malformed manifest fails its
+    # produce run (a forwarded declared input), where the same
+    # source without the flag exits 0.
+    bad = tmp_path / "bad.json"
+    bad.write_text("{")
+    code, out_bad, _ = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(bad)],
+        ),
+    )
+    assert code == 0
+    norm = json.loads(out_bad)["normalized"]
+    assert norm["outcome"] == "exited" and norm["exit_code"] != 0
+    other = tmp_path / "other-callee.json"
+    other.write_text(json.dumps(schema_fixture()) + "\n")
+    code, out3, _ = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(other)],
+        ),
+    )
+    assert code == 0
+    assert (
+        json.loads(out3)["sequence"]["request_fingerprint"]
+        != report["sequence"]["request_fingerprint"]
+    )
+
+
+def test_attempt_unreadable_input_error_hides_path(tmp_path, capsys):
+    helper = _write_helper(
+        tmp_path, json.dumps(schema_fixture()).encode()
+    )
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    missing = tmp_path / "missing-callee.json"
+    code, _, err = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(missing)],
+        ),
+    )
+    assert code == 1
+    assert str(missing) not in err
 
 
 def test_attempt_rejects_missing_helper(tmp_path, capsys):
@@ -1362,3 +1607,61 @@ def test_mcp_consume_tool_error_redacts_declared_paths(tmp_path):
     assert str(missing) not in out["error"]
     assert str(src) not in out["error"]
     assert str(tmp_path) not in out["error"]
+
+
+def test_context_key_binds_callee_manifest(tmp_path, capsys, real_go_types):
+    """A changed callee manifest must invalidate the strict
+    whole-context gate — its bytes are a derivation input."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    g = lib / "g.go"
+    g.write_text(
+        "package lib\nfunc G(a int64) int64 { return a }\n",
+        encoding="utf-8",
+    )
+    lib_manifest = _produce_manifest(tmp_path, capsys, real_go_types, g)
+    caller = _write_source(
+        tmp_path,
+        "a.go",
+        "package p\n"
+        'import l "lib"\n'
+        "func F(x int64) int64 { return l.G(x) }\n",
+    )
+    filler = _write_source(
+        tmp_path, "b.go", "package p\nfunc Z(y int64) int64 { return y }\n"
+    )
+    aware = [
+        "--import",
+        f"lib={g}",
+        "--summary-aware-calls",
+        str(lib_manifest),
+    ]
+    code, out, err = _run(
+        capsys, _args(real_go_types, caller, filler, extra=aware)
+    )
+    assert code == 0 and err == ""
+    manifest_path = tmp_path / "caller-manifest.json"
+    manifest_path.write_text(out, encoding="utf-8")
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            real_go_types, manifest_path, caller, filler, extra=aware
+        ),
+    )
+    assert code == 0 and err == ""
+    assert json.loads(out)["context_match"] is True
+    # Flip a declared dep ordinal — same source, changed manifest.
+    lib_doc = json.loads(lib_manifest.read_text())
+    entry = lib_doc["functions"][0]
+    entry["return_dependencies"] = []
+    lib_manifest.write_text(
+        json.dumps(lib_doc, indent=2, sort_keys=True) + "\n"
+    )
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            real_go_types, manifest_path, caller, filler, extra=aware
+        ),
+    )
+    assert code == 0 and err == ""
+    assert json.loads(out)["context_match"] is False

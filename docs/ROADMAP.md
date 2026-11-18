@@ -4071,6 +4071,27 @@ fingerprint cannot bind undeclared bytes. Receiver dispatch
 `pub use` re-exports, glob `use b::*`, `#[path]` attributes and
 macro-generated callables stay closed.
 
+### rust-summaries `--summary-aware-calls`
+
+`--summary-aware-calls <MANIFEST>` (all rust-summaries routes)
+declares a callee summary manifest the derivation folds into
+otherwise-opaque calls: an opaque call whose recorded name a
+manifest entry covers — `f` exactly, `crate::m::f`/`m::f` through
+one module-token prefix, never a deeper strip — adopts the entry's
+declared `return_dependencies` over its own actuals instead of the
+every-argument union. Receiver-carrying calls (`x.m`, `t.f`),
+local-bound callee names (fn pointers), voided calls, unavailable
+entries, arity mismatches and out-of-range ordinals all stay
+opaque; `effects` and the `&mut`-write merge stay opaque too —
+the manifest cannot bound writes through argument objects. The
+manifest is trusted as declared; its canonical bytes fold into
+`context_key`, so a swapped manifest invalidates the strict
+whole-context gate. The derived set's `call_modeling` block is
+advisory counting only (`summary_modeled_calls`, `opaque_calls`,
+`summary_unmatched`), never a verdict; `rust-summaries-reuse`
+propagates it and `rust-summaries-attempt` forwards the flag,
+binding the manifest bytes into the request fingerprint.
+
 
 `summarize_solidity(source, resolver=None, source_path=None)`
 accepts the same resolver contract: `resolver(spec)` (or
@@ -4849,6 +4870,58 @@ manifest can never weaken the audit, and manifest bytes still never
 land in the report. Reuse counts are observed metadata only:
 `summary_audits` stays advisory and carries no verdict.
 
+### go-summaries `--summary-aware-calls` (issue #900 Option B, Go first)
+
+`go-summaries --summary-aware-calls <MANIFEST>` declares a callee
+summary manifest (`mumei.go-scalar-parameter-deps/v1`). A plain
+`lib.F(args)` `direct_import` call whose callee the manifest covers
+folds the callee's declared data instead of the opaque every-argument
+union: the call's `result` becomes the union over the actuals the
+declared `return_dependencies` names, `imported` follows the callee's
+declared `effects` (an `unknown`-effects callee still transfers as
+imported and still widens store-through-alias writes), and the
+callee's declared `pinned` type identities fold like a local call's.
+The callee's declared statement reads need no fold — each maps to a
+subset of the actuals the call-site statement already reads. A folded
+call's transfer also records `folded_targets` — the callee's own
+`call_targets` transitively through the manifest — so
+`stale_dependents` flags the caller when a folded dep two hops out
+churns even though the directly named callee's bytes never moved.
+
+The declared manifest is trusted as asserted: authenticity and
+staleness stay unperformed, so `summary_authenticity` and
+`summary_staleness` still report honestly rather than silently
+upgrading. Matching is the declaration position, not the serialized
+binding id — a callee's (file digest, declaration start) mints
+identically under single-file and package unit shapes, so a
+single-file callee manifest folds into the package-minted call
+targets imports always carry; two manifest entries colliding on one
+position fold neither. Folding is monotone-widening only: a callee
+the manifest misses, or an entry that is gapped, arity-mismatched or
+non-scalar, keeps today's opaque approximation, so a partial or stale
+manifest can never narrow below the width a run without the flag
+would report. Method and receiver-carrying calls never fold — the
+manifest's parameter ordinals do not describe the receiver.
+
+A manifest derived with the flag carries `call_modeling` —
+`summary_modeled_calls` (folded), `opaque_calls` (left opaque),
+`summary_unmatched` (manifest entries no call referenced) — advisory
+counts only, never a verdict; manifests without the block load
+unchanged. A `--summary-aware-calls` reuse run keeps the counts in the
+merged manifest, and `go-summaries-attempt` forwards the flag to the
+child and binds the manifest's bytes into the request fingerprint like
+every other declared input. The manifest path joins the declared
+inputs, so `--output` can never overwrite it. Check and reuse treat
+the callee manifest's declared identities as `known`, so a folded dep
+the caller's helper never emits (an import's import, or a type only
+the callee's unit pins) stays checkable instead of flagging its caller
+stale on identical inputs — a regenerated manifest's churned ids still
+flag it. The callee manifest's canonical bytes also fold into the
+produced `context_key`, so a changed callee manifest invalidates the
+strict whole-context gate — `for_function`/`for_package_function`
+take the same declared set when the manifest was derived with one.
+The TS/Sol/Rust ports stay open.
+
 
 ### C11 declared evidence binding over record bytes
 
@@ -4865,8 +4938,9 @@ digest) and `bound` (the declared digest equals the record's).
 
 Attribution is closed like the recovery fold: `_BINDING_CARRIERS` pins
 the subject field per schema (`mumei.producer-signature/v1` →
-`subject_digest`; `mumei.source-evidence-acceptance/v1` and
-`mumei.native-evidence-acceptance/v1` → `evidence_fingerprint`), so a
+`subject_digest`; `mumei.source-evidence-acceptance/v1`,
+`mumei.native-evidence-acceptance/v1` and
+`mumei.source-evidence-recheck/v1` → `evidence_fingerprint`), so a
 document never declares its own coverage and a foreign schema never
 binds. A mismatched or missing subject reports `bound: false` — never
 an error — since a document may honestly describe a different record.

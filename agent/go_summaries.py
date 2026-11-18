@@ -106,6 +106,20 @@ def build_parser(
         metavar="<PATH>",
         help="Write the manifest JSON here instead of stdout.",
     )
+    parser.add_argument(
+        "--summary-aware-calls",
+        dest="summary_aware_calls",
+        metavar="<MANIFEST>",
+        default=None,
+        help=(
+            "Declared callee summary manifest "
+            "(mumei.go-scalar-parameter-deps/v1): calls resolving to a "
+            "callee it covers fold the declared return_dependencies and "
+            "statement_reads instead of the opaque every-argument "
+            "approximation. Advisory only — callees it misses keep "
+            "opaque-call behavior."
+        ),
+    )
     return parser
 
 
@@ -361,15 +375,23 @@ def _run_helper(binary: str, payload: bytes, timeout: int) -> bytes:
     return completed.stdout
 
 
-def _summarize(sources: dict[str, str], payload: bytes, target_arch: str):
+def _summarize(
+    sources: dict[str, str],
+    payload: bytes,
+    target_arch: str,
+    declared: "GoSummarySet | None" = None,
+):
     if len(sources) == 1:
         source = next(iter(sources.values()))
         return summarize_go(
-            source, load_go_snapshot(payload, source, target_arch=target_arch)
+            source,
+            load_go_snapshot(payload, source, target_arch=target_arch),
+            declared=declared,
         )
     return summarize_go_package(
         sources,
         load_go_package_snapshot(payload, sources, target_arch=target_arch),
+        declared=declared,
     )
 
 
@@ -384,6 +406,9 @@ def _declared_paths(args: argparse.Namespace) -> set[Path]:
         manifest = getattr(args, "manifest", None)
         if manifest is not None:
             declared.add(Path(manifest).resolve())
+        callee_manifest = getattr(args, "summary_aware_calls", None)
+        if callee_manifest is not None:
+            declared.add(Path(callee_manifest).resolve())
         go_types = getattr(args, "go_types", None)
         if go_types is not None:
             declared.add(Path(go_types).resolve())
@@ -425,6 +450,7 @@ def summarize_declared(
     target_arch: str,
     imports: dict[str, dict[str, str]] | None = None,
     timeout: int = 30,
+    declared: "GoSummarySet | None" = None,
 ):
     """Run a provisioned helper on declared sources and summarize.
 
@@ -469,7 +495,7 @@ def summarize_declared(
             "helper bound"
         )
     report = _run_helper(go_types, payload, timeout)
-    return _summarize(sources, report, target_arch), report
+    return _summarize(sources, report, target_arch, declared), report
 
 
 def _run_declared(
@@ -485,10 +511,26 @@ def _run_declared(
     declared = _declared_paths(args)
     _check_output_path(args, declared)
     imports = _read_imports(args.imports)
+    callee_manifest = (
+        _read_manifest(args.summary_aware_calls)
+        if getattr(args, "summary_aware_calls", None)
+        else None
+    )
     summary, report = summarize_declared(
-        sources, args.go_types, args.target_arch, imports, args.timeout
+        sources,
+        args.go_types,
+        args.target_arch,
+        imports,
+        args.timeout,
+        declared=callee_manifest,
     )
     return sources, summary, report
+
+
+def _callee_manifest(args: argparse.Namespace) -> GoSummarySet | None:
+    """The `--summary-aware-calls` manifest, when declared."""
+    path = getattr(args, "summary_aware_calls", None)
+    return _read_manifest(path) if path is not None else None
 
 
 def _emit(document: str, output: str | None) -> None:
@@ -513,7 +555,10 @@ def main(args: argparse.Namespace | None = None) -> int:
 
 
 def _reuse_partition(
-    restored: GoSummarySet, live: GoSummarySet, report: bytes
+    restored: GoSummarySet,
+    live: GoSummarySet,
+    report: bytes,
+    callee: GoSummarySet | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Partition the manifest's functions against the fresh report.
 
@@ -521,9 +566,27 @@ def _reuse_partition(
     `stale_dependents` does not flag it; `stale` — it references a
     replaced identity, transitively; `missing` — the fresh report no
     longer produces the identity. Detection only.
+
+    With `--summary-aware-calls` the callee manifest's declared
+    transitive identities (`call_targets`, `pinned`) join `known`:
+    it is already the trusted input the fold consumed, so a folded
+    transfer's transitive targets are checkable against it — a
+    regenerated manifest's churned ids still flag the caller.
+    Without this a folded callee dep the helper never emits (e.g.
+    an import's import) would flag its caller stale on every
+    identical input. The callee's own `binding_id` does NOT join:
+    a live fold emits it through the caller's fresh `call_targets`
+    whenever it is still mintable, so the only caller records that
+    reference it are ones the same manifest still reproduces —
+    letting it blanket-join would keep a caller reusable after the
+    callee's file digest moved its fold target opaque.
     """
     known: set[str] = set()
     _report_identities(json.loads(report), known)
+    if callee is not None:
+        for f in callee.functions:
+            known.update(f.call_targets)
+            known.update(f.pinned)
     live_ids = {f.binding_id for f in live.functions}
     stale = restored.stale_dependents(known)
     reusable, stale_ids, missing = [], [], []
@@ -572,7 +635,9 @@ def summary_check_document(args: argparse.Namespace) -> dict:
     """
     restored = _read_manifest(args.manifest)
     _sources, live, report = _run_declared(args)
-    reusable, stale_ids, missing = _reuse_partition(restored, live, report)
+    reusable, stale_ids, missing = _reuse_partition(
+        restored, live, report, _callee_manifest(args)
+    )
     return {
         "schema_version": CHECK_PROFILE,
         "context_match": restored.context_key == live.context_key,
@@ -617,7 +682,9 @@ def summary_reuse_set(args: argparse.Namespace) -> "GoSummarySet":
             "target architecture"
         )
     _sources, live, report = _run_declared(args)
-    reusable, _, _ = _reuse_partition(restored, live, report)
+    reusable, _, _ = _reuse_partition(
+        restored, live, report, _callee_manifest(args)
+    )
     by_id = {f.binding_id: f for f in restored.functions}
     return GoSummarySet(
         live.context_key,
@@ -626,6 +693,7 @@ def summary_reuse_set(args: argparse.Namespace) -> "GoSummarySet":
             for f in live.functions
         ),
         live.target_arch,
+        call_modeling=live.call_modeling,
     )
 
 
@@ -697,7 +765,24 @@ ATTEMPT_REPORT_PROFILE = "mumei.go-summaries-attempt-report/v1"
 
 
 def _file_sha256(path: str) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    # Streamed so hashing a large declared input cannot exhaust the
+    # parent's memory outside the attempt's declared bounds; the
+    # error detail carries `strerror` only — `str(exc)` would leak
+    # the checkout-local path into the route's failure output.
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise SnapshotError(
+            f"declared input unreadable: {exc.strerror or 'I/O error'}"
+        ) from exc
+    return digest.hexdigest()
+
+
+def _optional_file_sha256(path: str | None) -> str | None:
+    return _file_sha256(path) if path is not None else None
 
 
 def _attempt_fingerprint(args: argparse.Namespace) -> str:
@@ -720,6 +805,9 @@ def _attempt_fingerprint(args: argparse.Namespace) -> str:
             {"spec": spec, "sha256": _file_sha256(spec.partition("=")[2])}
             for spec in sorted(args.imports)
         ],
+        "summary_aware_calls": _optional_file_sha256(
+            getattr(args, "summary_aware_calls", None)
+        ),
         "target_arch": args.target_arch,
         "timeout_seconds": args.timeout,
     }
@@ -809,6 +897,10 @@ def run_attempt(args: argparse.Namespace) -> dict:
         arg
         for spec in args.imports
         for arg in ("--import", spec)
+    ) + tuple(
+        ("--summary-aware-calls", args.summary_aware_calls)
+        if getattr(args, "summary_aware_calls", None)
+        else ()
     )
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
@@ -821,7 +913,7 @@ def run_attempt(args: argparse.Namespace) -> dict:
     )
     try:
         inputs_changed = _attempt_fingerprint(args) != fingerprint
-    except OSError:
+    except (OSError, SnapshotError):
         inputs_changed = True
     if dispatch.run.record.state == "exited" and not inputs_changed:
         updated = dispatch.sequence.select_result(

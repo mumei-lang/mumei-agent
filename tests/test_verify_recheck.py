@@ -15,6 +15,10 @@ from agent.verify_recheck import build_recheck_parser, main_recheck
 DIAGNOSTIC = {
     "schema_version": "mumei.source-evidence-recheck/v1",
     "evidence_schema_version": "mumei.verification-evidence/v1",
+    # Real `recheck-source` consistent diagnostics carry the saved
+    # record's fingerprint since the Core `evidence_fingerprint`
+    # change; the stub emits a fake sentinel for the same shape.
+    "evidence_fingerprint": "00" * 32,
     "recheck": "consistent",
 }
 

@@ -39,12 +39,12 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harvest-tests` | 3 | Deterministically harvest observations from Python and Rust tests. |
 | `observe-tests` | 5 | Check harvested Python and Rust test observations against Mumei atoms. |
 | `config` | 2 | Show effective settings and where each value comes from |
-| `go-summaries` | 6 | Run a provisioned go-types helper on declared Go sources and print the summary manifest JSON. |
-| `go-summaries-check` | 7 | Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report. |
-| `go-summaries-reuse` | 7 | Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's summaries for the functions the fresh report confirms unchanged. |
-| `go-summaries-accept` | 8 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
+| `go-summaries` | 7 | Run a provisioned go-types helper on declared Go sources and print the summary manifest JSON. |
+| `go-summaries-check` | 8 | Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report. |
+| `go-summaries-reuse` | 8 | Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's summaries for the functions the fresh report confirms unchanged. |
+| `go-summaries-accept` | 9 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
-| `go-summaries-attempt` | 8 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `go-summaries-attempt` | 9 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `evidence-check` | 6 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-list` | 6 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
@@ -75,11 +75,11 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-source-recheck` | 7 | Run a declared Core native bundle source recheck as one attempt and emit the reconciled lineage plus the declared source recheck outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
 | `native-evidence-accept` | 8 | Run a declared Core native saved-Evidence acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
-| `rust-summaries` | 1 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
-| `rust-summaries-accept` | 3 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
-| `rust-summaries-check` | 3 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
-| `rust-summaries-reuse` | 3 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
-| `rust-summaries-attempt` | 4 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `rust-summaries` | 2 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `rust-summaries-accept` | 4 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `rust-summaries-check` | 4 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
+| `rust-summaries-reuse` | 4 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `rust-summaries-attempt` | 5 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `ts-summaries` | 2 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `ts-summaries-accept` | 4 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `ts-summaries-check` | 4 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
@@ -560,6 +560,7 @@ Run a provisioned go-types helper on declared Go sources and print the summary m
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the manifest JSON here instead of stdout. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
 
 
 ## `mumei-agent go-summaries-check`
@@ -576,6 +577,7 @@ Run a provisioned go-types helper on declared Go sources and check a declared su
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to check. |
 
 
@@ -593,6 +595,7 @@ Run a provisioned go-types helper on declared Go sources and emit a manifest tha
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to reuse. |
 
 
@@ -610,6 +613,7 @@ Run a provisioned go-types helper on declared Go sources and accept one function
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the accept report JSON here instead of stdout. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to accept from. |
 | `--binding` | `<<ID>>` | yes | — | Binding identity of the function whose declared summary to accept. |
 
@@ -644,6 +648,7 @@ Run the go-summaries produce route as one declared attempt and emit the reconcil
 | `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 
@@ -787,7 +792,7 @@ Pin a declared subject-bearing document to record bytes and emit the binding des
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--record` | `<PATH>` | yes | — | Record file whose raw bytes the document should cover. The bytes are hashed, never parsed. |
-| `--evidence` | `<PATH>` | yes | — | Declared JSON document carrying a subject digest — a producer-signature envelope or a Core acceptance descriptor. |
+| `--evidence` | `<PATH>` | yes | — | Declared JSON document carrying a subject digest — a producer-signature envelope, a Core acceptance descriptor, or a recheck diagnostic. |
 | `--output` | `<PATH>` | no | — | Write the binding descriptor to PATH instead of stdout. |
 
 
@@ -1141,6 +1146,7 @@ Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Callee summary manifest (mumei.rust-scalar-parameter-deps/v1): an opaque call whose recorded name a manifest entry covers folds the entry's declared return_dependencies instead of the opaque every-argument union. The manifest is trusted as declared; its canonical bytes fold into the context key. |
 
 
 ## `mumei-agent rust-summaries-accept`
@@ -1158,6 +1164,7 @@ Re-derive the Rust summary set for one declared source and accept one function's
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Callee summary manifest (mumei.rust-scalar-parameter-deps/v1): an opaque call whose recorded name a manifest entry covers folds the entry's declared return_dependencies instead of the opaque every-argument union. The manifest is trusted as declared; its canonical bytes fold into the context key. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to accept from. |
 | `--function` | `<<NAME>>` | yes | — | Function whose summary to accept — the emitted name or a bare member name when it is unambiguous. Accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
 
@@ -1177,6 +1184,7 @@ Re-derive the Rust summary set for one declared source and check a declared mani
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Callee summary manifest (mumei.rust-scalar-parameter-deps/v1): an opaque call whose recorded name a manifest entry covers folds the entry's declared return_dependencies instead of the opaque every-argument union. The manifest is trusted as declared; its canonical bytes fold into the context key. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to check. |
 | `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
 
@@ -1196,6 +1204,7 @@ Re-derive the Rust summary set for one declared source and emit a manifest that 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Callee summary manifest (mumei.rust-scalar-parameter-deps/v1): an opaque call whose recorded name a manifest entry covers folds the entry's declared return_dependencies instead of the opaque every-argument union. The manifest is trusted as declared; its canonical bytes fold into the context key. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.rust-scalar-parameter-deps/v1) to reuse unchanged summaries from. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
 
@@ -1215,6 +1224,7 @@ Run the rust-summaries produce route as one declared attempt and emit the reconc
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve `mod NAME;` declarations from the importer's directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); unresolved declarations stay opaque. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Callee summary manifest (mumei.rust-scalar-parameter-deps/v1): an opaque call whose recorded name a manifest entry covers folds the entry's declared return_dependencies instead of the opaque every-argument union. The manifest is trusted as declared; its canonical bytes fold into the context key. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
