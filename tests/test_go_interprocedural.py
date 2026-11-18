@@ -13709,6 +13709,26 @@ def test_package_channel_range_rejoins_body_send(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_package_channel_range_body_send_scope_empty(go_types_helper):
+    # A scope-empty function's range still iterates the fixed point:
+    # indirect_writes is a tracked slot outside `scope`, so the pass
+    # bound counts it rather than bottoming at zero.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tfor range GC {\n"
+            "\t\tGC <- x\n"
+            "\t\tbreak\n"
+            "\t}\n"
+            "\treturn x\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_package_channel_reseat_broadcasts_rhs_queue(go_types_helper):
     # `GC = ch` reseats the external operand to a local queue whose
     # contents broadcast into `indirect_writes` for a later read.

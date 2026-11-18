@@ -6005,7 +6005,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # copies are stale.
                     del transfers[mark:]
                     passes += 1
-                    if passes > len(scope) * (len(params) + 1):
+                    # `indirect_writes` is a tracked slot outside
+                    # `scope` — a body-only `GC <- x`/`p <- x` send
+                    # grows it without touching any binding, so the
+                    # bound counts one extra slot or a scope-empty
+                    # function's bound is zero.
+                    if passes > (len(scope) + 1) * (len(params) + 1):
                         raise _Unsupported("analysis_limit", _span(node))
             finally:
                 self.frames.pop()
