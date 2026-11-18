@@ -1079,7 +1079,12 @@ class _Builder:
             return summary
         except (_Unsupported, RecursionError) as exc:
             # Carry the partially built summary so `build` can
-            # keep the reads recorded before the failure.
+            # keep the reads recorded before the failure. The
+            # dep indexes on `partial_deps` name THIS function's
+            # parameters — its own reads already landed in its
+            # `statement_reads`, so a caller composing this
+            # summary through `_call` must not inherit them.
+            exc.partial_deps = frozenset()
             if summary is not None:
                 exc.partial_summary = summary
             raise

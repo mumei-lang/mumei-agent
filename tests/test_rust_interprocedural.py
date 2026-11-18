@@ -1985,6 +1985,32 @@ def test_statement_reads_closure_partial_failure():
     assert rec == frozenset({0})
 
 
+def test_statement_reads_callee_failure_no_param_leak():
+    # A callee failing mid-expression carries ITS param indexes
+    # on `partial_deps` — `_summarize` blanks them at the
+    # boundary so the caller's frames never inherit dep indexes
+    # that belong to the callee's signature.
+    src = (
+        "fn g(b: u64) -> u64 {\n"
+        "    let z = b + qq;\n"
+        "    z\n"
+        "}\n"
+        "fn f() -> u64 {\n"
+        "    g()\n"
+        "}\n"
+    )
+    g = _fn(src, "g")
+    f = _fn(src, "f")
+    assert not g.available
+    assert not f.available
+    # `g`'s own reads stay on its own partial summary.
+    assert any(r == frozenset({0}) for r in _reads(g).values())
+    # `f` has no parameters — nothing from `g`'s index space
+    # may appear in `f`'s records.
+    for r in _reads(f).values():
+        assert r == frozenset()
+
+
 def test_statement_reads_call_arg_partial_failure():
     # `ok(a, u64::MAX)` — the second actual is unsupported, but
     # the first actual's read still attributes to the call.
