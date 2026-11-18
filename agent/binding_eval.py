@@ -43,7 +43,8 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         required=True,
         metavar="PATH",
         help="Declared JSON document carrying a subject digest — a "
-        "producer-signature envelope or a Core acceptance descriptor.",
+        "producer-signature envelope, a Core acceptance descriptor, or "
+        "a recheck diagnostic.",
     )
     parser.add_argument(
         "--output",

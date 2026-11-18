@@ -4838,8 +4838,9 @@ digest) and `bound` (the declared digest equals the record's).
 
 Attribution is closed like the recovery fold: `_BINDING_CARRIERS` pins
 the subject field per schema (`mumei.producer-signature/v1` →
-`subject_digest`; `mumei.source-evidence-acceptance/v1` and
-`mumei.native-evidence-acceptance/v1` → `evidence_fingerprint`), so a
+`subject_digest`; `mumei.source-evidence-acceptance/v1`,
+`mumei.native-evidence-acceptance/v1` and
+`mumei.source-evidence-recheck/v1` → `evidence_fingerprint`), so a
 document never declares its own coverage and a foreign schema never
 binds. A mismatched or missing subject reports `bound: false` — never
 an error — since a document may honestly describe a different record.
