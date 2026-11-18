@@ -222,6 +222,37 @@ class SolCall:
 
 
 @dataclass
+class SolStatementRead:
+    """Parameter ordinals read while evaluating one statement.
+
+    `span` is the statement node's `(start_byte, end_byte)` —
+    stable within the file that produced it and meaningless
+    across modules, so manifests only compare spans inside a
+    single summary set."""
+
+    span: tuple[int, int]
+    deps: frozenset[int]
+
+    def to_dict(self) -> dict:
+        return {
+            "span": [self.span[0], self.span[1]],
+            "deps": sorted(self.deps),
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "SolStatementRead":
+        v = _manifest_record(value, ("span", "deps"))
+        span = _list(v["span"])
+        _require_manifest(
+            len(span) == 2
+            and all(isinstance(b, int) and b >= 0 for b in span)
+        )
+        return cls(
+            (span[0], span[1]), _deps_from_list(v["deps"])
+        )
+
+
+@dataclass
 class SolFunctionSummary:
     name: str
     contract: str
@@ -231,6 +262,7 @@ class SolFunctionSummary:
     calls: list[SolCall] = field(default_factory=list)
     gaps: list[SolGap] = field(default_factory=list)
     effects: str = "unknown"
+    statement_reads: tuple[SolStatementRead, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -246,6 +278,9 @@ class SolFunctionSummary:
             "calls": [c.to_dict() for c in self.calls],
             "gaps": [g.to_dict() for g in self.gaps],
             "effects": self.effects,
+            "statement_reads": [
+                r.to_dict() for r in self.statement_reads
+            ],
         }
 
     @classmethod
@@ -262,6 +297,7 @@ class SolFunctionSummary:
                 "gaps",
                 "effects",
             ),
+            ("statement_reads",),
         )
         parameters = _list(v["parameters"])
         calls = _list(v["calls"])
@@ -274,6 +310,11 @@ class SolFunctionSummary:
         deps = v["return_dependencies"]
         restored_deps = None if deps is None else _deps_from_list(deps)
         restored_gaps = [SolGap.from_dict(g) for g in gaps]
+        statement_reads = [
+            SolStatementRead.from_dict(r)
+            for r in _list(v.get("statement_reads", []))
+        ]
+        _require_manifest(len(statement_reads) <= MAX_MANIFEST_MEMBERS)
         available = _boolean(v["available"])
         # A manifest may not contradict itself: `available` tracks
         # exactly "a result was derived and no gap was recorded" —
@@ -291,6 +332,7 @@ class SolFunctionSummary:
             [SolCall.from_dict(c) for c in calls],
             restored_gaps,
             _string(v["effects"]),
+            tuple(statement_reads),
         )
 
 
@@ -422,6 +464,13 @@ class _Builder:
         self._effects_touched = False
         self._writes: list[set[str]] = []
         self._decls: list[set[str]] = []
+        # Per-statement read attribution: `_statement` pushes one
+        # frame per in-flight statement; `_expr` unions every
+        # evaluated dep set into every open frame, so a statement's
+        # reads cover its nested expressions and any inlined
+        # callee/modifier bodies (keyed by the callee's own spans).
+        self._read_stack: list[frozenset[int]] = []
+        self._stmt_reads: dict[tuple[int, int], frozenset[int]] = {}
         self._state_vars: dict[str, set[str]] = {}
         self._overload_groups: dict[str, list[str]] = {}
         self.modifiers: dict[str, object] = {}
@@ -1292,8 +1341,12 @@ class _Builder:
         # locals never shadow this function's state writes.
         prev_decls = self._decls
         prev_alias = self._storage_alias
+        prev_reads = self._stmt_reads
+        prev_stack = self._read_stack
         self._decls = [set()]
         self._storage_alias = {}
+        self._read_stack = []
+        self._stmt_reads = {}
         try:
             try:
                 rets = self._run_body(
@@ -1303,6 +1356,12 @@ class _Builder:
                 summary.gaps.append(SolGap(exc.reason, exc.byte))
                 return summary
         finally:
+            summary.statement_reads = tuple(
+                SolStatementRead(span, deps)
+                for span, deps in sorted(self._stmt_reads.items())
+            )
+            self._read_stack = prev_stack
+            self._stmt_reads = prev_reads
             self._writes.pop()
             self._decls = prev_decls
             self._storage_alias = prev_alias
@@ -1478,7 +1537,30 @@ class _Builder:
                 )
         return result
 
+    def _record_read(self, deps: frozenset[int]) -> None:
+        for i in range(len(self._read_stack)):
+            self._read_stack[i] = self._read_stack[i] | deps
+
     def _statement(
+        self, st, locals_, param_index, summary
+    ) -> frozenset[int] | None:
+        # Every expression evaluated under this statement — its
+        # own and any inlined callee/modifier body's — lands in
+        # the open frames; nested statements pop their own record
+        # under their own span.
+        self._read_stack.append(frozenset())
+        try:
+            return self._statement_inner(
+                st, locals_, param_index, summary
+            )
+        finally:
+            frame = self._read_stack.pop()
+            key = (st.start_byte, st.end_byte)
+            self._stmt_reads[key] = self._stmt_reads.get(
+                key, frozenset()
+            ) | frame
+
+    def _statement_inner(
         self, st, locals_, param_index, summary
     ) -> frozenset[int] | None:
         t = st.type
@@ -2260,6 +2342,13 @@ class _Builder:
     # -- expressions --------------------------------------------------
 
     def _expr(
+        self, node, locals_, param_index, summary
+    ) -> frozenset[int]:
+        deps = self._expr_inner(node, locals_, param_index, summary)
+        self._record_read(deps)
+        return deps
+
+    def _expr_inner(
         self, node, locals_, param_index, summary
     ) -> frozenset[int]:
         self.count[0] += 1

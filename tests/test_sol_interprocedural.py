@@ -3017,3 +3017,144 @@ function af(uint256 x) returns (uint256) {
     af = next(fn for fn in s.functions if fn.name == "af")
     assert not af.available
     assert af.gaps
+
+
+def _reads(s: sol.SolFunctionSummary) -> dict:
+    return {r.span: r.deps for r in s.statement_reads}
+
+
+def test_statement_reads_attribute_per_statement():
+    src = """contract C {
+  function f(uint256 a, uint256 b) public pure returns (uint256) {
+    uint256 x = a + 1;
+    uint256 y = b;
+    return x + y;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    decl_a = next(
+        r for span, r in reads.items()
+        if src.index("uint256 x") <= span[0] and span[1] <= src.index(";") + 1
+    )
+    assert decl_a == frozenset({0})
+    ret_span = (
+        src.index("return x + y"),
+        src.index("return x + y") + len("return x + y"),
+    )
+    # The return statement's span includes its `;` — find it by
+    # containment of the return keyword.
+    ret = next(
+        r for span, r in reads.items()
+        if span[0] <= ret_span[0] < span[1]
+    )
+    assert ret == frozenset({0, 1})
+
+
+def test_statement_reads_declaration_initializers():
+    # A declarator's RHS records on the statement even though the
+    # bound name's own read is deferred.
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    uint256 x = a;
+    return 0;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_nested_attribution():
+    # Reads inside an if-body attribute to the inner statement's
+    # own span AND the enclosing if statement.
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    uint256 y = 0;
+    if (a > 0) {
+      y = a;
+    }
+    return y;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    assert list(reads.values()).count(frozenset({0})) >= 2
+
+
+def test_statement_reads_modifier_body_attribution():
+    # An inlined modifier's body statements record under the
+    # modifier's own spans in the caller's summary.
+    src = """contract C {
+  modifier m(uint256 v) {
+    uint256 t = v + 1;
+    _;
+  }
+  function f(uint256 a) public m(a) returns (uint256) {
+    return 0;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_call_actual_records():
+    # A call to an opaque callee still reads its actual: `g(a)`
+    # records {0} on the statement even though the result is
+    # dropped.
+    src = """contract C {
+  function g(uint256 v) public pure returns (uint256) {
+    return 0;
+  }
+  function f(uint256 a) public pure returns (uint256) {
+    g(a);
+    return 0;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_absent_when_gapped():
+    # A gapped walk still attaches what was recorded before the
+    # gap — but the summary stays unavailable.
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    uint256 x = a;
+    return x + unknown_call();
+  }
+}"""
+    s = _fn(src, "f")
+    if not s.available:
+        assert s.gaps
+
+
+def test_statement_reads_roundtrip():
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    return a;
+  }
+}"""
+    s = _summarize(src)
+    restored = sol.SolSummarySet.from_dict(s.to_dict())
+    fn = next(f for f in restored.functions if f.name.endswith(".f"))
+    orig = next(f for f in s.functions if f.name.endswith(".f"))
+    assert fn.statement_reads == orig.statement_reads
+
+
+def test_statement_reads_manifest_optional():
+    # Manifests predating the field restore without it.
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    return a;
+  }
+}"""
+    s = _summarize(src).to_dict()
+    for f in s["functions"]:
+        f.pop("statement_reads", None)
+    restored = sol.SolSummarySet.from_dict(s)
+    assert all(fn.statement_reads == () for fn in restored.functions)
