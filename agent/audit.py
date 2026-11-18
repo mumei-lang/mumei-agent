@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1486,6 +1487,18 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 file=sys.stderr,
             )
             raise SystemExit(2)
+        if getattr(args, "output", None) is not None:
+            target = os.path.realpath(args.output)
+            if any(
+                os.path.realpath(path) == target
+                for path in _scheduled_verification_declared_paths(args)
+            ):
+                print(
+                    "audit: --output must not overwrite a declared "
+                    "schedule input",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
         try:
             scheduled_verification = _load_scheduled_verification(args)
         except (OSError, ValueError, UnicodeDecodeError) as exc:

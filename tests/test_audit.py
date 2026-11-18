@@ -4065,6 +4065,44 @@ def test_audit_scheduled_verification_flag_validation(
     assert "--schedule-policy" in err
 
 
+
+def test_audit_scheduled_verification_output_overwrite_rejected(
+    tmp_path: Path, capsys
+) -> None:
+    files = _scheduled_verification_files(tmp_path)
+    src = tmp_path / "calc.py"
+    src.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    base_args = [
+        "--code-file",
+        str(src),
+        "--enable-scheduled-verification",
+        "--schedule-request",
+        files["request"],
+        "--schedule-adapters",
+        files["adapters"],
+        "--schedule-argv-map",
+        files["argv_map"],
+        "--schedule-policy",
+        files["policy"],
+    ]
+
+    with pytest.raises(SystemExit):
+        main(
+            build_parser().parse_args(
+                base_args + ["--output", files["policy"]]
+            )
+        )
+    assert "must not overwrite" in capsys.readouterr().err
+
+    alias = tmp_path / "policy_alias.json"
+    alias.symlink_to(Path(files["policy"]))
+    with pytest.raises(SystemExit):
+        main(
+            build_parser().parse_args(base_args + ["--output", str(alias)])
+        )
+    assert "must not overwrite" in capsys.readouterr().err
+
+
 def test_audit_scheduled_verification_load_error_redacts(
     tmp_path: Path, capsys
 ) -> None:
