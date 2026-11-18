@@ -12223,10 +12223,11 @@ def test_double_pointer_named_chain_stays_closed(
     assert result.gaps[0].reason == "non_parameter_reference"
 
 
-def test_triple_pointer_stays_closed(
+def test_triple_pointer_read(
     go_types_helper,
 ):
-    # `***ppp` — the inner operand is not a bare identifier.
+    # `***ppp` — three-level deref through an anonymous chain:
+    # deps carry the pointer's provenance like `**pp` does.
     files = {
         "a.go": "package p\n"
         "func F(ppp ***int64) int64 { return ***ppp }\n"
@@ -12235,8 +12236,98 @@ def test_triple_pointer_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_triple_pointer_store_observed(
+    go_types_helper,
+):
+    # `***ppp = v` folds like `**pp = v` — a later `***ppp` read
+    # observes the stored deps through `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "func F(ppp ***int64, v int64) int64 {\n"
+        "\t***ppp = v\n"
+        "\treturn ***ppp\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_triple_pointer_parenthesized_read(
+    go_types_helper,
+):
+    # `*(*(*t))` — the same three-level chain through parens.
+    files = {
+        "a.go": "package p\n"
+        "func F(t ***int64, x int64) int64 {\n"
+        "\ta := x\n\t***t = a\n\treturn *(*(*t))\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_triple_pointer_named_chain_stays_closed(
+    go_types_helper,
+):
+    # `type PT *int64; ppp **PT` — the producer records PT's fact
+    # as opaque (`unsupported`), so the third-level descent cannot
+    # resolve and the read fails closed.
+    files = {
+        "a.go": "package p\n"
+        "type PT *int64\n"
+        "func F(ppp **PT) int64 { return ***ppp }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
     assert not result.available
     assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_triple_pointer_computed_operand_stays_closed(
+    go_types_helper,
+):
+    # `*(*(*g()))` — the innermost operand is a call, not a bare
+    # identifier: dep sets track binding indices, so the chain
+    # stays closed at every depth.
+    files = {
+        "a.go": "package p\n"
+        "func g() ***int64 { return nil }\n"
+        "func F(x int64) int64 {\n"
+        "\treturn *(*(*g()))\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_quadruple_pointer_read(
+    go_types_helper,
+):
+    # `****q` — the descent loop covers depth four too.
+    files = {
+        "a.go": "package p\n"
+        "func F(q ****int64) int64 { return ****q }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_double_pointer_deep_named_pointee(

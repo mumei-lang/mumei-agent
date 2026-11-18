@@ -3325,8 +3325,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> tuple[str, Any, bool] | None:
-        """A `*p = v` store through a bound pointer.
+    ) -> tuple[str, Any, int] | None:
+        """A `*p = v`/`**pp = v`/`***t = v` store through a bound
+        pointer.
 
         `p := &x` may aim the pointer at any escaped binding — dep
         sets track binding indices, never pointee contents, so the
@@ -3360,8 +3361,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
-        nested = False
-        if inner is not None and inner.type == "unary_expression":
+        # `*p`, `**pp`, `***t` — each unary `*` operand unwraps one
+        # more deref level (through parens) until the chain ends at
+        # the bound identifier. `extra` counts the levels past the
+        # outermost `*`; a non-identifier operand at any depth
+        # (`*(*g())`, `**s.F`) closes below.
+        extra = 0
+        while inner is not None and inner.type == "unary_expression":
             inner_op = inner.child_by_field_name("operator")
             inner_operand = inner.child_by_field_name("operand")
             while (
@@ -3377,13 +3383,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     None,
                 )
             if (
-                inner_op is not None
-                and inner_op.text == b"*"
-                and inner_operand is not None
-                and inner_operand.type == "identifier"
+                inner_op is None
+                or inner_op.text != b"*"
+                or inner_operand is None
             ):
-                inner = inner_operand
-                nested = True
+                break
+            inner = inner_operand
+            extra += 1
         if inner is None or inner.type != "identifier":
             return None
         ref = self.references.get(self.node_key(inner))
@@ -3424,20 +3430,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._pin_fact_identities(target.type)
             pointee_fact = target.type
             pointee_id = binding.type.type_id
-        if nested:
-            # `**pp = v` — the store lands one level deeper, in the
-            # pointee of pp's `*T` pointee; descend the fact chain
-            # once more under the same unconditional fold.
-            if pointee_fact.kind != "pointer":
+        if extra:
+            # `**pp = v`, `***t = v` — the store lands `extra`
+            # levels deeper than the first pointee; descend the
+            # fact chain that many levels under the same
+            # unconditional fold. Each intermediate level must be
+            # pointer-kind (an opaque named pointer or a scalar
+            # stops the chain); the deepest `elem` is the stored
+            # value's type.
+            cur = pointee_fact
+            for _ in range(extra - 1):
+                if cur.kind != "pointer" or cur.elem is None:
+                    return None
+                cur = cur.elem
+                self._pin_fact_identities(cur)
+            if cur.kind != "pointer":
                 return None
-            deep = pointee_fact.elem
+            deep = cur.elem
             if deep is None:
                 return None
             self._pin_fact_identities(deep)
             if deep.type_id:
-                return deep.type_id, ref, nested
-            return f"{ref.binding_id}/pointee/pointee", ref, nested
-        return pointee_id, ref, nested
+                return deep.type_id, ref, extra
+            return (
+                f"{ref.binding_id}" + "/pointee" * (extra + 1),
+                ref,
+                extra,
+            )
+        return pointee_id, ref, extra
 
     def _imported_pointer_deref(
         self,
@@ -3535,12 +3555,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # the result still carries the binding's own
             # dependencies, the pointer's provenance. Only an
             # identifier operand admits — a computed pointer
-            # (`*g()`) stays closed. A nested `**t` unwraps one more
-            # level: the inner `*t` operand must still be a bare
-            # identifier (`***t` stays closed) and the bound name's
-            # pointee chain must resolve pointer → scalar/pointer.
-            nested = False
-            if inner is not None and inner.type == "unary_expression":
+            # (`*g()`) stays closed. A nested `**t`/`***t` unwraps
+            # one more level each: the innermost operand must still
+            # be a bare identifier and the bound name's pointee
+            # chain must resolve pointer → … → scalar/pointer.
+            extra = 0
+            while inner is not None and inner.type == "unary_expression":
                 inner_op = inner.child_by_field_name("operator")
                 inner_operand = inner.child_by_field_name("operand")
                 while (
@@ -3556,13 +3576,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         None,
                     )
                 if (
-                    inner_op is not None
-                    and inner_op.text == b"*"
-                    and inner_operand is not None
-                    and inner_operand.type == "identifier"
+                    inner_op is None
+                    or inner_op.text != b"*"
+                    or inner_operand is None
                 ):
-                    inner = inner_operand
-                    nested = True
+                    break
+                inner = inner_operand
+                extra += 1
             if inner is None or inner.type != "identifier":
                 raise _Unsupported("non_parameter_reference", _span(node))
             bound_ref = self.references.get(self.node_key(inner))
@@ -3586,37 +3606,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # the same external read `*p` is.
             if binding is None or binding.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
-            if nested:
-                # `**pp` — descend the fact chain one level past the
-                # pointer's pointee: `pp`'s pointee must itself be a
-                # pointer whose own element classifies scalar or
-                # pointer like a first-level pointee would. A named
-                # step (`type PP *int64`) resolves through the type
-                # binding and pins it; an unnamed inner `*T` records
-                # a `<binding>/pointee/pointee` identity nothing can
+            if extra:
+                # `**pp`, `***t` — descend the fact chain `extra`
+                # levels past the pointer's own type: every level
+                # must resolve to another pointer whose own element
+                # continues the chain, and the deepest element
+                # classifies scalar or pointer like a first-level
+                # pointee would. A named step (`type PP *int64`)
+                # resolves through the type binding and pins it; an
+                # unnamed inner `*T` records a
+                # `<binding>/pointee…` identity nothing can
                 # redeclare.
                 inner_fact = binding.type
-                if inner_fact.type_id:
-                    resolved = self._pointee_type(inner_fact.type_id)
-                    if (
-                        resolved is None
-                        or resolved.type.kind != "pointer"
-                    ):
-                        raise _Unsupported(
-                            "non_parameter_reference", _span(node)
+                for _ in range(extra):
+                    if inner_fact.type_id:
+                        resolved = self._pointee_type(
+                            inner_fact.type_id
                         )
-                    self._pin_fact_identities(resolved.type)
-                    inner_fact = resolved.type
-                else:
-                    inner_fact = inner_fact.elem
-                    if (
-                        inner_fact is None
-                        or inner_fact.kind != "pointer"
-                    ):
-                        raise _Unsupported(
-                            "non_parameter_reference", _span(node)
-                        )
-                    self._pin_fact_identities(inner_fact)
+                        if (
+                            resolved is None
+                            or resolved.type.kind != "pointer"
+                        ):
+                            raise _Unsupported(
+                                "non_parameter_reference", _span(node)
+                            )
+                        self._pin_fact_identities(resolved.type)
+                        inner_fact = resolved.type
+                    else:
+                        inner_fact = inner_fact.elem
+                        if (
+                            inner_fact is None
+                            or inner_fact.kind != "pointer"
+                        ):
+                            raise _Unsupported(
+                                "non_parameter_reference", _span(node)
+                            )
+                        self._pin_fact_identities(inner_fact)
                 deep = inner_fact.elem
                 if (
                     deep is None
@@ -3635,9 +3660,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # read).
                 if deep.type_id:
                     self._pin_fact_identities(deep)
-                pointee_id = (
-                    deep.type_id
-                    or f"{bound_ref.binding_id}/pointee/pointee"
+                pointee_id = deep.type_id or (
+                    f"{bound_ref.binding_id}"
+                    + "/pointee" * (extra + 1)
                 )
                 named_pointee = False
             else:
@@ -4792,17 +4817,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_, params
                 )
                 if bound_ptr is not None:
-                    pointee_id, ref, nested = bound_ptr
+                    pointee_id, ref, extra = bound_ptr
                     # `*p = v` computes its destination from the
                     # pointer's own provenance. `*p += v` also reads
-                    # the old pointee, and `**pp = v` reads the
-                    # pointer and `*pp` — the full deref-read union
-                    # covers both.
+                    # the old pointee, and `**pp = v`/`***t = v`
+                    # read the intermediate pointees too — the
+                    # full deref-read union covers all depths.
                     self._record_read(
                         self._deref_read_deps(
                             ref.binding_id, params, locals_
                         )
-                        if nested or compound
+                        if extra or compound
                         else self._pointer_deps(
                             ref.binding_id, params, locals_
                         )
@@ -5810,9 +5835,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 operand, locals_, params
             )
             if bound_ptr is not None:
-                pointee_id, ref, nested = bound_ptr
+                pointee_id, ref, _extra = bound_ptr
                 # `(*p)++` reads the pointer and the old pointee —
-                # the deref-read union covers `**pp` too.
+                # the deref-read union covers `**pp`/`***t` too.
                 self._record_read(
                     self._deref_read_deps(
                         ref.binding_id, params, locals_
