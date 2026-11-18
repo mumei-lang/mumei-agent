@@ -6,6 +6,7 @@ trusted executable; an absolute path is not authentication or a sandbox.
 
 import json
 import os
+import re
 import selectors
 import subprocess
 import threading
@@ -741,3 +742,110 @@ def evaluate_unperformed_check_recovery(
         ],
     }
     return recovery
+
+
+FRESHNESS_EVALUATION_SCHEMA = "mumei.freshness-evaluation/v1"
+
+# Strict RFC 3339: full date, full time with seconds, optional
+# fractional seconds, and a numeric offset or Z. Looser ISO 8601
+# shapes `datetime.fromisoformat` accepts (missing seconds, missing
+# colon in the offset, date-only, week dates) stay unclaimed.
+# ``[0-9]`` rather than ``\d``: the unicode-aware class accepts
+# non-ASCII digits (Arabic-Indic etc.) that RFC 3339 excludes and
+# ``int()`` happily parses.
+_RFC3339_RE = re.compile(
+    r"^([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})"
+    r"(?:\.([0-9]+))?"
+    r"([Zz]|[+-][0-9]{2}:[0-9]{2})$"
+)
+
+
+def _parse_rfc3339(value: object) -> "tuple | None":
+    """Parse an RFC 3339 timestamp into ``(low, high)`` bounds, or None.
+
+    Returns two aware datetimes bracketing the claimed instant: the
+    whole-second floor plus the declared fractional seconds
+    (`low`), and `low` plus one microsecond when the fraction carries
+    sub-microsecond precision `datetime` cannot represent (`high`).
+    Consumers compare `high` against upper bounds and `low` against
+    lower bounds, so sub-microsecond truncation can never turn a
+    postdated or stale claim into a pass."""
+    from datetime import datetime, timedelta
+
+    if type(value) is not str:
+        return None
+    match = _RFC3339_RE.match(value.strip())
+    if match is None:
+        return None
+    base, fraction, zone = match.groups()
+    text = base + ("+00:00" if zone.upper() == "Z" else zone)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    digits = fraction or ""
+    micros = int((digits + "000000")[:6])
+    low = parsed + timedelta(microseconds=micros)
+    # No int() on the tail — an absurdly long fraction must not trip
+    # the integer-digit limit.
+    sub_micro = len(digits) > 6 and any(c != "0" for c in digits[6:])
+    return low, low + (timedelta(microseconds=1) if sub_micro else timedelta(0))
+
+
+def evaluate_freshness(
+    record: dict,
+    reference_time: str,
+    max_age_seconds: int,
+) -> dict:
+    """Evaluate a declared record's freshness claim against a declared
+    clock.
+
+    Emits ``mumei.freshness-evaluation/v1``. The record is schema-open:
+    any JSON object may carry a ``produced_at`` RFC 3339 timestamp —
+    its absence (or an unparseable value) reports
+    ``freshness_claimed: false`` rather than an error, since the field
+    is optional by design and a record without it simply makes no
+    freshness claim.
+
+    ``within_window`` holds only when a well-formed ``produced_at``
+    exists, does not postdate the declared ``reference_time``, and
+    ``produced_at + max_age_seconds >= reference_time``. The
+    ``reference_time`` is the caller's declared clock — the fold never
+    reads the system clock, so the same documents always evaluate the
+    same way.
+
+    ``checks_not_performed`` keeps ``clock_authenticity`` (the declared
+    reference time is trusted as supplied), ``producer_time_authenticity``
+    (the record's timestamp is a claim by the producer — only a
+    signature-bound timestamp upgrades it) and ``freshness_enforcement``
+    (the fold reports; gating on freshness is a host decision)."""
+    from datetime import timedelta
+
+    if type(record) is not dict:
+        raise ValueError("unsupported freshness evaluation request")
+    reference = _parse_rfc3339(reference_time)
+    if reference is None:
+        raise ValueError("invalid reference time")
+    if type(max_age_seconds) is not int or max_age_seconds < 0:
+        raise ValueError("invalid max age")
+    produced = _parse_rfc3339(record.get("produced_at"))
+    claimed = produced is not None
+    # Conservative both ways: a claim that could postdate the
+    # reference fails the first bound even by a sub-microsecond
+    # fraction, and a record only barely inside the window still
+    # fails the second.
+    within = (
+        claimed
+        and produced[1] <= reference[0]
+        and produced[0] + timedelta(seconds=max_age_seconds) >= reference[1]
+    )
+    return {
+        "schema_version": FRESHNESS_EVALUATION_SCHEMA,
+        "freshness_claimed": claimed,
+        "within_window": within,
+        "checks_not_performed": [
+            "clock_authenticity",
+            "producer_time_authenticity",
+            "freshness_enforcement",
+        ],
+    }

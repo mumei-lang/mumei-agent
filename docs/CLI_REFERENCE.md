@@ -53,6 +53,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `signature-eval` | 4 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
 | `signature-verify` | 5 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
 | `recovery-eval` | 3 | Fold a declared record's checks_not_performed over supporting evaluation documents and emit the recovery descriptor. |
+| `freshness-eval` | 4 | Evaluate a declared record's produced_at freshness claim against a declared reference time and emit the evaluation descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -759,6 +760,20 @@ Fold a declared record's checks_not_performed over supporting evaluation documen
 | `--record` | `<PATH>` | yes | — | Declared record JSON that may carry an optional checks_not_performed string list. |
 | `--evidence` | `<PATH>` | yes | — | Supporting evaluation document JSON; repeatable. Each document is counted only when its schema_version names the declared performer for a check. |
 | `--output` | `<PATH>` | no | — | Write the recovery descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent freshness-eval`
+
+Evaluate a declared record's produced_at freshness claim against a declared reference time and emit the evaluation descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--record` | `<PATH>` | yes | — | Declared producer record JSON that may carry an optional produced_at RFC 3339 timestamp. |
+| `--reference-time` | `<RFC3339>` | yes | — | The caller's declared reference time (RFC 3339 with timezone, e.g. 2026-11-18T00:00:00Z). The fold never reads the system clock. |
+| `--max-age-seconds` | `<N>` | yes | — | Declared freshness window: produced_at must be no older than reference_time minus N seconds. |
+| `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent evidence-identity-check`

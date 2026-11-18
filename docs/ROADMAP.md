@@ -4773,6 +4773,30 @@ documents (`evidence_authenticity` — trusted as declared) and does
 not pin a document to the record it covers (`evidence_binding`).
 Subject-bound recovery waits on producer-side fingerprint emission.
 
+### C11 declared freshness evaluation
+
+`agent.core_evidence.evaluate_freshness(record, reference_time,
+max_age_seconds)` and the `freshness-eval` route restore one declared
+producer record — any JSON object that may carry an optional
+`produced_at` RFC 3339 timestamp, per the issue #894 design memo —
+and emit `mumei.freshness-evaluation/v1`. `freshness_claimed` holds
+only when `produced_at` is present and parses with a timezone;
+`within_window` holds only when the claim does not postdate the
+declared `--reference-time` and stays inside `--max-age-seconds`.
+
+The clock is declared, never read — `--reference-time` is the
+caller's own trusted reference, so two runs over the same documents
+always agree. `checks_not_performed` keeps `clock_authenticity` (the
+declared reference is trusted as supplied), `producer_time_authenticity`
+(the timestamp is the producer's claim — only a signature-bound
+timestamp inside the signed `subject_digest` upgrades it) and
+`freshness_enforcement` (the fold reports; gating is a host
+decision). A record with no `produced_at` reports
+`freshness_claimed: false` — never an error — so the fold composes
+with every record shape that predates the optional field. Core-side
+emission of `produced_at` is the memo's slice 2 and stays open; C11
+stays partial.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
