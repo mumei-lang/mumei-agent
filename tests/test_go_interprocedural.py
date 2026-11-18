@@ -11350,15 +11350,47 @@ def test_bound_pointee_indexed_nested_field_read_index_call_write(
     assert result.return_dependencies == frozenset({0, 1, 2})
 
 
-def test_bound_pointee_indexed_nested_field_read_third_level_closed(
+def test_bound_pointee_indexed_nested_field_read_third_level(
     go_types_helper,
 ):
-    # `(*p)[i].V.G.H` — a third selection level stays closed: the
-    # intermediate chain admits at most one named-struct member.
+    # `(*p)[i].V.G.H` — the intermediate chain walks any number of
+    # named-struct members: `G`'s struct type (`R`) and `V`'s (`S`)
+    # each pin, and `H` resolves through its own reference like any
+    # leaf.
     files = {
         "a.go": "package p\n"
         "type R struct{ H int64 }\ntype S struct{ G R }\n"
         "type Q struct{ V S }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\treturn (*p)[i].V.G.H\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+    h_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "H" and b.kind == "variable" and b.scope is None
+    )
+    type_ids = {
+        b.name: b.id for b in snapshot.bindings if b.kind == "type"
+    }
+    assert any(c.target == h_id and c.imported for c in result.calls)
+    assert type_ids["S"] in result.pinned
+    assert type_ids["R"] in result.pinned
+
+
+def test_bound_pointee_indexed_nested_field_read_anonymous_mid_closed(
+    go_types_helper,
+):
+    # `(*p)[i].V.G.H` where `G` is an anonymous `struct{...}`
+    # member — no named identity to pin at that level, so the
+    # chain still fails closed.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ G struct{ H int64 } }\ntype Q struct{ V S }\n"
         "func F(p *[]Q, i int64) int64 {\n"
         "\treturn (*p)[i].V.G.H\n}\n"
     }
@@ -11702,11 +11734,12 @@ def test_bound_pointee_indexed_nested_field_inc(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_bound_pointee_indexed_nested_field_store_third_level_closed(
+def test_bound_pointee_indexed_nested_field_store_third_level(
     go_types_helper,
 ):
-    # `(*p)[i].V.G.H = w` — the third selection level stays closed
-    # for stores like reads.
+    # `(*p)[i].V.G.H = w` — stores admit the same intermediate
+    # chain reads do: every named-struct level pins its type and
+    # the leaf's identity records the external store.
     files = {
         "a.go": "package p\n"
         "type R struct{ H int64 }\ntype S struct{ G R }\n"
@@ -11718,7 +11751,12 @@ def test_bound_pointee_indexed_nested_field_store_third_level_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.effects == "unknown"
+    h_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "H" and b.kind == "variable" and b.scope is None
+    )
+    assert any(c.target == h_id and c.imported for c in result.calls)
 
 
 def test_bound_pointee_range_element_sees_loop_store(
@@ -13828,3 +13866,28 @@ def test_statement_reads_parallel_dest_uses_old_binding(go_types_helper):
     assert result.available
     reads = {r.deps for r in result.statement_reads}
     assert frozenset({0, 1, 2}) in reads
+
+
+def test_bound_pointee_indexed_nested_field_store_third_level(
+    go_types_helper,
+):
+    # `(*p)[i].V.G.H = v` — the third-level field store records the
+    # leaf member's identity like `(*p)[i].V.G = v` and folds the
+    # RHS through the alias fold.
+    files = {
+        "a.go": "package p\n"
+        "type R struct{ H int64 }\ntype S struct{ G R }\n"
+        "type Q struct{ V S }\n"
+        "func F(p *[]Q, i, v int64) int64 {\n"
+        "\t(*p)[i].V.G.H = v\n\treturn v\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    h_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "H" and b.kind == "variable" and b.scope is None
+    )
+    assert any(c.target == h_id and c.imported for c in result.calls)

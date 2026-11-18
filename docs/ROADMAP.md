@@ -2541,12 +2541,13 @@ imported transfer, argument deps union, `&x` arguments fold and
 `effects` stays unknown, while each element name carries
 deps(args) ∪ escaped ∪ indirect writes and the index/key stays
 dep-free — and nested element
-fields admit one deeper level (`(*p)[i].F.G` reads, stores and
-inc/dec: the intermediate `F` must be a `var` member whose named
-struct type pins, the leaf `G` resolves through its own reference,
-and the deps union the pointer's own, the indexes' and every
-indirect store exactly like `(*p)[i].F` — a third selection level
-and an anonymous `struct{...}` intermediate stay closed), while
+fields admit arbitrary named-struct levels (`(*p)[i].F.G`,
+`(*p)[i].F.G.H`, … reads, stores and inc/dec: every intermediate
+must be a `var` member whose named struct type pins, the leaf
+resolves through its own reference, and the deps union the
+pointer's own, the indexes' and every indirect store exactly
+like `(*p)[i].F` — an anonymous `struct{...}` intermediate stays
+closed), while
 deeper nested derefs
 now admit at any depth (`**p`/`***p`/`****q` — the chain of unary
 `*` operands must still end at a bare identifier, each pointee
