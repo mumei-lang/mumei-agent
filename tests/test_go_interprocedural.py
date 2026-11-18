@@ -12316,12 +12316,13 @@ def test_triple_pointer_parenthesized_read(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_triple_pointer_named_chain_stays_closed(
+def test_triple_pointer_named_chain_admits(
     go_types_helper,
 ):
-    # `type PT *int64; ppp **PT` — the producer records PT's fact
-    # as opaque (`unsupported`), so the third-level descent cannot
-    # resolve and the read fails closed.
+    # `type PT *int64; ppp **PT` — PT now emits a `pointer` fact
+    # (named-alias one-hop), so the arbitrary-depth descent resolves
+    # `*PT` → PT → `int64` and the read admits like `***q` on
+    # `q ***int64`.
     files = {
         "a.go": "package p\n"
         "type PT *int64\n"
@@ -12331,8 +12332,8 @@ def test_triple_pointer_named_chain_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
-    assert result.gaps[0].reason == "non_parameter_reference"
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_triple_pointer_computed_operand_stays_closed(
