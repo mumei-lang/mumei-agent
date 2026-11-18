@@ -51,6 +51,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check-consistency` | 6 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
 | `signature-eval` | 4 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
+| `signature-verify` | 5 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -729,6 +730,21 @@ Evaluate a declared producer-signature envelope and emit the representation-leve
 | `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex, e.g. an accepted descriptor's evidence_fingerprint). When supplied the evaluation emits subject_bound comparing it to the envelope's subject_digest. |
 | `--expected-producer-key` | `<ID>` | no | — | Declared producer key fingerprint the caller trusts, arriving over a separately trusted channel. When supplied the evaluation emits key_pinned comparing it to the envelope's producer_key_id. |
 | `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent signature-verify`
+
+Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--envelope` | `<PATH>` | yes | — | Declared producer-signature envelope JSON (mumei.producer-signature/v1). |
+| `--producer-key` | `<HEX>` | yes | — | Raw ed25519 public key (64-char lowercase hex) supplied over a separately trusted channel. The route verifies the envelope's signature over subject_digest under this key. |
+| `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex). When supplied the verification emits subject_bound comparing it to the envelope's subject_digest. |
+| `--expected-producer-key` | `<ID>` | no | — | Declared producer key id the caller trusts, arriving over a separately trusted channel. When supplied the verification emits key_pinned comparing it to the envelope's producer_key_id. |
+| `--output` | `<PATH>` | no | — | Write the verification descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent evidence-identity-check`
