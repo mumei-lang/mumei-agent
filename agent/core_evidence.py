@@ -621,3 +621,123 @@ def verify_signature_envelope(
         )
         verification["checks_not_performed"].remove("key_binding")
     return verification
+
+
+# Unperformed-check recovery schema (the composition fold issue
+# mumei-agent#897's memo fixes): which of a record's declared
+# ``checks_not_performed`` a set of supporting documents covers.
+UNPERFORMED_CHECK_RECOVERY_SCHEMA = "mumei.unperformed-check-recovery/v1"
+
+# Which emitted schema performs each check name, and the outcome field
+# that must hold `true` for the check to count as recovered. A document
+# never gets to declare its own coverage — attribution is pinned to the
+# emitted schema, so a foreign document claiming a check cannot count.
+_CHECK_PERFORMERS: dict = {
+    "attempt_binding": [
+        ("mumei.core-acceptance-evaluation/v1", "attempt_bound"),
+    ],
+    "subject_binding": [
+        ("mumei.signature-envelope-evaluation/v1", "subject_bound"),
+        ("mumei.signature-verification/v1", "subject_bound"),
+    ],
+    "key_binding": [
+        ("mumei.signature-envelope-evaluation/v1", "key_pinned"),
+        ("mumei.signature-verification/v1", "key_pinned"),
+    ],
+    "signature_verification": [
+        ("mumei.signature-verification/v1", "signature_valid"),
+    ],
+    "envelope_freshness": [
+        ("mumei.freshness-evaluation/v1", "within_window"),
+    ],
+    "descriptor_freshness": [
+        ("mumei.freshness-evaluation/v1", "within_window"),
+    ],
+    "freshness": [
+        ("mumei.freshness-evaluation/v1", "within_window"),
+    ],
+}
+
+
+def evaluate_unperformed_check_recovery(
+    record: dict, evidence: list
+) -> dict:
+    """Fold a record's declared ``checks_not_performed`` over the
+    supporting documents into a recovery report.
+
+    Emits ``mumei.unperformed-check-recovery/v1``: for each check the
+    record declares, `checks` reports one of
+
+    - ``recovered`` — a supporting document carries the declared
+      performer schema AND its outcome field is ``true``;
+    - ``evidence_failed`` — a document with the performer schema was
+      supplied but its outcome field is absent or not ``true``;
+    - ``no_evidence`` — no performer schema is declared for the check,
+      or no supplied document carries it.
+
+    Schema-open on the record: any object may declare
+    ``checks_not_performed`` (non-list/non-string entries are skipped
+    and the fold reports ``checks_declared: false`` when the list is
+    absent or invalid). Fail-closed on the evidence: a document is
+    only counted when it is a dict whose ``schema_version`` exactly
+    names the declared performer.
+
+    This is representation-level composition: the fold does not re-run
+    any check (`recovery_enforcement` stays), does not verify the
+    supporting documents themselves (`evidence_authenticity` stays —
+    they are trusted as declared), and does not bind a document to the
+    record it is said to cover (`evidence_binding` stays — a
+    freshness doc counts whether or not it was produced for this
+    record)."""
+    if type(record) is not dict:
+        raise ValueError("unsupported check-recovery request")
+    evidence = evidence or []
+    if any(type(doc) is not dict for doc in evidence):
+        raise ValueError("unsupported check-recovery evidence document")
+
+    declared = record.get("checks_not_performed")
+    checks_declared = type(declared) is list
+    check_names = (
+        [name for name in declared if type(name) is str]
+        if checks_declared
+        else []
+    )
+
+    schema_to_docs: dict = {}
+    for doc in evidence:
+        schema = doc.get("schema_version")
+        if type(schema) is str:
+            schema_to_docs.setdefault(schema, []).append(doc)
+
+    checks: dict = {}
+    for name in check_names:
+        performers = _CHECK_PERFORMERS.get(name, [])
+        status = "no_evidence"
+        for schema, field in performers:
+            if schema not in schema_to_docs:
+                continue
+            if status == "no_evidence":
+                status = "evidence_failed"
+            if any(
+                doc.get(field) is True for doc in schema_to_docs[schema]
+            ):
+                status = "recovered"
+                break
+        checks[name] = status
+
+    recovered = [name for name in check_names if checks[name] == "recovered"]
+    recovery = {
+        "schema_version": UNPERFORMED_CHECK_RECOVERY_SCHEMA,
+        "checks_declared": checks_declared,
+        "checks": checks,
+        "recovered": recovered,
+        "unrecovered": [
+            name for name in check_names if checks[name] != "recovered"
+        ],
+        "checks_not_performed": [
+            "evidence_binding",
+            "evidence_authenticity",
+            "recovery_enforcement",
+        ],
+    }
+    return recovery
