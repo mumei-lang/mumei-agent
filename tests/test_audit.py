@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from agent.audit import (
     _build_report,
     _collect_code_files,
     _format_result,
+    _load_scheduled_verification,
     build_parser,
     main,
 )
@@ -1830,6 +1832,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         summary_plan_stamp=1,
         summary_plan_tool_version=None,
         summary_plan_histories=None,
+        scheduled_verification=None,
     )
 
 
@@ -3862,3 +3865,228 @@ def test_summary_plan_flag_gating(tmp_path: Path) -> None:
     assert default.summary_plan_stamp == 1
     assert default.summary_plan_tool_version is None
     assert default.summary_plan_histories is None
+
+
+def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
+    """Declared inputs for the --enable-scheduled-verification lane."""
+    def write(name: str, doc: object) -> str:
+        path = tmp_path / f"FAKE_PRIVATE_SCHED_{name}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    profile = "mumei.test/v1"
+    contract = {
+        "profile": profile,
+        "method": "deductive_proof",
+        "scope": "unbounded",
+        "correspondence_relation": "exact_model",
+        "correspondence_status": "assumed",
+    }
+
+    def manifest(adapter_id: str) -> dict:
+        return {
+            "schema_version": "mumei.verifier-adapter/v1",
+            "adapter_id": adapter_id,
+            "adapter_version": "1.0.0",
+            "profiles": [profile],
+            "methods": ["deductive_proof"],
+            "result_contracts": [contract],
+            "input_formats": ["mumei.source-text/v1"],
+            "required_permissions": [],
+        }
+
+    alpha_exit = both_exit if both_exit is not None else 3
+    beta_exit = both_exit if both_exit is not None else 0
+    return {
+        "request": write(
+            "request",
+            {
+                "profile": profile,
+                "method": "deductive_proof",
+                "result_contract": contract,
+                "input_format": "mumei.source-text/v1",
+            },
+        ),
+        "adapters": write("adapters", [manifest("alpha"), manifest("beta")]),
+        "argv_map": write(
+            "argv",
+            {
+                "alpha": [sys.executable, "-c", f"import sys; sys.exit({alpha_exit})"],
+                "beta": [sys.executable, "-c", f"import sys; sys.exit({beta_exit})"],
+            },
+        ),
+        "policy": write(
+            "policy",
+            {"allowed_permissions": ["process.spawn"], "timeout_ms": 10_000},
+        ),
+        "observations": write(
+            "observations",
+            [
+                {
+                    "adapter_id": "alpha",
+                    "availability": "available",
+                    "tool_version": "1.0.0",
+                    "stamp": 1,
+                },
+                {
+                    "adapter_id": "beta",
+                    "availability": "available",
+                    "tool_version": "1.0.0",
+                    "stamp": 2,
+                },
+            ],
+        ),
+    }
+
+
+def _scheduled_verification_ctx(tmp_path: Path, both_exit: int | None = None):
+    files = _scheduled_verification_files(tmp_path, both_exit=both_exit)
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(tmp_path / "placeholder.py"),
+            "--enable-scheduled-verification",
+            "--schedule-request",
+            files["request"],
+            "--schedule-adapters",
+            files["adapters"],
+            "--schedule-argv-map",
+            files["argv_map"],
+            "--schedule-policy",
+            files["policy"],
+            "--schedule-observations",
+            files["observations"],
+        ]
+    )
+    return _load_scheduled_verification(args)
+
+
+def _scheduled_audit_pipeline() -> AuditPipeline:
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="overflow-safe calculation",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": True,
+        "verification": {
+            "success": True,
+            "report": {"status": "satisfiable"},
+        },
+    }
+    return AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    )
+
+
+def test_audit_scheduled_verification_records_selected(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=_scheduled_verification_ctx(tmp_path),
+    )
+
+    schedule = result.scheduled_verification
+    assert schedule["schema_version"] == "mumei.attempt-schedule/v1"
+    assert schedule["outcome"] == "selected"
+    assert schedule["selected_adapter_id"] == "beta"
+    assert [a["adapter_id"] for a in schedule["attempts"]] == ["alpha", "beta"]
+    # Dispatch record only: the audit verdict is untouched.
+    assert result.verification_status == "verified"
+    assert "scheduled_verification: outcome=selected attempts=2" in result.report
+    assert "FAKE_PRIVATE" not in json.dumps(schedule)
+    assert "FAKE_PRIVATE" not in result.report
+
+
+def test_audit_scheduled_verification_exhausted_keeps_verdict(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=_scheduled_verification_ctx(tmp_path, both_exit=3),
+    )
+
+    schedule = result.scheduled_verification
+    assert schedule["outcome"] == "exhausted"
+    assert schedule["selected_adapter_id"] is None
+    assert result.verification_status == "verified"
+    assert result.success is True
+
+
+def test_audit_scheduled_verification_off_by_default(tmp_path: Path) -> None:
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    result = _scheduled_audit_pipeline().audit_file(source, "python")
+    assert result.scheduled_verification is None
+    assert "scheduled_verification" not in result.report
+
+
+def test_audit_scheduled_verification_flag_validation(
+    tmp_path: Path, capsys
+) -> None:
+    src = tmp_path / "calc.py"
+    src.write_text("def calc():\n    return 0\n", encoding="utf-8")
+
+    bare = build_parser().parse_args(
+        ["--code-file", str(src), "--schedule-request", "x.json"]
+    )
+    with pytest.raises(SystemExit):
+        main(bare)
+    assert "--enable-scheduled-verification" in capsys.readouterr().err
+
+    missing = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-scheduled-verification",
+            "--schedule-request",
+            "x.json",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(missing)
+    err = capsys.readouterr().err
+    assert "--schedule-adapters" in err
+    assert "--schedule-argv-map" in err
+    assert "--schedule-policy" in err
+
+
+def test_audit_scheduled_verification_load_error_redacts(
+    tmp_path: Path, capsys
+) -> None:
+    src = tmp_path / "calc.py"
+    src.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    missing = str(tmp_path / "FAKE_PRIVATE_request.json")
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-scheduled-verification",
+            "--schedule-request",
+            missing,
+            "--schedule-adapters",
+            "a.json",
+            "--schedule-argv-map",
+            "b.json",
+            "--schedule-policy",
+            "c.json",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(args)
+    err = capsys.readouterr().err
+    assert "FAKE_PRIVATE" not in err

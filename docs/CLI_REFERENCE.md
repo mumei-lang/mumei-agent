@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 23 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 32 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -281,6 +281,15 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--summary-plan-tool-version` | `<<VERSION>>` | no | — | Optional declared tool version the --enable-summary-plan planner pins against. |
 | `--summary-plan-histories` | `<<PATH>>` | no | — | Optional JSON array of persisted mumei.adapter-probe-history records the --enable-summary-plan planner resumes. |
 | `--go-types` | `<<PATH>>` | no | — | Path to the provisioned tools/go-types helper binary; Go summary units record skipped_no_helper when --enable-summaries is set without it. |
+| `--enable-scheduled-verification` | — | no | — | Dispatch each unit's generated .mm spec through run_attempt_schedule against the declared --schedule-request/--schedule-adapters/--schedule-argv-map/--schedule-policy inputs and record the mumei.attempt-schedule/v1 descriptor per unit. Dispatch record only — never a verdict. Requires the four declared input paths. |
+| `--schedule-request` | `<<PATH>>` | no | — | Declared RouteRequirements JSON for --enable-scheduled-verification (source input contract required). |
+| `--schedule-adapters` | `<<PATH>>` | no | — | Declared JSON array of adapter manifests for --enable-scheduled-verification. |
+| `--schedule-argv-map` | `<<PATH>>` | no | — | Declared JSON object mapping adapter_id to its argv prefix for --enable-scheduled-verification; the unit's generated spec path is appended as the final argument. |
+| `--schedule-policy` | `<<PATH>>` | no | — | Declared planner policy JSON for --enable-scheduled-verification; allowed_permissions must be declared. |
+| `--schedule-observations` | `<<PATH>>` | no | — | Optional declared JSON array of runtime observations for --enable-scheduled-verification. |
+| `--schedule-max-attempts` | `<<N>>` | no | 8 | Bounded schedule attempts per unit for --enable-scheduled-verification (default: 8). |
+| `--schedule-success-exit-code` | `<<N>>` | no | — | Declared exit code counting as a scheduling success for --enable-scheduled-verification (repeatable; default {0}). |
+| `--schedule-memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per scheduled attempt child. |
 
 
 ## `mumei-agent extract-spec`
