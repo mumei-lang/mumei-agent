@@ -83,6 +83,7 @@ def test_valid_signature_verifies():
     )
     assert verification["envelope_match"] is True
     assert verification["signature_valid"] is True
+    assert verification["subject_digest"] == _SUBJECT
     assert "subject_bound" not in verification
     assert "key_pinned" not in verification
     assert set(verification["checks_not_performed"]) == {
@@ -168,6 +169,9 @@ def test_unmatched_envelope_never_verifies():
         assert verification["signature_valid"] is False
         assert verification["subject_bound"] is False
         assert verification["key_pinned"] is False
+        # An unmatched envelope carries no digest a consumer could
+        # bind to a record.
+        assert "subject_digest" not in verification
 
 
 def test_request_validation():

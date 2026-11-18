@@ -326,6 +326,100 @@ def test_attempt_report_recovers_historical_execution():
     assert evaluation["checks"]["historical_execution"] == "recovered"
 
 
+def _signature_verification_doc(
+    record_digest,
+    signature_valid=True,
+    key_pinned=True,
+):
+    """A signature-verification doc bound to *record_digest* — the
+    shape `signature-verify` emits since the doc carries the
+    envelope's `subject_digest` carrier."""
+    return _doc(
+        "mumei.signature-verification/v1",
+        envelope_match=True,
+        signature_valid=signature_valid,
+        key_pinned=key_pinned,
+        subject_digest=record_digest,
+    )
+
+
+def test_pinned_signature_verification_recovers_producer_authenticity():
+    digest = "a" * 64
+    record = _record("producer_authenticity")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_signature_verification_doc(digest)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["producer_authenticity"] == "recovered"
+
+    # A record declaring a carrier binds through the same digest.
+    descriptor_record = {
+        "schema_version": "mumei.any/v1",
+        "checks_not_performed": ["producer_authenticity"],
+        "evidence_fingerprint": digest,
+    }
+    evaluation = evaluate_unperformed_check_recovery(
+        descriptor_record, [_signature_verification_doc(digest)],
+    )
+    assert evaluation["checks"]["producer_authenticity"] == "recovered"
+
+
+def test_producer_authenticity_needs_signature_and_key_pin_and_binding():
+    digest = "a" * 64
+    record = _record("producer_authenticity")
+
+    # A valid signature under an UNPINNED key only proves somebody
+    # signed — it never performs producer_authenticity.
+    for doc in (
+        _signature_verification_doc(digest, key_pinned=False),
+        _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            signature_valid=True,
+            subject_digest=digest,
+        ),
+    ):
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert evaluation["checks"]["producer_authenticity"] == (
+            "evidence_failed"
+        )
+
+    # A pinned key whose signature failed counts for nothing.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_signature_verification_doc(digest, signature_valid=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["producer_authenticity"] == (
+        "evidence_failed"
+    )
+
+    # A doc bound to other bytes can never recover this record — the
+    # subject_digest carrier must name this record's digest. The
+    # performer schema was supplied, so the fold reports the failed
+    # evidence rather than no evidence.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_signature_verification_doc("b" * 64)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["producer_authenticity"] == (
+        "evidence_failed"
+    )
+
+    # Undeclared records recover only through bound documents — and a
+    # bound verification doc scopes itself by the carrier.
+    evaluation = evaluate_unperformed_check_recovery(
+        {"any": "manifest"},
+        [_signature_verification_doc(digest)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["producer_authenticity"] == "recovered"
+
+
 def test_real_attempt_report_recovers_produced_record(tmp_path, capsys):
     """The fold binds a REAL verify-attempt report's declared digests.
 
