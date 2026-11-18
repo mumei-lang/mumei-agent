@@ -7068,3 +7068,147 @@ def test_review6_conditional_pop_then_push_keeps_deps():
         " return a[0]; }"
     )
     assert s.available and 1 in s.return_dependencies
+
+
+# --- statement_reads ----------------------------------------------------------
+
+
+def _reads(s: ts.TsFunctionSummary) -> dict:
+    return {(r.span.start, r.span.end): r.deps for r in s.statement_reads}
+
+
+def test_statement_reads_attribute_per_statement():
+    # Each walked statement records the parameter ordinals its
+    # evaluation read — `let y = x + 1` reads {0}, `_`-style use of
+    # `z` reads {1}, a literal assignment reads nothing but is
+    # still recorded.
+    s = _fn(
+        "function f(x: number, z: number): number {"
+        " let y = x + 1;"
+        " z;"
+        " y = 5;"
+        " return y; }"
+    )
+    assert s.available
+    reads = _reads(s)
+    assert frozenset({0}) in reads.values()
+    assert frozenset({1}) in reads.values()
+    assert frozenset() in reads.values()  # `y = 5` reads nothing
+
+
+def test_statement_reads_declaration_initializers():
+    # Declaration initializers go through `_eval`, not
+    # `expression()` — their reads still belong to the statement:
+    # `let y = a` reads {0}, a destructuring `const [p, q] = a`
+    # does too, and `let x` reads nothing.
+    s = _fn(
+        "function f(a: number): number {"
+        " let y = a;"
+        " const [p, q] = [a, 1];"
+        " let x;"
+        " return y + p + q; }"
+    )
+    assert s.available
+    reads = _reads(s)
+    assert frozenset({0}) in reads.values()
+    assert frozenset() in reads.values()
+
+
+def test_statement_reads_nested_attribution():
+    # A read inside `if (b) { y = x * 2 }` attributes to both the
+    # assignment and the enclosing `if` — which also carries the
+    # condition's read.
+    s = _fn(
+        "function f(x: number, b: boolean): number {"
+        " let y = x;"
+        " if (b) {"
+        "   y = x * 2;"
+        " }"
+        " return y; }"
+    )
+    assert s.available
+    spans = _reads(s)
+    if_reads = [
+        d for d in spans.values() if d == frozenset({0, 1})
+    ]
+    assert if_reads, spans
+
+
+def test_statement_reads_loop_fixed_point_idempotent():
+    # `for (...) { s += x }` re-passes the body until the deps stop
+    # growing — the span's recorded set unions each pass and stays
+    # a single record, never duplicated.
+    s = _fn(
+        "function f(x: number, n: number): number {"
+        " let s = 0;"
+        " for (let i = 0; i < n; i++) {"
+        "   s += x;"
+        " }"
+        " return s; }"
+    )
+    assert s.available
+    spans = [(r.span.start, r.span.end) for r in s.statement_reads]
+    assert len(spans) == len(set(spans))
+
+
+def test_statement_reads_for_of_and_augmented():
+    # `for (const e of a)` reads the iterated expression and `y += a`
+    # reads both the target's old value's name and the operand.
+    s = _fn(
+        "function f(a: number): number {"
+        " let y = 0;"
+        " for (const e of [a]) { y = e; }"
+        " y += a;"
+        " return y; }"
+    )
+    assert s.available
+    reads = _reads(s)
+    # the `for` statement and the `y += a` both read {0}
+    assert list(reads.values()).count(frozenset({0})) >= 2
+
+
+def test_statement_reads_invoked_callable_attributes_to_caller():
+    # Reads inside an invoked callable's body attribute to the
+    # caller's frames under the callee's own statement spans —
+    # inlined like the Go model's `_sequence` on the body.
+    s = _fn(
+        "function g(a: number): number {"
+        " let y = a + 1;"
+        " return y; }"
+        "function f(x: number): number {"
+        " let z = g(x);"
+        " return z; }",
+        name="f",
+    )
+    assert s.available
+    # `let y = a + 1` inside g surfaces in f's reads.
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_absent_when_closed():
+    # A gapped walk misattributes — closed functions emit no reads.
+    s = _fn(
+        "function f(x: number): number {"
+        " let s = unknownFn(x);"
+        " return s; }"
+    )
+    assert not s.available
+    assert s.statement_reads == ()
+
+
+def test_statement_reads_roundtrip():
+    s = _fn(
+        "function f(x: number, b: boolean): number {"
+        " let y = x + 1;"
+        " if (b) {"
+        "   y = x * 2;"
+        " }"
+        " return y; }"
+    )
+    assert s.available
+    restored = ts.TsFunctionSummary.from_dict(s.to_dict())
+    assert restored.statement_reads == s.statement_reads
+    # A missing manifest field restores as no reads.
+    d = s.to_dict()
+    del d["statement_reads"]
+    assert ts.TsFunctionSummary.from_dict(d).statement_reads == ()
