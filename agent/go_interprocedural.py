@@ -839,6 +839,13 @@ class _Builder:
         # between the literal and the call (`p := &a; h := func(){*p};
         # p = &b; h()` reads `b`, not `a`).
         self.closure_captures: dict[str, frozenset[str]] = {}
+        # Channel aliases — `ch2 := ch` / `var ch2 = ch` / `ch2 = x`
+        # copies one queue's name, not its contents, so sends through
+        # the alias must land in the SOURCE binding's dep set. The
+        # alias maps the new name to the channel binding it copied;
+        # `_chan_binding` resolves the chain before classifying the
+        # operand as local queue or shared parameter.
+        self.chan_aliases: dict[str, str] = {}
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -2709,6 +2716,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or (binding.id not in locals_ and binding.id not in params)
         ):
             return None
+        return self.bindings.get(self._chan_root(binding.id))
+
+    def _chan_root(self, binding_id: str) -> str:
+        """Resolve a channel name's alias chain to the queue binding.
+
+        `ch2 := ch` / `var ch2 = ch` / `ch2 = x` name the same queue,
+        so every channel operation resolves through `chan_aliases`
+        before the local-vs-parameter classification reads it. An
+        unaliased name is its own root."""
+        seen: set[str] = set()
+        root = binding_id
+        while root in self.chan_aliases and root not in seen:
+            seen.add(root)
+            root = self.chan_aliases[root]
+        return root
+
+    def _chan_alias_target(
+        self, node: Any, locals_: dict, params: dict
+    ) -> Any:
+        """The binding `node` names when it can stand as a `ch2 := ch`
+        alias source — an identifier bound to a scalar-element channel
+        in locals or params. Anything else stays closed."""
+        while node is not None and node.type == "parenthesized_expression":
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
+        if node is None or node.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(node))
+        if ref is None or not ref.binding_id:
+            return None
+        source_id = self._chan_root(ref.binding_id)
+        binding = self.bindings.get(source_id)
+        if (
+            binding is None
+            or not self._scalar_chan_binding(binding.id)
+            or (source_id not in locals_ and source_id not in params)
+        ):
+            return None
         return binding
 
     def _is_make_chan_call(self, node: Any) -> bool:
@@ -3847,6 +3894,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_read_stack = self._read_stack
         saved_stmt_reads = self._stmt_reads
         saved_ptr_deps = self._ptr_deps
+        saved_chan_aliases = self.chan_aliases
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -3854,6 +3902,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._read_stack = []
         self._stmt_reads = {}
         self._ptr_deps = {}
+        self.chan_aliases = {}
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -3886,6 +3935,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._read_stack = saved_read_stack
             self._stmt_reads = saved_stmt_reads
             self._ptr_deps = saved_ptr_deps
+            self.chan_aliases = saved_chan_aliases
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -4141,17 +4191,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and not self._is_local_composite(binding)
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
-                if binding.type.kind == "chan" and (
-                    not self._is_make_chan_call(rights[i])
-                    or not self._scalar_chan_binding(binding.id)
+                if binding.type.kind == "chan" and not (
+                    self._scalar_chan_binding(binding.id)
+                    and (
+                        self._is_make_chan_call(rights[i])
+                        or self._chan_alias_target(
+                            rights[i], locals_, params
+                        )
+                        is not None
+                    )
                 ):
-                    # `ch2 := ch` would copy ch's dep set while the
-                    # two names still alias one queue — a later
-                    # `ch2 <- x; <-ch` reads ch's stale set and
-                    # under-approximates. Only `make` creates a
-                    # channel in-fragment, and only a scalar element
-                    # keeps queue contents inside the dep model.
+                    # `ch2 := ch` aliases one queue under a second
+                    # name — sends through ch2 land in ch's dep set
+                    # through `chan_aliases` — but any other RHS (a
+                    # receive, a call result) produces a queue the
+                    # conflated dep set cannot model. Only `make`
+                    # creates a channel in-fragment, an identifier
+                    # copies one, and only a scalar element keeps
+                    # queue contents inside the dep model.
                     raise _Unsupported("binding_unavailable", _span(node))
+                if binding.type.kind == "chan" and not self._is_make_chan_call(
+                    rights[i]
+                ):
+                    self.chan_aliases[binding.id] = self._chan_alias_target(
+                        rights[i], locals_, params
+                    ).id
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]
@@ -4340,17 +4404,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and not self._is_make_chan_call(
                                     value_nodes[i]
                                 )
+                                and self._chan_alias_target(
+                                    value_nodes[i], locals_, params
+                                )
+                                is None
                             )
                         )
                     ):
                         # `var ch2 = ch` aliases one queue under a
-                        # second dep set, like `ch2 := ch`; a
-                        # non-scalar element (`var q chan chan T`)
-                        # transports channel values the same way —
-                        # only a `make` RHS over a scalar element
-                        # creates a channel in-fragment.
+                        # second name like `ch2 := ch`; a non-scalar
+                        # element (`var q chan chan T`) transports
+                        # channel values the dep model cannot hold,
+                        # and any RHS that is neither `make` nor a
+                        # channel identifier produces an unmodelled
+                        # queue — all stay closed.
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
+                        )
+                    if (
+                        binding.type.kind == "chan"
+                        and value_nodes
+                        and not self._is_make_chan_call(value_nodes[i])
+                    ):
+                        self.chan_aliases[binding.id] = (
+                            self._chan_alias_target(
+                                value_nodes[i], locals_, params
+                            ).id
                         )
                     if not conditional:
                         self._ptr_deps[binding.id] = (
@@ -5026,21 +5105,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # binding's continuing set.
                         self._record_read(dest_reads[i])
                     value = old | value
-                if (
-                    not compound
-                    and self._is_chan_binding(ref.binding_id)
-                    and (
-                        len(lefts) != len(rights)
-                        or not self._is_make_chan_call(rights[i])
-                        or not self._scalar_chan_binding(ref.binding_id)
+                if not compound and self._is_chan_binding(ref.binding_id):
+                    # `ch2 = ch` redirects the alias — sends through
+                    # ch2 now land in the new source's dep set, and a
+                    # `ch2 = make(chan)` RHS re-creates the queue so
+                    # the alias drops. A tuple-of-different-width
+                    # (`ch2, _ = <-q`), a receive, a call result or a
+                    # non-scalar element produce a queue the
+                    # conflated dep set cannot model — all stay
+                    # closed.
+                    chan_alias = (
+                        self._chan_alias_target(rights[i], locals_, params)
+                        if len(lefts) == len(rights)
+                        else None
                     )
-                ):
-                    # `ch2 = ch` aliases one queue under a second dep
-                    # set — sends through ch2 would never reach `<-ch`.
-                    # A tuple-of-different-width (`ch2, _ = <-q`) can
-                    # bind a channel just the same, so the arity guard
-                    # sits inside the chan check, not outside it.
-                    raise _Unsupported("binding_unavailable", _span(node))
+                    fresh_make = (
+                        len(lefts) == len(rights)
+                        and self._is_make_chan_call(rights[i])
+                    )
+                    if not self._scalar_chan_binding(ref.binding_id) or (
+                        not fresh_make and chan_alias is None
+                    ):
+                        raise _Unsupported(
+                            "binding_unavailable", _span(node)
+                        )
+                    if conditional or self._may_skip > 0:
+                        # A maybe-skipped rebind cannot pick "either
+                        # queue": the alias change is conditional, so
+                        # only a fresh `make` on an unaliased name
+                        # admits — the dep union covers both queues.
+                        if (
+                            chan_alias is not None
+                            or ref.binding_id in self.chan_aliases
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(node)
+                            )
+                    if chan_alias is not None:
+                        self.chan_aliases[ref.binding_id] = chan_alias.id
+                    elif fresh_make:
+                        self.chan_aliases.pop(ref.binding_id, None)
                 if not accumulating:
                     # A plain store replaces what the pointer itself
                     # depends on — pointee folds stay in `locals_`
@@ -6240,6 +6344,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # Reassigned names (including parameters) resolve through
             # `locals_` first — their latest dependencies live there.
             if ref is not None and ref.binding_id in locals_:
+                chan_root = (
+                    self._chan_root(ref.binding_id)
+                    if self._is_chan_binding(ref.binding_id)
+                    else ref.binding_id
+                )
+                if chan_root != ref.binding_id:
+                    # `ch2 := ch` names one queue under two names —
+                    # a bare `G(ch2)` read surfaces what the queue
+                    # may hold, so it reads the SOURCE binding's
+                    # slot (plus a parameter's send broadcast), not
+                    # the snapshot `locals_[ch2]` froze at the copy.
+                    if chan_root in locals_:
+                        return locals_[chan_root]
+                    if chan_root in params:
+                        return (
+                            frozenset({params[chan_root]})
+                            | self.indirect_writes
+                        )
+                    return frozenset()
                 return locals_[ref.binding_id]
             if ref is not None and ref.binding_id in params:
                 deps = frozenset({params[ref.binding_id]})

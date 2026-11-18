@@ -13079,24 +13079,156 @@ def test_local_channel_conditional_send(go_types_helper):
 
 
 def test_local_channel_alias_binds_stay_closed(go_types_helper):
-    # `ch2 := ch`, `var ch2 = ch` and `ch2 = ch` would alias one
-    # queue under a second dep set — a send through ch2 could never
-    # reach `<-ch`, under-approximating. Only `make` creates a
-    # channel binding.
+    # A queue-producing RHS still stays closed: `ch2 := <-q`,
+    # `ch2 := f()` and a `chan` element that is itself a channel
+    # produce a queue the conflated dep set cannot model.
     for src in (
         "func F(x int64) int64 {\n"
         "\tch := make(chan int64)\n"
-        "\tch2 := ch\n\tch2 <- x\n\treturn <-ch2\n}\n",
-        "func F(x int64) int64 {\n"
-        "\tch := make(chan int64)\n"
-        "\tvar ch2 = ch\n\tch2 <- x\n\treturn <-ch2\n}\n",
+        "\tvar ch2 chan int64 = nil\n"
+        "\tch2 <- x\n\treturn <-ch\n}\n",
         "func F(x int64) int64 {\n"
         "\tch := make(chan int64)\n"
         "\tch2 := make(chan int64)\n"
-        "\tch2 = ch\n\tch2 <- x\n\treturn <-ch2\n}\n",
+        "\tch2 = nil\n\tch2 <- x\n\treturn <-ch\n}\n",
+        "func F(x int64, b bool) int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tch2 := make(chan int64)\n"
+        "\tch3 := make(chan int64)\n"
+        "\tif b {\n\t\tch2 = ch3\n\t}\n"
+        "\tch2 <- x\n\treturn <-ch\n}\n",
+        "func F(x int64, b bool) int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tch2 := ch\n"
+        "\tch3 := make(chan int64)\n"
+        "\tif b {\n\t\tch2 = ch3\n\t}\n"
+        "\tch2 <- x\n\treturn <-ch\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available
+
+
+def test_local_channel_alias_send_observed_through_source(
+    go_types_helper,
+):
+    # `ch2 := ch` copies one queue's name, not its contents — a
+    # send through the alias lands in ch's dep set, so `<-ch`
+    # observes it like a direct send.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := ch\n"
+            "\tch2 <- x\n"
+            "\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_local_channel_alias_read_observed_through_source(
+    go_types_helper,
+):
+    # The mirror read: `ch <- x; <-ch2` returns the source queue's
+    # conflated set, not a snapshot frozen at the copy.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, y int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := ch\n"
+            "\tch <- x\n"
+            "\tv := <-ch2\n"
+            "\tch <- y\n"
+            "\treturn v + <-ch2\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_channel_alias_var_and_rebind_forms(go_types_helper):
+    # `var ch2 = ch` and `ch2 = ch3` alias the same way — the
+    # rebind redirects sends to the new queue.
+    for decl in ("var ch2 = ch", "ch2 := ch"):
+        result = named(
+            *unit(
+                go_types_helper,
+                "func F(x int64) int64 {\n"
+                "\tch := make(chan int64)\n"
+                "\t" + decl + "\n"
+                "\tch3 := make(chan int64)\n"
+                "\tch2 = ch3\n"
+                "\tch2 <- x\n"
+                "\treturn <-ch3\n}\n",
+            )
+        )
+        assert result.available, decl
+        assert result.return_dependencies == frozenset({0}), decl
+
+
+def test_local_channel_alias_chain_and_close(go_types_helper):
+    # `ch3 := ch2` resolves through ch2's alias to ch; `close`
+    # on an alias admits as the same untracked synchronization
+    # fact.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := ch\n"
+            "\tch3 := ch2\n"
+            "\tch3 <- x\n"
+            "\tclose(ch3)\n"
+            "\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_parameter_alias_send_recv(go_types_helper):
+    # `ch2 := p` on a `chan` parameter aliases the caller-shared
+    # queue: the send records the imported transfer on p's
+    # identity and broadcasts into `indirect_writes`, so a later
+    # `<-p` (or `<-ch2`) observes it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(p chan int64, x int64) int64 {\n"
+            "\tch2 := p\n"
+            "\tch2 <- x\n"
+            "\treturn <-p\n}\n",
+        )
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_local_channel_alias_bare_read_follows_source(
+    go_types_helper,
+):
+    # A bare `G(ch2)` read surfaces what the queue may hold — the
+    # SOURCE queue's live dep set, not the snapshot the copy
+    # froze into `locals_[ch2]`.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tch2 := ch\n"
+        "\tch <- y\n"
+        "\t_ = ch2\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    reads = {r.deps for r in result.statement_reads}
+    assert frozenset({1}) in reads
 
 
 def test_channel_boundaries_stay_closed(go_types_helper):
@@ -13264,14 +13396,15 @@ def test_chan_parameter_records_effects_and_staleness(go_types_helper):
 
 
 def test_chan_parameter_boundaries_stay_closed(go_types_helper):
-    # Non-scalar elements, a channel result, an alias of the
-    # parameter, len/cap metadata and select all stay closed.
+    # Non-scalar elements, a channel result, a receive-valued
+    # binding, len/cap metadata and select all stay closed.
     files = {
         "a.go": "package p\n"
         "func Ptr(ch chan *int64) int64 { return 0 }\n"
         "func Res(x int64) chan int64 { return make(chan int64) }\n"
         "func Alias(ch chan int64, x int64) int64 {\n"
-        "\tp := ch\n"
+        "\tq := make(chan chan int64)\n"
+        "\tp := <-q\n"
         "\tp <- x\n"
         "\treturn 0\n}\n"
         "func Len(ch chan int64, x int64) int64 {\n"
