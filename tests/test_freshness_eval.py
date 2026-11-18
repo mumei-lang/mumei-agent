@@ -76,12 +76,46 @@ def test_missing_or_malformed_claim():
         {},
         {"produced_at": "not-a-time"},
         {"produced_at": "2026-11-18T00:00:00"},  # no timezone
+        {"produced_at": "2026-11-18T00:00Z"},  # RFC 3339 needs seconds
+        {"produced_at": "2026-11-18"},  # date only
+        {"produced_at": "2026-11-18T00:00:00+0000"},  # offset colon
         {"produced_at": 7},
         {"produced_at": None},
     ):
         evaluation = evaluate_freshness(record, _REFERENCE, 7200)
         assert evaluation["freshness_claimed"] is False
         assert evaluation["within_window"] is False
+
+
+def test_sub_microsecond_precision_stays_conservative():
+    # A claim 1ns postdated must not read as "at" the reference: the
+    # parser's microsecond floor is bounded by a +1µs ceiling, so
+    # even a huge window cannot rescue a future claim.
+    evaluation = evaluate_freshness(
+        {"produced_at": "2026-11-18T01:00:00.000000001Z"},
+        _REFERENCE,
+        7200,
+    )
+    assert evaluation["freshness_claimed"] is True
+    assert evaluation["within_window"] is False
+
+    # A claim inside the window only by sub-microsecond slack fails
+    # the stale bound: the floor — not the ceiling — is compared.
+    evaluation = evaluate_freshness(
+        {"produced_at": "2026-11-18T00:59:59.9999999Z"},
+        _REFERENCE,
+        0,
+    )
+    assert evaluation["freshness_claimed"] is True
+    assert evaluation["within_window"] is False
+
+    # Exact microsecond precision still compares cleanly.
+    evaluation = evaluate_freshness(
+        {"produced_at": "2026-11-18T01:00:00.000000Z"},
+        _REFERENCE,
+        0,
+    )
+    assert evaluation["within_window"] is True
 
 
 def test_offset_timestamps_parse():

@@ -6,6 +6,7 @@ trusted executable; an absolute path is not authentication or a sandbox.
 
 import json
 import os
+import re
 import selectors
 import subprocess
 import threading
@@ -745,23 +746,47 @@ def evaluate_unperformed_check_recovery(
 
 FRESHNESS_EVALUATION_SCHEMA = "mumei.freshness-evaluation/v1"
 
+# Strict RFC 3339: full date, full time with seconds, optional
+# fractional seconds, and a numeric offset or Z. Looser ISO 8601
+# shapes `datetime.fromisoformat` accepts (missing seconds, missing
+# colon in the offset, date-only, week dates) stay unclaimed.
+_RFC3339_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2})"
+    r"(?:\.(\d+))?"
+    r"([Zz]|[+-]\d{2}:\d{2})$"
+)
 
-def _parse_rfc3339(value: object) -> "object":
-    """Parse an RFC 3339 timestamp into an aware datetime, or None."""
-    from datetime import datetime
+
+def _parse_rfc3339(value: object) -> "tuple | None":
+    """Parse an RFC 3339 timestamp into ``(low, high)`` bounds, or None.
+
+    Returns two aware datetimes bracketing the claimed instant: the
+    whole-second floor plus the declared fractional seconds
+    (`low`), and `low` plus one microsecond when the fraction carries
+    sub-microsecond precision `datetime` cannot represent (`high`).
+    Consumers compare `high` against upper bounds and `low` against
+    lower bounds, so sub-microsecond truncation can never turn a
+    postdated or stale claim into a pass."""
+    from datetime import datetime, timedelta
 
     if type(value) is not str:
         return None
-    text = value.strip()
-    if text.endswith(("Z", "z")):
-        text = text[:-1] + "+00:00"
+    match = _RFC3339_RE.match(value.strip())
+    if match is None:
+        return None
+    base, fraction, zone = match.groups()
+    text = base + ("+00:00" if zone.upper() == "Z" else zone)
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed
+    digits = fraction or ""
+    micros = int((digits + "000000")[:6])
+    low = parsed + timedelta(microseconds=micros)
+    # No int() on the tail — an absurdly long fraction must not trip
+    # the integer-digit limit.
+    sub_micro = len(digits) > 6 and any(c != "0" for c in digits[6:])
+    return low, low + (timedelta(microseconds=1) if sub_micro else timedelta(0))
 
 
 def evaluate_freshness(
@@ -802,10 +827,14 @@ def evaluate_freshness(
         raise ValueError("invalid max age")
     produced = _parse_rfc3339(record.get("produced_at"))
     claimed = produced is not None
+    # Conservative both ways: a claim that could postdate the
+    # reference fails the first bound even by a sub-microsecond
+    # fraction, and a record only barely inside the window still
+    # fails the second.
     within = (
         claimed
-        and produced <= reference
-        and produced + timedelta(seconds=max_age_seconds) >= reference
+        and produced[1] <= reference[0]
+        and produced[0] + timedelta(seconds=max_age_seconds) >= reference[1]
     )
     return {
         "schema_version": FRESHNESS_EVALUATION_SCHEMA,
