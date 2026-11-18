@@ -1,0 +1,195 @@
+"""Route tests for ``signature-eval``: folding a declared
+``mumei.producer-signature/v1`` envelope into
+``mumei.signature-envelope-evaluation/v1``.
+
+Representation-level only — the fold checks the envelope's closed shape
+and declared pins, never the ed25519 signature bytes, the key's own
+authenticity, freshness or revocation."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from agent.core_evidence import evaluate_signature_envelope
+from agent.signature_eval import (
+    build_eval_parser,
+    main_eval,
+)
+
+_SUBJECT = "a" * 64
+_OTHER_SUBJECT = "b" * 64
+_SIGNATURE = "c" * 128
+_KEY = "producer-key-fingerprint"
+
+
+def _envelope(**overrides) -> dict:
+    value = {
+        "schema_version": "mumei.producer-signature/v1",
+        "subject_digest": _SUBJECT,
+        "algorithm": "ed25519",
+        "signature": _SIGNATURE,
+        "producer_key_id": _KEY,
+    }
+    value.update(overrides)
+    return value
+
+
+def _write(path: Path, value) -> Path:
+    path.write_text(json.dumps(value) if not isinstance(value, str) else value)
+    return path
+
+
+def _args(parser, envelope_path, *extra):
+    return parser.parse_args(
+        ["--envelope", str(envelope_path), *extra]
+    )
+
+
+def test_well_formed_envelope_matches():
+    evaluation = evaluate_signature_envelope(_envelope())
+    assert evaluation["schema_version"] == (
+        "mumei.signature-envelope-evaluation/v1"
+    )
+    assert evaluation["envelope_match"] is True
+    assert "subject_bound" not in evaluation
+    assert "key_pinned" not in evaluation
+    assert set(evaluation["checks_not_performed"]) == {
+        "subject_binding",
+        "key_binding",
+        "signature_verification",
+        "key_authenticity",
+        "envelope_freshness",
+        "key_revocation",
+    }
+
+
+def test_subject_and_key_pins():
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        expected_subject=_SUBJECT,
+        expected_key=_KEY,
+    )
+    assert evaluation["envelope_match"] is True
+    assert evaluation["subject_bound"] is True
+    assert evaluation["key_pinned"] is True
+    assert "subject_binding" not in evaluation["checks_not_performed"]
+    assert "key_binding" not in evaluation["checks_not_performed"]
+    # Crypto verification, key authenticity, freshness and revocation
+    # are never claimed at representation level.
+    assert "signature_verification" in evaluation["checks_not_performed"]
+    assert "key_authenticity" in evaluation["checks_not_performed"]
+    assert "envelope_freshness" in evaluation["checks_not_performed"]
+    assert "key_revocation" in evaluation["checks_not_performed"]
+
+
+def test_pin_mismatch_is_observation_not_error():
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        expected_subject=_OTHER_SUBJECT,
+        expected_key="other-key",
+    )
+    assert evaluation["envelope_match"] is True
+    assert evaluation["subject_bound"] is False
+    assert evaluation["key_pinned"] is False
+
+
+def test_unmatched_envelope_reports_pins_false():
+    for broken in (
+        _envelope(schema_version="other/v1"),
+        _envelope(algorithm="rsa"),
+        _envelope(subject_digest="not-hex"),
+        _envelope(signature="ab" * 4),
+        _envelope(signature="C" * 128),  # uppercase hex rejected
+        _envelope(producer_key_id=""),
+        _envelope(producer_key_id=7),
+        {**_envelope(), "extra": True},
+        {k: v for k, v in _envelope().items() if k != "signature"},
+    ):
+        evaluation = evaluate_signature_envelope(
+            broken,
+            expected_subject=_SUBJECT,
+            expected_key=_KEY,
+        )
+        assert evaluation["envelope_match"] is False
+        assert evaluation["subject_bound"] is False
+        assert evaluation["key_pinned"] is False
+
+
+def test_request_validation():
+    with pytest.raises(ValueError):
+        evaluate_signature_envelope("not-a-dict")
+    with pytest.raises(ValueError):
+        evaluate_signature_envelope(_envelope(), expected_subject="zz")
+    with pytest.raises(ValueError):
+        evaluate_signature_envelope(_envelope(), expected_key="")
+
+
+def test_route_emits_evaluation(tmp_path, capsys):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    exit_code = main_eval(
+        _args(
+            parser,
+            envelope,
+            "--expected-subject", _SUBJECT,
+            "--expected-producer-key", _KEY,
+        )
+    )
+    assert exit_code == 0
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["envelope_match"] is True
+    assert emitted["subject_bound"] is True
+    assert emitted["key_pinned"] is True
+
+
+def test_route_output_file(tmp_path, capsys):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    out = tmp_path / "out.json"
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    exit_code = main_eval(
+        _args(parser, envelope, "--output", str(out))
+    )
+    assert exit_code == 0
+    emitted = json.loads(out.read_text())
+    assert emitted["envelope_match"] is True
+
+
+def test_route_static_failures(tmp_path, capsys):
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+
+    missing = tmp_path / "missing.json"
+    assert main_eval(_args(parser, missing)) == 1
+    assert "signature-eval:" in capsys.readouterr().err
+
+    malformed = _write(tmp_path / "bad.json", "{not json")
+    assert main_eval(_args(parser, malformed)) == 1
+
+    non_object = _write(tmp_path / "list.json", [1, 2])
+    assert main_eval(_args(parser, non_object)) == 1
+
+    envelope = _write(tmp_path / "env.json", _envelope())
+    assert main_eval(
+        _args(parser, envelope, "--expected-subject", "zz")
+    ) == 1
+
+
+def test_route_refuses_output_over_input(tmp_path):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(_args(parser, envelope, "--output", str(envelope)))
+        == 1
+    )

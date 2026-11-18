@@ -412,3 +412,111 @@ def evaluate_core_acceptance(
             if check != "attempt_binding"
         ]
     return evaluation
+
+
+# Producer-signature envelope schema (the detached authenticity record
+# issue mumei-agent#886's memo fixes): the signature travels beside the
+# signed record, never inside it, so every existing pin on the record
+# stays byte-identical.
+PRODUCER_SIGNATURE_SCHEMA = "mumei.producer-signature/v1"
+
+_PRODUCER_SIGNATURE_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "subject_digest",
+        "algorithm",
+        "signature",
+        "producer_key_id",
+    }
+)
+
+# The only algorithm the closed family admits — no negotiation.
+_PRODUCER_SIGNATURE_ALGORITHM = "ed25519"
+# ed25519 signatures are 64 bytes.
+_PRODUCER_SIGNATURE_HEX_LEN = 128
+
+
+def _is_hex(value: object, length: int) -> bool:
+    return (
+        type(value) is str
+        and len(value) == length
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def evaluate_signature_envelope(
+    envelope: dict,
+    expected_subject: str | None = None,
+    expected_key: str | None = None,
+) -> dict:
+    """Fold a declared producer-signature envelope into an evaluation.
+
+    Emits ``mumei.signature-envelope-evaluation/v1``: `envelope_match`
+    holds only for a closed-shape `mumei.producer-signature/v1` record
+    naming `algorithm: "ed25519"` with a 64-char hex `subject_digest`,
+    a 128-char hex `signature` and a non-empty `producer_key_id` — a
+    foreign or malformed document never counts.
+
+    With `expected_subject` (the record digest the signature should
+    cover — e.g. an accepted descriptor's `evidence_fingerprint` or a
+    record's own `sha256`) the fold emits `subject_bound`: true only
+    when the envelope matched AND pins the same digest. With
+    `expected_key` the caller declares the producer key fingerprint it
+    trusts (over a separately trusted channel, exactly like
+    `--expected-adapter`/`--expected-build-id` pins) and the fold emits
+    `key_pinned`: true only when the envelope matched AND names that
+    key. Either pin left out stays declared-unperformed — the key is
+    absent and the check remains in `checks_not_performed`.
+
+    This is representation-level only: the fold checks the envelope's
+    shape and declared pins, never the ed25519 signature bytes
+    (`signature_verification` stays), never the key's own authenticity
+    (the declared pin is trusted as supplied — `key_authenticity`
+    stays), and never freshness or revocation. A matched envelope whose
+    declared pins disagree reports `false` observations, never an
+    error."""
+    if type(envelope) is not dict:
+        raise ValueError("unsupported signature envelope evaluation request")
+    if expected_subject is not None and not _is_fingerprint(
+        expected_subject
+    ):
+        raise ValueError("invalid expected subject digest")
+    if expected_key is not None and (
+        type(expected_key) is not str or expected_key == ""
+    ):
+        raise ValueError("invalid expected producer key")
+    fields = frozenset(envelope)
+    match = (
+        fields == _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
+        and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
+        and _is_fingerprint(envelope["subject_digest"])
+        and _is_hex(
+            envelope["signature"], _PRODUCER_SIGNATURE_HEX_LEN
+        )
+        and type(envelope["producer_key_id"]) is str
+        and envelope["producer_key_id"] != ""
+    )
+    evaluation = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "envelope_match": match,
+        "checks_not_performed": [
+            "subject_binding",
+            "key_binding",
+            "signature_verification",
+            "key_authenticity",
+            "envelope_freshness",
+            "key_revocation",
+        ],
+    }
+    if expected_subject is not None:
+        evaluation["subject_bound"] = (
+            match and envelope["subject_digest"] == expected_subject
+        )
+        evaluation["checks_not_performed"].remove("subject_binding")
+    if expected_key is not None:
+        evaluation["key_pinned"] = (
+            match and envelope["producer_key_id"] == expected_key
+        )
+        evaluation["checks_not_performed"].remove("key_binding")
+    return evaluation
