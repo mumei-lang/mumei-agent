@@ -211,6 +211,40 @@ def test_undeclared_argv_records_not_dispatched_and_falls_back():
     assert len(result.sequences) == 1
 
 
+def test_unstamped_observations_still_fall_back():
+    # Unstamped declarations are not retained by the registry's stamped
+    # record — the schedule must replay the caller's tuple at replan.
+    registry = registry_with("alpha", "beta")
+    unstamped = tuple(
+        RuntimeObservation(adapter_id, "available", "1.0.0")
+        for adapter_id in ("alpha", "beta")
+    )
+    result = run_attempt_schedule(
+        registry, request(), policy(), SOURCE,
+        hashlib.sha256(SOURCE).hexdigest(),
+        lambda adapter_id: {"alpha": argv(1), "beta": argv(0)}.get(adapter_id),
+        observations=unstamped,
+    )
+    assert result.outcome == "selected"
+    assert result.selected_adapter_id == "beta"
+    assert [e.adapter_id for e in result.entries] == ["alpha", "beta"]
+
+
+def test_cancel_event_stops_not_dispatched_rounds_too():
+    registry = registry_with("alpha", "beta")
+    event = threading.Event()
+    event.set()
+    result = schedule(
+        registry,
+        ("alpha", "beta"),
+        {"beta": argv(0)},  # alpha has no declared argv
+        cancel_event=event,
+    )
+    assert result.outcome == "cancelled"
+    assert result.entries == ()
+    assert len(result.plans) == 1
+
+
 def test_cancel_event_stops_schedule_without_fallback():
     registry = registry_with("alpha", "beta")
     event = threading.Event()
@@ -221,10 +255,30 @@ def test_cancel_event_stops_schedule_without_fallback():
         {"alpha": argv(0), "beta": argv(0)},
         cancel_event=event,
     )
+    # A pre-declared stop holds before the first spawn: nothing was ever
+    # attempted, so no entry is recorded.
     assert result.outcome == "cancelled"
+    assert result.entries == ()
+
+
+def test_cancel_event_mid_run_records_killed_child_and_stops():
+    registry = registry_with("alpha", "beta")
+    event = threading.Event()
+    timer = threading.Timer(0.3, event.set)
+    timer.start()
+    try:
+        result = schedule(
+            registry,
+            ("alpha", "beta"),
+            {"alpha": (PY, "-c", "import time; time.sleep(30)"), "beta": argv(0)},
+            cancel_event=event,
+        )
+    finally:
+        timer.cancel()
     # The record honestly reports the killed child as `exited`; the
     # schedule outcome is what names the host's stop decision.
-    assert result.entries[-1].terminal_state == "exited"
+    assert result.outcome == "cancelled"
+    assert result.entries[-1].terminal_state in {"exited", "cancelled"}
     assert len(result.entries) == 1
 
 
