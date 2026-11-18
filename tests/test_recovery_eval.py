@@ -510,6 +510,31 @@ def test_missing_or_malformed_declaration():
     }
 
 
+def test_undeclared_record_requires_bound_documents():
+    """Record-agnostic performers can only count against the
+    record's own declared list: a signature-verification doc for
+    some other artifact must not recover an undeclared record."""
+    evaluation = evaluate_unperformed_check_recovery(
+        {"any": "manifest"},
+        [_doc("mumei.signature-verification/v1", signature_valid=True)],
+        record_digest="a" * 64,
+    )
+    assert evaluation["checks_declared"] is False
+    assert evaluation["checks"]["signature_verification"] == "no_evidence"
+    assert evaluation["recovered"] == []
+    # A bound attempt report still recovers the undeclared record.
+    digest = "b" * 64
+    report = _attempt_report(
+        digest, schema="mumei.go-summaries-attempt-report/v1"
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        {"any": "manifest"}, [report], record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "recovered"
+    assert evaluation["checks"]["historical_execution"] == "recovered"
+    assert evaluation["checks"]["signature_verification"] == "no_evidence"
+
+
 def test_rejects_non_dict_inputs():
     with pytest.raises(ValueError):
         evaluate_unperformed_check_recovery([], [])

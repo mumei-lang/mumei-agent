@@ -882,7 +882,12 @@ def evaluate_unperformed_check_recovery(
     absent or invalid); a record declaring none — a produced summary
     manifest carries no check fields — is folded over every check
     ``_CHECK_PERFORMERS`` knows, so a bound attempt report still
-    recovers what it discharges. Fail-closed on the evidence: a document is
+    recovers what it discharges. Undeclared records recover only
+    through bound documents: record-agnostic performers (whose entry
+    carries no `bind_path`, e.g. signature-verification and
+    freshness-eval reports) are skipped, because without the
+    record's own declaration nothing scopes such a document to this
+    record. Fail-closed on the evidence: a document is
     only counted when it is a dict whose ``schema_version`` exactly
     names the declared performer.
 
@@ -950,6 +955,14 @@ def evaluate_unperformed_check_recovery(
         )
         for schema, field, expected, bind_path in performers:
             if schema not in schema_to_docs:
+                continue
+            if bind_path is None and not checks_declared:
+                # Record-agnostic documents count only against the
+                # record's own declared list — without it nothing
+                # scopes them to this record, so an unrelated
+                # signature-verification or freshness report would
+                # otherwise be attributed to it. Undeclared records
+                # recover only through documents bound to their bytes.
                 continue
             if status == "no_evidence":
                 status = "evidence_failed"
