@@ -1364,11 +1364,14 @@ def _collect_summary_plans(
     try:
         histories = load_plan_histories(histories_path)
     except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        detail = str(exc)
+        if histories_path is not None:
+            detail = detail.replace(str(histories_path), "<histories>")
         return [
             {
                 "profile": profile,
                 "status": "failed",
-                "error": _summary_error_text(str(exc), source_path, None),
+                "error": _summary_error_text(detail, source_path, None),
             }
             for profile in profiles
         ]
@@ -1391,8 +1394,11 @@ def _collect_summary_plans(
             json.JSONDecodeError,
             RecursionError,
         ) as exc:
+            detail = str(exc)
+            if histories_path is not None:
+                detail = detail.replace(str(histories_path), "<histories>")
             entry["status"] = "failed"
-            entry["error"] = _summary_error_text(str(exc), source_path, None)
+            entry["error"] = _summary_error_text(detail, source_path, None)
         else:
             entry["status"] = "planned"
             entry["plan"] = build_plan_document(profile, probe_plan)

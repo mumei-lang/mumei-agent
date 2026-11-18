@@ -3729,6 +3729,28 @@ def test_collect_summary_plans_failures_stay_advisory(tmp_path: Path) -> None:
     assert entries[0]["error"]
 
 
+def test_collect_summary_plans_redacts_histories_path(tmp_path: Path) -> None:
+    from agent.audit import _collect_summary_plans
+
+    audited = tmp_path / "src"
+    audited.mkdir()
+    ts = audited / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    histories = tmp_path / "elsewhere" / "histories.json"
+
+    entries = _collect_summary_plans(
+        audited,
+        [ts],
+        stamp=7,
+        tool_version="1.0.0",
+        histories_path=str(histories),
+    )
+
+    assert entries[0]["status"] == "failed"
+    assert str(histories) not in entries[0]["error"]
+    assert "<histories>" in entries[0]["error"]
+
+
 def test_audit_directory_collects_summary_plans(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
