@@ -6436,13 +6436,22 @@ def test_accept_route_emits_the_live_record_not_the_forged_one(
     src.write_text("function f(x: number): number { return x; }")
     manifest = tmp_path / "m.json"
     forged = ts.summarize_typescript(src.read_bytes()).to_dict()
-    forged["functions"][0]["return_dependencies"] = [1, 2, 3]
+    forged["functions"][0]["return_dependencies"] = []
     manifest.write_text(json.dumps(forged))
     with pytest.raises(SystemExit):
         ts.main_accept(_accept_args(src, manifest, "f"))
     out = json.loads(capsys.readouterr().out)
     assert out["accepted"] is True
     assert out["summary"]["return_dependencies"] == [0]
+
+
+def test_manifest_rejects_an_out_of_range_ordinal():
+    r = ts.summarize_typescript(
+        b"function f(x: number): number { return x; }"
+    ).to_dict()
+    r["functions"][0]["return_dependencies"] = [1]
+    with pytest.raises(ValueError, match="malformed"):
+        ts.TsSummarySet.from_dict(r)
 
 
 def test_accept_route_rejects_a_malformed_manifest(tmp_path, capsys):
@@ -7367,11 +7376,28 @@ def test_summary_aware_member_of_named_import_stays_opaque():
     assert s.call_modeling["opaque_calls"] == 1
 
 
+def _out_of_range_entry(name, params, deps):
+    """A declared entry whose ordinals exceed its parameters —
+    `from_dict` rejects it as malformed, so the runtime gate is
+    exercised through a directly built set."""
+    return ts.TsFunctionSummary(
+        name=name,
+        available=True,
+        parameters=tuple(params),
+        return_dependencies=frozenset(deps),
+        calls=(),
+        gaps=(),
+    )
+
+
 def test_summary_aware_mismatch_keeps_opaque_shape():
-    declared = _callee_manifest(
+    parsed = _callee_manifest(
         _decl_fn("g", ["a"], []),  # arity mismatch: call passes 2
         _decl_fn("h", ["a", "b"], None),  # gapped entry
-        _decl_fn("k", ["a", "b"], [5]),  # ordinal out of range
+    )
+    declared = ts.TsSummarySet(
+        "declared-context",
+        parsed.functions + (_out_of_range_entry("k", ["a", "b"], {5}),),
     )
     s = ts.summarize_typescript(
         "import {g} from './a';\n"
@@ -7520,7 +7546,10 @@ def test_summary_aware_nested_namespace_member_stays_opaque():
 
 
 def test_summary_aware_zero_arity_bad_ordinals_stay_opaque():
-    declared = _callee_manifest(_decl_fn("g", [], [0]))
+    declared = ts.TsSummarySet(
+        "declared-context",
+        (_out_of_range_entry("g", [], {0}),),
+    )
     s = ts.summarize_typescript(
         "import {g} from './m';\n"
         "function f(x: number): number { g(); return x; }",
