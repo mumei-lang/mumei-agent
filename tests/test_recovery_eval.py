@@ -7,6 +7,7 @@ import json
 import pytest
 
 from agent.core_evidence import (
+    _CHECK_PERFORMERS,
     UNPERFORMED_CHECK_RECOVERY_SCHEMA,
     evaluate_unperformed_check_recovery,
 )
@@ -390,11 +391,12 @@ def test_go_summaries_attempt_report_recovers_manifest_checks():
         "file_identity",
         "producer_authenticity",
         "freshness",
-        "semantic_correspondence",
-        "claim_truth",
         "historical_execution",
     ):
         assert checks[name] == "recovered", name
+    # Parsing never verifies the manifest's dep claims
+    assert checks["claim_truth"] == "no_evidence"
+    assert checks["semantic_correspondence"] == "no_evidence"
     assert checks["artifact_semantics"] == "no_evidence"
 
 
@@ -495,7 +497,8 @@ def test_missing_or_malformed_declaration():
     ):
         evaluation = evaluate_unperformed_check_recovery(record, [])
         assert evaluation["checks_declared"] is False
-        assert evaluation["checks"] == {}
+        # undeclared records fold over every known check
+        assert set(evaluation["checks"]) == set(_CHECK_PERFORMERS)
         assert evaluation["recovered"] == []
     # non-string entries inside the list are skipped
     evaluation = evaluate_unperformed_check_recovery(
