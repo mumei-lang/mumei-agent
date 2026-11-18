@@ -4,6 +4,7 @@ No default route uses this API. The host must authorize the call and supply a
 trusted executable; an absolute path is not authentication or a sandbox.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -660,8 +661,6 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
     (`carrier_authenticity` — the fold never verifies the document's
     own checks or signature) and the report gates nothing itself
     (`binding_enforcement` stays in `checks_not_performed`)."""
-    import hashlib
-
     if type(record) is not bytes:
         raise ValueError("unsupported evidence binding record")
     if type(document) is not dict:
