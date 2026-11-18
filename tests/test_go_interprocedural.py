@@ -13189,6 +13189,27 @@ def test_local_channel_alias_chain_and_close(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_local_channel_alias_tuple_swap_uses_prestate(go_types_helper):
+    # `ch2, ch3 = ch3, ch2` — the swap's alias targets must resolve
+    # against the pre-state map: ch2 takes ch3's queue and vice
+    # versa, so a send through ch3 lands in ch2's old queue and a
+    # read of ch2 observes it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, y int64) int64 {\n"
+            "\tch2 := make(chan int64)\n"
+            "\tch3 := make(chan int64)\n"
+            "\tch2, ch3 = ch3, ch2\n"
+            "\tch3 <- x\n"
+            "\tch2 <- y\n"
+            "\treturn <-ch2 + <-ch3\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_chan_parameter_alias_send_recv(go_types_helper):
     # `ch2 := p` on a `chan` parameter aliases the caller-shared
     # queue: the send records the imported transfer on p's

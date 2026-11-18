@@ -5041,6 +5041,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # propagation below reads the maps from BEFORE any store.
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
+            # Channel alias targets resolve against the pre-state
+            # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
+            # RHS's root must be read before any element's store
+            # updates `chan_aliases`.
+            chan_alias_targets = [
+                (
+                    self._chan_alias_target(rights[i], locals_, params)
+                    if len(lefts) == len(rights)
+                    else None
+                )
+                for i in range(len(refs))
+            ]
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     continue
@@ -5114,11 +5126,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # non-scalar element produce a queue the
                     # conflated dep set cannot model — all stay
                     # closed.
-                    chan_alias = (
-                        self._chan_alias_target(rights[i], locals_, params)
-                        if len(lefts) == len(rights)
-                        else None
-                    )
+                    chan_alias = chan_alias_targets[i]
                     fresh_make = (
                         len(lefts) == len(rights)
                         and self._is_make_chan_call(rights[i])
