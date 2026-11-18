@@ -568,18 +568,23 @@ def _reuse_partition(
     longer produces the identity. Detection only.
 
     With `--summary-aware-calls` the callee manifest's declared
-    identities join `known`: it is already the trusted input the
-    fold consumed, so a folded transfer's transitive targets are
-    checkable against it — a regenerated manifest's churned ids
-    still flag the caller. Without this a folded callee dep the
-    helper never emits (e.g. an import's import) would flag its
-    caller stale on every identical input.
+    transitive identities (`call_targets`, `pinned`) join `known`:
+    it is already the trusted input the fold consumed, so a folded
+    transfer's transitive targets are checkable against it — a
+    regenerated manifest's churned ids still flag the caller.
+    Without this a folded callee dep the helper never emits (e.g.
+    an import's import) would flag its caller stale on every
+    identical input. The callee's own `binding_id` does NOT join:
+    a live fold emits it through the caller's fresh `call_targets`
+    whenever it is still mintable, so the only caller records that
+    reference it are ones the same manifest still reproduces —
+    letting it blanket-join would keep a caller reusable after the
+    callee's file digest moved its fold target opaque.
     """
     known: set[str] = set()
     _report_identities(json.loads(report), known)
     if callee is not None:
         for f in callee.functions:
-            known.add(f.binding_id)
             known.update(f.call_targets)
             known.update(f.pinned)
     live_ids = {f.binding_id for f in live.functions}
