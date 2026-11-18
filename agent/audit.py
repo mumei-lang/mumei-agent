@@ -1780,7 +1780,10 @@ def _collect_summary_audits(
     non-accepted report when its strict manifest restore fails) falls
     back to the plain ``-attempt`` route with
     ``reuse_status: "stale_manifest"`` — matching the plain reuse
-    path, a bad prior manifest can never weaken the audit.
+    path, a bad prior manifest can never weaken the audit. Only an
+    exited child counts as a rejection: a timeout or transport failure
+    is recorded as-is rather than labelled stale or masked by a fresh
+    acceptance.
     """
     run = runner or _run_summary_route
     entries: list[dict] = []
@@ -1879,10 +1882,15 @@ def _collect_summary_audits(
                 normalized = report.get("normalized")
                 evidence_check = report.get("evidence_check")
                 acceptance = report.get("acceptance")
-                if reuse_attempt and not (
-                    selected
-                    and type(acceptance) is dict
-                    and acceptance.get("accepted") is True
+                if (
+                    reuse_attempt
+                    and type(normalized) is dict
+                    and normalized.get("outcome") == "exited"
+                    and not (
+                        selected
+                        and type(acceptance) is dict
+                        and acceptance.get("accepted") is True
+                    )
                 ):
                     # The reuse-attempt lifecycle exits 0 even when its
                     # child rejects the manifest (schema-invalid JSON
@@ -1890,14 +1898,19 @@ def _collect_summary_audits(
                     # strict restore). Mirror the plain reuse path: a
                     # rejected manifest falls back to the -attempt
                     # route rather than recording a summaryless
-                    # accepted: false entry.
+                    # accepted: false entry. Only an exited child
+                    # counts as a rejection — a timeout or transport
+                    # failure is recorded as-is (the plain reuse path
+                    # likewise only falls back on a clean nonzero
+                    # exit, never on a runner failure), so a manifest
+                    # that was never evaluated can never be labelled
+                    # stale nor masked by a fresh acceptance.
                     reuse_attempt = False
                     entry["reuse_status"] = "stale_manifest"
                     detail_parts = []
-                    if type(normalized) is dict:
-                        detail_parts.append(
-                            f"outcome={normalized.get('outcome')}"
-                        )
+                    detail_parts.append(
+                        f"outcome={normalized.get('outcome')}"
+                    )
                     if type(evidence_check) is dict:
                         detail_parts.append(
                             f"check_outcome={evidence_check.get('outcome')}"
@@ -1909,8 +1922,6 @@ def _collect_summary_audits(
                     entry["reuse_error"] = (
                         "reuse attempt rejected the declared manifest "
                         "(" + ", ".join(detail_parts) + ")"
-                        if detail_parts
-                        else "reuse attempt rejected the declared manifest"
                     )
                     continue
                 entry["status"] = "emitted"

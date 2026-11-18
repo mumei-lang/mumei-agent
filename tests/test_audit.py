@@ -2860,6 +2860,7 @@ def _attempt_report_json(
     selected: bool = True,
     accepted: bool | None = True,
     check_outcome: str | None = "valid",
+    outcome: str = "exited",
     sha256: str = "b" * 64,
 ) -> str:
     report: dict = {
@@ -2875,7 +2876,7 @@ def _attempt_report_json(
             "request_fingerprint": "a" * 64,
             "attempt_number": 1,
             "timeout_ms": 120000,
-            "outcome": "exited",
+            "outcome": outcome,
             "elapsed_ms": 10,
             "stdout": {"sha256": sha256, "size_bytes": 12},
         },
@@ -3306,6 +3307,51 @@ def test_collect_summary_audits_attempt_schema_invalid_manifest_falls_back_real_
     # the real -attempt lifecycle selected and accepted a summary
     assert entries[0]["selected"] is True
     assert entries[0]["accepted"] is True
+
+
+def test_collect_summary_audits_attempt_reuse_timeout_records_as_is(
+    tmp_path: Path,
+) -> None:
+    """A reuse-attempt lifecycle that never evaluated the manifest —
+    a timeout or transport failure, not a rejection — records its
+    honest reuse-attempt entry: no stale_manifest label and no
+    fallback masking it with a fresh acceptance."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}),
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=1000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(
+            argv,
+            stdout=_attempt_report_json(
+                selected=False,
+                accepted=False,
+                check_outcome=None,
+                outcome="timeout",
+            ),
+        ),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == "ts-summaries-reuse-attempt"
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "reuse-attempt"
+    assert entries[0]["selected"] is False
+    assert entries[0]["accepted"] is False
+    assert "reuse_status" not in entries[0]
 
 
 def test_collect_summary_audits_attempt_unmapped_unit_stays_attempt(
