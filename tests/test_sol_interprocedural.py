@@ -3745,3 +3745,29 @@ def test_inline_depth_cut_rederives_at_top_level():
     mid = fns[f"f{chain - 2}"]
     assert mid.available
     assert mid.return_dependencies == frozenset({0})
+
+
+def test_inline_depth_cut_rederived_calls_still_count():
+    # A call the first inline walk never reached (depth cut) is
+    # first walked during the top-level re-derivation — it must
+    # still be counted and mark its declared callee seen.
+    chain = sol.MAX_INLINE_DEPTH + 6
+    src = "\n".join(
+        (
+            f"function f{i}(uint256 x) returns (uint256) "
+            f"{{ return f{i + 1}(x); }}"
+            if i < chain
+            else f"function f{i}(uint256 x) returns (uint256) "
+            "{ return ext.g(x); }"
+        )
+        for i in range(chain + 1)
+    )
+    s = sol.summarize_solidity(
+        src, declared=_callee_manifest(_decl_fn("g", ("x",), {0}))
+    )
+    fns = {fn.name: fn for fn in s.functions}
+    tail = fns[f"f{chain}"]
+    assert tail.available
+    assert tail.return_dependencies == frozenset({0})
+    assert s.call_modeling["summary_modeled_calls"] == 1
+    assert s.call_modeling["summary_unmatched"] == 0

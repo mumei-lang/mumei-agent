@@ -556,8 +556,11 @@ class _Builder:
         )
         self._declared_set = declared
         self._declared_seen: set[str] = set()
-        self._modeled_calls = 0
-        self._opaque_calls = 0
+        # Advisory call accounting, deduped by call-site span
+        # (module, start, end) so a body re-walked after an
+        # unavailable cache hit does not double-count its calls.
+        self._modeled_spans: set[tuple[str, int, int]] = set()
+        self._opaque_spans: set[tuple[str, int, int]] = set()
         if resolver is not None:
             import inspect
 
@@ -639,8 +642,8 @@ class _Builder:
         if self._declared_set is None:
             return None
         return {
-            "summary_modeled_calls": self._modeled_calls,
-            "opaque_calls": self._opaque_calls,
+            "summary_modeled_calls": len(self._modeled_spans),
+            "opaque_calls": len(self._opaque_spans),
             "summary_unmatched": (
                 len(self._declared) - len(self._declared_seen)
             ),
@@ -672,13 +675,11 @@ class _Builder:
                 if cached is not None and cached.available:
                     summaries.append(cached)
                 elif cached is not None:
-                    modeled = self._modeled_calls
-                    opaque = self._opaque_calls
-                    seen = set(self._declared_seen)
+                    # The advisory counters dedup by call-site
+                    # span, so re-deriving is idempotent for
+                    # calls already counted and still picks up
+                    # calls the first walk never reached.
                     fresh = self._summarize(name, fn_node)
-                    self._modeled_calls = modeled
-                    self._opaque_calls = opaque
-                    self._declared_seen = seen
                     self.summaries[name] = fresh
                     summaries.append(fresh)
                 else:
@@ -3327,11 +3328,25 @@ class _Builder:
                     *(param_actual[i] for i in declared_entry.return_dependencies)
                 ) if declared_entry.return_dependencies else frozenset()
                 result_deps = folded | opt_deps | base_deps
-                self._modeled_calls += 1
+                self._modeled_spans.add(
+                    (
+                        self._mod_stack[-1] if self._mod_stack else "",
+                        node.start_byte,
+                        node.end_byte,
+                    )
+                )
             else:
                 result_deps = actual_union | base_deps
                 if self._declared_set is not None:
-                    self._opaque_calls += 1
+                    self._opaque_spans.add(
+                        (
+                            self._mod_stack[-1]
+                            if self._mod_stack
+                            else "",
+                            node.start_byte,
+                            node.end_byte,
+                        )
+                    )
             summary.calls.append(
                 SolCall(
                     _span(node),
