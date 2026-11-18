@@ -13688,6 +13688,83 @@ def test_external_channel_boundaries_stay_closed(go_types_helper):
     assert not results["Field"].available
 
 
+def test_package_channel_range_rejoins_body_send(go_types_helper):
+    # The queue's only send lives inside the loop body: the fixed
+    # point must keep iterating on `indirect_writes` growth so the
+    # element re-join observes it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := int64(0)\n"
+            "\tfor v := range GC {\n"
+            "\t\ts += v\n"
+            "\t\tGC <- x\n"
+            "\t}\n"
+            "\treturn s\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_package_channel_reseat_broadcasts_rhs_queue(go_types_helper):
+    # `GC = ch` reseats the external operand to a local queue whose
+    # contents broadcast into `indirect_writes` for a later read.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch <- x\n"
+            "\tGC = ch\n"
+            "\treturn <-GC\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_callee_send_to_package_channel_reaches_caller(go_types_helper):
+    # `Send(x)` sends into the package-level queue — the caller's
+    # `<-GC` observes it through the arg-dep broadcast.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GC chan int64\n"
+            "func Send(x int64) int64 {\n"
+            "\tGC <- x\n"
+            "\treturn x\n}\n"
+            "func F(x int64) int64 {\n"
+            "\t_ = Send(x)\n"
+            "\treturn <-GC\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_dot_imported_channel_member_admits(go_types_helper):
+    # `import . "lib"` — a dot-imported channel member resolves
+    # through the member record like `lib.VC`.
+    files = {
+        "a.go": 'package p\nimport . "lib"\n'
+        "func F(x int64) int64 {\n"
+        "\tVC <- x\n"
+        "\treturn <-VC\n}\n",
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    members = {m.name: m for m in snapshot.imported_members}
+    assert all(t.target == members["VC"].id for t in result.calls)
+
+
 def test_chan_argument_propagates_queue_contents(go_types_helper):
     # `G(ch)` hands the callee the shared queue: sends the callee
     # records land in the caller's channel state, and a callee's
