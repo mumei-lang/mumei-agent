@@ -4910,6 +4910,198 @@ def _summaries_attempt_tool(
     return _ok({"report": report})
 
 
+def _summaries_reuse_attempt_tool(
+    source_path: str,
+    manifest_path: str,
+    attempt_timeout_ms,
+    memory_bound_mb,
+    module,
+) -> str:
+    """Shared body for the `*_summaries_reuse_attempt` MCP tools.
+
+    The same declared inputs as the CLI route: a validated
+    `source_path` read under the module's `MAX_SOURCE_BYTES` bound,
+    a declared `manifest_path`, a required positive
+    `attempt_timeout_ms` and an optional positive `memory_bound_mb`.
+    The report comes from the module's `run_reuse_attempt` — the
+    identical C11 lifecycle the CLI route runs. Declared failures
+    surface as `error` with the declared paths basename-redacted.
+    """
+    declared_paths = [source_path, manifest_path]
+    if not _valid_declared_path(source_path):
+        return _err("source_path must be a nonempty single-line path")
+    if not _valid_declared_path(manifest_path):
+        return _err("manifest_path must be a nonempty single-line path")
+    if (
+        not isinstance(attempt_timeout_ms, int)
+        or isinstance(attempt_timeout_ms, bool)
+        or attempt_timeout_ms <= 0
+    ):
+        return _err("attempt_timeout_ms must be a positive integer")
+    if memory_bound_mb is not None and (
+        not isinstance(memory_bound_mb, int)
+        or isinstance(memory_bound_mb, bool)
+        or memory_bound_mb <= 0
+    ):
+        return _err(
+            "memory_bound_mb must be a positive integer when set"
+        )
+    try:
+        with open(source_path, "rb") as handle:
+            raw = handle.read(module.MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    if len(raw) > module.MAX_SOURCE_BYTES:
+        return _err(
+            f"source_path exceeds the {module.MAX_SOURCE_BYTES}-byte "
+            "declared bound"
+        )
+    try:
+        report = module.run_reuse_attempt(
+            source_path,
+            raw,
+            manifest_path,
+            attempt_timeout_ms,
+            memory_bound_mb=memory_bound_mb,
+        )
+    except Exception as exc:
+        return _err(
+            _redact_declared_paths(str(exc), declared_paths)
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
+def ts_summaries_reuse_attempt(
+    source_path: str,
+    manifest_path: str,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the ts-summaries-reuse route as one declared attempt.
+
+    The same wiring as `ts-summaries-reuse-attempt`: manifest replay
+    through the C11 dispatch lifecycle — the request fingerprint
+    binds the declared manifest's bytes with every other declared
+    input, and an `exited` run's captured stdout (the merged
+    manifest) is selected only when the drift gate passes. The
+    returned report is the canonical lineage — not an accepted
+    manifest.
+
+    Args:
+        source_path: Declared TypeScript/JavaScript source (64 KiB).
+        manifest_path: Declared `mumei.ts-scalar-parameter-deps/v1`
+            manifest to replay (8 MiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.ts-summaries-reuse-attempt-report/v1` document — or
+        `error` on a declared failure.
+    """
+    try:
+        import agent.ts_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_reuse_attempt_tool(
+        source_path,
+        manifest_path,
+        attempt_timeout_ms,
+        memory_bound_mb or None,
+        mod,
+    )
+
+
+@mcp.tool()
+def rust_summaries_reuse_attempt(
+    source_path: str,
+    manifest_path: str,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the rust-summaries-reuse route as one declared attempt.
+
+    The same wiring as `rust-summaries-reuse-attempt`: manifest
+    replay through the C11 dispatch lifecycle — the request
+    fingerprint binds the declared manifest's bytes with every
+    other declared input, and an `exited` run's captured stdout
+    (the merged manifest) is selected only when the drift gate
+    passes. The returned report is the canonical lineage — not an
+    accepted manifest.
+
+    Args:
+        source_path: Declared Rust source (64 KiB).
+        manifest_path: Declared `mumei.rust-scalar-parameter-deps/v1`
+            manifest to replay (8 MiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.rust-summaries-reuse-attempt-report/v1` document — or
+        `error` on a declared failure.
+    """
+    try:
+        import agent.rust_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_reuse_attempt_tool(
+        source_path,
+        manifest_path,
+        attempt_timeout_ms,
+        memory_bound_mb or None,
+        mod,
+    )
+
+
+@mcp.tool()
+def sol_summaries_reuse_attempt(
+    source_path: str,
+    manifest_path: str,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the sol-summaries-reuse route as one declared attempt.
+
+    The same wiring as `sol-summaries-reuse-attempt`: manifest
+    replay through the C11 dispatch lifecycle — the request
+    fingerprint binds the declared manifest's bytes with every
+    other declared input, and an `exited` run's captured stdout
+    (the merged manifest) is selected only when the drift gate
+    passes. The returned report is the canonical lineage — not an
+    accepted manifest.
+
+    Args:
+        source_path: Declared Solidity source (256 KiB).
+        manifest_path: Declared `mumei.sol-scalar-parameter-deps/v1`
+            manifest to replay (8 MiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.sol-summaries-reuse-attempt-report/v1` document — or
+        `error` on a declared failure.
+    """
+    try:
+        import agent.sol_interprocedural as mod
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    return _summaries_reuse_attempt_tool(
+        source_path,
+        manifest_path,
+        attempt_timeout_ms,
+        memory_bound_mb or None,
+        mod,
+    )
+
+
 @mcp.tool()
 def ts_summaries_attempt(
     source_path: str,

@@ -110,6 +110,9 @@ Exported tools:
 | `ts_summaries_attempt(source_path, attempt_timeout_ms, memory_bound_mb=0)` | Run the `ts-summaries` produce route as one declared attempt (same wiring as `ts-summaries-attempt`) — returns `mumei.ts-summaries-attempt-report/v1`: canonical lineage, not an accepted manifest |
 | `rust_summaries_attempt(source_path, attempt_timeout_ms, memory_bound_mb=0)` | Same wiring as `rust-summaries-attempt` — returns `mumei.rust-summaries-attempt-report/v1` |
 | `sol_summaries_attempt(source_path, attempt_timeout_ms, memory_bound_mb=0)` | Same wiring as `sol-summaries-attempt` — returns `mumei.sol-summaries-attempt-report/v1` |
+| `ts_summaries_reuse_attempt(source_path, manifest_path, attempt_timeout_ms, memory_bound_mb=0)` | Run the `ts-summaries-reuse` route as one declared attempt (same wiring as `ts-summaries-reuse-attempt`): the request fingerprint also binds the manifest's bytes — returns `mumei.ts-summaries-reuse-attempt-report/v1`: canonical lineage, not an accepted manifest |
+| `rust_summaries_reuse_attempt(source_path, manifest_path, attempt_timeout_ms, memory_bound_mb=0)` | Same wiring as `rust-summaries-reuse-attempt` — returns `mumei.rust-summaries-reuse-attempt-report/v1` |
+| `sol_summaries_reuse_attempt(source_path, manifest_path, attempt_timeout_ms, memory_bound_mb=0)` | Same wiring as `sol-summaries-reuse-attempt` — returns `mumei.sol-summaries-reuse-attempt-report/v1` |
 | `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
@@ -221,6 +224,9 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `ts_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `rust_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `sol_summaries_attempt` | `source_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
+| `ts_summaries_reuse_attempt` | `source_path: str, manifest_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
+| `rust_summaries_reuse_attempt` | `source_path: str, manifest_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
+| `sol_summaries_reuse_attempt` | `source_path: str, manifest_path: str, attempt_timeout_ms: int, memory_bound_mb: int = 0` | `report` |
 | `go_summaries` | `source_files: str, go_types: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `manifest` |
 | `go_summaries_attempt` | `source_files: str, go_types: str, attempt_timeout_ms: int, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30, memory_bound_mb: int = 0` | `report` |
 | `go_summaries_check` | `source_files: str, go_types: str, manifest_path: str, target_arch: str = 'amd64', imports_json: str = '{}', timeout_s: int = 30` | `check` |

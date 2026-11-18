@@ -4046,7 +4046,7 @@ it discharges. The ts/sol/rust sibling routes carry the same
 envelope, and directory audits reach the attempt lifecycle through
 `--enable-summary-attempts`; no retry policy or scheduling is wired.
 
-### go-summaries-reuse-attempt — manifest replay through the attempt lifecycle
+### go-summaries-reuse-attempt (+ ts/sol/rust siblings) — manifest replay through the attempt lifecycle
 
 `python -m agent go-summaries-reuse-attempt` runs the reuse route as
 one declared attempt inside the C11 lifecycle, closing the last gap
@@ -4078,10 +4078,15 @@ its dep claims stay unperformed until the strict accept route
 re-derives them). recovery-eval folds the report schema under the
 same four bound-report performer lists as the produce attempt.
 `go_summaries_reuse_attempt` is the matching MCP tool. The ts/sol/rust
-reuse routes still have no attempt variant, and audit
-`--enable-summary-attempts` still cannot combine with
-`--summaries-manifest-map`: mapped units keep running the plain
-reuse route.
+siblings landed the same variant — `ts-summaries-reuse-attempt`,
+`rust-summaries-reuse-attempt` and `sol-summaries-reuse-attempt`
+mirror it one-to-one (single declared source, `--manifest` bound into
+the fingerprint, identical envelope and `SUMMARY_ESTABLISHED`
+discharge, matching `*_summaries_reuse_attempt` MCP tools), and
+recovery-eval folds the three sibling report schemas under the same
+four performer lists. Audit `--enable-summary-attempts` still cannot
+combine with `--summaries-manifest-map`: mapped units keep running
+the plain reuse route.
 
 
 ### C06 declared Rust summary route family

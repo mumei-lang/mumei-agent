@@ -4372,3 +4372,283 @@ def main_attempt(args=None) -> None:
             handle.write(document)
     else:
         sys.stdout.write(document)
+
+
+REUSE_ATTEMPT_REQUEST_PROFILE = "mumei.sol-summaries-reuse-attempt-request/v1"
+REUSE_ATTEMPT_REPORT_PROFILE = "mumei.sol-summaries-reuse-attempt-report/v1"
+
+
+def build_reuse_attempt_parser(parser=None):
+    """Parser for ``sol-summaries-reuse-attempt``: the reuse
+    route's declared inputs plus the attempt's own declared timeout
+    and an optional memory bound. ``--resolve-modules`` is rejected —
+    the request fingerprint cannot bind files resolved implicitly."""
+    parser = build_reuse_parser(parser)
+    parser.description = (
+        "Run the sol-summaries-reuse route as one declared attempt "
+        "and emit the reconciled lineage descriptors."
+    )
+    parser.add_argument(
+        "--attempt-timeout",
+        type=int,
+        required=True,
+        metavar="<MS>",
+        help="Declared attempt bound in milliseconds (required).",
+    )
+    parser.add_argument(
+        "--memory-bound-mb",
+        type=int,
+        default=None,
+        metavar="<MB>",
+        help=(
+            "Optional declared POSIX RLIMIT_AS ceiling applied to the "
+            "attempt child's whole address space."
+        ),
+    )
+    for action in parser._actions:
+        if action.dest == "output":
+            action.help = (
+                "Write the attempt report JSON here instead of stdout."
+            )
+    return parser
+
+
+def _reuse_attempt_fingerprint(
+    source_path: str,
+    raw: bytes,
+    manifest_path: str,
+    summary_aware_calls=None,
+) -> str:
+    """Bind the reuse request's declared inputs into one identity —
+    the source's bytes plus the declared manifest's bytes (and the
+    callee manifest's, when declared)."""
+    import hashlib
+    import json
+
+    try:
+        with open(manifest_path, "rb") as handle:
+            manifest_raw = handle.read(MAX_MANIFEST_BYTES + 1)
+    except OSError as exc:
+        # `str(exc)` would carry the checkout-local path into the
+        # attempt report's error detail.
+        raise ValueError(
+            "declared manifest unreadable: "
+            f"{exc.strerror or 'I/O error'}"
+        ) from exc
+    if len(manifest_raw) > MAX_MANIFEST_BYTES:
+        raise ValueError("declared manifest too large")
+    request_doc = {
+        "schema_version": REUSE_ATTEMPT_REQUEST_PROFILE,
+        "source": {
+            "path": source_path,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        },
+        "manifest": {
+            "path": manifest_path,
+            "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        },
+    }
+    if summary_aware_calls is not None:
+        try:
+            with open(summary_aware_calls, "rb") as handle:
+                callee_raw = handle.read(MAX_MANIFEST_BYTES + 1)
+        except OSError as exc:
+            raise ValueError(
+                "declared callee manifest unreadable: "
+                f"{exc.strerror or 'I/O error'}"
+            ) from exc
+        if len(callee_raw) > MAX_MANIFEST_BYTES:
+            raise ValueError("declared callee manifest too large")
+        request_doc["summary_aware_calls"] = {
+            "path": summary_aware_calls,
+            "sha256": hashlib.sha256(callee_raw).hexdigest(),
+        }
+    return hashlib.sha256(
+        json.dumps(
+            request_doc, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+
+
+def run_reuse_attempt(
+    source_path,
+    raw,
+    manifest_path,
+    attempt_timeout,
+    memory_bound_mb=None,
+    summary_aware_calls=None,
+):
+    """Run the reuse route as one declared attempt → report dict.
+
+    The same C11 lifecycle ``run_attempt`` applies to the produce
+    route: a fresh ``AttemptSequence`` keyed to the request
+    fingerprint — which also binds the declared ``--manifest``'s
+    bytes — one reserved attempt observed by ``dispatch_attempt``
+    under ``attempt_timeout``, reconcile and compare-and-set
+    publication. An ``exited`` run's captured stdout (the merged
+    manifest) is selected only when every declared input byte is
+    unchanged after the observed run. Returns the
+    ``mumei.sol-summaries-reuse-attempt-report/v1`` document; raises ``ValueError`` on a lifecycle
+    failure.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    from agent.attempt_runner import dispatch_attempt
+    from agent.core_evidence import evaluate_evidence_check
+    from agent.verify_attempt import CHECK_VOCABULARY, DischargedChecks
+    from agent.verification_attempt import (
+        AttemptSequence,
+        AttemptSequenceStore,
+    )
+
+    fingerprint = _reuse_attempt_fingerprint(
+        source_path, raw, manifest_path, summary_aware_calls
+    )
+    argv = [
+        sys.executable,
+        "-m",
+        "agent",
+        "sol-summaries-reuse",
+        source_path,
+        "--manifest",
+        manifest_path,
+    ]
+    if summary_aware_calls is not None:
+        argv += ["--summary-aware-calls", summary_aware_calls]
+    argv = tuple(argv)
+    sequence = AttemptSequence(fingerprint, attempt_timeout)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    current = store.current
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        memory_bound_mb=memory_bound_mb,
+    )
+    try:
+        drifted = (
+            _reuse_attempt_fingerprint(
+                source_path,
+                Path(source_path).read_bytes(),
+                manifest_path,
+                summary_aware_calls,
+            )
+            != fingerprint
+        )
+    except (OSError, ValueError):
+        drifted = True
+    if dispatch.run.record.state == "exited" and not drifted:
+        updated = dispatch.sequence.select_result(
+            dispatch.captured_output()
+        )
+    else:
+        updated = dispatch.sequence
+    published = store.compare_and_set(current, updated)
+    report = {
+        "schema_version": REUSE_ATTEMPT_REPORT_PROFILE,
+        "sequence": published.to_dict(),
+        "normalized": dispatch.run.normalized().to_dict(),
+    }
+    if published.selected_result is not None:
+        candidate = published.evidence_candidate()
+        report["candidate"] = candidate.to_dict()
+        # The merged manifest's strict from_dict boundary is the
+        # declared representation check, same as the produce
+        # attempt: a selected run whose captured bytes restore as
+        # the declared summary set records "valid"; anything else
+        # records "failed", never an error.
+        try:
+            payload = json.loads(dispatch.run.stdout)
+            SolSummarySet.from_dict(payload)
+            outcome = "valid"
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            RecursionError,
+        ):
+            outcome = "failed"
+        check = published.evidence_check(candidate, outcome)
+        report["evidence_check"] = check.to_dict()
+        report["acceptance"] = evaluate_evidence_check(
+            published, check
+        )
+        report["discharged_checks"] = sorted(
+            DischargedChecks.SUMMARY_ESTABLISHED
+        )
+        report["checks_not_performed"] = sorted(
+            CHECK_VOCABULARY - DischargedChecks.SUMMARY_ESTABLISHED
+        )
+    return report
+
+
+def main_reuse_attempt(args=None) -> None:
+    """Run the reuse route as one declared attempt.
+
+    Spawns ``python -m agent sol-summaries-reuse <source> --manifest <path>``
+    through the C11 dispatch lifecycle, so manifest replay no longer
+    stays out of attempt mode: the lineage binds every byte the
+    merge consumes — the declared manifest included — and an
+    ``exited`` run's captured stdout becomes the selected result
+    only when the drift gate passes. ``--resolve-modules`` is
+    refused: implicit module resolution names files the request
+    identity cannot cover. Emits ``mumei.sol-summaries-reuse-attempt-report/v1`` — the canonical
+    lineage, the normalized run-result descriptor and, only when a
+    result was selected, the evidence check and acceptance for the
+    merged manifest — never manifest bytes themselves.
+    """
+    import json
+    import sys
+
+    if args is None:
+        args = build_reuse_attempt_parser().parse_args()
+    _reject_overwrite(
+        args.output,
+        _declared_input_paths(args),
+        REUSE_ATTEMPT_REPORT_PROFILE,
+    )
+    raw = _read_declared_source(
+        args.source, REUSE_ATTEMPT_REPORT_PROFILE
+    )
+    if getattr(args, "resolve_modules", False):
+        _emit(
+            {
+                "schema_version": REUSE_ATTEMPT_REPORT_PROFILE,
+                "error": {
+                    "reason": "unsupported_option",
+                    "detail": (
+                        "--resolve-modules resolves files "
+                        "implicitly; the attempt request "
+                        "fingerprint cannot bind undeclared bytes"
+                    ),
+                },
+            },
+            2,
+        )
+    try:
+        report = run_reuse_attempt(
+            args.source,
+            raw,
+            args.manifest,
+            args.attempt_timeout,
+            memory_bound_mb=args.memory_bound_mb,
+            summary_aware_calls=getattr(
+                args, "summary_aware_calls", None
+            ),
+        )
+    except ValueError as exc:
+        _emit(
+            {
+                "schema_version": REUSE_ATTEMPT_REPORT_PROFILE,
+                "error": {"reason": "attempt_failed", "detail": str(exc)},
+            },
+            2,
+        )
+    document = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(document)
+    else:
+        sys.stdout.write(document)
