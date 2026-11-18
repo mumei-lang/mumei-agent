@@ -877,6 +877,12 @@ class _Builder:
         # must not conflate. Recorded at every plain store and
         # declaration; `_join` scopes union back via `_join_ptr`.
         self._ptr_deps: dict[str, frozenset[int]] = {}
+        # Which queues a `chan` field member may currently hold —
+        # `p.C = ch` unions `ch`'s token into the member's may-set
+        # (never replaces: a conditional store leaves the old queue
+        # a candidate). Reads on `p.C` union every token's queue
+        # deps — an over-approx like the escaped-binding fold.
+        self.field_chan_queues: dict[str, frozenset[str]] = {}
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -1679,6 +1685,64 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         return pointees, field_member, root_ref
+
+    def _chan_queue_tokens(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> frozenset[str] | None:
+        """The queue identities a channel-typed RHS names — for a
+        `p.C = ch` field store tracking which queue the member may
+        now hold. A bare identifier yields its scalar-chan binding;
+        a selector yields an external operand's target or a bound
+        field member's live tokens. Anything else (`make(chan)` —
+        a fresh queue whose contents the ordinary dep fold already
+        carries, a call result, a receive) yields None."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None:
+            return None
+        if inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            if ref is not None and self._scalar_chan_binding(
+                ref.binding_id
+            ):
+                return frozenset({ref.binding_id})
+            return None
+        external = self._external_chan_operand(inner)
+        if external is not None:
+            return frozenset({external[0]})
+        field = self._bound_field_chan(inner, locals_, params)
+        if field is not None:
+            member = field[1]
+            return self.field_chan_queues.get(
+                member.id, frozenset({member.id})
+            )
+        return None
+
+    def _field_chan_deps(
+        self,
+        member_id: str,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> frozenset[int]:
+        """Deps of every queue a `chan` field member may hold — the
+        member's own slot plus each token `p.C = ch` stores may have
+        aliased it to (a may-set; over-approx like `escaped`)."""
+        deps = locals_.get(member_id, frozenset())
+        for token in self.field_chan_queues.get(member_id, ()):
+            deps = deps | locals_.get(token, frozenset())
+            if token in params:
+                deps = deps | frozenset({params[token]})
+        return deps
 
     def _bound_pointee_index_field(
         self,
@@ -4113,6 +4177,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_stmt_reads = self._stmt_reads
         saved_ptr_deps = self._ptr_deps
         saved_chan_aliases = self.chan_aliases
+        saved_field_queues = self.field_chan_queues
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -4121,6 +4186,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._stmt_reads = {}
         self._ptr_deps = {}
         self.chan_aliases = {}
+        self.field_chan_queues = {}
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -4154,6 +4220,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._stmt_reads = saved_stmt_reads
             self._ptr_deps = saved_ptr_deps
             self.chan_aliases = saved_chan_aliases
+            self.field_chan_queues = saved_field_queues
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -4878,6 +4945,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # into `indirect_writes` (like a send does) for a later
             # `<-GC`/`range GC` read to observe.
             chan_write_targets: set[int] = set()
+            # `p.C = ch` reseats which queue the field names: index →
+            # the leaf `chan` member, so the store can union the RHS
+            # queue's tokens into the member's may-set.
+            field_chan_lhs: dict[int, Any] = {}
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -4978,6 +5049,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # (`p.Next.V = v`) — computing the destination
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
+                    field_chan = self._bound_field_chan(
+                        lhs, locals_, params
+                    )
+                    if field_chan is not None:
+                        field_chan_lhs[len(refs) - 1] = field_chan[1]
                     continue
                 # An imported member write — `lib.V = v`,
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
@@ -5436,6 +5512,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if broadcast:
                     self.indirect_writes |= value
+                member = field_chan_lhs.get(i)
+                if (
+                    member is not None
+                    and i < len(rights)
+                    and len(lefts) == len(rights)
+                ):
+                    tokens = self._chan_queue_tokens(
+                        rights[i], locals_, params
+                    )
+                    if tokens is not None:
+                        # `p.C = ch` — the field may now name ch's
+                        # queue. Union into the member's may-set
+                        # (a conditional store leaves the previous
+                        # queue a candidate, so never replace).
+                        self.field_chan_queues[member.id] = (
+                            self.field_chan_queues.get(
+                                member.id, frozenset()
+                            )
+                            | tokens
+                        )
                 # `h2 = h` — an assignment copy propagates the
                 # closure's capture record like `h2 := h` does; a
                 # non-closure RHS clears a stale record on the name.
@@ -5955,8 +6051,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             rdeps = (
                                 self.indirect_writes
-                                | self._pointer_deps(
+                                | self._deref_read_deps(
                                     root_ref.binding_id, params, scope
+                                )
+                                | self._field_chan_deps(
+                                    member.id, scope, params
                                 )
                             )
                             chan = (
@@ -6539,6 +6638,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         | self.indirect_writes
                     )
                 self.indirect_writes |= value_deps
+                if field_chan is not None:
+                    # The send writes into the pointee's contents:
+                    # fold the value into the root binding like
+                    # `p.F = v` does — a caller's deps on `p` then
+                    # carry the queue, so `g(p)` sees this send —
+                    # and into every queue the member may alias
+                    # (`p.C = ch` sends reach `<-ch` too).
+                    root_old = locals_.get(
+                        root_ref.binding_id, frozenset()
+                    )
+                    if root_ref.binding_id in params:
+                        root_old = root_old | frozenset(
+                            {params[root_ref.binding_id]}
+                        )
+                    self._store(
+                        locals_, params, root_ref.binding_id,
+                        root_old | value_deps, conditional,
+                    )
+                    for token in self.field_chan_queues.get(
+                        member.id, ()
+                    ):
+                        token_old = locals_.get(token, frozenset())
+                        if token in params:
+                            token_old = token_old | frozenset(
+                                {params[token]}
+                            )
+                        self._store(
+                            locals_, params, token,
+                            token_old | value_deps, conditional,
+                        )
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -7306,8 +7435,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 if not p.id.endswith("/pointee")
                             )
                             self._pin_member_type(member)
-                            base_deps = self._pointer_deps(
+                            # A receive reads the pointee's contents —
+                            # the full deref union (folded field-store
+                            # deps, escaped bindings, indirect writes)
+                            # plus every queue the member may alias
+                            # (`p.C = ch` makes `<-p.C` observe
+                            # `ch <- x`).
+                            base_deps = self._deref_read_deps(
                                 root_ref.binding_id, params, locals_
+                            ) | self._field_chan_deps(
+                                member.id, locals_, params
                             )
                         self._pin_fact_identities(fact)
                         transfers.append(
@@ -7631,6 +7768,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 if not p.id.endswith("/pointee")
                             )
                             self._pin_member_type(member)
+                            # The operand read — resolving `p.C`
+                            # reads the pointer plus every earlier
+                            # indirect store, like the send's
+                            # destination read.
+                            self._record_read(
+                                self._pointer_deps(
+                                    root_ref.binding_id, params,
+                                    locals_,
+                                )
+                                | self.indirect_writes
+                            )
                         self._pin_fact_identities(fact)
                         transfers.append(
                             CallTransfer(

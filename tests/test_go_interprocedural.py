@@ -13854,6 +13854,67 @@ def test_callee_send_to_field_channel_reaches_caller(go_types_helper):
     assert 1 in result.return_dependencies
 
 
+def test_bound_field_channel_reseat_to_local_queue(go_types_helper):
+    # `p.C = ch` makes the field name ch's queue: a later `ch <- x`
+    # is a send into it, so `<-p.C` observes x (and `p.C <- y`
+    # would reach `<-ch` the same way).
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tp.C = ch\n"
+            "\tch <- x\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_caller_send_to_field_channel_reaches_callee(go_types_helper):
+    # The caller's `p.C <- x` folds into p's tracked deps like a
+    # field store, so `g(p)` — whose `return <-p.C` depends on p —
+    # carries the sent value.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func Recv(q *S) int64 {\n"
+            "\treturn <-q.C\n}\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tp.C <- x\n"
+            "\treturn Recv(p)\n}\n",
+        )
+    )
+    assert result.available
+    assert 1 in result.return_dependencies
+
+
+def test_bound_field_channel_close_records_operand_read(go_types_helper):
+    # `close(p.C)` resolves the operand — the statement read
+    # carries the pointer's deps plus earlier indirect stores.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tp.C <- x\n"
+            "\tclose(p.C)\n"
+            "\treturn x\n}\n",
+        )
+    )
+    assert result.available
+    # `close(p.C)` is the 10-byte statement between the send and
+    # the return.
+    close_read = next(
+        r for r in result.statement_reads
+        if r.span.end - r.span.start == len("close(p.C)")
+    )
+    assert close_read.deps == frozenset({0, 1})
+
+
 def test_bound_field_channel_boundaries_stay_closed(go_types_helper):
     # A non-scalar `chan string` field and a computed base
     # (`arr[i].C`) stay closed.
