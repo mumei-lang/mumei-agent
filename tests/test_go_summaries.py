@@ -1061,6 +1061,58 @@ def test_attempt_binds_declared_input_bytes(tmp_path, capsys):
     assert fp != fp2
 
 
+def test_attempt_binds_and_forwards_summary_aware_calls(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = tmp_path / "callee.json"
+    manifest.write_text(json.dumps(schema_fixture()))
+    code, out, _ = _run_attempt(capsys, _attempt_args(helper, source))
+    assert code == 0
+    fp = json.loads(out)["sequence"]["request_fingerprint"]
+    code, out2, err = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(manifest)],
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out2)
+    assert report["sequence"]["request_fingerprint"] != fp
+    # The flag reached the child: a malformed manifest fails its
+    # produce run (a forwarded declared input), where the same
+    # source without the flag exits 0.
+    bad = tmp_path / "bad.json"
+    bad.write_text("{")
+    code, out_bad, _ = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(bad)],
+        ),
+    )
+    assert code == 0
+    norm = json.loads(out_bad)["normalized"]
+    assert norm["outcome"] == "exited" and norm["exit_code"] != 0
+    other = tmp_path / "other-callee.json"
+    other.write_text(json.dumps(schema_fixture()) + "\n")
+    code, out3, _ = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(other)],
+        ),
+    )
+    assert code == 0
+    assert (
+        json.loads(out3)["sequence"]["request_fingerprint"]
+        != report["sequence"]["request_fingerprint"]
+    )
+
+
 def test_attempt_rejects_missing_helper(tmp_path, capsys):
     source = _write_source(tmp_path, "f.go", SOURCE)
     code, _, err = _run_attempt(

@@ -736,6 +736,10 @@ def _file_sha256(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _optional_file_sha256(path: str | None) -> str | None:
+    return _file_sha256(path) if path is not None else None
+
+
 def _attempt_fingerprint(args: argparse.Namespace) -> str:
     """Bind the request's declared inputs into one request identity.
 
@@ -756,6 +760,9 @@ def _attempt_fingerprint(args: argparse.Namespace) -> str:
             {"spec": spec, "sha256": _file_sha256(spec.partition("=")[2])}
             for spec in sorted(args.imports)
         ],
+        "summary_aware_calls": _optional_file_sha256(
+            getattr(args, "summary_aware_calls", None)
+        ),
         "target_arch": args.target_arch,
         "timeout_seconds": args.timeout,
     }
@@ -845,6 +852,10 @@ def run_attempt(args: argparse.Namespace) -> dict:
         arg
         for spec in args.imports
         for arg in ("--import", spec)
+    ) + tuple(
+        ("--summary-aware-calls", args.summary_aware_calls)
+        if getattr(args, "summary_aware_calls", None)
+        else ()
     )
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
