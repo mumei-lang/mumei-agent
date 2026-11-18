@@ -22,7 +22,7 @@ MAX_JSON_NUMBER_CHARS = 128
 EVENT_KINDS = frozenset(
     {"started", "cancel_requested", "exited", "failed", "timed_out", "cancelled"}
 )
-STREAM_KINDS = frozenset({"stdout"})
+STREAM_KINDS = frozenset({"stdout", "stderr"})
 TERMINAL_STATES = frozenset({"exited", "failed", "timed_out", "cancelled"})
 EVIDENCE_CHECK_OUTCOMES = frozenset({"valid", "failed", "cancelled"})
 _TRANSITIONS = {

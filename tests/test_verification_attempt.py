@@ -2983,18 +2983,20 @@ def test_output_stream_collection_constructor_matrix(stream, complete):
     assert snapshot.stream == stream
     assert snapshot.complete is complete
     manifest = snapshot.to_dict()
-    if complete:
+    if stream != "stdout":
+        assert manifest["stdout"]["stream"] == stream
+    elif complete:
         assert manifest["stdout"] == {
             "sha256": hashlib.sha256(STDOUT).hexdigest(),
             "size_bytes": len(STDOUT),
         }
-    else:
+    if not complete:
         assert manifest["stdout"]["complete"] is False
 
 
 @pytest.mark.parametrize(
     "stream",
-    ["stderr", "STDOUT", "out", "", 1, True, b"stdout", None, ("stdout",)],
+    ["stdin", "STDOUT", "out", "", 1, True, b"stdout", None, ("stdout",)],
 )
 def test_output_stream_rejects_unsupported_names(stream):
     with pytest.raises(
@@ -3086,8 +3088,17 @@ def test_output_from_prepared_declares_collection_metadata():
             report,
             STDOUT,
             hashlib.sha256(STDOUT).hexdigest(),
-            stream="stderr",
+            stream="stdin",
         )
+    stderr_output = AttemptOutput.from_prepared(
+        prepared,
+        1,
+        report,
+        STDOUT,
+        hashlib.sha256(STDOUT).hexdigest(),
+        stream="stderr",
+    )
+    assert stderr_output.stream == "stderr"
 
 
 def test_output_completeness_is_a_declaration_not_a_proof():

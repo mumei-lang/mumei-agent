@@ -113,6 +113,32 @@ def test_run_captures_bounded_stdout_without_interpreting_it():
     assert "FAKE_PRIVATE_RUNNER_STDOUT" not in repr(result)
 
 
+def test_run_captures_bounded_stderr_without_interpreting_it():
+    body = b"FAKE_PRIVATE_RUNNER_STDERR"
+    result = AttemptRunner().run(
+        request(), argv(f"import sys; sys.stderr.buffer.write({body!r})")
+    )
+    assert result.stderr == body
+    assert result.stderr_complete is True
+    assert result.stdout == b""
+    assert result.record.state == "exited"
+    assert "FAKE_PRIVATE_RUNNER_STDERR" not in repr(result)
+
+
+def test_run_marks_oversize_stderr_incomplete_but_keeps_stdout_whole():
+    code = (
+        "import sys\n"
+        "sys.stdout.buffer.write(b'ok')\n"
+        "sys.stderr.buffer.write(b'e' * 200000)\n"
+    )
+    result = AttemptRunner().run(request(), argv(code))
+    assert result.record.state == "exited"
+    assert result.stdout == b"ok"
+    assert result.complete is True
+    assert len(result.stderr) == MAX_STDOUT_BYTES
+    assert result.stderr_complete is False
+
+
 def test_run_binds_records_and_outputs_to_the_request():
     req = request(number=3, fingerprint="b" * 64)
     result = AttemptRunner().run(req, argv("print('ok')"))
@@ -244,17 +270,23 @@ def test_run_result_rejects_invalid_metadata():
         FINGERPRINT, 1, 10, (AttemptEvent("started", 0), AttemptEvent("exited", 1, 0))
     )
     running = AttemptRecord(FINGERPRINT, 1, 10, (AttemptEvent("started", 0),))
-    for record, stdout, complete in (
-        (running, b"", True),
-        ("x", b"", True),
-        (exited, b"x" * (MAX_STDOUT_BYTES + 1), True),
-        (exited, "x", True),
-        (exited, b"", 0),
-        (exited, b"", "true"),
+    for record, stdout, complete, stderr, stderr_complete in (
+        (running, b"", True, b"", True),
+        ("x", b"", True, b"", True),
+        (exited, b"x" * (MAX_STDOUT_BYTES + 1), True, b"", True),
+        (exited, "x", True, b"", True),
+        (exited, b"", 0, b"", True),
+        (exited, b"", "true", b"", True),
+        (exited, b"", True, b"x" * (MAX_STDOUT_BYTES + 1), True),
+        (exited, b"", True, "x", True),
+        (exited, b"", True, b"", 0),
+        (exited, b"", True, b"", "true"),
     ):
         with pytest.raises(ValueError):
-            AttemptRunResult(record, stdout, complete)
-    result = AttemptRunResult(exited, b"", True)
+            AttemptRunResult(
+                record, stdout, complete, stderr, stderr_complete
+            )
+    result = AttemptRunResult(exited, b"", True, b"", True)
     with pytest.raises(FrozenInstanceError):
         result.complete = False
 
@@ -809,6 +841,25 @@ def test_dispatch_attempt_reports_spawn_failure_as_failed():
     assert dispatch.run.record.state == "failed"
     assert dispatch.sequence.current.state == "failed"
     assert dispatch.run.stdout == b""
+    assert dispatch.run.stderr == b""
+
+
+def test_dispatch_attempt_captured_stderr_binds_the_stream_snapshot():
+    body = b"FAKE_PRIVATE_DISPATCH_STDERR"
+    sequence = ready_sequence()
+    dispatch = dispatch_attempt(
+        sequence,
+        argv(f"import sys; sys.stderr.buffer.write({body!r})"),
+    )
+    output = dispatch.captured_stderr()
+    assert output.stream == "stderr"
+    assert output.stdout == body
+    assert output.complete is True
+    assert output.attempt == dispatch.sequence.current
+    manifest = output.to_dict()
+    assert manifest["stdout"]["stream"] == "stderr"
+    assert manifest["stdout"]["sha256"] == hashlib.sha256(body).hexdigest()
+    assert "FAKE_PRIVATE_DISPATCH_STDERR" not in repr(output)
 
 
 def test_dispatch_attempt_honors_cancellation(monkeypatch):
