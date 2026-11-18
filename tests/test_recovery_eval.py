@@ -1,6 +1,7 @@
 """Tests for the unperformed-check recovery fold and route (#897)."""
 
 import argparse
+import hashlib
 import json
 
 import pytest
@@ -82,6 +83,121 @@ def test_outcome_field_must_be_true():
     assert evaluation["checks"]["signature_verification"] == (
         "evidence_failed"
     )
+
+
+def _recheck_doc(fingerprint, recheck="consistent"):
+    return _doc(
+        "mumei.source-evidence-recheck/v1",
+        evidence_fingerprint=fingerprint,
+        recheck=recheck,
+    )
+
+
+def _accept_doc(schema, fingerprint):
+    return _doc(
+        schema,
+        evidence_fingerprint=fingerprint,
+        accepted=True,
+    )
+
+
+def test_bound_core_docs_recover_semantic_checks():
+    record_bytes = b'{"record": true}'
+    digest = hashlib.sha256(record_bytes).hexdigest()
+    record = _record(
+        "claim_truth",
+        "freshness",
+        "semantic_correspondence",
+        "artifact_semantics",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [
+            _recheck_doc(digest),
+            _accept_doc("mumei.native-evidence-acceptance/v1", digest),
+        ],
+        record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        "artifact_semantics": "recovered",
+    }
+
+
+def test_source_acceptance_recovers_the_same_three():
+    digest = "a" * 64
+    record = _record(
+        "claim_truth", "freshness", "semantic_correspondence",
+        "artifact_semantics",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_accept_doc("mumei.source-evidence-acceptance/v1", digest)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        # the compiled-artifact layer needs the native descriptor
+        "artifact_semantics": "no_evidence",
+    }
+
+
+def test_core_docs_only_count_for_the_bound_record():
+    record = _record("claim_truth", "semantic_correspondence")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_recheck_doc("b" * 64)],
+        record_digest="a" * 64,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "evidence_failed",
+        "semantic_correspondence": "evidence_failed",
+    }
+
+
+def test_core_docs_need_the_claimed_outcome():
+    digest = "a" * 64
+    record = _record("claim_truth")
+    for recheck in ("inconclusive", None, True):
+        evaluation = evaluate_unperformed_check_recovery(
+            record,
+            [_recheck_doc(digest, recheck=recheck)],
+            record_digest=digest,
+        )
+        assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.native-evidence-acceptance/v1",
+              evidence_fingerprint=digest, accepted=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+
+
+def test_core_docs_cannot_be_attributed_without_record_digest():
+    record = _record("claim_truth")
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_recheck_doc("a" * 64)]
+    )
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+    evaluation = evaluate_unperformed_check_recovery(record, [])
+    assert evaluation["checks"]["claim_truth"] == "no_evidence"
+
+
+def test_anonymous_native_acceptance_applies_to_nothing():
+    # Artifact acceptance with no record input carries no
+    # evidence_fingerprint, so it can never be attributed.
+    record = _record("artifact_semantics")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.native-evidence-acceptance/v1", accepted=True)],
+        record_digest="a" * 64,
+    )
+    assert evaluation["checks"]["artifact_semantics"] == "evidence_failed"
 
 
 def test_foreign_schema_never_counts():

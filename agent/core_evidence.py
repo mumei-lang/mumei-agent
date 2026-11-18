@@ -698,38 +698,69 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
 # ``checks_not_performed`` a set of supporting documents covers.
 UNPERFORMED_CHECK_RECOVERY_SCHEMA = "mumei.unperformed-check-recovery/v1"
 
-# Which emitted schema performs each check name, and the outcome field
-# that must hold `true` for the check to count as recovered. A document
+# Which emitted schema performs each check name, the outcome field and
+# the value it must hold for the check to count as recovered. A document
 # never gets to declare its own coverage — attribution is pinned to the
 # emitted schema, so a foreign document claiming a check cannot count.
 _CHECK_PERFORMERS: dict = {
     "attempt_binding": [
-        ("mumei.core-acceptance-evaluation/v1", "attempt_bound"),
+        ("mumei.core-acceptance-evaluation/v1", "attempt_bound", True),
     ],
     "subject_binding": [
-        ("mumei.signature-envelope-evaluation/v1", "subject_bound"),
-        ("mumei.signature-verification/v1", "subject_bound"),
+        ("mumei.signature-envelope-evaluation/v1", "subject_bound", True),
+        ("mumei.signature-verification/v1", "subject_bound", True),
     ],
     "key_binding": [
-        ("mumei.signature-envelope-evaluation/v1", "key_pinned"),
-        ("mumei.signature-verification/v1", "key_pinned"),
+        ("mumei.signature-envelope-evaluation/v1", "key_pinned", True),
+        ("mumei.signature-verification/v1", "key_pinned", True),
     ],
     "signature_verification": [
-        ("mumei.signature-verification/v1", "signature_valid"),
+        ("mumei.signature-verification/v1", "signature_valid", True),
     ],
     "envelope_freshness": [
-        ("mumei.freshness-evaluation/v1", "within_window"),
+        ("mumei.freshness-evaluation/v1", "within_window", True),
     ],
     "descriptor_freshness": [
-        ("mumei.freshness-evaluation/v1", "within_window"),
+        ("mumei.freshness-evaluation/v1", "within_window", True),
     ],
     "freshness": [
-        ("mumei.freshness-evaluation/v1", "within_window"),
+        ("mumei.freshness-evaluation/v1", "within_window", True),
+        ("mumei.source-evidence-recheck/v1", "recheck", "consistent"),
+        ("mumei.source-evidence-acceptance/v1", "accepted", True),
     ],
     "evidence_binding": [
-        (EVIDENCE_BINDING_SCHEMA, "bound"),
+        (EVIDENCE_BINDING_SCHEMA, "bound", True),
+    ],
+    # The semantic C02 checks recover through the fingerprint-carrying
+    # Core descriptors, mirroring the discharged_checks sets the
+    # declared attempt routes report: a consistent source recheck or an
+    # accepted source acceptance re-establishes the record's claims
+    # within its declared profile; a native acceptance descriptor adds
+    # the compiled-artifact layer. Each document only counts when its
+    # `evidence_fingerprint` equals the record's digest — an anonymous
+    # or differently-bound descriptor can never recover this record.
+    "claim_truth": [
+        ("mumei.source-evidence-recheck/v1", "recheck", "consistent"),
+        ("mumei.source-evidence-acceptance/v1", "accepted", True),
+        ("mumei.native-evidence-acceptance/v1", "accepted", True),
+    ],
+    "semantic_correspondence": [
+        ("mumei.source-evidence-recheck/v1", "recheck", "consistent"),
+        ("mumei.source-evidence-acceptance/v1", "accepted", True),
+    ],
+    "artifact_semantics": [
+        ("mumei.native-evidence-acceptance/v1", "accepted", True),
     ],
 }
+
+
+def _outcome_matches(actual: object, expected: object) -> bool:
+    """Strict outcome equality: a declared `1` or `"true"` is not the
+    boolean `true` a boolean performer requires, while a string
+    outcome like `"consistent"` compares by value."""
+    if type(expected) is bool:
+        return actual is expected
+    return actual == expected
 
 
 def _performer_document_applies(
@@ -739,13 +770,21 @@ def _performer_document_applies(
 
     A binding document pins itself to one record's digest, so it only
     applies when the fold has a declared `record_digest` the document
-    matches; every other performer schema applies record-agnostically
-    (their own binding is a separate, still-declared check)."""
+    matches. The same holds for every subject-bearing schema in
+    `_BINDING_CARRIERS` — a recheck or acceptance descriptor only
+    recovers a check on the record its declared digest names (an
+    anonymous descriptor, e.g. an artifact acceptance with no record
+    input, applies to nothing). Every other performer schema applies
+    record-agnostically (their own binding is a separate,
+    still-declared check)."""
     if schema == EVIDENCE_BINDING_SCHEMA:
         return (
             record_digest is not None
             and doc.get("record_digest") == record_digest
         )
+    carrier = _BINDING_CARRIERS.get(schema)
+    if carrier is not None:
+        return record_digest is not None and doc.get(carrier) == record_digest
     return True
 
 
@@ -786,9 +825,13 @@ def evaluate_unperformed_check_recovery(
     `mumei.evidence-binding/v1` performer document then counts only
     when it is `bound` AND its `record_digest` equals the declared
     digest — a bound document for a *different* record can never
-    recover this record's `evidence_binding`. Without a declared
-    digest no binding document can be attributed, so the check stays
-    unrecovered."""
+    recover this record's `evidence_binding`. The Core descriptors
+    (`mumei.source-evidence-recheck/v1` and the source/native
+    acceptance descriptors) are bound the same way through their
+    `evidence_fingerprint`, so they recover `claim_truth`,
+    `freshness`, `semantic_correspondence` or `artifact_semantics`
+    only for the record they name. Without a declared digest no bound
+    document can be attributed, so those checks stay unrecovered."""
     if type(record) is not dict:
         raise ValueError("unsupported check-recovery request")
     if record_digest is not None and not _is_fingerprint(record_digest):
@@ -815,13 +858,13 @@ def evaluate_unperformed_check_recovery(
     for name in check_names:
         performers = _CHECK_PERFORMERS.get(name, [])
         status = "no_evidence"
-        for schema, field in performers:
+        for schema, field, expected in performers:
             if schema not in schema_to_docs:
                 continue
             if status == "no_evidence":
                 status = "evidence_failed"
             if any(
-                doc.get(field) is True
+                _outcome_matches(doc.get(field), expected)
                 and _performer_document_applies(
                     schema, doc, record_digest
                 )
