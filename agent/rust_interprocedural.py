@@ -1052,8 +1052,12 @@ class _Builder:
                     # index stays aligned with the entry at that
                     # position.
                     idx += 1
+            # `params` is fixed before the body walk — a
+            # partial summary carried on `_Unsupported` keeps
+            # the names its dep indexes refer to.
             summary = RustFunctionSummary(
-                name=name, params=(), available=False,
+                name=name, params=tuple(param_names),
+                available=False,
                 return_dependencies=None,
             )
             body = fn_node.child_by_field_name("body")
@@ -1070,7 +1074,6 @@ class _Builder:
             ):
                 raise _Unsupported("missing_return", _span(fn_node))
             ret = (ret or frozenset()) | (ret_mark or frozenset())
-            summary.params = tuple(param_names)
             summary.return_dependencies = ret
             summary.available = True
             return summary
@@ -1381,7 +1384,10 @@ class _Builder:
                     deps |= self._expr(
                         c, locals_, param_index, summary
                     )
-                except _Unsupported:
+                except _Unsupported as exc:
+                    deps |= getattr(
+                        exc, "partial_deps", frozenset()
+                    )
                     continue
             return deps
         if t == "continue_expression":
@@ -1651,8 +1657,10 @@ class _Builder:
                 deps |= self._expr(
                     left, locals_, param_index, summary
                 )
-            except _Unsupported:
-                pass
+            except _Unsupported as exc:
+                deps |= getattr(
+                    exc, "partial_deps", frozenset()
+                )
             root = _arg_root(left)
             if root is not None:
                 if root in locals_:
@@ -1754,8 +1762,10 @@ class _Builder:
                     recv_deps = self._expr(
                         recv, locals_, param_index, summary
                     )
-                except _Unsupported:
-                    recv_deps = frozenset()
+                except _Unsupported as exc:
+                    recv_deps = getattr(
+                        exc, "partial_deps", frozenset()
+                    )
             actual_union |= recv_deps
         name = None
         raw_ident = None
@@ -1991,7 +2001,16 @@ class _Builder:
     # -- expressions -------------------------------------------------
 
     def _expr(self, node, locals_, param_index, summary):
-        deps = self._expr_inner(node, locals_, param_index, summary)
+        try:
+            deps = self._expr_inner(node, locals_, param_index, summary)
+        except _Unsupported as exc:
+            # Reads evaluated before a mid-expression failure
+            # still attribute to the open statement frames —
+            # `_expr_inner` loops carry them on `partial_deps`.
+            partial = getattr(exc, "partial_deps", None)
+            if partial:
+                self._record_read(partial)
+            raise
         self._record_read(deps)
         return deps
 
@@ -2021,9 +2040,16 @@ class _Builder:
                 # `_expr_inner` recursion stays one frame per
                 # level — `_expr`'s record on the way out
                 # captures this subtree's union anyway.
-                deps |= self._expr_inner(
-                    c, locals_, param_index, summary
-                )
+                try:
+                    deps |= self._expr_inner(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported as exc:
+                    exc.partial_deps = (
+                        getattr(exc, "partial_deps", frozenset())
+                        | deps
+                    )
+                    raise
             return deps
         if t in {
             "unary_expression", "reference_expression",
@@ -2034,9 +2060,16 @@ class _Builder:
             for c in _children(node):
                 if c.type in _TYPE_NAMES:
                     continue
-                deps |= self._expr_inner(
-                    c, locals_, param_index, summary
-                )
+                try:
+                    deps |= self._expr_inner(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported as exc:
+                    exc.partial_deps = (
+                        getattr(exc, "partial_deps", frozenset())
+                        | deps
+                    )
+                    raise
             return deps
         if t == "call_expression":
             return self._call(
@@ -2063,7 +2096,10 @@ class _Builder:
                     deps |= self._expr_inner(
                         c, locals_, param_index, summary
                     )
-                except _Unsupported:
+                except _Unsupported as exc:
+                    deps |= getattr(
+                        exc, "partial_deps", frozenset()
+                    )
                     continue
             return deps
         if t == "continue_expression":
@@ -2092,7 +2128,13 @@ class _Builder:
                 return self._expr_inner(
                     cbody, inner, param_index, summary
                 )
-            except _Unsupported:
+            except _Unsupported as exc:
+                # An unanalyzable closure body is an opaque
+                # value, but reads evaluated before the failure
+                # still attribute to the enclosing statement.
+                self._record_read(
+                    getattr(exc, "partial_deps", frozenset())
+                )
                 return frozenset()
 
         if t == "unsafe_block":
@@ -2125,7 +2167,10 @@ class _Builder:
                         deps |= self._expr_inner(
                             tok, locals_, param_index, summary
                         )
-                    except _Unsupported:
+                    except _Unsupported as exc:
+                        deps |= getattr(
+                            exc, "partial_deps", frozenset()
+                        )
                         continue
             summary.calls.append(
                 RustCall(_span(node), cname, (deps,), deps)
@@ -2146,9 +2191,16 @@ class _Builder:
             for c in _children(node):
                 if c.type in _TYPE_NAMES:
                     continue
-                deps |= self._expr_inner(
-                    c, locals_, param_index, summary
-                )
+                try:
+                    deps |= self._expr_inner(
+                        c, locals_, param_index, summary
+                    )
+                except _Unsupported as exc:
+                    exc.partial_deps = (
+                        getattr(exc, "partial_deps", frozenset())
+                        | deps
+                    )
+                    raise
             return deps
         raise _Unsupported("unsupported_expression", _span(node))
 

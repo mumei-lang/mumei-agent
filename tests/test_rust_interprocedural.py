@@ -1959,6 +1959,48 @@ def test_statement_reads_failure_keeps_partial():
         None,
     )
     assert rec == frozenset({0})
+    # `params` is bound before the body walk, so the carried
+    # partial summary keeps the names its dep indexes mean.
+    assert s.params == ("a",)
+
+
+def test_statement_reads_closure_partial_failure():
+    # `u64::MAX` is unsupported inside the closure and swallows
+    # as an opaque value — but the `a` read evaluated before it
+    # still attributes to the `let` statement.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    let cb = || a + u64::MAX;\n"
+        "    a\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    assert s.available
+    idx = src.index("let cb")
+    rec = next(
+        (r for span, r in _reads(s).items()
+         if span[0] <= idx < span[1]),
+        None,
+    )
+    assert rec == frozenset({0})
+
+
+def test_statement_reads_call_arg_partial_failure():
+    # `ok(a, u64::MAX)` — the second actual is unsupported, but
+    # the first actual's read still attributes to the call.
+    src = (
+        "fn f(a: u64) -> u64 {\n"
+        "    opaque(a, u64::MAX)\n"
+        "}\n"
+    )
+    s = _fn(src, "f")
+    idx = src.index("opaque(")
+    rec = next(
+        (r for span, r in _reads(s).items()
+         if span[0] <= idx < span[1]),
+        None,
+    )
+    assert rec == frozenset({0})
 
 
 def test_statement_reads_roundtrip():
