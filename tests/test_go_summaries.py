@@ -1014,6 +1014,78 @@ def test_real_helper_import_round_trip(tmp_path, capsys, real_go_types):
     assert calls and any(call.get("imported") for call in calls)
 
 
+def test_check_reuses_folded_transitive_targets(tmp_path, capsys, real_go_types):
+    """A folded callee dep the helper never emits (an import's import)
+    is still checkable through the callee manifest's declared
+    identities: identical inputs keep the caller reusable."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    g = lib / "g.go"
+    g.write_text(
+        "package lib\nfunc G(a int64) int64 { return H(a) }\n",
+        encoding="utf-8",
+    )
+    h = lib / "h.go"
+    h.write_text(
+        "package lib\nfunc H(a int64) int64 { return a }\n",
+        encoding="utf-8",
+    )
+    lib_manifest = _produce_manifest(tmp_path, capsys, real_go_types, g, h)
+    # A folded dep only the callee manifest names — e.g. an identity
+    # minted inside the callee's own unit for one of its imports. The
+    # caller's helper never emits it, so without the manifest's ids in
+    # `known` the caller is flagged stale on identical inputs.
+    foreign = "sha256:" + "00" * 32
+    lib_doc = json.loads(lib_manifest.read_text())
+    callee = next(f for f in lib_doc["functions"] if f["calls"])
+    callee["pinned"] = [*callee.get("pinned", []), foreign]
+    lib_manifest.write_text(
+        json.dumps(lib_doc, indent=2, sort_keys=True) + "\n"
+    )
+    caller = _write_source(
+        tmp_path,
+        "a.go",
+        "package p\n"
+        'import l "lib"\n'
+        "func F(x int64) int64 { return l.G(x) }\n",
+    )
+    filler = _write_source(
+        tmp_path, "b.go", "package p\nfunc Z(y int64) int64 { return y }\n"
+    )
+    # Both lib files must be declared imports for the caller's unit to
+    # typecheck; the manifest-only `pinned` id above is what the fresh
+    # report never emits.
+    aware = [
+        "--import",
+        f"lib={g}",
+        "--import",
+        f"lib={h}",
+        "--summary-aware-calls",
+        str(lib_manifest),
+    ]
+    code, out, err = _run(
+        capsys, _args(real_go_types, caller, filler, extra=aware)
+    )
+    assert code == 0 and err == ""
+    manifest_path = tmp_path / "caller-manifest.json"
+    manifest_path.write_text(out, encoding="utf-8")
+    caller_f = next(
+        f
+        for f in json.loads(out)["functions"]
+        if f["calls"] and any("folded_targets" in c for c in f["calls"])
+    )
+    code, out, err = _run_check(
+        capsys,
+        _check_args(
+            real_go_types, manifest_path, caller, filler, extra=aware
+        ),
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert caller_f["binding_id"] in report["reusable"]
+    assert report["stale"] == []
+
+
 # --- go-summaries-attempt ----------------------------------------------------
 
 

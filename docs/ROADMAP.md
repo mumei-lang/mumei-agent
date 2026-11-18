@@ -4863,8 +4863,12 @@ unchanged. A `--summary-aware-calls` reuse run keeps the counts in the
 merged manifest, and `go-summaries-attempt` forwards the flag to the
 child and binds the manifest's bytes into the request fingerprint like
 every other declared input. The manifest path joins the declared
-inputs, so `--output` can never overwrite it. The TS/Sol/Rust ports
-stay open.
+inputs, so `--output` can never overwrite it. Check and reuse treat
+the callee manifest's declared identities as `known`, so a folded dep
+the caller's helper never emits (an import's import, or a type only
+the callee's unit pins) stays checkable instead of flagging its caller
+stale on identical inputs — a regenerated manifest's churned ids still
+flag it. The TS/Sol/Rust ports stay open.
 
 
 ## Roadmap authority and vocabulary

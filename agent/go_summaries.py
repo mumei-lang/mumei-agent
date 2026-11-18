@@ -527,6 +527,12 @@ def _run_declared(
     return sources, summary, report
 
 
+def _callee_manifest(args: argparse.Namespace) -> GoSummarySet | None:
+    """The `--summary-aware-calls` manifest, when declared."""
+    path = getattr(args, "summary_aware_calls", None)
+    return _read_manifest(path) if path is not None else None
+
+
 def _emit(document: str, output: str | None) -> None:
     if output:
         Path(output).write_text(document, encoding="utf-8")
@@ -549,7 +555,10 @@ def main(args: argparse.Namespace | None = None) -> int:
 
 
 def _reuse_partition(
-    restored: GoSummarySet, live: GoSummarySet, report: bytes
+    restored: GoSummarySet,
+    live: GoSummarySet,
+    report: bytes,
+    callee: GoSummarySet | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Partition the manifest's functions against the fresh report.
 
@@ -557,9 +566,22 @@ def _reuse_partition(
     `stale_dependents` does not flag it; `stale` — it references a
     replaced identity, transitively; `missing` — the fresh report no
     longer produces the identity. Detection only.
+
+    With `--summary-aware-calls` the callee manifest's declared
+    identities join `known`: it is already the trusted input the
+    fold consumed, so a folded transfer's transitive targets are
+    checkable against it — a regenerated manifest's churned ids
+    still flag the caller. Without this a folded callee dep the
+    helper never emits (e.g. an import's import) would flag its
+    caller stale on every identical input.
     """
     known: set[str] = set()
     _report_identities(json.loads(report), known)
+    if callee is not None:
+        for f in callee.functions:
+            known.add(f.binding_id)
+            known.update(f.call_targets)
+            known.update(f.pinned)
     live_ids = {f.binding_id for f in live.functions}
     stale = restored.stale_dependents(known)
     reusable, stale_ids, missing = [], [], []
@@ -608,7 +630,9 @@ def summary_check_document(args: argparse.Namespace) -> dict:
     """
     restored = _read_manifest(args.manifest)
     _sources, live, report = _run_declared(args)
-    reusable, stale_ids, missing = _reuse_partition(restored, live, report)
+    reusable, stale_ids, missing = _reuse_partition(
+        restored, live, report, _callee_manifest(args)
+    )
     return {
         "schema_version": CHECK_PROFILE,
         "context_match": restored.context_key == live.context_key,
@@ -653,7 +677,9 @@ def summary_reuse_set(args: argparse.Namespace) -> "GoSummarySet":
             "target architecture"
         )
     _sources, live, report = _run_declared(args)
-    reusable, _, _ = _reuse_partition(restored, live, report)
+    reusable, _, _ = _reuse_partition(
+        restored, live, report, _callee_manifest(args)
+    )
     by_id = {f.binding_id: f for f in restored.functions}
     return GoSummarySet(
         live.context_key,
