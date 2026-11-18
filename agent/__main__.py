@@ -57,6 +57,7 @@ _SUBCOMMANDS = {
     "signature-eval",
     "signature-verify",
     "recovery-eval",
+    "freshness-eval",
     "evidence-compare",
     "evidence-identity-check",
     "evidence-producer-check",
@@ -780,6 +781,24 @@ def main() -> None:
         recovery_eval_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(recovery_eval_main(args))
+    elif command == "freshness-eval":
+        import argparse
+        from agent.freshness_eval import (
+            build_eval_parser as freshness_eval_build_parser,
+            main_eval as freshness_eval_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent freshness-eval",
+            description=(
+                "Evaluate a declared record's produced_at freshness "
+                "claim against a declared reference time and emit "
+                "the evaluation descriptor."
+            ),
+        )
+        freshness_eval_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(freshness_eval_main(args))
     elif command == "evidence-identity-check":
         import argparse
         from agent.evidence_identity import (

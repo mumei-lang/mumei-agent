@@ -741,3 +741,79 @@ def evaluate_unperformed_check_recovery(
         ],
     }
     return recovery
+
+
+FRESHNESS_EVALUATION_SCHEMA = "mumei.freshness-evaluation/v1"
+
+
+def _parse_rfc3339(value: object) -> "object":
+    """Parse an RFC 3339 timestamp into an aware datetime, or None."""
+    from datetime import datetime
+
+    if type(value) is not str:
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def evaluate_freshness(
+    record: dict,
+    reference_time: str,
+    max_age_seconds: int,
+) -> dict:
+    """Evaluate a declared record's freshness claim against a declared
+    clock.
+
+    Emits ``mumei.freshness-evaluation/v1``. The record is schema-open:
+    any JSON object may carry a ``produced_at`` RFC 3339 timestamp —
+    its absence (or an unparseable value) reports
+    ``freshness_claimed: false`` rather than an error, since the field
+    is optional by design and a record without it simply makes no
+    freshness claim.
+
+    ``within_window`` holds only when a well-formed ``produced_at``
+    exists, does not postdate the declared ``reference_time``, and
+    ``produced_at + max_age_seconds >= reference_time``. The
+    ``reference_time`` is the caller's declared clock — the fold never
+    reads the system clock, so the same documents always evaluate the
+    same way.
+
+    ``checks_not_performed`` keeps ``clock_authenticity`` (the declared
+    reference time is trusted as supplied), ``producer_time_authenticity``
+    (the record's timestamp is a claim by the producer — only a
+    signature-bound timestamp upgrades it) and ``freshness_enforcement``
+    (the fold reports; gating on freshness is a host decision)."""
+    from datetime import timedelta
+
+    if type(record) is not dict:
+        raise ValueError("unsupported freshness evaluation request")
+    reference = _parse_rfc3339(reference_time)
+    if reference is None:
+        raise ValueError("invalid reference time")
+    if type(max_age_seconds) is not int or max_age_seconds < 0:
+        raise ValueError("invalid max age")
+    produced = _parse_rfc3339(record.get("produced_at"))
+    claimed = produced is not None
+    within = (
+        claimed
+        and produced <= reference
+        and produced + timedelta(seconds=max_age_seconds) >= reference
+    )
+    return {
+        "schema_version": FRESHNESS_EVALUATION_SCHEMA,
+        "freshness_claimed": claimed,
+        "within_window": within,
+        "checks_not_performed": [
+            "clock_authenticity",
+            "producer_time_authenticity",
+            "freshness_enforcement",
+        ],
+    }
