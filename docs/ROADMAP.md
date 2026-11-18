@@ -4834,9 +4834,22 @@ memo — compose the family's folds: given a record's declared
 `checks_not_performed` and a set of supporting documents, emit
 `mumei.unperformed-check-recovery/v1` reporting each check as
 `recovered` (a supplied document carries the declared performer
-schema AND its outcome field is `true`), `evidence_failed` (the
-performer schema was supplied but the outcome is absent or not
-`true`) or `no_evidence`.
+schema, its outcome field holds the declared value — `true` for the
+evaluation folds, `"consistent"` for a source recheck — and, for
+bound descriptors, its declared carrier equals the record's bound
+digest), `evidence_failed` (the performer schema was supplied but
+the outcome or the binding fails) or `no_evidence`. The bound digest
+is the record's own declared carrier
+(`evidence_fingerprint`/`subject_digest`/`record_digest`) when it
+pins another artifact — so a Core acceptance descriptor folded as
+the record is recovered by a recheck doc bound to the same
+evidence — else the record's byte digest (`record_digest`). Note
+`freshness` recovers two honest senses a consumer may want told
+apart: recency (`freshness-evaluation/v1`·`within_window` over a
+declared `produced_at`) and currency (a bound consistent recheck or
+accepted acceptance re-establishing the record's claims); the report
+names only which checks recovered, so a consumer that needs the
+distinction reads the supplied documents.
 
 Attribution is closed: `_CHECK_PERFORMERS` pins each check name to
 its emitted schema and outcome field (`signature_verification` ←
@@ -4849,8 +4862,35 @@ so a document never declares its own coverage and a foreign schema
 never counts. The fold stays representation-level: it does not re-run
 checks (`recovery_enforcement`), does not verify the supporting
 documents (`evidence_authenticity` — trusted as declared) and does
-not pin a document to the record it covers (`evidence_binding`).
-Subject-bound recovery waits on producer-side fingerprint emission.
+not pin a document to the record it covers (`evidence_binding` —
+recovered below through `mumei.evidence-binding/v1`, pinned to the
+record's own bytes even when the record declares a carrier for a
+different artifact).
+
+The six C02 semantic checks all recover through bound documents,
+mirroring each attempt route's `discharged_checks`: `claim_truth`,
+`freshness` and `semantic_correspondence` ← a consistent
+`source-evidence-recheck/v1` or an accepted
+`source-evidence-acceptance/v1`; `claim_truth` and
+`artifact_semantics` ← an accepted `native-evidence-acceptance/v1`;
+and all five non-artifact checks — `file_identity`,
+`producer_authenticity`, `freshness`, `semantic_correspondence` and
+`claim_truth` — ← an accepted `verify-attempt-report/v1`, whose
+attempt sequence is also the recorded execution lineage, so the
+same bound report performs `historical_execution` on the record its
+run produced. Bound
+documents match through a declared carrier pinned per schema:
+`evidence_fingerprint` on a Core descriptor, `record_digest` on a
+binding document, `normalized.stdout.sha256` (the produced bytes'
+SHA-256 — `candidate.output_fingerprint` fingerprints the
+verifier-output manifest, not the record) on the attempt report — and each counts only when the carrier equals the record's
+bound digest, so a document produced for different bytes (or an
+anonymous artifact acceptance with no record input) applies to
+nothing, and without a declared `record_digest` or declared carrier
+no bound document can be attributed. `claim_truth` and
+`artifact_semantics` recovering here is still representation-level
+composition — the fold re-verifies nothing the descriptor declares
+(`recovery_enforcement`/`evidence_authenticity` stay).
 
 ### C11 declared freshness evaluation
 
@@ -4873,8 +4913,11 @@ timestamp inside the signed `subject_digest` upgrades it) and
 decision). A record with no `produced_at` reports
 `freshness_claimed: false` — never an error — so the fold composes
 with every record shape that predates the optional field. Core-side
-emission of `produced_at` is the memo's slice 2 and stays open; C11
-stays partial.
+emission of `produced_at` is the memo's slice 2 — landed on mumei as
+an opt-in `--produced-at` stamp on Evidence records
+([mumei#1110](https://github.com/mumei-lang/mumei/pull/1110)) — and
+`record_freshness` joins the recovery fold through this same
+document; C11 stays partial.
 
 ### C11 audit-side summary-manifest reuse consumption
 

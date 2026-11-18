@@ -1,6 +1,7 @@
 """Tests for the unperformed-check recovery fold and route (#897)."""
 
 import argparse
+import hashlib
 import json
 
 import pytest
@@ -82,6 +83,352 @@ def test_outcome_field_must_be_true():
     assert evaluation["checks"]["signature_verification"] == (
         "evidence_failed"
     )
+
+
+def _recheck_doc(fingerprint, recheck="consistent"):
+    return _doc(
+        "mumei.source-evidence-recheck/v1",
+        evidence_fingerprint=fingerprint,
+        recheck=recheck,
+    )
+
+
+def _accept_doc(schema, fingerprint):
+    return _doc(
+        schema,
+        evidence_fingerprint=fingerprint,
+        accepted=True,
+    )
+
+
+def test_bound_core_docs_recover_semantic_checks():
+    record_bytes = b'{"record": true}'
+    digest = hashlib.sha256(record_bytes).hexdigest()
+    record = _record(
+        "claim_truth",
+        "freshness",
+        "semantic_correspondence",
+        "artifact_semantics",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [
+            _recheck_doc(digest),
+            _accept_doc("mumei.native-evidence-acceptance/v1", digest),
+        ],
+        record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        "artifact_semantics": "recovered",
+    }
+
+
+def test_source_acceptance_recovers_the_same_three():
+    digest = "a" * 64
+    record = _record(
+        "claim_truth", "freshness", "semantic_correspondence",
+        "artifact_semantics",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_accept_doc("mumei.source-evidence-acceptance/v1", digest)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        # the compiled-artifact layer needs the native descriptor
+        "artifact_semantics": "no_evidence",
+    }
+
+
+def test_core_docs_only_count_for_the_bound_record():
+    record = _record("claim_truth", "semantic_correspondence")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_recheck_doc("b" * 64)],
+        record_digest="a" * 64,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "evidence_failed",
+        "semantic_correspondence": "evidence_failed",
+    }
+
+
+def test_core_docs_need_the_claimed_outcome():
+    digest = "a" * 64
+    record = _record("claim_truth")
+    for recheck in ("inconclusive", None, True):
+        evaluation = evaluate_unperformed_check_recovery(
+            record,
+            [_recheck_doc(digest, recheck=recheck)],
+            record_digest=digest,
+        )
+        assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.native-evidence-acceptance/v1",
+              evidence_fingerprint=digest, accepted=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+
+
+def test_core_docs_cannot_be_attributed_without_record_digest():
+    record = _record("claim_truth")
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_recheck_doc("a" * 64)]
+    )
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+    evaluation = evaluate_unperformed_check_recovery(record, [])
+    assert evaluation["checks"]["claim_truth"] == "no_evidence"
+
+
+def test_anonymous_native_acceptance_applies_to_nothing():
+    # Artifact acceptance with no record input carries no
+    # evidence_fingerprint, so it can never be attributed.
+    record = _record("artifact_semantics")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.native-evidence-acceptance/v1", accepted=True)],
+        record_digest="a" * 64,
+    )
+    assert evaluation["checks"]["artifact_semantics"] == "evidence_failed"
+
+
+def test_descriptor_record_recovers_through_declared_carrier():
+    # A Core acceptance descriptor declares its own
+    # checks_not_performed AND the evidence digest it evaluated; a
+    # recheck doc bound to the same evidence recovers its declared
+    # checks even though the descriptor's own bytes differ.
+    evidence_digest = "a" * 64
+    record = _doc(
+        "mumei.source-evidence-acceptance/v1",
+        evidence_fingerprint=evidence_digest,
+        accepted=True,
+        checks_not_performed=[
+            "claim_truth", "semantic_correspondence",
+            "artifact_semantics", "llvm_correspondence",
+        ],
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [
+            _recheck_doc(evidence_digest),
+            _accept_doc("mumei.native-evidence-acceptance/v1",
+                        evidence_digest),
+        ],
+        # the descriptor's own byte digest is different — bound docs
+        # still match its declared carrier
+        record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "recovered",
+        "semantic_correspondence": "recovered",
+        "artifact_semantics": "recovered",
+        "llvm_correspondence": "no_evidence",
+    }
+
+
+def test_declared_carrier_only_binds_that_artifact():
+    record = _doc(
+        "mumei.source-evidence-acceptance/v1",
+        evidence_fingerprint="a" * 64,
+        checks_not_performed=["claim_truth"],
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_recheck_doc("b" * 64)],
+        record_digest="b" * 64,
+    )
+    # the doc binds the descriptor's byte digest but NOT its declared
+    # carrier — the declared carrier names the artifact, so it wins
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+
+
+def _attempt_report(record_digest, accepted=True):
+    """A minimal realistic verify-attempt report.
+
+    `record_digest` is the produced bytes' SHA-256, surfaced at
+    `normalized.stdout.sha256`; `candidate.output_fingerprint` stays a
+    DISTINCT verifier-output-manifest fingerprint — the fold binds the
+    record through the normalized bytes, never the manifest hash.
+    """
+    manifest_fingerprint = "f" * 64
+    return _doc(
+        "mumei.verify-attempt-report/v1",
+        sequence={
+            "schema_version": "mumei.verifier-attempt-sequence/v1",
+            "request_fingerprint": "e" * 64,
+            "timeout_ms": 30000,
+            "attempts": [
+                {
+                    "request_fingerprint": "e" * 64,
+                    "attempt_number": 1,
+                    "state": "exited",
+                }
+            ],
+            "selected_result": {
+                "attempt_number": 1,
+                "output_fingerprint": manifest_fingerprint,
+            },
+        },
+        normalized={
+            "schema_version": "mumei.verifier-run-result/v1",
+            "request_fingerprint": "e" * 64,
+            "attempt_number": 1,
+            "outcome": "exited",
+            "stdout": {"sha256": record_digest, "size_bytes": 2},
+        },
+        candidate={
+            "schema_version": "mumei.verifier-evidence-candidate/v1",
+            "output_fingerprint": manifest_fingerprint,
+        },
+        acceptance={"accepted": accepted},
+    )
+
+
+def test_attempt_report_recovers_five_checks():
+    digest = "a" * 64
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth", "artifact_semantics",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest)], record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "file_identity": "recovered",
+        "producer_authenticity": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        "claim_truth": "recovered",
+        # the artifact layer needs the native descriptor
+        "artifact_semantics": "no_evidence",
+    }
+
+
+def test_attempt_report_recovers_historical_execution():
+    digest = "a" * 64
+    record = _record("historical_execution")
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest)], record_digest=digest,
+    )
+    assert evaluation["checks"]["historical_execution"] == "recovered"
+
+
+def test_real_attempt_report_recovers_produced_record(tmp_path, capsys):
+    """The fold binds a REAL verify-attempt report's declared digests.
+
+    Runs the route against a stub Core so the report shape — where the
+    produced bytes' digest lands — is exercised end to end rather than
+    handwritten."""
+    from tests.test_verify_attempt import (
+        EVIDENCE,
+        _args,
+        _run,
+        _write_core,
+        _write_source,
+    )
+
+    core = _write_core(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"]["accepted"] is True
+
+    # The produced record is the run's stdout bytes verbatim.
+    record_bytes = json.dumps(EVIDENCE).encode()
+    record_digest = hashlib.sha256(record_bytes).hexdigest()
+    assert report["normalized"]["stdout"]["sha256"] == record_digest
+
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth",
+        "historical_execution",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [report], record_digest=record_digest,
+    )
+    assert evaluation["checks"] == {
+        "file_identity": "recovered",
+        "producer_authenticity": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        "claim_truth": "recovered",
+        "historical_execution": "recovered",
+    }
+
+
+def test_attempt_report_requires_accepted_and_bound():
+    digest = "a" * 64
+    record = _record("file_identity", "claim_truth")
+    # not accepted
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest, accepted=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "evidence_failed"
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+    # accepted but bound to a different record
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report("b" * 64)], record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "evidence_failed"
+    # no candidate at all
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.verify-attempt-report/v1",
+              acceptance={"accepted": True})],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "evidence_failed"
+
+
+def test_record_freshness_recovers_via_freshness_eval():
+    record = _record("record_freshness")
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.freshness-evaluation/v1", within_window=True)],
+    )
+    assert evaluation["checks"]["record_freshness"] == "recovered"
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc("mumei.freshness-evaluation/v1", within_window=False)],
+    )
+    assert evaluation["checks"]["record_freshness"] == "evidence_failed"
+
+
+def test_evidence_binding_pins_record_bytes_not_declared_carrier():
+    # A descriptor record declares `subject_digest` for the artifact it
+    # signs; a binding doc still evaluates THIS record's bytes.
+    artifact_digest = "b" * 64
+    record_digest = "c" * 64
+    record = _record("evidence_binding")
+    record["subject_digest"] = artifact_digest
+    bound_to_record = _doc(
+        "mumei.evidence-binding/v1", bound=True, record_digest=record_digest
+    )
+    bound_to_artifact = _doc(
+        "mumei.evidence-binding/v1",
+        bound=True,
+        record_digest=artifact_digest,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [bound_to_record], record_digest=record_digest
+    )
+    assert evaluation["checks"]["evidence_binding"] == "recovered"
+    # A doc bound to the referred artifact is not a binding of THIS
+    # record.
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [bound_to_artifact], record_digest=record_digest
+    )
+    assert evaluation["checks"]["evidence_binding"] == "evidence_failed"
 
 
 def test_foreign_schema_never_counts():
