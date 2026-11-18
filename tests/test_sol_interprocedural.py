@@ -3717,3 +3717,31 @@ def test_attempt_route_forwards_summary_aware_calls(tmp_path, capsys):
     sol.main_attempt(args)
     norm = json.loads(capsys.readouterr().out)["normalized"]
     assert norm["outcome"] == "exited" and norm["exit_code"] != 0
+
+
+def test_inline_depth_cut_rederives_at_top_level():
+    # A callee whose first inline walk stops at the depth limit is
+    # cached unavailable — the top-level pass must re-derive it
+    # rather than publish the depth-limited record.
+    chain = sol.MAX_INLINE_DEPTH + 6
+    src = "\n".join(
+        (
+            f"function f{i}(uint256 x) returns (uint256) "
+            f"{{ return f{i + 1}(x); }}"
+            if i < chain
+            else f"function f{i}(uint256 x) returns (uint256) "
+            "{ return x + 1; }"
+        )
+        for i in range(chain + 1)
+    )
+    s = sol.summarize_solidity(src)
+    fns = {fn.name: fn for fn in s.functions}
+    tail = fns[f"f{chain}"]
+    assert tail.available
+    assert tail.return_dependencies == frozenset({0})
+    # The function whose callee walk hit the limit still
+    # re-derives — its own call chain fully resolves at
+    # depth zero.
+    mid = fns[f"f{chain - 2}"]
+    assert mid.available
+    assert mid.return_dependencies == frozenset({0})
