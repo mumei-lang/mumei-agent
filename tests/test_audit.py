@@ -2860,6 +2860,7 @@ def _attempt_report_json(
     selected: bool = True,
     accepted: bool | None = True,
     check_outcome: str | None = "valid",
+    outcome: str = "exited",
     sha256: str = "b" * 64,
 ) -> str:
     report: dict = {
@@ -2875,7 +2876,7 @@ def _attempt_report_json(
             "request_fingerprint": "a" * 64,
             "attempt_number": 1,
             "timeout_ms": 120000,
-            "outcome": "exited",
+            "outcome": outcome,
             "elapsed_ms": 10,
             "stdout": {"sha256": sha256, "size_bytes": 12},
         },
@@ -3061,6 +3062,410 @@ def test_collect_summary_audits_attempt_passes_go_types_helper(
         "/opt/go-types",
     ]
     assert calls[0][-2:] == ["--attempt-timeout", "5000"]
+
+
+def test_collect_summary_audits_attempt_mapped_unit_runs_reuse_attempt(
+    tmp_path: Path,
+) -> None:
+    """--enable-summary-attempts + --summaries-manifest-map dispatches
+    the <route>-reuse-attempt route: the fingerprint binds the
+    manifest's bytes too, and the same acceptance envelope is
+    recorded with mode reuse-attempt."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=90000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    assert calls == [
+        [
+            "ts-summaries-reuse-attempt",
+            str(ts),
+            "--manifest",
+            str(manifest),
+            "--attempt-timeout",
+            "90000",
+        ]
+    ]
+    assert entries == [
+        {
+            "route": "ts-summaries",
+            "unit": "main.ts",
+            "status": "emitted",
+            "mode": "reuse-attempt",
+            "selected": True,
+            "manifest_sha256": "b" * 64,
+            "check_outcome": "valid",
+            "accepted": True,
+        }
+    ]
+
+
+def test_collect_summary_audits_attempt_reuse_passes_go_types_helper(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    go = tmp_path / "pkg" / "a.go"
+    go.parent.mkdir()
+    go.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [go],
+        "/opt/go-types",
+        manifest_map={"pkg": str(manifest)},
+        attempt_timeout_ms=5000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "reuse-attempt"
+    assert calls == [
+        [
+            "go-summaries-reuse-attempt",
+            "--go-types",
+            "/opt/go-types",
+            "--source",
+            str(go),
+            "--manifest",
+            str(manifest),
+            "--attempt-timeout",
+            "5000",
+        ]
+    ]
+
+
+def test_collect_summary_audits_attempt_stale_manifest_falls_back(
+    tmp_path: Path,
+) -> None:
+    """A mapped unit whose prior manifest is unreadable or malformed
+    falls back to the plain -attempt route with
+    reuse_status: stale_manifest — a bad manifest can never weaken
+    the audit."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    missing = tmp_path / "no-such.json"
+    malformed = tmp_path / "bad.json"
+    malformed.write_text("{not json", encoding="utf-8")
+    not_object = tmp_path / "list.json"
+    not_object.write_text("[1]", encoding="utf-8")
+    too_big = tmp_path / "big.json"
+    too_big.write_bytes(b" " * (1024 * 1024 + 1))
+
+    other = tmp_path / "other.ts"
+    other.write_text("x", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        return _fake_completed(argv, stdout=_attempt_report_json())
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts, other],
+        None,
+        manifest_map={
+            "main.ts": str(missing),
+            "other.ts": str(not_object),
+        },
+        attempt_timeout_ms=1000,
+        runner=runner,
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "attempt"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(missing) not in entries[0]["reuse_error"]
+    assert "<manifest>" in entries[0]["reuse_error"]
+    assert entries[1]["status"] == "emitted"
+    assert entries[1]["mode"] == "attempt"
+    assert entries[1]["reuse_status"] == "stale_manifest"
+    assert calls == [
+        ["ts-summaries-attempt", str(ts), "--attempt-timeout", "1000"],
+        ["ts-summaries-attempt", str(other), "--attempt-timeout", "1000"],
+    ]
+
+    for bad in (malformed, too_big):
+        calls.clear()
+        entries = _collect_summary_audits(
+            tmp_path,
+            [ts],
+            None,
+            manifest_map={"main.ts": str(bad)},
+            attempt_timeout_ms=1000,
+            runner=runner,
+        )
+        assert entries[0]["mode"] == "attempt"
+        assert entries[0]["reuse_status"] == "stale_manifest"
+        assert calls == [
+            ["ts-summaries-attempt", str(ts), "--attempt-timeout", "1000"]
+        ]
+
+
+def test_collect_summary_audits_attempt_rejected_reuse_falls_back(
+    tmp_path: Path,
+) -> None:
+    """A reuse-attempt lifecycle that reports a rejected manifest
+    (the route exits 0 without a selected, accepted result — e.g. a
+    schema-invalid JSON object passing the pre-read) falls back to the
+    plain -attempt route, mirroring the non-attempt reuse path."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        rejected = _attempt_report_json(
+            selected=False, accepted=False, check_outcome="failed"
+        )
+        accepted = _attempt_report_json()
+        return _fake_completed(
+            argv,
+            stdout=rejected if "-reuse-attempt" in argv[0] else accepted,
+        )
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=1000,
+        runner=runner,
+    )
+
+    assert calls == [
+        [
+            "ts-summaries-reuse-attempt",
+            str(ts),
+            "--manifest",
+            str(manifest),
+            "--attempt-timeout",
+            "1000",
+        ],
+        ["ts-summaries-attempt", str(ts), "--attempt-timeout", "1000"],
+    ]
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "attempt"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(manifest) not in entries[0]["reuse_error"]
+    # the fallback -attempt report's envelope is what lands
+    assert entries[0]["accepted"] is True
+
+
+def test_collect_summary_audits_attempt_schema_invalid_manifest_falls_back_real_route(
+    tmp_path: Path,
+) -> None:
+    """Real route, no mocks: mapping a schema-invalid manifest (``{}``
+    passes the JSON-object pre-read but fails the route's strict
+    restore) falls back to the plain -attempt route."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("export const g = () => 1\n", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=60000,
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "attempt"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(manifest) not in entries[0]["reuse_error"]
+    # the real -attempt lifecycle selected and accepted a summary
+    assert entries[0]["selected"] is True
+    assert entries[0]["accepted"] is True
+
+
+def test_collect_summary_audits_attempt_reuse_timeout_records_as_is(
+    tmp_path: Path,
+) -> None:
+    """A reuse-attempt lifecycle that never evaluated the manifest —
+    a timeout or transport failure, not a rejection — records its
+    honest reuse-attempt entry: no stale_manifest label and no
+    fallback masking it with a fresh acceptance."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}),
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=1000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(
+            argv,
+            stdout=_attempt_report_json(
+                selected=False,
+                accepted=False,
+                check_outcome=None,
+                outcome="timeout",
+            ),
+        ),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == "ts-summaries-reuse-attempt"
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "reuse-attempt"
+    assert entries[0]["selected"] is False
+    assert entries[0]["accepted"] is False
+    assert "reuse_status" not in entries[0]
+
+
+def test_collect_summary_audits_attempt_unmapped_unit_stays_attempt(
+    tmp_path: Path,
+) -> None:
+    """With a manifest map declared, units absent from it run the
+    plain -attempt route — only mapped units replay a manifest."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    rs = tmp_path / "lib.rs"
+    rs.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}),
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [rs, ts],
+        None,
+        manifest_map={"lib.rs": str(manifest)},
+        attempt_timeout_ms=1000,
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+
+    by_unit = {entry["unit"]: entry for entry in entries}
+    assert by_unit["lib.rs"]["mode"] == "reuse-attempt"
+    assert "reuse_status" not in by_unit["lib.rs"]
+    assert by_unit["main.ts"]["mode"] == "attempt"
+    assert "reuse_status" not in by_unit["main.ts"]
+    assert calls == [
+        [
+            "rust-summaries-reuse-attempt",
+            str(rs),
+            "--manifest",
+            str(manifest),
+            "--attempt-timeout",
+            "1000",
+        ],
+        ["ts-summaries-attempt", str(ts), "--attempt-timeout", "1000"],
+    ]
+
+
+def test_audit_directory_reuse_attempt_renders_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: --enable-summary-attempts with a manifest map
+    dispatches <route>-reuse-attempt and the rendered summary shows
+    mode=reuse-attempt rather than the produce-route detail line."""
+    src = tmp_path / "src"
+    src.mkdir()
+    unit = src / "util.ts"
+    unit.write_text("export const g = () => 1\n", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}),
+        encoding="utf-8",
+    )
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        "agent.audit._run_summary_route",
+        lambda argv: seen.append(argv)
+        or _fake_completed(argv, stdout=_attempt_report_json()),
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(
+        src,
+        enable_summaries=True,
+        enable_summary_attempts=True,
+        summaries_manifest_map={"util.ts": str(manifest)},
+    )
+
+    assert seen == [
+        [
+            "ts-summaries-reuse-attempt",
+            str(unit),
+            "--manifest",
+            str(manifest),
+            "--attempt-timeout",
+            "120000",
+        ]
+    ]
+    assert result.summary_audits == [
+        {
+            "route": "ts-summaries",
+            "unit": "util.ts",
+            "status": "emitted",
+            "mode": "reuse-attempt",
+            "selected": True,
+            "manifest_sha256": "b" * 64,
+            "check_outcome": "valid",
+            "accepted": True,
+        }
+    ]
+    assert "mode=reuse-attempt" in result.summary
 
 
 def test_collect_summary_audits_attempt_failures_stay_advisory(
@@ -3632,8 +4037,8 @@ def test_summary_attempts_flag_gating(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(no_enable)
 
-    # attempts cannot combine with the manifest map — there is no
-    # attempt variant of *-summaries-reuse
+    # attempts now combine with the manifest map — a mapped unit runs
+    # its *-summaries-reuse-attempt route
     combined = build_parser().parse_args(
         [
             "--code-file",
@@ -3644,8 +4049,8 @@ def test_summary_attempts_flag_gating(tmp_path: Path) -> None:
             str(map_path),
         ]
     )
-    with pytest.raises(SystemExit):
-        main(combined)
+    assert combined.enable_summary_attempts is True
+    assert combined.summaries_manifest_map == str(map_path)
 
     ok = build_parser().parse_args(
         [
