@@ -19,6 +19,7 @@ fails statically.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -52,11 +53,15 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _read_declared(path: str) -> dict:
+def _read_declared_bytes(path: str) -> bytes:
     with open(path, "rb") as handle:
         data = handle.read(MAX_DOCUMENT_BYTES + 1)
     if len(data) > MAX_DOCUMENT_BYTES:
         raise ValueError("declared document exceeds the bounded read limit")
+    return data
+
+
+def _parse_declared(data: bytes) -> dict:
     try:
         value = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -66,9 +71,17 @@ def _read_declared(path: str) -> dict:
     return value
 
 
+def _read_declared(path: str) -> dict:
+    return _parse_declared(_read_declared_bytes(path))
+
+
 def main_eval(args: argparse.Namespace | None = None) -> int:
     try:
-        record = _read_declared(args.record)
+        record_bytes = _read_declared_bytes(args.record)
+        record = _parse_declared(record_bytes)
+        # SHA-256 of the record's raw bytes — the digest a bound
+        # binding document must pin to count toward `evidence_binding`.
+        record_digest = hashlib.sha256(record_bytes).hexdigest()
         evidence_paths = list(args.evidence)
         output_path = getattr(args, "output", None)
         if output_path is not None:
@@ -83,7 +96,9 @@ def main_eval(args: argparse.Namespace | None = None) -> int:
                 except FileNotFoundError:
                     pass
         evidence = [_read_declared(path) for path in evidence_paths]
-        recovery = evaluate_unperformed_check_recovery(record, evidence)
+        recovery = evaluate_unperformed_check_recovery(
+            record, evidence, record_digest=record_digest
+        )
         text = json.dumps(recovery, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)

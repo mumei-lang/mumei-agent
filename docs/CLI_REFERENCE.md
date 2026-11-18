@@ -54,6 +54,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `signature-verify` | 5 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
 | `recovery-eval` | 3 | Fold a declared record's checks_not_performed over supporting evaluation documents and emit the recovery descriptor. |
 | `freshness-eval` | 4 | Evaluate a declared record's produced_at freshness claim against a declared reference time and emit the evaluation descriptor. |
+| `binding-eval` | 3 | Pin a declared subject-bearing document to record bytes and emit the binding descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -775,6 +776,19 @@ Evaluate a declared record's produced_at freshness claim against a declared refe
 | `--reference-time` | `<RFC3339>` | yes | — | The caller's declared reference time (RFC 3339 with timezone, e.g. 2026-11-18T00:00:00Z). The fold never reads the system clock. |
 | `--max-age-seconds` | `<N>` | yes | — | Declared freshness window: produced_at must be no older than reference_time minus N seconds. |
 | `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent binding-eval`
+
+Pin a declared subject-bearing document to record bytes and emit the binding descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--record` | `<PATH>` | yes | — | Record file whose raw bytes the document should cover. The bytes are hashed, never parsed. |
+| `--evidence` | `<PATH>` | yes | — | Declared JSON document carrying a subject digest — a producer-signature envelope or a Core acceptance descriptor. |
+| `--output` | `<PATH>` | no | — | Write the binding descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent evidence-identity-check`

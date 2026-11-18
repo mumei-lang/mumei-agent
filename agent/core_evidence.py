@@ -4,6 +4,7 @@ No default route uses this API. The host must authorize the call and supply a
 trusted executable; an absolute path is not authentication or a sandbox.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -624,6 +625,70 @@ def verify_signature_envelope(
     return verification
 
 
+# Evidence-binding schema: pin a subject-bearing document to the record
+# bytes it is said to cover.
+EVIDENCE_BINDING_SCHEMA = "mumei.evidence-binding/v1"
+
+# Which declared field of each subject-bearing schema carries the
+# record's SHA-256 digest. Both conventions hash the record's raw
+# bytes: `subject_digest` on a producer-signature envelope and
+# `evidence_fingerprint` on a Core acceptance descriptor are the same
+# SHA-256 a consumer reproduces with `sha256sum`.
+_BINDING_CARRIERS: dict = {
+    PRODUCER_SIGNATURE_SCHEMA: "subject_digest",
+    "mumei.source-evidence-acceptance/v1": "evidence_fingerprint",
+    "mumei.native-evidence-acceptance/v1": "evidence_fingerprint",
+}
+
+
+def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
+    """Pin a declared subject-bearing document to record bytes.
+
+    Emits ``mumei.evidence-binding/v1``: `record_digest` is the
+    SHA-256 lowercase hex of the supplied record's raw bytes —
+    recomputed by the fold, never trusted from a declared pin.
+    `carrier_match` holds only when `document` is an object whose
+    `schema_version` names a declared subject-bearing schema (a
+    producer-signature envelope's `subject_digest`, or a Core
+    acceptance descriptor's `evidence_fingerprint`). `subject_declared`
+    holds only when the matched carrier's subject field carries a
+    64-char lowercase-hex value. `bound` holds only when all three
+    hold AND the declared digest equals `record_digest` — a mismatched
+    or missing subject reports `false` observations, never an error,
+    since a document may honestly describe a different record.
+
+    This is representation-level: the document is trusted as declared
+    (`carrier_authenticity` — the fold never verifies the document's
+    own checks or signature) and the report gates nothing itself
+    (`binding_enforcement` stays in `checks_not_performed`)."""
+    if type(record) is not bytes:
+        raise ValueError("unsupported evidence binding record")
+    if type(document) is not dict:
+        raise ValueError("unsupported evidence binding document")
+    record_digest = hashlib.sha256(record).hexdigest()
+    schema = document.get("schema_version")
+    field = (
+        _BINDING_CARRIERS.get(schema) if type(schema) is str else None
+    )
+    match = field is not None
+    declared = (
+        _is_fingerprint(document.get(field)) if match else False
+    )
+    return {
+        "schema_version": EVIDENCE_BINDING_SCHEMA,
+        "record_digest": record_digest,
+        "carrier_match": match,
+        "subject_declared": declared,
+        "bound": match
+        and declared
+        and document[field] == record_digest,
+        "checks_not_performed": [
+            "carrier_authenticity",
+            "binding_enforcement",
+        ],
+    }
+
+
 # Unperformed-check recovery schema (the composition fold issue
 # mumei-agent#897's memo fixes): which of a record's declared
 # ``checks_not_performed`` a set of supporting documents covers.
@@ -657,11 +722,31 @@ _CHECK_PERFORMERS: dict = {
     "freshness": [
         ("mumei.freshness-evaluation/v1", "within_window"),
     ],
+    "evidence_binding": [
+        (EVIDENCE_BINDING_SCHEMA, "bound"),
+    ],
 }
 
 
+def _performer_document_applies(
+    schema: str, doc: dict, record_digest: str | None
+) -> bool:
+    """Whether a performer-schema document counts for *this* record.
+
+    A binding document pins itself to one record's digest, so it only
+    applies when the fold has a declared `record_digest` the document
+    matches; every other performer schema applies record-agnostically
+    (their own binding is a separate, still-declared check)."""
+    if schema == EVIDENCE_BINDING_SCHEMA:
+        return (
+            record_digest is not None
+            and doc.get("record_digest") == record_digest
+        )
+    return True
+
+
 def evaluate_unperformed_check_recovery(
-    record: dict, evidence: list
+    record: dict, evidence: list, record_digest: str | None = None
 ) -> dict:
     """Fold a record's declared ``checks_not_performed`` over the
     supporting documents into a recovery report.
@@ -689,9 +774,21 @@ def evaluate_unperformed_check_recovery(
     they are trusted as declared), and does not bind a document to the
     record it is said to cover (`evidence_binding` stays — a
     freshness doc counts whether or not it was produced for this
-    record)."""
+    record).
+
+    `record_digest` declares the SHA-256 of the record's bytes (the
+    `recovery-eval` route recomputes it from the record file; dict
+    callers declare it like `expected_fingerprint`). An
+    `mumei.evidence-binding/v1` performer document then counts only
+    when it is `bound` AND its `record_digest` equals the declared
+    digest — a bound document for a *different* record can never
+    recover this record's `evidence_binding`. Without a declared
+    digest no binding document can be attributed, so the check stays
+    unrecovered."""
     if type(record) is not dict:
         raise ValueError("unsupported check-recovery request")
+    if record_digest is not None and not _is_fingerprint(record_digest):
+        raise ValueError("invalid record digest")
     evidence = evidence or []
     if any(type(doc) is not dict for doc in evidence):
         raise ValueError("unsupported check-recovery evidence document")
@@ -720,7 +817,11 @@ def evaluate_unperformed_check_recovery(
             if status == "no_evidence":
                 status = "evidence_failed"
             if any(
-                doc.get(field) is True for doc in schema_to_docs[schema]
+                doc.get(field) is True
+                and _performer_document_applies(
+                    schema, doc, record_digest
+                )
+                for doc in schema_to_docs[schema]
             ):
                 status = "recovered"
                 break

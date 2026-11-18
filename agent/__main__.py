@@ -58,6 +58,7 @@ _SUBCOMMANDS = {
     "signature-verify",
     "recovery-eval",
     "freshness-eval",
+    "binding-eval",
     "evidence-compare",
     "evidence-identity-check",
     "evidence-producer-check",
@@ -799,6 +800,23 @@ def main() -> None:
         freshness_eval_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(freshness_eval_main(args))
+    elif command == "binding-eval":
+        import argparse
+        from agent.binding_eval import (
+            build_eval_parser as binding_eval_build_parser,
+            main_eval as binding_eval_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent binding-eval",
+            description=(
+                "Pin a declared subject-bearing document to record "
+                "bytes and emit the binding descriptor."
+            ),
+        )
+        binding_eval_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(binding_eval_main(args))
     elif command == "evidence-identity-check":
         import argparse
         from agent.evidence_identity import (

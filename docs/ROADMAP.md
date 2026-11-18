@@ -4823,6 +4823,42 @@ land in the report. Reuse counts are observed metadata only:
 `summary_audits` stays advisory and carries no verdict.
 
 
+### C11 declared evidence binding over record bytes
+
+`agent.core_evidence.evaluate_evidence_binding(record, document)` and
+the `binding-eval` route close the last representation-level gap the
+recovery fold names: `evidence_binding`. The route reads a record's
+raw bytes — never parsed, so any bounded document binds the same way —
+and emits `mumei.evidence-binding/v1` reporting the recomputed
+`record_digest` (SHA-256 of the bytes, the same convention as
+`subject_digest` / `evidence_fingerprint`), `carrier_match` (the
+document's `schema_version` is a declared subject-bearing schema),
+`subject_declared` (the carrier's subject field is a well-formed
+digest) and `bound` (the declared digest equals the record's).
+
+Attribution is closed like the recovery fold: `_BINDING_CARRIERS` pins
+the subject field per schema (`mumei.producer-signature/v1` →
+`subject_digest`; `mumei.source-evidence-acceptance/v1` and
+`mumei.native-evidence-acceptance/v1` → `evidence_fingerprint`), so a
+document never declares its own coverage and a foreign schema never
+binds. A mismatched or missing subject reports `bound: false` — never
+an error — since a document may honestly describe a different record.
+
+A `bound` binding document now performs `evidence_binding` in the
+recovery fold (`_CHECK_PERFORMERS`), so subject-bound recovery
+composes: `recovery-eval` plus `binding-eval` reports which recovered
+documents actually cover this record. The recovery fold only counts a
+binding document whose `record_digest` equals the record's own
+SHA-256 — the `recovery-eval` route recomputes it from the record
+file, dict callers declare it like `expected_fingerprint` — so a bound
+document for a different record can never recover this record's
+`evidence_binding`. The fold stays
+representation-level: `carrier_authenticity` (the document is trusted
+as declared — its own checks and signature are not re-verified) and
+`binding_enforcement` (the report is an observation; gating is a host
+decision) stay in `checks_not_performed`. C11 stays partial.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
