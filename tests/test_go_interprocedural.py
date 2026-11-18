@@ -13233,6 +13233,27 @@ def test_local_channel_alias_swap_keeps_earlier_alias_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_local_channel_alias_swap_keeps_queue_contents(
+    go_types_helper,
+):
+    # `a <- x; a, b = b, a; return <-b` — the reseat redirects only
+    # the names; the sent value stays in the original queue's slot,
+    # which `b` now names.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\ta := make(chan int64)\n"
+            "\tb := make(chan int64)\n"
+            "\ta <- x\n"
+            "\ta, b = b, a\n"
+            "\treturn <-b\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_parameter_alias_send_recv(go_types_helper):
     # `ch2 := p` on a `chan` parameter aliases the caller-shared
     # queue: the send records the imported transfer on p's

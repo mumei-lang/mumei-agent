@@ -5153,6 +5153,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                     if chan_alias is not None:
                         self.chan_aliases[ref.binding_id] = chan_alias.id
+                        # A reseat redirects only the name — the
+                        # `_store` below would overwrite
+                        # `locals_[ref.binding_id]`, but that slot
+                        # IS the old queue's contents, now owned by
+                        # whoever aliases it (`a <- x; a, b = b, a`
+                        # must keep x reachable through `b`).
+                        continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
                 if not accumulating:
