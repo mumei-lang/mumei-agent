@@ -59,6 +59,7 @@ _SUBCOMMANDS = {
     "evidence-check-consistency",
     "evidence-acceptance-eval",
     "signature-eval",
+    "signature-sign",
     "signature-verify",
     "recovery-eval",
     "freshness-eval",
@@ -787,6 +788,24 @@ def main() -> None:
         signature_verify_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(signature_verify_main(args))
+    elif command == "signature-sign":
+        import argparse
+        from agent.signature_sign import (
+            build_sign_parser as signature_sign_build_parser,
+            main_sign as signature_sign_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent signature-sign",
+            description=(
+                "Sign a declared record's digest into a detached "
+                "mumei.producer-signature/v1 envelope under a "
+                "declared ed25519 secret key."
+            ),
+        )
+        signature_sign_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(signature_sign_main(args))
     elif command == "recovery-eval":
         import argparse
         from agent.recovery_eval import (

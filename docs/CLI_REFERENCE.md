@@ -53,6 +53,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
 | `signature-eval` | 4 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
 | `signature-verify` | 5 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
+| `signature-sign` | 4 | Sign a declared record's digest into a detached mumei.producer-signature/v1 envelope under a declared ed25519 secret key. |
 | `recovery-eval` | 3 | Fold a declared record's checks_not_performed over supporting evaluation documents and emit the recovery descriptor. |
 | `freshness-eval` | 4 | Evaluate a declared record's produced_at freshness claim against a declared reference time and emit the evaluation descriptor. |
 | `binding-eval` | 3 | Pin a declared subject-bearing document to record bytes and emit the binding descriptor. |
@@ -794,6 +795,20 @@ Verify a declared producer-signature envelope's ed25519 signature under a declar
 | `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex). When supplied the verification emits subject_bound comparing it to the envelope's subject_digest. |
 | `--expected-producer-key` | `<ID>` | no | — | Declared producer key id the caller trusts, arriving over a separately trusted channel. When supplied the verification emits key_pinned comparing it to the envelope's producer_key_id. |
 | `--output` | `<PATH>` | no | — | Write the verification descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent signature-sign`
+
+Sign a declared record's digest into a detached mumei.producer-signature/v1 envelope under a declared ed25519 secret key.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--record` | `<PATH>` | yes | — | Declared record whose raw bytes are SHA-256'd into the envelope's subject_digest. |
+| `--key-file` | `<PATH>` | yes | — | File holding the 64-char lowercase-hex ed25519 secret key (the shape `mumei evidence keygen --secret-file` writes). The key material is never printed or emitted. |
+| `--producer-key-id` | `<ID>` | yes | — | Declared producer key id carried in the envelope — a label the consumer pins separately via --expected-producer-key, not an attested identity. |
+| `--output` | `<PATH>` | no | — | Write the signature envelope to PATH instead of stdout. |
 
 
 ## `mumei-agent recovery-eval`

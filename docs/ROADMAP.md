@@ -4899,8 +4899,8 @@ ed25519 signature bytes (`signature_verification` stays), the pinned
 key's own authenticity (`key_authenticity` stays — the caller-side pin
 is trusted as declared), freshness (`envelope_freshness` stays — a
 stale-but-well-formed envelope still matches) or revocation
-(`key_revocation` stays). Signing, key generation, rotation and the
-Core producer side are separate later slices; C11 stays partial.
+(`key_revocation` stays). Rotation and the Core producer side are
+separate later slices; C11 stays partial.
 
 ### C11 declared producer-signature verification
 
@@ -4931,9 +4931,33 @@ is trusted as declared — a verifying signature binds that key to the
 digest, it does not establish the key is the producer's),
 `envelope_freshness` stays (a stale-but-signed envelope verifies) and
 `key_revocation` stays. An unmatched envelope or a failed verify
-reports `false` observations, never an error. Signing, key
-generation, rotation and the Core producer side are separate later
-slices; C11 stays partial.
+reports `false` observations, never an error. Signing is a later
+slice (see `signature-sign` below); rotation and the Core producer
+side are separate later slices; C11 stays partial.
+
+### C11 declared producer-record signing
+
+`agent.core_evidence.sign_producer_record(record, secret_key,
+producer_key_id)` and the `signature-sign` route produce the
+`mumei.producer-signature/v1` envelope `signature-verify` consumes,
+over a caller-declared record file and ed25519 secret key file
+(`--record`, `--key-file`, `--producer-key-id`, `--output`). The key
+file follows the Core convention: exactly 64 lowercase-hex characters
+of a 32-byte ed25519 secret — strict ASCII, no whitespace or other
+trimmable bytes admitted — and the signed payload is
+`sha256(record bytes)`'s lowercase-hex ASCII encoding, the same
+message `crypto_verify_signature` verifies. Both inputs are bounded
+reads (record ≤ `MAX_INPUT_BYTES` matching the Core limit, key file
+≤ 256 bytes), and `--output` refuses to overwrite either declared
+input by inode. The secret is a declared input only: it never
+appears in the emitted envelope, in error text, or on any output
+surface — malformed key material reports only
+`invalid producer key material`.
+
+Signing claims nothing beyond producing the envelope: key generation
+(the `mumei evidence keygen` side), key authenticity, rotation and
+revocation policy, and the Core producer signing its own records are
+separate slices; C11 stays partial.
 
 ### C11 declared unperformed-check recovery
 
