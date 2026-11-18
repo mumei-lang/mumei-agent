@@ -888,13 +888,21 @@ class TsSummarySet:
     context_key: str
     functions: tuple[TsFunctionSummary, ...]
     profile: str = PROFILE
+    # `mumei.ts-summaries --summary-aware-calls` advisory counts:
+    # external calls folded onto declared summaries, left opaque
+    # and manifest entries no call referenced — descriptive only,
+    # never a verdict. Absent when the flag was not given.
+    call_modeling: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "schema_version": self.profile,
             "context_key": self.context_key,
             "functions": [f.to_dict() for f in self.functions],
         }
+        if self.call_modeling is not None:
+            result["call_modeling"] = self.call_modeling
+        return result
 
     @classmethod
     def from_dict(cls, value) -> "TsSummarySet":
@@ -907,13 +915,41 @@ class TsSummarySet:
         v = _manifest_record(
             value,
             ("schema_version", "context_key", "functions"),
+            ("call_modeling",),
         )
         _require_manifest(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
         _require_manifest(len(functions) <= MAX_MANIFEST_MEMBERS)
+        call_modeling = None
+        if "call_modeling" in v:
+            m = _manifest_record(
+                v["call_modeling"],
+                (
+                    "summary_modeled_calls",
+                    "opaque_calls",
+                    "summary_unmatched",
+                ),
+            )
+            for key_ in (
+                "summary_modeled_calls",
+                "opaque_calls",
+                "summary_unmatched",
+            ):
+                _require_manifest(
+                    type(m[key_]) is int and m[key_] >= 0
+                )
+            call_modeling = {
+                k: m[k]
+                for k in (
+                    "summary_modeled_calls",
+                    "opaque_calls",
+                    "summary_unmatched",
+                )
+            }
         return cls(
             _string(v["context_key"]),
             tuple(TsFunctionSummary.from_dict(f) for f in functions),
+            call_modeling=call_modeling,
         )
 
 
@@ -1026,9 +1062,19 @@ class _External:
     """An imported name: the callee/ctor lives outside the unit.
     A call through it records a `TsCall` transfer and yields the
     union of its actuals (the opaque-callee over-approximation);
-    any member read stays external (a namespace import)."""
+    any member read stays external (a namespace import).
 
-    __slots__ = ()
+    `name` carries the export name the import declared — `import
+    {g as h}` yields `\"g\"`, `import g from './m'` yields
+    `\"default\"` and `import * as ns` yields `\"*\"` (a member read
+    on it then carries the member's own name); `None` marks an
+    external no declared-manifest entry may match (a global, a
+    member of a named import, a `require` result)."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name=None):
+        self.name = name
 
 
 class _Class:
@@ -1536,6 +1582,7 @@ class _Builder:
         module_cache=None,
         module_digests=None,
         source_path=None,
+        declared=None,
     ) -> None:
         self.functions: dict[str, object] = {}
         self.classes: dict[str, object] = {}
@@ -1608,7 +1655,23 @@ class _Builder:
         # admitted kind — ambient declares, namespaces and
         # top-level statements all qualify.
         self.unit_gap: TsGap | None = None
-        self.imports: set[str] = set()
+        # Local name -> the export name the import declared
+        # (`\"*\"` for a namespace import, `\"default\"` for a default
+        # import); resolution failures stay `_External(imported)`.
+        self.imports: dict[str, str] = {}
+        # Declared callee manifest from `--summary-aware-calls` —
+        # export name -> `TsFunctionSummary`, colliding names
+        # already dropped by `_declared_map`. `None` = no declared
+        # input (every `_External` call stays opaque); a resolved
+        # module's own `_Builder` never receives it.
+        self.declared: dict[str, TsFunctionSummary] | None = declared
+        # Names of manifest entries a fold-matched call referenced
+        # (hit or gate-fail) — feeds `summary_unmatched`.
+        self._declared_seen: set[str] = set()
+        # (start, end) spans of external calls folded onto declared
+        # summaries vs left opaque — feeds `call_modeling`.
+        self._modeled_spans: set[tuple[int, int]] = set()
+        self._opaque_spans: set[tuple[int, int]] = set()
         # Module-scope value bindings — top-level declarators
         # evaluated in source order in pass 2, read by `_lookup`
         # after params and before the class/import registries.
@@ -2088,7 +2151,7 @@ class _Builder:
                     self.imported_bindings[local] = exports[imported]
                     bound = True
             if not bound:
-                self.imports.add(local)
+                self.imports[local] = imported
 
     def _resolve_module(self, node):
         """Resolve this import's specifier to the imported
@@ -4104,7 +4167,7 @@ class _Builder:
         if name in self.imported_bindings:
             return self.imported_bindings[name]
         if name in self.imports:
-            return _External()
+            return _External(self.imports[name])
         if name in _GLOBALS:
             return _External()
         raise _Unsupported("binding_unavailable", span)
@@ -4242,8 +4305,14 @@ class _Builder:
         for idx, key in enumerate(path):
             if isinstance(val, _External):
                 # Any member of an imported name stays external
-                # (`ns.f`, `ns.a.b`) — the callee lives outside.
-                return val
+                # (`ns.f`, `ns.a.b`) — the callee lives outside. A
+                # namespace's member carries the member name for a
+                # declared-manifest match; a member of a NAMED
+                # external is no longer nameable (`g.f` must not
+                # fold onto a manifest's plain `f`).
+                if val.name == "*" and key is not None:
+                    return _External(key)
+                return _External()
             if isinstance(val, _Class):
                 # `C.sm` / `C.sf` — statics and methods on the
                 # class object itself.
@@ -6182,6 +6251,67 @@ class _Builder:
                 val.fields.get("*", frozenset()), deps
             )
 
+    def _declared_call_summary(self, raw, actual):
+        """The declared callee summary an `_External` call folds.
+
+        Matching is the export name the import declared (`import
+        {g as h}` calls fold onto the manifest's `g`, an unresolved
+        `ns.f` onto `f`), never the caller's local alias — a
+        `None`/`"*"` name, a manifest miss, a gapped or arity-/
+        ordinal-mismatched entry all keep the opaque path, so a
+        partial or stale manifest can never narrow below the width
+        a run without the flag reports. The entry's name records a
+        reference for `summary_unmatched` on ANY match — the count
+        is about declared summaries a call asked for, not about
+        gates passed.
+        """
+        if not self.declared:
+            return None
+        name = getattr(raw, "name", None)
+        if not name or name == "*":
+            return None
+        if name not in self.declared:
+            return None
+        self._declared_seen.add(name)
+        summary = self.declared[name]
+        if summary is None:
+            # A name two manifest entries share — the tombstone
+            # rejects the fold like a miss.
+            return None
+        if (
+            not summary.available
+            or summary.return_dependencies is None
+            or len(summary.parameters) != len(actual)
+            or len(actual) > 0
+            and max(summary.return_dependencies, default=-1)
+            >= len(actual)
+        ):
+            return None
+        return summary
+
+    def _fold_call_result(
+        self, raw, actual, vals, span
+    ):
+        """A folded call's result deps, or None to stay opaque.
+
+        `result` unions only the actuals the declared
+        `return_dependencies` names. Store-through-alias widening
+        applies only when the callee's declared `effects` is
+        `unknown` — a callee that derived no transfers asserts no
+        effectful call, so its arguments take no may-write.
+        """
+        summary = self._declared_call_summary(raw, actual)
+        if summary is None:
+            self._opaque_spans.add((span.start, span.end))
+            return None
+        result = frozenset()
+        for i in summary.return_dependencies:
+            result |= actual[i]
+        if summary.effects == "unknown":
+            self._opaque_call_writes(vals, result)
+        self._modeled_spans.add((span.start, span.end))
+        return result
+
     def _funproto_call(
         self,
         prop,
@@ -7197,7 +7327,14 @@ class _Builder:
             if isinstance(raw_n, _External):
                 # `new` on an imported ctor — the instance shape
                 # is unknown; the value conservatively carries
-                # every actual's deps.
+                # every actual's deps. Constructor semantics never
+                # fold onto a declared function summary (the
+                # manifest's ordinals describe a plain call's
+                # params, not `new`'s this-binding), so the call
+                # always counts opaque.
+                self._opaque_spans.add(
+                    (_span(node).start, _span(node).end)
+                )
                 result_n = frozenset()
                 for a in actual_n:
                     result_n |= a
@@ -7296,10 +7433,14 @@ class _Builder:
                     # fallbacks below decide before closing.
                     raw = frozenset()
                 if isinstance(raw, _External):
-                    result_m = frozenset()
-                    for a in actual_m:
-                        result_m |= a
-                    self._opaque_call_writes(vals_m, result_m)
+                    result_m = self._fold_call_result(
+                        raw, actual_m, vals_m, _span(node)
+                    )
+                    if result_m is None:
+                        result_m = frozenset()
+                        for a in actual_m:
+                            result_m |= a
+                        self._opaque_call_writes(vals_m, result_m)
                     transfers.append(
                         TsCall(
                             _span(node),
@@ -7566,6 +7707,9 @@ class _Builder:
                     node,
                     values_out=vals_i,
                 )
+                self._opaque_spans.add(
+                    (_span(node).start, _span(node).end)
+                )
                 result_i = frozenset()
                 for a in actual_i:
                     result_i |= a
@@ -7617,6 +7761,20 @@ class _Builder:
                         )
                     )
                     return result_e
+                if isinstance(raw, _External):
+                    result_e = self._fold_call_result(
+                        raw, actual_e, vals_e, _span(node)
+                    )
+                    if result_e is not None:
+                        transfers.append(
+                            TsCall(
+                                _span(node),
+                                _callee_name(function),
+                                actual_e,
+                                result_e,
+                            )
+                        )
+                        return result_e
                 result_e = frozenset() if isinstance(raw, _External) else _scalar_of(raw)
                 for a in actual_e:
                     result_e |= a
@@ -7675,10 +7833,14 @@ class _Builder:
                     callee, params, locals_, _span(function)
                 )
                 if isinstance(raw, _External):
-                    result_i = frozenset()
-                    for a in actual:
-                        result_i |= a
-                    self._opaque_call_writes(vals, result_i)
+                    result_i = self._fold_call_result(
+                        raw, actual, vals, _span(node)
+                    )
+                    if result_i is None:
+                        result_i = frozenset()
+                        for a in actual:
+                            result_i |= a
+                        self._opaque_call_writes(vals, result_i)
                     transfers.append(
                         TsCall(
                             _span(node), callee, actual, result_i
@@ -7809,8 +7971,40 @@ class _Builder:
         raise _Unsupported("unsupported_expression", _span(node))
 
 
+def _declared_map(declared: "TsSummarySet | None"):
+    """Export-name keyed lookup for `--summary-aware-calls`.
+
+    A name two manifest entries share can never fold — comparing
+    one while deriving the other would swap summaries — so it maps
+    to a `None` tombstone the fold path rejects like a miss.
+    """
+    result: dict[str, TsFunctionSummary | None] = {}
+    if declared is not None:
+        for f in declared.functions:
+            result[f.name] = None if f.name in result else f
+    return result
+
+
+def _call_modeling(builder, declared):
+    """The manifest's advisory `call_modeling` block, or None."""
+    if declared is None:
+        return None
+    return {
+        "summary_modeled_calls": len(builder._modeled_spans),
+        "opaque_calls": len(builder._opaque_spans),
+        "summary_unmatched": sum(
+            1
+            for f in declared.functions
+            if f.name not in builder._declared_seen
+        ),
+    }
+
+
 def summarize_typescript(
-    source: "str | bytes", resolver=None, source_path=None
+    source: "str | bytes",
+    resolver=None,
+    source_path=None,
+    declared: "TsSummarySet | None" = None,
 ) -> TsSummarySet:
     """Compose conservative dependencies only; never infer equality or
     safety.
@@ -7829,6 +8023,16 @@ def summarize_typescript(
     records a transfer and yields the actuals' union, the same
     over-approximation as before resolution existed, so resolution
     can only ever sharpen a summary, never weaken it.
+
+    `declared` is the `--summary-aware-calls` callee manifest —
+    declared data trusted as asserted. An `_External` call whose
+    export name it covers folds the declared `return_dependencies`
+    through the actuals instead of the opaque every-argument
+    union; a manifest miss, a gapped entry or an arity/ordinal
+    mismatch keeps the opaque shape, so the fold can never narrow
+    below what a run without the flag reports. Matching is name-
+    level only within the root unit — a resolved module's builder
+    sees no declared input.
     """
     raw = source.encode() if isinstance(source, str) else source
     root = _syntax(raw)
@@ -7838,11 +8042,13 @@ def summarize_typescript(
             (),
         )
     module_digests: dict[str, str] = {}
+    declared_map = _declared_map(declared)
     builder = _Builder(
         root,
         resolver=resolver,
         module_digests=module_digests,
         source_path=source_path,
+        declared=declared_map if declared is not None else None,
     )
     functions = builder.summarize_all()
     context = hashlib.sha256(raw)
@@ -7857,6 +8063,7 @@ def summarize_typescript(
     return TsSummarySet(
         context.hexdigest(),
         functions,
+        call_modeling=_call_modeling(builder, declared),
     )
 
 
@@ -7901,6 +8108,16 @@ def build_parser(parser=None):
         help="Resolve relative './'/'../' import specifiers to "
         "source files under the source file's directory "
         "(each at most 64 KiB; unresolvable names stay external).",
+    )
+    parser.add_argument(
+        "--summary-aware-calls",
+        metavar="<MANIFEST>",
+        help="Declared callee summary manifest "
+        "(mumei.ts-scalar-parameter-deps/v1): external calls whose "
+        "export name it covers fold the declared return "
+        "dependencies through the actuals instead of the opaque "
+        "every-argument union. Declared data trusted as asserted — "
+        "a miss, gap or arity mismatch keeps the opaque shape.",
     )
     return parser
 
@@ -7984,10 +8201,13 @@ def build_attempt_parser(parser=None):
     return parser
 
 
-def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
-    """Bind the request's declared input into one request identity."""
+def _attempt_fingerprint(
+    source_path: str, raw: bytes, callee_manifest_path=None
+) -> str:
+    """Bind the request's declared inputs into one request identity."""
     import hashlib
     import json
+    from pathlib import Path
 
     request_doc = {
         "schema_version": ATTEMPT_REQUEST_PROFILE,
@@ -7996,6 +8216,13 @@ def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
     }
+    if callee_manifest_path is not None:
+        request_doc["summary_aware_calls"] = {
+            "path": callee_manifest_path,
+            "sha256": hashlib.sha256(
+                Path(callee_manifest_path).read_bytes()
+            ).hexdigest(),
+        }
     return hashlib.sha256(
         json.dumps(
             request_doc, sort_keys=True, separators=(",", ":")
@@ -8027,19 +8254,27 @@ def main_attempt(args=None) -> None:
     if args is None:
         args = build_attempt_parser().parse_args()
     if args.output is not None:
-        try:
-            same = (
-                Path(args.output).resolve() == Path(args.source).resolve()
-            )
-        except RuntimeError:
-            same = True
-        if not same:
+        declared_paths = [args.source]
+        if getattr(args, "summary_aware_calls", None) is not None:
+            declared_paths.append(args.summary_aware_calls)
+        same = False
+        for declared_path in declared_paths:
             try:
-                import os
+                same = (
+                    Path(args.output).resolve()
+                    == Path(declared_path).resolve()
+                )
+            except RuntimeError:
+                same = True
+            if not same:
+                try:
+                    import os
 
-                same = os.path.samefile(args.output, args.source)
-            except OSError:
-                same = False
+                    same = os.path.samefile(args.output, declared_path)
+                except OSError:
+                    same = False
+            if same:
+                break
         if same:
             _emit(
                 {
@@ -8076,6 +8311,9 @@ def main_attempt(args=None) -> None:
             raw,
             args.attempt_timeout,
             memory_bound_mb=args.memory_bound_mb,
+            summary_aware_calls=getattr(
+                args, "summary_aware_calls", None
+            ),
         )
     except ValueError as exc:
         _emit(
@@ -8093,7 +8331,13 @@ def main_attempt(args=None) -> None:
         sys.stdout.write(document)
 
 
-def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
+def run_attempt(
+    source_path,
+    raw,
+    attempt_timeout,
+    memory_bound_mb=None,
+    summary_aware_calls=None,
+):
     """Run the produce route as one declared attempt → report dict.
 
     Shared by ``ts-summaries-attempt`` and the
@@ -8116,13 +8360,26 @@ def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
         AttemptSequenceStore,
     )
 
-    fingerprint = _attempt_fingerprint(source_path, raw)
+    try:
+        fingerprint = _attempt_fingerprint(
+            source_path, raw, summary_aware_calls
+        )
+    except OSError as exc:
+        raise ValueError(
+            "declared callee manifest unreadable: "
+            f"{exc.strerror or exc}"
+        ) from None
     argv = (
         sys.executable,
         "-m",
         "agent",
         "ts-summaries",
         source_path,
+        *(
+            ("--summary-aware-calls", summary_aware_calls)
+            if summary_aware_calls
+            else ()
+        ),
     )
     sequence = AttemptSequence(fingerprint, attempt_timeout)
     store = AttemptSequenceStore()
@@ -8136,7 +8393,9 @@ def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
     try:
         drifted = (
             _attempt_fingerprint(
-                source_path, Path(source_path).read_bytes()
+                source_path,
+                Path(source_path).read_bytes(),
+                summary_aware_calls,
             )
             != fingerprint
         )
@@ -8301,6 +8560,27 @@ def _resolver_for(args):
     return None
 
 
+def _callee_manifest(args, schema):
+    """The `--summary-aware-calls` manifest when declared, else
+    None — read with the same bounds and fail-closed shape as
+    ``--manifest``."""
+    path = getattr(args, "summary_aware_calls", None)
+    return (
+        _read_declared_manifest(path, schema)
+        if path is not None
+        else None
+    )
+
+
+def _declared_input_paths(args) -> list:
+    paths = [args.source]
+    if getattr(args, "manifest", None) is not None:
+        paths.insert(0, args.manifest)
+    if getattr(args, "summary_aware_calls", None) is not None:
+        paths.append(args.summary_aware_calls)
+    return paths
+
+
 def main(args=None) -> None:
     import json
 
@@ -8308,7 +8588,10 @@ def main(args=None) -> None:
         args = build_parser().parse_args()
     raw = _read_declared_source(args.source, PROFILE)
     live = summarize_typescript(
-        raw, resolver=_resolver_for(args), source_path=args.source
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+        declared=_callee_manifest(args, PROFILE),
     )
     print(json.dumps(live.to_dict(), sort_keys=True))
 
@@ -8360,7 +8643,10 @@ def main_accept(args=None) -> None:
     declared = _read_declared_manifest(args.manifest)
     raw = _read_declared_source(args.source, ACCEPT_PROFILE)
     live = summarize_typescript(
-        raw, resolver=_resolver_for(args), source_path=args.source
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+        declared=_callee_manifest(args, ACCEPT_PROFILE),
     )
     _emit(
         summary_accept_document(declared, live, args.function), 0
@@ -8538,13 +8824,16 @@ def main_check(args=None) -> None:
         args = build_check_parser().parse_args()
     _reject_overwrite(
         getattr(args, "output", None),
-        [args.manifest, args.source],
+        _declared_input_paths(args),
         CHECK_PROFILE,
     )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     live = summarize_typescript(
-        raw, resolver=_resolver_for(args), source_path=args.source
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+        declared=_callee_manifest(args, CHECK_PROFILE),
     )
     document = json.dumps(
         summary_check_document(declared, live), sort_keys=True
@@ -8573,7 +8862,9 @@ def summary_reuse_set(declared, live) -> TsSummarySet:
         declared_by_name.get(f.name, f) if f.name in reusable else f
         for f in live.functions
     ]
-    return TsSummarySet(live.context_key, merged)
+    return TsSummarySet(
+        live.context_key, merged, call_modeling=live.call_modeling
+    )
 
 
 def main_reuse(args=None) -> None:
@@ -8593,13 +8884,16 @@ def main_reuse(args=None) -> None:
         args = build_reuse_parser().parse_args()
     _reject_overwrite(
         getattr(args, "output", None),
-        [args.manifest, args.source],
+        _declared_input_paths(args),
         CHECK_PROFILE,
     )
     declared = _read_declared_manifest(args.manifest, CHECK_PROFILE)
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     live = summarize_typescript(
-        raw, resolver=_resolver_for(args), source_path=args.source
+        raw,
+        resolver=_resolver_for(args),
+        source_path=args.source,
+        declared=_callee_manifest(args, CHECK_PROFILE),
     )
     document = json.dumps(
         summary_reuse_set(declared, live).to_dict(),

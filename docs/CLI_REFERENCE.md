@@ -80,11 +80,11 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `rust-summaries-check` | 3 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
 | `rust-summaries-reuse` | 3 | Re-derive the Rust summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
 | `rust-summaries-attempt` | 4 | Run the rust-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
-| `ts-summaries` | 1 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
-| `ts-summaries-accept` | 3 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
-| `ts-summaries-check` | 3 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
-| `ts-summaries-reuse` | 3 | Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
-| `ts-summaries-attempt` | 4 | Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `ts-summaries` | 2 | Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
+| `ts-summaries-accept` | 4 | Re-derive the TypeScript summary set for one declared source and accept one function's summary under the strict whole-context gate. |
+| `ts-summaries-check` | 4 | Re-derive the TypeScript summary set for one declared source and check a declared manifest's functions against it. |
+| `ts-summaries-reuse` | 4 | Re-derive the TypeScript summary set for one declared source and emit a manifest that reuses a declared manifest's unchanged summaries. |
+| `ts-summaries-attempt` | 5 | Run the ts-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
 | `sol-summaries` | 1 | Emit opt-in Solidity interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `sol-summaries-accept` | 3 | Re-derive the Solidity summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `sol-summaries-check` | 3 | Re-derive the Solidity summary set for one declared source and check a declared manifest's functions against it. |
@@ -1235,6 +1235,7 @@ Emit opt-in TypeScript interprocedural dependency summaries as JSON — a conser
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.ts-scalar-parameter-deps/v1): external calls whose export name it covers fold the declared return dependencies through the actuals instead of the opaque every-argument union. Declared data trusted as asserted — a miss, gap or arity mismatch keeps the opaque shape. |
 
 
 ## `mumei-agent ts-summaries-accept`
@@ -1252,6 +1253,7 @@ Re-derive the TypeScript summary set for one declared source and accept one func
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.ts-scalar-parameter-deps/v1): external calls whose export name it covers fold the declared return dependencies through the actuals instead of the opaque every-argument union. Declared data trusted as asserted — a miss, gap or arity mismatch keeps the opaque shape. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to accept from. |
 | `--function` | `<<NAME>>` | yes | — | Name of the function whose summary to accept — accepted only when the manifest's context key still matches the fresh derivation and the function survives in it. |
 
@@ -1271,6 +1273,7 @@ Re-derive the TypeScript summary set for one declared source and check a declare
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.ts-scalar-parameter-deps/v1): external calls whose export name it covers fold the declared return dependencies through the actuals instead of the opaque every-argument union. Declared data trusted as asserted — a miss, gap or arity mismatch keeps the opaque shape. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to check. |
 | `--output` | `<<PATH>>` | no | — | Write the check report JSON here instead of stdout. |
 
@@ -1290,6 +1293,7 @@ Re-derive the TypeScript summary set for one declared source and emit a manifest
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.ts-scalar-parameter-deps/v1): external calls whose export name it covers fold the declared return dependencies through the actuals instead of the opaque every-argument union. Declared data trusted as asserted — a miss, gap or arity mismatch keeps the opaque shape. |
 | `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.ts-scalar-parameter-deps/v1) to reuse unchanged summaries from. |
 | `--output` | `<<PATH>>` | no | — | Write the merged manifest JSON here instead of stdout. |
 
@@ -1309,6 +1313,7 @@ Run the ts-summaries produce route as one declared attempt and emit the reconcil
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--resolve-modules` | — | no | — | Resolve relative './'/'../' import specifiers to source files under the source file's directory (each at most 64 KiB; unresolvable names stay external). |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.ts-scalar-parameter-deps/v1): external calls whose export name it covers fold the declared return dependencies through the actuals instead of the opaque every-argument union. Declared data trusted as asserted — a miss, gap or arity mismatch keeps the opaque shape. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |

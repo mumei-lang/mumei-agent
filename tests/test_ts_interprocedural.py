@@ -7259,3 +7259,245 @@ def test_statement_reads_member_write_reads_destination():
     # `o.f = b` reads the destination base ({0} from `a`) and the
     # value ({1}): union {0, 1}.
     assert frozenset({0, 1}) in reads.values(), reads
+
+
+# --- slice 69: --summary-aware-calls declared-manifest fold ------------------
+
+def _callee_manifest(*functions) -> ts.TsSummarySet:
+    return ts.TsSummarySet.from_dict(
+        {
+            "schema_version": ts.PROFILE,
+            "context_key": "declared-context",
+            "functions": list(functions),
+        }
+    )
+
+
+def _decl_fn(
+    name, params, deps, effects="none_in_supported_fragment", **over
+):
+    fn = {
+        "name": name,
+        "available": deps is not None,
+        "parameters": params,
+        "return_dependencies": deps,
+        "calls": [],
+        "gaps": (
+            []
+            if deps is not None
+            else [
+                {
+                    "reason": "binding_unavailable",
+                    "span": {"start": 0, "end": 0},
+                }
+            ]
+        ),
+        "pinned": [],
+        "effects": effects,
+    }
+    fn.update(over)
+    return fn
+
+
+def test_summary_aware_named_import_folds_return_deps():
+    declared = _callee_manifest(
+        _decl_fn("g", ["a", "b"], [0]),
+        _decl_fn("unused", ["x"], [0]),
+    )
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(x: number, y: number): number { return g(x, y); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    # The fold narrows the result to the declared dep ordinal —
+    # the opaque union would carry {0, 1}.
+    assert fn.return_dependencies == frozenset({0})
+    assert s.call_modeling == {
+        "summary_modeled_calls": 1,
+        "opaque_calls": 0,
+        "summary_unmatched": 1,
+    }
+
+
+def test_summary_aware_alias_folds_by_export_name():
+    declared = _callee_manifest(_decl_fn("g", ["a", "b"], [1]))
+    s = ts.summarize_typescript(
+        "import {g as h} from './m';\n"
+        "function f(x: number, y: number): number { return h(x, y); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.return_dependencies == frozenset({1})
+
+
+def test_summary_aware_namespace_member_folds():
+    declared = _callee_manifest(_decl_fn("g", ["a"], []))
+    s = ts.summarize_typescript(
+        "import * as ns from './m';\n"
+        "function f(x: number): number { return ns.g(x); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.return_dependencies == frozenset()
+    assert s.call_modeling["summary_modeled_calls"] == 1
+
+
+def test_summary_aware_default_import_folds():
+    declared = _callee_manifest(_decl_fn("default", ["a"], [0]))
+    s = ts.summarize_typescript(
+        "import d from './m';\n"
+        "function f(x: number): number { return d(x); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.return_dependencies == frozenset({0})
+
+
+def test_summary_aware_member_of_named_import_stays_opaque():
+    declared = _callee_manifest(_decl_fn("f", ["a"], []))
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(x: number): number { return g.f(x); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    # `g.f` is a member of a named external — not the export `f`.
+    assert fn.return_dependencies == frozenset({0})
+    assert s.call_modeling["opaque_calls"] == 1
+
+
+def test_summary_aware_mismatch_keeps_opaque_shape():
+    declared = _callee_manifest(
+        _decl_fn("g", ["a"], []),  # arity mismatch: call passes 2
+        _decl_fn("h", ["a", "b"], None),  # gapped entry
+        _decl_fn("k", ["a", "b"], [5]),  # ordinal out of range
+    )
+    s = ts.summarize_typescript(
+        "import {g} from './a';\n"
+        "import {h} from './b';\n"
+        "import {k} from './c';\n"
+        "function f(x: number, y: number): number {"
+        " return g(x, y) + h(x, y) + k(x, y); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    # All three stay opaque: each call yields the args' union.
+    assert fn.return_dependencies == frozenset({0, 1})
+    assert s.call_modeling == {
+        "summary_modeled_calls": 0,
+        "opaque_calls": 3,
+        "summary_unmatched": 0,
+    }
+
+
+def test_summary_aware_name_miss_and_globals_stay_opaque():
+    declared = _callee_manifest(_decl_fn("g", ["a"], []))
+    s = ts.summarize_typescript(
+        "import {z} from './m';\n"
+        "function f(x: number): number { return z(x) + isNaN(x); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.return_dependencies == frozenset({0})
+    assert s.call_modeling["summary_unmatched"] == 1
+
+
+def test_summary_aware_colliding_names_fold_neither():
+    declared = _callee_manifest(
+        _decl_fn("g", ["a"], []),
+        _decl_fn("g", ["a"], []),
+    )
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(x: number): number { return g(x); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.return_dependencies == frozenset({0})
+    assert s.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_summary_aware_no_flag_no_call_modeling():
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(x: number): number { return g(x); }"
+    )
+    assert s.call_modeling is None
+    assert "call_modeling" not in s.to_dict()
+
+
+def test_summary_aware_call_modeling_round_trip():
+    declared = _callee_manifest(_decl_fn("g", ["a"], []))
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(x: number): number { return g(x); }",
+        declared=declared,
+    )
+    restored = ts.TsSummarySet.from_dict(s.to_dict())
+    assert restored.call_modeling == s.call_modeling
+
+
+def test_summary_aware_new_expression_stays_opaque():
+    declared = _callee_manifest(_decl_fn("C", ["a"], []))
+    s = ts.summarize_typescript(
+        "import {C} from './m';\n"
+        "function f(x: number): number { return new C(x).v; }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.return_dependencies == frozenset({0})
+    assert s.call_modeling["opaque_calls"] == 1
+
+
+def test_check_route_folds_with_flag(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(
+        "import {g} from './m';\n"
+        "function f(x: number, y: number): number { return g(x, y); }"
+    )
+    callee = tmp_path / "callee.json"
+    callee.write_text(
+        json.dumps(
+            _callee_manifest(_decl_fn("g", ["a", "b"], [0])).to_dict()
+        )
+    )
+    args = _route_args(src)
+    args.summary_aware_calls = str(callee)
+    ts.main(args)
+    produced = json.loads(capsys.readouterr().out)
+    fn = next(f for f in produced["functions"] if f["name"] == "f")
+    assert fn["return_dependencies"] == [0]
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(produced))
+    args.manifest = str(manifest)
+    ts.main_check(args)
+    out = json.loads(capsys.readouterr().out)
+    assert out["reusable"] == ["f"]
+    assert out["stale"] == []
+
+
+def test_attempt_route_forwards_and_binds_manifest(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    callee = tmp_path / "callee.json"
+    callee.write_text("{not json")
+    args = _attempt_args(src)
+    args.summary_aware_calls = str(callee)
+    ts.main_attempt(args)
+    report = json.loads(capsys.readouterr().out)
+    # The flag reached the child: a malformed callee manifest fails
+    # the produce route it spawned.
+    assert report["normalized"]["outcome"] == "exited"
+    assert report["normalized"]["exit_code"] != 0
+    first_fp = report["sequence"]["request_fingerprint"]
+    callee.write_text(
+        json.dumps(
+            _callee_manifest(_decl_fn("g", ["a"], [0])).to_dict()
+        )
+    )
+    ts.main_attempt(args)
+    second = json.loads(capsys.readouterr().out)
+    assert (
+        second["sequence"]["request_fingerprint"] != first_fp
+    )
