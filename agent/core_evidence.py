@@ -962,7 +962,8 @@ def evaluate_unperformed_check_recovery(
                 # scopes them to this record, so an unrelated
                 # signature-verification or freshness report would
                 # otherwise be attributed to it. Undeclared records
-                # recover only through documents bound to their bytes.
+                # recover only through bound documents (each matched
+                # against the record's bound digest below).
                 continue
             if status == "no_evidence":
                 status = "evidence_failed"
