@@ -769,6 +769,30 @@ class TsCall:
 
 
 @dataclass(frozen=True)
+class TsStatementRead:
+    """The parameter ordinals one statement's evaluation read.
+
+    A read inside a nested block attributes to every enclosing
+    statement, like dep flow itself: `if (c) { y = x }` records `x`
+    against both the assignment and the `if`. Descriptive only —
+    like `calls`, it never feeds `for_function`/stale-dependents."""
+
+    span: TsSpan
+    deps: frozenset[int]
+
+    def to_dict(self) -> dict:
+        return {
+            "span": self.span.to_dict(),
+            "deps": sorted(self.deps),
+        }
+
+    @classmethod
+    def from_dict(cls, value) -> "TsStatementRead":
+        v = _manifest_record(value, ("span", "deps"), ())
+        return cls(TsSpan.from_dict(v["span"]), _deps_from_list(v["deps"]))
+
+
+@dataclass(frozen=True)
 class TsFunctionSummary:
     name: str
     available: bool
@@ -783,6 +807,9 @@ class TsFunctionSummary:
     # `pinned` member/signature ids); always empty in slice 0.
     pinned: tuple[str, ...] = ()
     effects: str = "none_in_supported_fragment"
+    # Per-statement parameter reads — descriptive like `calls`, keyed
+    # by statement span in body order.
+    statement_reads: tuple[TsStatementRead, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -798,6 +825,7 @@ class TsFunctionSummary:
             "gaps": [g.to_dict() for g in self.gaps],
             "pinned": list(self.pinned),
             "effects": self.effects,
+            "statement_reads": [r.to_dict() for r in self.statement_reads],
         }
 
     @classmethod
@@ -814,6 +842,9 @@ class TsFunctionSummary:
                 "pinned",
                 "effects",
             ),
+            # Manifests written before `statement_reads` existed
+            # lack the key — an absent key restores as no reads.
+            ("statement_reads",),
         )
         parameters = _list(v["parameters"])
         calls = _list(v["calls"])
@@ -828,6 +859,9 @@ class TsFunctionSummary:
         deps = v["return_dependencies"]
         restored_deps = None if deps is None else _deps_from_list(deps)
         restored_gaps = tuple(TsGap.from_dict(g) for g in gaps)
+        reads = _list(v["statement_reads"]) if "statement_reads" in v else []
+        _require_manifest(len(reads) <= MAX_MANIFEST_MEMBERS)
+        restored_reads = tuple(TsStatementRead.from_dict(r) for r in reads)
         available = _boolean(v["available"])
         # A manifest may not contradict itself: `available` tracks
         # exactly "a result was derived and no gap was recorded" —
@@ -845,6 +879,7 @@ class TsFunctionSummary:
             restored_gaps,
             tuple(_string(p) for p in pinned),
             _string(v["effects"]),
+            restored_reads,
         )
 
 
@@ -1523,6 +1558,14 @@ class _Builder:
         # Optional module resolver: maps an import specifier to
         # source text (None = no resolver / unresolvable — the
         # names stay `_External`, the existing over-approximation).
+        # Per-statement read attribution: `statement` pushes one list
+        # per walked statement and `expression` appends every dep set
+        # it returns to all open frames, so a nested read lands on
+        # every enclosing statement. `_stmt_reads` merges the unions
+        # by span — a loop's fixed-point re-passes re-record the same
+        # spans idempotently.
+        self._read_stack: list[list[frozenset[int]]] = []
+        self._stmt_reads: dict[tuple[int, int], list] = {}
         # `resolving` is the ancestor-specifier stack for cycle
         # detection; `module_cache` shares built export tables
         # across the whole top-level call.
@@ -2523,6 +2566,14 @@ class _Builder:
         self.block_stack = []
         self.thrown = [False]
         self.thrown_deps = [frozenset()]
+        # The read-attribution state belongs to this function alone —
+        # a caller's open statement frames and recorded reads must
+        # never mix with this body's (a nested `function inner() {}`
+        # summarized mid-walk gets its own set either way).
+        saved_read_stack = self._read_stack
+        saved_stmt_reads = self._stmt_reads
+        self._read_stack = []
+        self._stmt_reads = {}
         self.pending_labels = []
         transfers: list[TsCall] = []
         count = [0]
@@ -2574,10 +2625,21 @@ class _Builder:
         self.frames = []
         saw_return = [False]
         saved_yields, self.yield_deps = self.yield_deps, []
-        self._sequence(
-            _children(body), params, locals_, transfers, count, deps,
-            saw_return, False,
-        )
+        try:
+            self._sequence(
+                _children(body), params, locals_, transfers, count,
+                deps, saw_return, False,
+            )
+        finally:
+            reads = tuple(
+                TsStatementRead(entry[0], entry[1])
+                for entry in sorted(
+                    self._stmt_reads.values(),
+                    key=lambda e: (e[0].start, e[0].end),
+                )
+            )
+            self._read_stack = saved_read_stack
+            self._stmt_reads = saved_stmt_reads
         result_deps = deps[0] if saw_return[0] else frozenset()
         for ydeps in self.yield_deps:
             result_deps |= ydeps
@@ -2591,6 +2653,7 @@ class _Builder:
             (),
             (),
             "unknown" if transfers else "none_in_supported_fragment",
+            reads,
         )
 
     def _sequence(
@@ -2941,20 +3004,48 @@ class _Builder:
         saw_return,
         conditional,
     ) -> None:
-        if conditional:
-            self._may_depth += 1
-            try:
+        # Passive read attribution: every dep set `expression`
+        # returns while this statement walks lands on this frame (and
+        # on every enclosing frame) — a nested statement's reads
+        # belong to the outer statement too, like dep flow itself. A
+        # statement closed by `_Unsupported` records nothing; the
+        # function gaps anyway.
+        self._read_stack.append([])
+        try:
+            if conditional:
+                self._may_depth += 1
+                try:
+                    self._statement(
+                        node, params, locals_, transfers, count, deps,
+                        saw_return, conditional,
+                    )
+                finally:
+                    self._may_depth -= 1
+            else:
                 self._statement(
                     node, params, locals_, transfers, count, deps,
                     saw_return, conditional,
                 )
-            finally:
-                self._may_depth -= 1
-            return
-        self._statement(
-            node, params, locals_, transfers, count, deps,
-            saw_return, conditional,
-        )
+        finally:
+            frame = self._read_stack.pop()
+        span = _span(node)
+        union = frozenset().union(*frame) if frame else frozenset()
+        key = (span.start, span.end)
+        entry = self._stmt_reads.get(key)
+        if entry is None:
+            self._stmt_reads[key] = [span, union]
+        else:
+            # Loop fixed-point re-passes walk the same span again —
+            # union, never replace, so the record stays idempotent.
+            entry[1] |= union
+
+    def _record_read(self, deps: frozenset[int]) -> None:
+        """Attribute an implicit read to every open statement frame.
+        `x++`'s operand and `x op= e`'s LHS read a binding without
+        routing through `expression()`, so the wrapper never sees
+        them."""
+        for frame in self._read_stack:
+            frame.append(deps)
 
     def _statement(
         self,
@@ -3028,6 +3119,9 @@ class _Builder:
                     val_v = self._eval(
                         value, params, locals_, transfers, count
                     )
+                    # A destructuring declaration reads its
+                    # initializer like any other expression.
+                    self._record_read(_scalar_of(val_v))
                     self._destructure(
                         pname,
                         val_v,
@@ -3042,17 +3136,17 @@ class _Builder:
                     continue
                 if pname.type != "identifier":
                     raise _Unsupported("binding_unavailable", _span(decl))
-                deps_v = (
-                    self._bindable(
-                        value,
-                        self._eval(
-                            value, params, locals_, transfers, count
-                        ),
+                if value is not None:
+                    val_v = self._eval(
+                        value, params, locals_, transfers, count
                     )
-                    if value is not None
+                    # The initializer's reads belong to this
+                    # statement.
+                    self._record_read(_scalar_of(val_v))
+                    deps_v = self._bindable(value, val_v)
+                else:
                     # `let x;` binds `undefined` — no dependencies.
-                    else frozenset()
-                )
+                    deps_v = frozenset()
                 vname = pname.text.decode()
                 if (
                     is_var
@@ -3076,13 +3170,17 @@ class _Builder:
             "abstract_class_declaration",
         }:
             # `class C { ... }` in a body — binds a `_Class` (no
-            # hoisting: declaration order applies).
+            # hoisting: declaration order applies). Static field
+            # initializers and computed member keys evaluate
+            # eagerly on the declaration.
             name_node = node.child_by_field_name("name")
             if name_node is None:
                 raise _Unsupported("unsupported_statement", _span(node))
+            class_val = self._class_value(node, params, locals_)
+            self._record_read(_scalar_of(class_val))
             self._declare_name(
                 name_node.text.decode(),
-                self._class_value(node, params, locals_),
+                class_val,
                 False,
                 conditional,
                 params,
@@ -3221,6 +3319,9 @@ class _Builder:
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
             iterated = self._eval(right, params, locals_, transfers, count)
+            # `for (… of right)` reads the iterated expression on
+            # the loop statement.
+            self._record_read(_scalar_of(iterated))
             scope = dict(locals_)
             if op.type == "in":
                 element = frozenset()
@@ -3636,6 +3737,7 @@ class _Builder:
             # dep-invisible: bind like `const`. `await using`
             # reaches here as the await operand.
             value = self._eval(right, params, locals_, transfers, count)
+            self._record_read(_scalar_of(value))
             if left.type in {"object_pattern", "array_pattern"}:
                 self._destructure(
                     left, value, params, locals_, transfers, count,
@@ -3650,30 +3752,33 @@ class _Builder:
             )
             return
         value = self._eval(right, params, locals_, transfers, count)
+        # The assignment right-hand side reads on this statement
+        # (covers `x = e` and the `e` of `x op= e`).
+        self._record_read(_scalar_of(value))
         if left.type == "identifier":
             name = left.text.decode()
             target = self._write_scope(name, locals_, params)
             if target is None:
                 raise _Unsupported("binding_unavailable", _span(left))
             if augmented:
-                value = (
-                    self._read_name(left, params, locals_, _span(left))
-                    | _scalar_of(value)
+                lhs_read = self._read_name(
+                    left, params, locals_, _span(left)
                 )
+                self._record_read(lhs_read)
+                value = lhs_read | _scalar_of(value)
             else:
                 value = self._bindable(right, value)
             self._store(target, params, name, value, conditional)
             return
         if left.type in {"member_expression", "subscript_expression"}:
             if augmented:
-                value = (
-                    _scalar_of(
-                        self._member_read(
-                            left, params, locals_, transfers, count
-                        )
+                lhs_read = _scalar_of(
+                    self._member_read(
+                        left, params, locals_, transfers, count
                     )
-                    | _scalar_of(value)
                 )
+                self._record_read(lhs_read)
+                value = lhs_read | _scalar_of(value)
             self._member_store(
                 left, value, params, locals_, transfers, count,
                 conditional,
@@ -3729,22 +3834,22 @@ class _Builder:
             target = self._write_scope(name, locals_, params)
             if target is None:
                 raise _Unsupported("binding_unavailable", _span(argument))
-            self._store(
-                target, params, name,
-                self._read_name(
-                    argument, params, locals_, _span(argument)
-                ),
-                conditional,
+            arg_read = self._read_name(
+                argument, params, locals_, _span(argument)
             )
+            self._record_read(arg_read)
+            self._store(target, params, name, arg_read, conditional)
             return
         # `o.f++` — dep-preserving member write.
+        member_read = _scalar_of(
+            self._member_read(
+                argument, params, locals_, transfers, count
+            )
+        )
+        self._record_read(member_read)
         self._member_store(
             argument,
-            _scalar_of(
-                self._member_read(
-                    argument, params, locals_, transfers, count
-                )
-            ),
+            member_read,
             params,
             locals_,
             transfers,
@@ -4416,6 +4521,10 @@ class _Builder:
                 raise _Unsupported("binding_unavailable", _span(node))
         else:
             old = target.get(base)
+        # A member write reads its destination object — the base's
+        # current deps attribute to the statement like the Go
+        # model's destination-operand reads.
+        self._record_read(_scalar_of(old))
         if isinstance(old, _Class) and has_dynamic:
             # `C[k] = v` — every static field is a may-write and
             # every static setter may run.
@@ -4623,9 +4732,16 @@ class _Builder:
     def expression(self, node, params, locals_, transfers, count):
         """Evaluate a node to scalar dependencies — a composite
         flattens to the union of its leaf deps."""
-        return _scalar_of(
+        result = _scalar_of(
             self._eval(node, params, locals_, transfers, count)
         )
+        # Attribute the read to every statement frame still open — a
+        # nested expression's deps are a subset of its parent's union,
+        # so recursive calls appending their own returns change
+        # nothing (the union is idempotent).
+        for frame in self._read_stack:
+            frame.append(result)
+        return result
 
     def _callable_value(self, node, params, locals_, is_method=False):
         """`const g = (v) => v + x` — the arrow/function value.
@@ -4767,6 +4883,10 @@ class _Builder:
         must never capture them). The shared `transfers`/`count`
         accumulators keep call records and the node budget
         global across the chain."""
+        # The callee's own deps (captured bindings, a function
+        # parameter's ordinal) read on the call statement like the
+        # Go model's binding resolution at the call site.
+        self._record_read(_scalar_of(cval))
         if self._invoke_depth >= MAX_INVOKE_DEPTH:
             # Recursive or deeply nested call chains — beyond
             # the bound the result over-approximates to the
@@ -5039,6 +5159,11 @@ class _Builder:
         actual_values=None,
     ) -> frozenset[int]:
         if cval.origin is not None and cval.origin is not self:
+            # The delegation runs the callee under the imported
+            # module's builder, whose read state is its own — the
+            # callee's deps still attribute to the importer's
+            # call statement here.
+            self._record_read(_scalar_of(cval))
             return cval.origin._invoke_callable(
                 cval,
                 actual,
@@ -5173,6 +5298,10 @@ class _Builder:
         saved_var, self.var_names = self.var_names, set()
         saved_flocals, self.function_locals = self.function_locals, inner
         saved_yields, self.yield_deps = self.yield_deps, []
+        # The invoked body's reads attribute to the caller's open
+        # statement frames, keyed by the callee's own statement
+        # spans — matching how an inlined callee's reads surface in
+        # the calling summary in the Go model.
         # `var` declarations hoist to this invocation's frame.
         for vname in self._hoist_var_names(body_node):
             self.var_names.add(vname)
@@ -5900,9 +6029,14 @@ class _Builder:
             value = self._eval(
                 arg_node, params, locals_, transfers, count
             )
+            deps = _scalar_of(value)
+            # Each actual's reads attribute to the call statement
+            # even when the result drops them (an inlined callee
+            # returning a constant reads nothing of its result).
+            self._record_read(deps)
             if values_out is not None:
                 values_out.append(value)
-            return _scalar_of(value)
+            return deps
 
         if arguments.type == "template_string":
             actuals: list = [frozenset()]
@@ -5930,6 +6064,7 @@ class _Builder:
                 sval = self._eval(
                     operand, params, locals_, transfers, count
                 )
+                self._record_read(_scalar_of(sval))
                 if isinstance(sval, _Composite):
                     spread_items = [
                         (int(k), v)
@@ -6950,13 +7085,13 @@ class _Builder:
             # unknown (dep-free).
             operand = next(iter(_children(node)), None)
             if operand is not None:
-                self.yield_deps.append(
-                    _scalar_of(
-                        self._eval(
-                            operand, params, locals_, transfers, count
-                        )
+                operand_deps = _scalar_of(
+                    self._eval(
+                        operand, params, locals_, transfers, count
                     )
                 )
+                self._record_read(operand_deps)
+                self.yield_deps.append(operand_deps)
             return frozenset()
         if kind in {
             "arrow_function",
