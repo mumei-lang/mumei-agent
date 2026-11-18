@@ -13343,6 +13343,59 @@ def test_local_channel_alias_bare_read_follows_source(
     assert frozenset({1}) in reads
 
 
+def test_local_channel_len_cap_dep_free(go_types_helper):
+    # `len(ch)`/`cap(ch)` — the queue length and capacity are
+    # runtime state, not parameter provenance, so the result is
+    # dep-free even after `ch <- x`.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64, 2)\n"
+            "\tch <- x\n"
+            "\t_ = cap(ch)\n"
+            "\treturn int64(len(ch))\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_chan_parameter_len_records_transfer(go_types_helper):
+    # `len(p)`/`cap(p)` on a `chan` parameter observe the caller's
+    # queue — each records an imported transfer on p's identity
+    # (effects unknown) while the result stays dep-free.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(p chan int64) int64 {\n"
+            "\treturn int64(len(p)) + int64(cap(p))\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    assert len(result.calls) == 2
+    assert {t.imported for t in result.calls} == {True}
+
+
+def test_channel_len_through_alias(go_types_helper):
+    # `len(ch2)` resolves through the alias to the root queue —
+    # dep-free on a local channel.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := ch\n"
+            "\tch2 <- x\n"
+            "\treturn int64(len(ch2))\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
 def test_channel_boundaries_stay_closed(go_types_helper):
     # A send through a selector (`p.C <- x`) and `make([]T)` stay
     # opaque; `select` cannot build a CFG. (`chan` parameters admit
@@ -13509,7 +13562,7 @@ def test_chan_parameter_records_effects_and_staleness(go_types_helper):
 
 def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     # Non-scalar elements, a channel result, a receive-valued
-    # binding, len/cap metadata and select all stay closed.
+    # binding and select all stay closed.
     files = {
         "a.go": "package p\n"
         "func Ptr(ch chan *int64) int64 { return 0 }\n"
@@ -13519,10 +13572,6 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
         "\tp := <-q\n"
         "\tp <- x\n"
         "\treturn 0\n}\n"
-        "func Len(ch chan int64, x int64) int64 {\n"
-        "\tn := len(ch)\n"
-        "\t_ = n\n"
-        "\treturn x\n}\n"
         "func Sel(ch chan int64, x int64) int64 {\n"
         "\tselect {\n"
         "\tcase v := <-ch:\n"
@@ -13535,12 +13584,11 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     summaries = ip.summarize_go_package(files, snapshot)
     results = {
         name: named_package(files, snapshot, summaries, name)
-        for name in ("Ptr", "Res", "Alias", "Len", "Sel")
+        for name in ("Ptr", "Res", "Alias", "Sel")
     }
     assert not results["Ptr"].available
     assert not results["Res"].available
     assert not results["Alias"].available
-    assert not results["Len"].available
     assert not results["Sel"].available
 
 

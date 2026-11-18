@@ -7280,6 +7280,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
+                    chan = self._chan_binding(
+                        arguments[0], locals_, params
+                    )
+                    if chan is not None:
+                        # `len(ch)`/`cap(ch)` — the queue length and
+                        # capacity are runtime state, not parameter
+                        # provenance, so the result is dep-free. On a
+                        # local channel it is an untracked
+                        # synchronization fact like `close`; on a
+                        # `chan` parameter it observes the caller's
+                        # queue, recorded as an imported transfer on
+                        # the parameter's binding identity.
+                        if chan.id in params:
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        node.start_byte,
+                                        node.end_byte,
+                                    ),
+                                    chan.id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                        return frozenset()
                     member = self._imported_member_operand(arguments[0])
                     fact = member.type if member is not None else None
                     index_deps = frozenset()
