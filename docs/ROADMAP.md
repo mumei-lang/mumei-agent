@@ -4071,6 +4071,27 @@ fingerprint cannot bind undeclared bytes. Receiver dispatch
 `pub use` re-exports, glob `use b::*`, `#[path]` attributes and
 macro-generated callables stay closed.
 
+### rust-summaries `--summary-aware-calls`
+
+`--summary-aware-calls <MANIFEST>` (all rust-summaries routes)
+declares a callee summary manifest the derivation folds into
+otherwise-opaque calls: an opaque call whose recorded name a
+manifest entry covers — `f` exactly, `crate::m::f`/`m::f` through
+one module-token prefix, never a deeper strip — adopts the entry's
+declared `return_dependencies` over its own actuals instead of the
+every-argument union. Receiver-carrying calls (`x.m`, `t.f`),
+local-bound callee names (fn pointers), voided calls, unavailable
+entries, arity mismatches and out-of-range ordinals all stay
+opaque; `effects` and the `&mut`-write merge stay opaque too —
+the manifest cannot bound writes through argument objects. The
+manifest is trusted as declared; its canonical bytes fold into
+`context_key`, so a swapped manifest invalidates the strict
+whole-context gate. The derived set's `call_modeling` block is
+advisory counting only (`summary_modeled_calls`, `opaque_calls`,
+`summary_unmatched`), never a verdict; `rust-summaries-reuse`
+propagates it and `rust-summaries-attempt` forwards the flag,
+binding the manifest bytes into the request fingerprint.
+
 
 `summarize_solidity(source, resolver=None, source_path=None)`
 accepts the same resolver contract: `resolver(spec)` (or

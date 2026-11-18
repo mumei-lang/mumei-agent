@@ -2057,3 +2057,299 @@ def test_statement_reads_gapped_still_attaches():
     s = _fn(src, "f")
     if not s.available:
         assert s.gaps
+
+
+# -- --summary-aware-calls -------------------------------------------
+
+def _decl_fn(name, params, deps, effects="none_in_supported_fragment"):
+    return {
+        "name": name,
+        "available": deps is not None,
+        "parameters": params,
+        "return_dependencies": None if deps is None else sorted(deps),
+        "calls": [],
+        "gaps": (
+            [] if deps is not None
+            else [{"reason": "unresolved_call", "byte": 0}]
+        ),
+        "effects": effects,
+        "statement_reads": [],
+    }
+
+
+def _callee_manifest(*functions):
+    return RustSummarySet.from_dict({
+        "schema_version": PROFILE,
+        "context_key": "declared-context",
+        "functions": list(functions),
+    })
+
+
+_SRC = "fn caller(x: u64, y: u64) -> u64 {\n    let r = m::f(x, y);\n    r\n}\n"
+
+
+def test_aware_fold_narrows():
+    plain = _fn(_SRC, "caller")
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    aware = next(
+        f for f in summarize_rust(_SRC, declared=declared).functions
+        if f.name == "caller"
+    )
+    assert plain.return_dependencies == frozenset({0, 1})
+    assert aware.return_dependencies == frozenset({0})
+
+
+def test_aware_call_modeling_counts():
+    declared = _callee_manifest(
+        _decl_fn("f", ["a", "b"], {0}),
+        _decl_fn("unused", ["a"], {0}),
+    )
+    r = summarize_rust(_SRC, declared=declared)
+    assert r.call_modeling == {
+        "summary_modeled_calls": 1,
+        "opaque_calls": 0,
+        "summary_unmatched": 1,
+    }
+
+
+def test_aware_bare_ident_folds():
+    src = "fn caller(x: u64, y: u64) -> u64 { f(x, y) }\n"
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {1}))
+    aware = next(
+        f for f in summarize_rust(src, declared=declared).functions
+        if f.name == "caller"
+    )
+    assert aware.return_dependencies == frozenset({1})
+
+
+def test_aware_crate_prefix_folds():
+    src = "fn caller(x: u64, y: u64) -> u64 { crate::m::f(x, y) }\n"
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    aware = next(
+        f for f in summarize_rust(src, declared=declared).functions
+        if f.name == "caller"
+    )
+    assert aware.return_dependencies == frozenset({0})
+
+
+def test_aware_deep_qualifier_stays_opaque():
+    src = "fn caller(x: u64, y: u64) -> u64 { a::b::f(x, y) }\n"
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    r = summarize_rust(src, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0, 1})
+    assert r.call_modeling["opaque_calls"] == 1
+    assert r.call_modeling["summary_unmatched"] == 1
+
+
+def test_aware_receiver_call_never_folds():
+    src = (
+        "fn caller(x: u64, y: u64) -> u64 {\n"
+        "    let t = x;\n"
+        "    let r = t.m(y);\n"
+        "    r\n"
+        "}\n"
+    )
+    declared = _callee_manifest(_decl_fn("m", ["a"], {0}))
+    r = summarize_rust(src, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0, 1})
+    assert r.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_aware_local_bound_never_folds():
+    src = (
+        "fn caller(x: u64, y: u64) -> u64 {\n"
+        "    let cb = x;\n"
+        "    cb(y)\n"
+        "}\n"
+    )
+    declared = _callee_manifest(_decl_fn("cb", ["a"], {0}))
+    r = summarize_rust(src, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0, 1})
+    assert r.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_aware_gapped_callee_stays_opaque():
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], None))
+    r = summarize_rust(_SRC, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0, 1})
+    assert r.call_modeling["opaque_calls"] == 1
+
+
+def test_aware_arity_mismatch_stays_opaque():
+    declared = _callee_manifest(_decl_fn("f", ["a"], {0}))
+    r = summarize_rust(_SRC, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0, 1})
+    assert r.call_modeling["opaque_calls"] == 1
+
+
+def test_aware_ordinal_out_of_range_stays_opaque():
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {2}))
+    r = summarize_rust(_SRC, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0, 1})
+    assert r.call_modeling["opaque_calls"] == 1
+
+
+def test_aware_void_call_never_folds():
+    src = "fn caller(x: u64, y: u64) -> u64 {\n    m::f(x, y);\n    x\n}\n"
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    r = summarize_rust(src, declared=declared)
+    aware = next(f for f in r.functions if f.name == "caller")
+    assert aware.return_dependencies == frozenset({0})
+    assert r.call_modeling["opaque_calls"] == 1
+
+
+def test_aware_fold_empty_deps():
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], set()))
+    aware = next(
+        f for f in summarize_rust(_SRC, declared=declared).functions
+        if f.name == "caller"
+    )
+    assert aware.return_dependencies == frozenset()
+
+
+def test_aware_no_modeling_without_manifest():
+    r = summarize_rust(_SRC)
+    assert r.call_modeling is None
+    assert "call_modeling" not in r.to_dict()
+
+
+def test_aware_context_key_binds_manifest():
+    one = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    two = _callee_manifest(_decl_fn("f", ["a", "b"], {1}))
+    assert (
+        summarize_rust(_SRC, declared=one).context_key
+        != summarize_rust(_SRC, declared=two).context_key
+    )
+    assert (
+        summarize_rust(_SRC).context_key
+        != summarize_rust(_SRC, declared=one).context_key
+    )
+
+
+def test_aware_call_modeling_roundtrip():
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    r = summarize_rust(_SRC, declared=declared)
+    restored = RustSummarySet.from_dict(r.to_dict())
+    assert restored.call_modeling == r.call_modeling
+
+
+def _aware_args(source, manifest, output=None):
+    import argparse
+    return argparse.Namespace(
+        source=str(source),
+        manifest=None,
+        function=None,
+        resolve_modules=False,
+        summary_aware_calls=None if manifest is None else str(manifest),
+        output=None if output is None else str(output),
+    )
+
+
+def _produce(tmp_path, capsys, src_path, manifest=None):
+    rust.main(_aware_args(src_path, manifest))
+    out = capsys.readouterr().out
+    p = tmp_path / "out.json"
+    p.write_text(out)
+    return p
+
+
+def test_aware_produce_route(tmp_path, capsys):
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    callee = _produce(tmp_path, capsys, src)
+    man = tmp_path / "callee.json"
+    man.write_text(json.dumps(
+        _callee_manifest(_decl_fn("f", ["a", "b"], {0})).to_dict()
+    ))
+    out = _produce(tmp_path, capsys, src, man)
+    doc = json.loads(out.read_text())
+    assert doc["call_modeling"]["summary_modeled_calls"] == 1
+
+
+def test_aware_check_route(tmp_path, capsys):
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    man = tmp_path / "callee.json"
+    man.write_text(json.dumps(
+        _callee_manifest(_decl_fn("f", ["a", "b"], {0})).to_dict()
+    ))
+    produced = _produce(tmp_path, capsys, src, man)
+    args = _aware_args(src, man)
+    args.manifest = str(produced)
+    rust.main_check(args)
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["context_match"] is True
+    args2 = _aware_args(src, None)
+    args2.manifest = str(produced)
+    rust.main_check(args2)
+    doc2 = json.loads(capsys.readouterr().out)
+    assert doc2["context_match"] is False
+
+
+def test_aware_reuse_propagates_modeling():
+    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {0}))
+    live = summarize_rust(_SRC, declared=declared)
+    merged = rust.summary_reuse_set(_callee_manifest(), live)
+    assert merged.call_modeling == live.call_modeling
+
+
+def test_aware_output_over_manifest_refused(tmp_path, capsys):
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    man = tmp_path / "callee.json"
+    man.write_text(json.dumps(
+        _callee_manifest(_decl_fn("f", ["a", "b"], {0})).to_dict()
+    ))
+    produced = _produce(tmp_path, capsys, src, man)
+    args = _aware_args(src, man, output=man)
+    args.manifest = str(produced)
+    with pytest.raises(SystemExit) as exc:
+        rust.main_check(args)
+    assert exc.value.code == 2
+
+
+def test_aware_attempt_fingerprint_binds_manifest(tmp_path):
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    one = tmp_path / "one.json"
+    two = tmp_path / "two.json"
+    one.write_text(json.dumps(
+        _callee_manifest(_decl_fn("f", ["a", "b"], {0})).to_dict()
+    ))
+    two.write_text(json.dumps(
+        _callee_manifest(_decl_fn("f", ["a", "b"], {1})).to_dict()
+    ))
+    raw = src.read_bytes()
+    base = rust._attempt_fingerprint(str(src), raw)
+    f1 = rust._attempt_fingerprint(
+        str(src), raw, summary_aware_calls=str(one))
+    f2 = rust._attempt_fingerprint(
+        str(src), raw, summary_aware_calls=str(two))
+    assert len({base, f1, f2}) == 3
+    with pytest.raises(ValueError):
+        rust._attempt_fingerprint(
+            str(src), raw,
+            summary_aware_calls=str(tmp_path / "missing.json"))
+
+
+def test_aware_attempt_forwards_flag(tmp_path):
+    # A malformed callee manifest makes the forwarded child fail
+    # while the same source without the flag exits cleanly.
+    src = tmp_path / "caller.rs"
+    src.write_text(_SRC)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{")
+    report = rust.run_attempt(
+        str(src), src.read_bytes(), 30000,
+        summary_aware_calls=str(bad),
+    )
+    norm = report["normalized"]
+    assert norm["outcome"] == "exited" and norm["exit_code"] != 0
+    report2 = rust.run_attempt(str(src), src.read_bytes(), 30000)
+    assert report2["normalized"]["exit_code"] == 0

@@ -251,13 +251,22 @@ class RustSummarySet:
     context_key: str
     profile: str
     functions: list
+    # `--summary-aware-calls` reporting: present only on manifests
+    # derived with a declared callee manifest — advisory counts
+    # (`summary_modeled_calls` folded, `opaque_calls` left opaque,
+    # `summary_unmatched` manifest entries never referenced), never
+    # a verdict or a gate.
+    call_modeling: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        doc = {
             "schema_version": self.profile,
             "context_key": self.context_key,
             "functions": [f.to_dict() for f in self.functions],
         }
+        if self.call_modeling is not None:
+            doc["call_modeling"] = self.call_modeling
+        return doc
 
     @classmethod
     def from_dict(cls, value) -> "RustSummarySet":
@@ -270,10 +279,15 @@ class RustSummarySet:
         v = _manifest_record(
             value,
             ("schema_version", "context_key", "functions"),
+            ("call_modeling",),
         )
         _require_manifest(v["schema_version"] == PROFILE)
         functions = _list(v["functions"])
         _require_manifest(len(functions) <= MAX_MANIFEST_MEMBERS)
+        call_modeling = v.get("call_modeling")
+        _require_manifest(
+            call_modeling is None or type(call_modeling) is dict
+        )
         restored = [
             RustFunctionSummary.from_dict(f) for f in functions
         ]
@@ -286,6 +300,7 @@ class RustSummarySet:
             _string(v["context_key"]),
             PROFILE,
             restored,
+            call_modeling=call_modeling,
         )
 
 
@@ -444,6 +459,7 @@ class _Builder:
         module_digests=None,
         source_path=None,
         resolved_paths=None,
+        declared=None,
     ):
         self.source = source
         self.count = [0]
@@ -493,6 +509,18 @@ class _Builder:
         # overwrite one.
         self.resolved_paths = resolved_paths
         self.source_path = source_path
+        # `--summary-aware-calls`: the declared callee manifest's
+        # name -> entry map; `_declared_seen` feeds
+        # `summary_unmatched`.
+        self._declared_set = declared
+        self._declared = (
+            {f.name: f for f in declared.functions}
+            if declared is not None
+            else {}
+        )
+        self._declared_seen: set = set()
+        self._modeled_calls = 0
+        self._opaque_calls = 0
         if resolver is not None:
             import inspect
 
@@ -563,17 +591,65 @@ class _Builder:
             )
         # The context key folds every resolved module's bytes with
         # the root source — a changed module invalidates reuse.
+        # Under `--summary-aware-calls` the callee manifest's
+        # canonical bytes fold in too — it is a derivation input
+        # like the sources, so a changed manifest invalidates the
+        # strict whole-context gate.
         ctx = hashlib.sha256(self.source)
         for ref, digest in sorted(self.module_digests.items()):
             ctx.update(ref.encode())
             ctx.update(b"\x00")
             ctx.update(digest.encode())
             ctx.update(b"\x00")
+        if self._declared_set is not None:
+            import json
+
+            ctx.update(
+                json.dumps(
+                    self._declared_set.to_dict(), sort_keys=True
+                ).encode()
+            )
         return RustSummarySet(
             context_key=ctx.hexdigest(),
             profile=PROFILE,
             functions=summaries,
+            call_modeling=self._call_modeling(),
         )
+
+    def _declared_entry(self, cname):
+        """Declared manifest entry for an opaque call's recorded name.
+
+        The recorded name normalizes `::` to `.` and drops leading
+        `crate.`/`self.`/`super.` roots; a name that stays qualified
+        also matches one module-token prefix over the callee's
+        standalone name (`b::T::f` -> `T.f`), never a deeper strip.
+        """
+        if not self._declared or cname is None:
+            return None
+        norm = cname.replace("::", ".")
+        for root in ("crate.", "self.", "super."):
+            if norm.startswith(root):
+                norm = norm[len(root):]
+                break
+        entry = self._declared.get(norm)
+        if entry is None and "." in norm:
+            entry = self._declared.get(norm.split(".", 1)[1])
+        if entry is not None:
+            self._declared_seen.add(entry.name)
+        return entry
+
+    def _call_modeling(self):
+        """The `call_modeling` advisory block — only on manifests
+        derived with a declared callee manifest."""
+        if self._declared_set is None:
+            return None
+        return {
+            "summary_modeled_calls": self._modeled_calls,
+            "opaque_calls": self._opaque_calls,
+            "summary_unmatched": (
+                len(self._declared) - len(self._declared_seen)
+            ),
+        }
 
     # -- module scan ----------------------------------------------
 
@@ -1906,6 +1982,38 @@ class _Builder:
             self._record_read(bound)
             result = actual_union | bound
             cname = fn_expr.text.decode() if fn_expr is not None else None
+            declared_entry = (
+                None
+                if fld is not None or bound
+                else self._declared_entry(cname)
+            )
+            foldable = (
+                declared_entry is not None
+                and not void
+                and declared_entry.available
+                and len(declared_entry.params) == len(actual)
+                and max(
+                    declared_entry.return_dependencies,
+                    default=-1,
+                )
+                < len(actual)
+            )
+            if foldable:
+                # `--summary-aware-calls` fold: the declared
+                # return_dependencies replace the opaque
+                # every-argument union. Receiver-carrying calls
+                # (`x.m`, `t.f`) never fold — the manifest's
+                # ordinals do not describe the receiver — and a
+                # local-bound callee name stays a fn-pointer call
+                # regardless of the manifest. `effects` and the
+                # &mut-write merge stay opaque too: the manifest
+                # cannot bound writes through argument objects.
+                result = frozenset().union(
+                    *(actual[i] for i in declared_entry.return_dependencies)
+                ) if declared_entry.return_dependencies else frozenset()
+                self._modeled_calls += 1
+            elif self._declared:
+                self._opaque_calls += 1
             summary.calls.append(
                 RustCall(_span(node), cname, actual_t,
                          None if void else result)
@@ -2264,6 +2372,7 @@ def summarize_rust(
     source_path=None,
     module_digests=None,
     resolved_paths=None,
+    declared=None,
 ) -> RustSummarySet:
     if isinstance(source, str):
         source = source.encode()
@@ -2275,6 +2384,7 @@ def summarize_rust(
         source_path=source_path,
         module_digests=module_digests,
         resolved_paths=resolved_paths,
+        declared=declared,
     ).build()
 
 
@@ -2377,6 +2487,20 @@ def build_parser(parser=None):
             "Resolve `mod NAME;` declarations from the importer's "
             "directory (`<dir>/NAME.rs`, `<dir>/NAME/mod.rs`); "
             "unresolved declarations stay opaque."
+        ),
+    )
+    parser.add_argument(
+        "--summary-aware-calls",
+        metavar="<MANIFEST>",
+        default=None,
+        help=(
+            "Callee summary manifest "
+            "(mumei.rust-scalar-parameter-deps/v1): an opaque call "
+            "whose recorded name a manifest entry covers folds the "
+            "entry's declared return_dependencies instead of the "
+            "opaque every-argument union. The manifest is trusted "
+            "as declared; its canonical bytes fold into the "
+            "context key."
         ),
     )
     return parser
@@ -2596,8 +2720,30 @@ def _read_declared_manifest(path, schema=ACCEPT_PROFILE):
         )
 
 
+def _callee_manifest(args, schema=PROFILE):
+    """The `--summary-aware-calls` manifest — declared, trusted
+    as asserted; malformed fails statically like the primary
+    manifest."""
+    path = getattr(args, "summary_aware_calls", None)
+    if path is None:
+        return None
+    return _read_declared_manifest(path, schema)
+
+
+def _declared_input_paths(args) -> list:
+    """Every declared input the route consumes — `--output` may
+    not overwrite one."""
+    paths = [args.source]
+    for extra in ("manifest", "summary_aware_calls"):
+        path = getattr(args, extra, None)
+        if path is not None:
+            paths.append(path)
+    return paths
+
+
 def _summarize_declared(
-    raw, schema, resolver=None, source_path=None, resolved=None
+    raw, schema, resolver=None, source_path=None, resolved=None,
+    declared=None,
 ):
     try:
         return summarize_rust(
@@ -2605,6 +2751,7 @@ def _summarize_declared(
             resolver=resolver,
             source_path=source_path,
             resolved_paths=resolved,
+            declared=declared,
         )
     except _Unsupported as exc:
         _emit(
@@ -2640,6 +2787,7 @@ def main(args=None) -> None:
                 PROFILE,
                 resolver=resolver,
                 source_path=args.source,
+                declared=_callee_manifest(args),
             ).to_dict(),
             sort_keys=True,
         )
@@ -2709,6 +2857,7 @@ def main_accept(args=None) -> None:
         ACCEPT_PROFILE,
         resolver=_resolver_for(args),
         source_path=args.source,
+        declared=_callee_manifest(args, ACCEPT_PROFILE),
     )
     _emit(
         summary_accept_document(declared, live, args.function), 0
@@ -2776,7 +2925,7 @@ def main_check(args=None) -> None:
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     _reject_overwrite(
         getattr(args, "output", None),
-        (args.source, args.manifest),
+        _declared_input_paths(args),
         CHECK_PROFILE,
     )
     resolved: set = set()
@@ -2786,6 +2935,7 @@ def main_check(args=None) -> None:
         resolver=_resolver_for(args),
         source_path=args.source,
         resolved=resolved,
+        declared=_callee_manifest(args, CHECK_PROFILE),
     )
     _reject_overwrite(
         getattr(args, "output", None), resolved, CHECK_PROFILE
@@ -2818,7 +2968,12 @@ def summary_reuse_set(declared, live) -> RustSummarySet:
         declared_by_name.get(f.name, f) if f.name in reusable else f
         for f in live.functions
     ]
-    return RustSummarySet(live.context_key, PROFILE, merged)
+    return RustSummarySet(
+        live.context_key,
+        PROFILE,
+        merged,
+        call_modeling=live.call_modeling,
+    )
 
 
 def main_reuse(args=None) -> None:
@@ -2840,7 +2995,7 @@ def main_reuse(args=None) -> None:
     raw = _read_declared_source(args.source, CHECK_PROFILE)
     _reject_overwrite(
         getattr(args, "output", None),
-        (args.source, args.manifest),
+        _declared_input_paths(args),
         CHECK_PROFILE,
     )
     resolved: set = set()
@@ -2850,6 +3005,7 @@ def main_reuse(args=None) -> None:
         resolver=_resolver_for(args),
         source_path=args.source,
         resolved=resolved,
+        declared=_callee_manifest(args, CHECK_PROFILE),
     )
     _reject_overwrite(
         getattr(args, "output", None), resolved, CHECK_PROFILE
@@ -2903,10 +3059,18 @@ def build_attempt_parser(parser=None):
     return parser
 
 
-def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
-    """Bind the request's declared input into one request identity."""
+def _attempt_fingerprint(
+    source_path: str, raw: bytes, summary_aware_calls=None
+) -> str:
+    """Bind the request's declared inputs into one request identity.
+
+    A declared callee manifest is a request input like the source —
+    its bytes fold in so a swapped manifest yields a different
+    fingerprint. An unreadable manifest raises ``ValueError`` —
+    the request cannot be bound to bytes it does not have."""
     import hashlib
     import json
+    from pathlib import Path
 
     request_doc = {
         "schema_version": ATTEMPT_REQUEST_PROFILE,
@@ -2915,6 +3079,17 @@ def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
     }
+    if summary_aware_calls is not None:
+        try:
+            manifest_raw = Path(summary_aware_calls).read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                f"declared callee manifest unreadable: {exc}"
+            ) from exc
+        request_doc["callee_manifest"] = {
+            "path": summary_aware_calls,
+            "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        }
     return hashlib.sha256(
         json.dumps(
             request_doc, sort_keys=True, separators=(",", ":")
@@ -2922,7 +3097,13 @@ def _attempt_fingerprint(source_path: str, raw: bytes) -> str:
     ).hexdigest()
 
 
-def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
+def run_attempt(
+    source_path,
+    raw,
+    attempt_timeout,
+    memory_bound_mb=None,
+    summary_aware_calls=None,
+):
     """Run the produce route as one declared attempt → report dict.
 
     Shared by ``rust-summaries-attempt`` and the
@@ -2945,14 +3126,19 @@ def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
         AttemptSequenceStore,
     )
 
-    fingerprint = _attempt_fingerprint(source_path, raw)
-    argv = (
+    fingerprint = _attempt_fingerprint(
+        source_path, raw, summary_aware_calls=summary_aware_calls
+    )
+    argv = [
         sys.executable,
         "-m",
         "agent",
         "rust-summaries",
         source_path,
-    )
+    ]
+    if summary_aware_calls is not None:
+        argv += ["--summary-aware-calls", summary_aware_calls]
+    argv = tuple(argv)
     sequence = AttemptSequence(fingerprint, attempt_timeout)
     store = AttemptSequenceStore()
     store.publish(sequence)
@@ -2965,11 +3151,13 @@ def run_attempt(source_path, raw, attempt_timeout, memory_bound_mb=None):
     try:
         drifted = (
             _attempt_fingerprint(
-                source_path, Path(source_path).read_bytes()
+                source_path,
+                Path(source_path).read_bytes(),
+                summary_aware_calls=summary_aware_calls,
             )
             != fingerprint
         )
-    except OSError:
+    except (OSError, ValueError):
         drifted = True
     if dispatch.run.record.state == "exited" and not drifted:
         updated = dispatch.sequence.select_result(
@@ -3010,7 +3198,7 @@ def main_attempt(args=None) -> None:
     if args is None:
         args = build_attempt_parser().parse_args()
     _reject_overwrite(
-        args.output, (args.source,), ATTEMPT_REPORT_PROFILE
+        args.output, _declared_input_paths(args), ATTEMPT_REPORT_PROFILE
     )
     raw = _read_declared_source(args.source, ATTEMPT_REPORT_PROFILE)
     if getattr(args, "resolve_modules", False):
@@ -3034,6 +3222,7 @@ def main_attempt(args=None) -> None:
             raw,
             args.attempt_timeout,
             memory_bound_mb=args.memory_bound_mb,
+            summary_aware_calls=getattr(args, "summary_aware_calls", None),
         )
     except ValueError as exc:
         _emit(
