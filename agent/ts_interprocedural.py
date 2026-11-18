@@ -8251,11 +8251,15 @@ def _attempt_fingerprint(
         },
     }
     if callee_manifest_path is not None:
+        with open(callee_manifest_path, "rb") as handle:
+            blob = handle.read(MAX_MANIFEST_BYTES + 1)
+        if len(blob) > MAX_MANIFEST_BYTES:
+            raise ValueError(
+                "declared callee manifest too large"
+            )
         request_doc["summary_aware_calls"] = {
             "path": callee_manifest_path,
-            "sha256": hashlib.sha256(
-                Path(callee_manifest_path).read_bytes()
-            ).hexdigest(),
+            "sha256": hashlib.sha256(blob).hexdigest(),
         }
     return hashlib.sha256(
         json.dumps(
@@ -8401,7 +8405,7 @@ def run_attempt(
     except OSError as exc:
         raise ValueError(
             "declared callee manifest unreadable: "
-            f"{exc.strerror or exc}"
+            f"{exc.strerror or 'I/O error'}"
         ) from None
     argv = (
         sys.executable,

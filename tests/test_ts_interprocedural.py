@@ -7529,6 +7529,20 @@ def test_attempt_route_forwards_and_binds_manifest(tmp_path, capsys):
     )
 
 
+def test_attempt_fingerprint_bounds_manifest_read(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    callee = tmp_path / "big.json"
+    callee.write_bytes(b"x" * 64)
+    monkeypatch.setattr(ts, "MAX_MANIFEST_BYTES", 8)
+    with pytest.raises(ValueError, match="too large"):
+        ts._attempt_fingerprint(
+            str(src), src.read_bytes(), str(callee)
+        )
+
+
 def test_summary_aware_nested_namespace_member_stays_opaque():
     declared = _callee_manifest(_decl_fn("g", ["a"], []))
     s = ts.summarize_typescript(
