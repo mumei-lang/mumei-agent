@@ -4740,15 +4740,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         _root, _pid, fact, extras, field_member,
                         mid_members, ref,
                     ) = indexed_field
-                    # Same pointer-read as `(*p)[i] = v` — the field
-                    # store's destination resolves through the
-                    # bound pointer.
-                    dest_deps = self._pointer_deps(
-                        ref.binding_id, params, locals_
-                    )
-                    if compound:
-                        dest_deps = dest_deps | self.indirect_writes
-                    self._record_read(dest_deps)
                     self._pin_fact_identities(fact)
                     for mid_member in mid_members:
                         self._pin_fact_identities(mid_member.type)
@@ -4763,6 +4754,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 transfers, count, 0,
                             )
                         )
+                    # Same pointer-read as `(*p)[i] = v` — the field
+                    # store's destination resolves through the
+                    # bound pointer; the indexes evaluate first so a
+                    # call in one can add indirect stores the store's
+                    # own read observes.
+                    dest_deps = self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if compound:
+                        dest_deps = dest_deps | self.indirect_writes
+                    self._record_read(dest_deps)
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -5881,10 +5883,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     _root, _pid, fact, extras, field_member,
                     mid_members, ref,
                 ) = indexed_field
-                self._record_read(
-                    self._pointer_deps(ref.binding_id, params, locals_)
-                    | self.indirect_writes
-                )
                 self._pin_fact_identities(fact)
                 for mid_member in mid_members:
                     self._pin_fact_identities(mid_member.type)
@@ -5899,6 +5897,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             transfers, count, 0,
                         )
                     )
+                self._record_read(
+                    self._pointer_deps(ref.binding_id, params, locals_)
+                    | self.indirect_writes
+                )
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -6564,11 +6566,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    deps = field_index_deps | self.indirect_writes
-                    deps |= self.expression(
-                        ident, fn, params, locals_,
-                        transfers, count, depth + 1,
-                    )
+                    # Evaluate the indexes before snapshotting
+                    # `indirect_writes`: a two-level operand escapes
+                    # the pre-scan, and an index call can add
+                    # indirect stores the leaf read must observe.
+                    deps = field_index_deps
                     for extra in reversed(extras):
                         if (
                             extra.type in _INDEX_LITERALS
@@ -6579,6 +6581,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             extra, fn, params, locals_,
                             transfers, count, 0,
                         )
+                    deps |= self.indirect_writes
+                    deps |= self.expression(
+                        ident, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
                     return deps
             if (
                 member is None

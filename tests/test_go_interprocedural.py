@@ -11328,6 +11328,28 @@ def test_bound_pointee_indexed_nested_field_read_observes_store(
     assert result.return_dependencies == frozenset({0, 1, 2, 3})
 
 
+def test_bound_pointee_indexed_nested_field_read_index_call_write(
+    go_types_helper,
+):
+    # `(*p)[Set(q, x)].V.G` — the index is a local call that folds
+    # `q`'s arg deps into `indirect_writes`; the leaf read must
+    # observe them, so the result unions pointer, callee-arg and
+    # stored-value deps.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ G int64 }\ntype Q struct{ V S }\n"
+        "func Set(q *int64, x int64) int64 { *q = x; return 0 }\n"
+        "func F(p *[]Q, q *int64, x int64) int64 {\n"
+        "\treturn (*p)[Set(q, x)].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
 def test_bound_pointee_indexed_nested_field_read_third_level_closed(
     go_types_helper,
 ):
