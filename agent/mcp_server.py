@@ -2169,6 +2169,80 @@ def go_summaries_attempt(
     return _ok({"report": report})
 
 
+@mcp.tool()
+def go_summaries_reuse_attempt(
+    source_files: str,
+    go_types: str,
+    manifest_path: str,
+    attempt_timeout_ms: int,
+    target_arch: str = "amd64",
+    imports_json: str = "{}",
+    timeout_s: int = 30,
+    memory_bound_mb: int = 0,
+) -> str:
+    """Run the go-summaries-reuse route as one declared attempt.
+
+    The same wiring as `go-summaries-reuse-attempt`: manifest replay
+    through the C11 dispatch lifecycle — the request fingerprint
+    binds the declared manifest's bytes with every other declared
+    input, and an `exited` run's captured stdout (the merged
+    manifest) is selected only when the drift gate passes. The
+    returned report is the canonical lineage — not an accepted
+    manifest.
+
+    Args:
+        source_files: JSON array of Go source file paths — same
+            declared shape as `go_summaries`.
+        go_types: Path to the provisioned go-types helper binary.
+        manifest_path: Declared `mumei.go-scalar-parameter-deps/v1`
+            manifest to replay.
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+        target_arch: `gc` target the report is validated against —
+            must match the manifest's derivation arch.
+        imports_json: JSON object mapping an import path to a file or
+            an array of files of that importable unit.
+        timeout_s: Bound on the inner helper spawn, in seconds.
+        memory_bound_mb: Optional declared RLIMIT_AS ceiling; 0
+            means unset.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.go-summaries-reuse-attempt-report/v1` document — or
+        `error` on a declared failure.
+    """
+    args, declared_paths, error = _go_summaries_consume_args(
+        source_files, go_types, manifest_path, imports_json, timeout_s,
+        {},
+    )
+    if error is not None:
+        return _err(error)
+    args.target_arch = target_arch
+    if (
+        not isinstance(attempt_timeout_ms, int)
+        or isinstance(attempt_timeout_ms, bool)
+        or attempt_timeout_ms <= 0
+    ):
+        return _err("attempt_timeout_ms must be a positive integer")
+    mb = memory_bound_mb or None
+    if mb is not None and (
+        not isinstance(mb, int) or isinstance(mb, bool) or mb <= 0
+    ):
+        return _err(
+            "memory_bound_mb must be a positive integer when set"
+        )
+    args.attempt_timeout = attempt_timeout_ms
+    args.memory_bound_mb = mb
+    try:
+        from agent.go_summaries import run_reuse_attempt
+        from agent.go_type_snapshot import SnapshotError
+        report = run_reuse_attempt(args)
+    except ImportError as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+    except (SnapshotError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"report": report})
+
+
 def _go_summaries_consume_args(
     source_files: str,
     go_types: str,

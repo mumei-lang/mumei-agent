@@ -19,13 +19,14 @@ from agent.go_summaries import (
     build_attempt_parser,
     build_check_parser,
     build_parser,
-    build_attempt_parser,
+    build_reuse_attempt_parser,
     build_reuse_parser,
     main,
     main_accept,
     main_check,
     main_attempt,
     main_reuse,
+    main_reuse_attempt,
 )
 from agent.go_type_snapshot import PACKAGE_PROFILE, TARGETS
 from tests.test_go_type_snapshot import SOURCE, schema_fixture
@@ -1712,3 +1713,149 @@ def test_context_key_binds_callee_manifest(tmp_path, capsys, real_go_types):
     )
     assert code == 0 and err == ""
     assert json.loads(out)["context_match"] is False
+
+
+# --- go-summaries-reuse-attempt ----------------------------------------------
+
+
+def _run_reuse_attempt(capsys, argv: list[str]):
+    try:
+        code = main_reuse_attempt(
+            build_reuse_attempt_parser().parse_args(argv)
+        )
+    except SystemExit as exc:
+        code = exc.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def _reuse_attempt_args(
+    helper: Path, manifest: Path, *sources: Path, extra=()
+):
+    return _reuse_args(
+        helper,
+        manifest,
+        *sources,
+        extra=["--attempt-timeout", "30000", *extra],
+    )
+
+
+def test_reuse_attempt_emits_lineage_and_acceptance(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = _produce_manifest(tmp_path, capsys, helper, source)
+    code, out, err = _run_reuse_attempt(
+        capsys, _reuse_attempt_args(helper, manifest, source)
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert (
+        report["schema_version"]
+        == "mumei.go-summaries-reuse-attempt-report/v1"
+    )
+    seq = report["sequence"]
+    assert seq["schema_version"] == "mumei.verifier-attempt-sequence/v1"
+    assert seq["selected_result"] is not None
+    norm = report["normalized"]
+    assert norm["outcome"] == "exited" and norm["exit_code"] == 0
+    assert norm["request_fingerprint"] == seq["request_fingerprint"]
+    assert (
+        report["candidate"]["schema_version"]
+        == "mumei.verifier-evidence-candidate/v1"
+    )
+    assert report["evidence_check"]["outcome"] == "valid"
+    assert report["acceptance"]["accepted"] is True
+    assert report["discharged_checks"] == [
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "semantic_correspondence",
+    ]
+
+
+def test_reuse_attempt_binds_manifest_bytes(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = _produce_manifest(tmp_path, capsys, helper, source)
+    code, out, _ = _run_reuse_attempt(
+        capsys, _reuse_attempt_args(helper, manifest, source)
+    )
+    assert code == 0
+    fp = json.loads(out)["sequence"]["request_fingerprint"]
+    other = tmp_path / "other-manifest.json"
+    merged = json.loads(manifest.read_text(encoding="utf-8"))
+    merged["context_key"] = "tampered-context"
+    other.write_text(json.dumps(merged), encoding="utf-8")
+    code, out2, _ = _run_reuse_attempt(
+        capsys, _reuse_attempt_args(helper, other, source)
+    )
+    assert code == 0
+    assert (
+        json.loads(out2)["sequence"]["request_fingerprint"] != fp
+    )
+
+
+def test_reuse_attempt_records_failed_check_on_non_manifest(
+    tmp_path, capsys
+):
+    helper = tmp_path / "go-types-garbage"
+    helper.write_text("#!/bin/sh\nprintf '%s' 'not a manifest'\n")
+    helper.chmod(0o755)
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = tmp_path / "declared.json"
+    manifest.write_text(json.dumps(schema_fixture()))
+    code, out, _ = _run_reuse_attempt(
+        capsys, _reuse_attempt_args(helper, manifest, source)
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["evidence_check"]["outcome"] == "failed"
+    assert report["acceptance"]["accepted"] is False
+
+
+def test_reuse_attempt_timeout_records_no_selection(tmp_path, capsys):
+    fast = _write_helper(
+        tmp_path, json.dumps(schema_fixture()).encode()
+    )
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = _produce_manifest(tmp_path, capsys, fast, source)
+    helper = tmp_path / "go-types-slow"
+    helper.write_text("#!/bin/sh\nsleep 5\n")
+    helper.chmod(0o755)
+    code, out, _ = _run_reuse_attempt(
+        capsys,
+        _reuse_args(
+            helper,
+            manifest,
+            source,
+            extra=["--attempt-timeout", "200", "--timeout", "1"],
+        ),
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["normalized"]["outcome"] == "timed_out"
+    assert "selected_result" not in report["sequence"]
+    assert "candidate" not in report
+
+
+def test_reuse_attempt_output_writes_report(tmp_path, capsys):
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    manifest = _produce_manifest(tmp_path, capsys, helper, source)
+    out_path = tmp_path / "report.json"
+    code, out, err = _run_reuse_attempt(
+        capsys,
+        _reuse_attempt_args(
+            helper, manifest, source, extra=["--output", str(out_path)]
+        ),
+    )
+    assert code == 0 and err == "" and out == ""
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert (
+        report["schema_version"]
+        == "mumei.go-summaries-reuse-attempt-report/v1"
+    )

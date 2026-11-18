@@ -33,6 +33,7 @@ _SUBCOMMANDS = {
     "go-summaries-reuse",
     "go-summaries-accept",
     "go-summaries-attempt",
+    "go-summaries-reuse-attempt",
     "summaries-plan",
     "rust-summaries",
     "rust-summaries-accept",
@@ -639,6 +640,24 @@ def main() -> None:
         go_summaries_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(go_summaries_attempt_main(args))
+    elif command == "go-summaries-reuse-attempt":
+        import argparse
+        from agent.go_summaries import (
+            build_reuse_attempt_parser
+            as go_summaries_reuse_attempt_build_parser,
+            main_reuse_attempt as go_summaries_reuse_attempt_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent go-summaries-reuse-attempt",
+            description=(
+                "Run the go-summaries-reuse route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        go_summaries_reuse_attempt_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(go_summaries_reuse_attempt_main(args))
     elif command == "evidence-check":
         import argparse
         from agent.evidence_check_route import (
