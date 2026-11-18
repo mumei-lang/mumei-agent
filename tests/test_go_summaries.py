@@ -1131,14 +1131,19 @@ def test_attempt_emits_lineage_normalized_and_candidate(tmp_path, capsys):
         == "mumei.evidence-check-acceptance/v1"
     )
     assert acceptance["accepted"] is True
+    # A summary manifest discharges only the byte/run-level checks:
+    # its dep claims stay unperformed until the strict accept route
+    # re-derives them.
     assert report["discharged_checks"] == [
-        "claim_truth",
         "file_identity",
         "freshness",
         "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
         "semantic_correspondence",
     ]
-    assert report["checks_not_performed"] == ["artifact_semantics"]
 
 
 def test_attempt_records_failed_check_on_non_manifest(tmp_path, capsys):
@@ -1151,7 +1156,19 @@ def test_attempt_records_failed_check_on_non_manifest(tmp_path, capsys):
     report = json.loads(out)
     assert report["evidence_check"]["outcome"] == "failed"
     assert report["acceptance"]["accepted"] is False
-    assert report["checks_not_performed"] == ["artifact_semantics"]
+    # The produced bytes still discharge their identity/provenance/
+    # freshness — the representation check's outcome is a separate
+    # claim, same convention as verify-attempt.
+    assert report["discharged_checks"] == [
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "semantic_correspondence",
+    ]
 
 
 def test_attempt_timeout_records_no_selection(tmp_path, capsys):

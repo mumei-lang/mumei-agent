@@ -105,6 +105,20 @@ class DischargedChecks:
         }
     )
 
+    # What a summary-manifest attempt discharges: the produced bytes'
+    # identity, provenance and freshness. `claim_truth` and
+    # `semantic_correspondence` stay unperformed — the representation
+    # check only restores the manifest's shape; the strict accept
+    # route's re-derivation is what checks the claims against the
+    # implementation.
+    SUMMARY_ESTABLISHED = frozenset(
+        {
+            "file_identity",
+            "freshness",
+            "producer_authenticity",
+        }
+    )
+
 
 def _file_sha256(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()

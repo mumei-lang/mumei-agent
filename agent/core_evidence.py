@@ -766,8 +766,6 @@ _CHECK_PERFORMERS: dict = {
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
-        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
-         "normalized.stdout.sha256"),
     ],
     "semantic_correspondence": [
         ("mumei.source-evidence-recheck/v1", "recheck", "consistent",
@@ -775,8 +773,6 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.source-evidence-acceptance/v1", "accepted", True,
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "normalized.stdout.sha256"),
-        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
     ],
     "artifact_semantics": [
@@ -883,7 +879,10 @@ def evaluate_unperformed_check_recovery(
     Schema-open on the record: any object may declare
     ``checks_not_performed`` (non-list/non-string entries are skipped
     and the fold reports ``checks_declared: false`` when the list is
-    absent or invalid). Fail-closed on the evidence: a document is
+    absent or invalid); a record declaring none — a produced summary
+    manifest carries no check fields — is folded over every check
+    ``_CHECK_PERFORMERS`` knows, so a bound attempt report still
+    recovers what it discharges. Fail-closed on the evidence: a document is
     only counted when it is a dict whose ``schema_version`` exactly
     names the declared performer.
 
@@ -922,11 +921,15 @@ def evaluate_unperformed_check_recovery(
 
     declared = record.get("checks_not_performed")
     checks_declared = type(declared) is list
-    check_names = (
-        [name for name in declared if type(name) is str]
-        if checks_declared
-        else []
-    )
+    if checks_declared:
+        check_names = [name for name in declared if type(name) is str]
+    else:
+        # A record that declares no performed/unperformed checks (a
+        # freshly produced manifest carries no check fields at all)
+        # still gets a fold: every check a performer is known for is
+        # a candidate, so a bound attempt report can recover what it
+        # discharges. `checks_declared: false` marks the default.
+        check_names = sorted(_CHECK_PERFORMERS)
 
     schema_to_docs: dict = {}
     for doc in evidence:

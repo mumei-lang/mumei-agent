@@ -954,9 +954,9 @@ def run_attempt(args: argparse.Namespace) -> dict:
             published, check
         )
         report["discharged_checks"] = sorted(
-            DischargedChecks.ESTABLISHED
+            DischargedChecks.SUMMARY_ESTABLISHED
         )
         report["checks_not_performed"] = sorted(
-            CHECK_VOCABULARY - DischargedChecks.ESTABLISHED
+            CHECK_VOCABULARY - DischargedChecks.SUMMARY_ESTABLISHED
         )
     return report
