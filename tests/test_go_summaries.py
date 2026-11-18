@@ -1214,6 +1214,24 @@ def test_attempt_binds_and_forwards_summary_aware_calls(tmp_path, capsys):
     )
 
 
+def test_attempt_unreadable_input_error_hides_path(tmp_path, capsys):
+    helper = _write_helper(
+        tmp_path, json.dumps(schema_fixture()).encode()
+    )
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    missing = tmp_path / "missing-callee.json"
+    code, _, err = _run_attempt(
+        capsys,
+        _attempt_args(
+            helper,
+            source,
+            extra=["--summary-aware-calls", str(missing)],
+        ),
+    )
+    assert code == 1
+    assert str(missing) not in err
+
+
 def test_attempt_rejects_missing_helper(tmp_path, capsys):
     source = _write_source(tmp_path, "f.go", SOURCE)
     code, _, err = _run_attempt(

@@ -765,7 +765,20 @@ ATTEMPT_REPORT_PROFILE = "mumei.go-summaries-attempt-report/v1"
 
 
 def _file_sha256(path: str) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    # Streamed so hashing a large declared input cannot exhaust the
+    # parent's memory outside the attempt's declared bounds; the
+    # error detail carries `strerror` only — `str(exc)` would leak
+    # the checkout-local path into the route's failure output.
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise SnapshotError(
+            f"declared input unreadable: {exc.strerror or 'I/O error'}"
+        ) from exc
+    return digest.hexdigest()
 
 
 def _optional_file_sha256(path: str | None) -> str | None:
@@ -900,7 +913,7 @@ def run_attempt(args: argparse.Namespace) -> dict:
     )
     try:
         inputs_changed = _attempt_fingerprint(args) != fingerprint
-    except OSError:
+    except (OSError, SnapshotError):
         inputs_changed = True
     if dispatch.run.record.state == "exited" and not inputs_changed:
         updated = dispatch.sequence.select_result(
