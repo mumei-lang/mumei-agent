@@ -1892,8 +1892,12 @@ nonterminal. Same-attempt snapshots now have explicit prefix-only reconciliation
 above. Independent branches may still conflict: host attempt-number uniqueness,
 cross-attempt/backend arbitration/replay protection, final preflight/authority checks,
 actual execution/cancellation/cleanup/resource enforcement, output collection and
-Evidence normalization/acceptance are still open. There is no pre-start
-cancellation flow; the retry/fallback scheduler
+Evidence normalization/acceptance are still open for execution
+outcomes beyond the declared checks the attempt routes already fold
+(`evidence_check`/`acceptance` on the summaries routes, and Core
+`mumei evidence accept` verdicts for declared-requirement docs).
+Pre-start cancellation has since landed as `ready → cancelled` via
+`AttemptSequence.withdraw_attempt()` above; the retry/fallback scheduler
 (`run_attempt_schedule`), the `verify-schedule` CLI route, the
 `verify_schedule` MCP tool and `audit --enable-scheduled-verification`
 integration have since landed.
