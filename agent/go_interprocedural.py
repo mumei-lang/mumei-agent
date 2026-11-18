@@ -1624,17 +1624,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> tuple[Any, str, Any, tuple[Any, ...], Any] | None:
+    ) -> tuple[Any, str, Any, tuple[Any, ...], Any, tuple[Any, ...], Any] | None:
         """`(*p)[i].F` — a field of the element a bound container
         pointee's index selects.
 
         Returns `(root identifier, pointee identity, innermost
-        container fact, index nodes outermost-first, field member)`
+        container fact, index nodes outermost-first, leaf field
+        member, intermediate named-struct members, bound reference)`
         or None. The element the last level reaches must resolve the
         field through its own reference — a named struct's `var`
         member like `_bound_field_read`'s leaf, scalar-or-pointer.
-        `(*p)[i].F.G` stays closed: the field's operand must be the
-        index itself, so a second selection never reaches here.
+        `(*p)[i].F.G` admits one deeper level: the intermediate `F`
+        must be a `var` member whose named struct type pins, and `G`
+        resolves through its own reference like any leaf — a third
+        selection and an anonymous intermediate struct stay closed.
         """
         operand = node.child_by_field_name("operand")
         field = node.child_by_field_name("field")
@@ -1647,6 +1650,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if operand is None:
                 return None
+        mid_member = None
+        if operand.type == "selector_expression":
+            mid_operand = operand.child_by_field_name("operand")
+            mid_field = operand.child_by_field_name("field")
+            if mid_operand is None or mid_field is None:
+                return None
+            while mid_operand.type == "parenthesized_expression":
+                mid_operand = next(
+                    (
+                        c
+                        for c in mid_operand.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+                if mid_operand is None:
+                    return None
+            if mid_operand.type != "index_expression":
+                return None
+            mid_ref = self.references.get(self.node_key(mid_field))
+            if mid_ref is not None and mid_ref.kind == "import":
+                mid_member = self.members.get(mid_ref.binding_id)
+            else:
+                mid_member = self._local_field(mid_ref)
+            if (
+                mid_member is None
+                or mid_member.name.encode("utf-8") != mid_field.text
+                or mid_member.kind not in {"var", "variable"}
+                or mid_member.type is None
+                or mid_member.type.kind != "struct"
+                or not mid_member.type.type_id
+            ):
+                return None
+            operand = mid_operand
         if operand.type != "index_expression":
             return None
         extras: list[Any] = []
@@ -1732,7 +1769,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             not in {"integer", "boolean", "pointer"}
         ):
             return None
-        return ident, pointee_id, fact, tuple(extras), field_member, ref
+        return (
+            ident,
+            pointee_id,
+            fact,
+            tuple(extras),
+            field_member,
+            (mid_member,) if mid_member is not None else (),
+            ref,
+        )
 
     def _bound_selector_pointees(
         self,
@@ -4691,19 +4736,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_, params
                 )
                 if indexed_field is not None:
-                    _root, _pid, fact, extras, field_member, ref = (
-                        indexed_field
-                    )
-                    # Same pointer-read as `(*p)[i] = v` — the field
-                    # store's destination resolves through the
-                    # bound pointer.
-                    dest_deps = self._pointer_deps(
-                        ref.binding_id, params, locals_
-                    )
-                    if compound:
-                        dest_deps = dest_deps | self.indirect_writes
-                    self._record_read(dest_deps)
+                    (
+                        _root, _pid, fact, extras, field_member,
+                        mid_members, ref,
+                    ) = indexed_field
                     self._pin_fact_identities(fact)
+                    for mid_member in mid_members:
+                        self._pin_fact_identities(mid_member.type)
                     if field_member.type is not None:
                         self._pin_fact_identities(field_member.type)
                     for extra in reversed(extras):
@@ -4715,6 +4754,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 transfers, count, 0,
                             )
                         )
+                    # Same pointer-read as `(*p)[i] = v` — the field
+                    # store's destination resolves through the
+                    # bound pointer; the indexes evaluate first so a
+                    # call in one can add indirect stores the store's
+                    # own read observes.
+                    dest_deps = self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if compound:
+                        dest_deps = dest_deps | self.indirect_writes
+                    self._record_read(dest_deps)
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -5829,14 +5879,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 operand, locals_, params
             )
             if indexed_field is not None:
-                _root, _pid, fact, extras, field_member, ref = (
-                    indexed_field
-                )
-                self._record_read(
-                    self._pointer_deps(ref.binding_id, params, locals_)
-                    | self.indirect_writes
-                )
+                (
+                    _root, _pid, fact, extras, field_member,
+                    mid_members, ref,
+                ) = indexed_field
                 self._pin_fact_identities(fact)
+                for mid_member in mid_members:
+                    self._pin_fact_identities(mid_member.type)
                 if field_member.type is not None:
                     self._pin_fact_identities(field_member.type)
                 for extra in reversed(extras):
@@ -5848,6 +5897,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             transfers, count, 0,
                         )
                     )
+                self._record_read(
+                    self._pointer_deps(ref.binding_id, params, locals_)
+                    | self.indirect_writes
+                )
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -6493,9 +6546,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if indexed is not None:
                     (
                         ident, pointee_id, fact, extras, field_member,
-                        _ref,
+                        mid_members, _ref,
                     ) = indexed
                     self._pin_fact_identities(fact)
+                    for mid_member in mid_members:
+                        self._pin_fact_identities(mid_member.type)
                     if field_member.type is not None:
                         self._pin_fact_identities(field_member.type)
                     transfers.append(
@@ -6511,11 +6566,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    deps = field_index_deps | self.indirect_writes
-                    deps |= self.expression(
-                        ident, fn, params, locals_,
-                        transfers, count, depth + 1,
-                    )
+                    # Evaluate the indexes before snapshotting
+                    # `indirect_writes`: a two-level operand escapes
+                    # the pre-scan, and an index call can add
+                    # indirect stores the leaf read must observe.
+                    deps = field_index_deps
                     for extra in reversed(extras):
                         if (
                             extra.type in _INDEX_LITERALS
@@ -6526,6 +6581,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             extra, fn, params, locals_,
                             transfers, count, 0,
                         )
+                    deps |= self.indirect_writes
+                    deps |= self.expression(
+                        ident, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
                     return deps
             if (
                 member is None
