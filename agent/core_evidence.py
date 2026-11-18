@@ -750,10 +750,13 @@ FRESHNESS_EVALUATION_SCHEMA = "mumei.freshness-evaluation/v1"
 # fractional seconds, and a numeric offset or Z. Looser ISO 8601
 # shapes `datetime.fromisoformat` accepts (missing seconds, missing
 # colon in the offset, date-only, week dates) stay unclaimed.
+# ``[0-9]`` rather than ``\d``: the unicode-aware class accepts
+# non-ASCII digits (Arabic-Indic etc.) that RFC 3339 excludes and
+# ``int()`` happily parses.
 _RFC3339_RE = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2})"
-    r"(?:\.(\d+))?"
-    r"([Zz]|[+-]\d{2}:\d{2})$"
+    r"^([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})"
+    r"(?:\.([0-9]+))?"
+    r"([Zz]|[+-][0-9]{2}:[0-9]{2})$"
 )
 
 

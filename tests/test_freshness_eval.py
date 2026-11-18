@@ -79,6 +79,11 @@ def test_missing_or_malformed_claim():
         {"produced_at": "2026-11-18T00:00Z"},  # RFC 3339 needs seconds
         {"produced_at": "2026-11-18"},  # date only
         {"produced_at": "2026-11-18T00:00:00+0000"},  # offset colon
+        # non-ASCII digits (Arabic-Indic) are not RFC 3339 digits —
+        # ``int()`` accepts them, the strict regex must not
+        {"produced_at": "2026-11-18T00:00:00.١00000Z"},
+        {"produced_at": "٢٠٢٦-11-18T00:00:00Z"},
+        {"produced_at": "2026-11-18T00:00:00+0١:00"},
         {"produced_at": 7},
         {"produced_at": None},
     ):
