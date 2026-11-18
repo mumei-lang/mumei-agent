@@ -106,6 +106,20 @@ def build_parser(
         metavar="<PATH>",
         help="Write the manifest JSON here instead of stdout.",
     )
+    parser.add_argument(
+        "--summary-aware-calls",
+        dest="summary_aware_calls",
+        metavar="<MANIFEST>",
+        default=None,
+        help=(
+            "Declared callee summary manifest "
+            "(mumei.go-scalar-parameter-deps/v1): calls resolving to a "
+            "callee it covers fold the declared return_dependencies and "
+            "statement_reads instead of the opaque every-argument "
+            "approximation. Advisory only — callees it misses keep "
+            "opaque-call behavior."
+        ),
+    )
     return parser
 
 
@@ -361,15 +375,23 @@ def _run_helper(binary: str, payload: bytes, timeout: int) -> bytes:
     return completed.stdout
 
 
-def _summarize(sources: dict[str, str], payload: bytes, target_arch: str):
+def _summarize(
+    sources: dict[str, str],
+    payload: bytes,
+    target_arch: str,
+    declared: "GoSummarySet | None" = None,
+):
     if len(sources) == 1:
         source = next(iter(sources.values()))
         return summarize_go(
-            source, load_go_snapshot(payload, source, target_arch=target_arch)
+            source,
+            load_go_snapshot(payload, source, target_arch=target_arch),
+            declared=declared,
         )
     return summarize_go_package(
         sources,
         load_go_package_snapshot(payload, sources, target_arch=target_arch),
+        declared=declared,
     )
 
 
@@ -384,6 +406,9 @@ def _declared_paths(args: argparse.Namespace) -> set[Path]:
         manifest = getattr(args, "manifest", None)
         if manifest is not None:
             declared.add(Path(manifest).resolve())
+        callee_manifest = getattr(args, "summary_aware_calls", None)
+        if callee_manifest is not None:
+            declared.add(Path(callee_manifest).resolve())
         go_types = getattr(args, "go_types", None)
         if go_types is not None:
             declared.add(Path(go_types).resolve())
@@ -425,6 +450,7 @@ def summarize_declared(
     target_arch: str,
     imports: dict[str, dict[str, str]] | None = None,
     timeout: int = 30,
+    declared: "GoSummarySet | None" = None,
 ):
     """Run a provisioned helper on declared sources and summarize.
 
@@ -469,7 +495,7 @@ def summarize_declared(
             "helper bound"
         )
     report = _run_helper(go_types, payload, timeout)
-    return _summarize(sources, report, target_arch), report
+    return _summarize(sources, report, target_arch, declared), report
 
 
 def _run_declared(
@@ -485,8 +511,18 @@ def _run_declared(
     declared = _declared_paths(args)
     _check_output_path(args, declared)
     imports = _read_imports(args.imports)
+    callee_manifest = (
+        _read_manifest(args.summary_aware_calls)
+        if getattr(args, "summary_aware_calls", None)
+        else None
+    )
     summary, report = summarize_declared(
-        sources, args.go_types, args.target_arch, imports, args.timeout
+        sources,
+        args.go_types,
+        args.target_arch,
+        imports,
+        args.timeout,
+        declared=callee_manifest,
     )
     return sources, summary, report
 

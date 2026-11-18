@@ -494,6 +494,80 @@ def test_real_helper_package_round_trip(tmp_path, capsys, real_go_types):
     assert calls and any(call["result"] for call in calls)
 
 
+def test_summary_aware_calls_folds_a_declared_callee(
+    tmp_path, capsys, real_go_types
+):
+    """`--summary-aware-calls` end-to-end: the lib manifest produced by
+    an earlier run folds `lib.G`'s declared return deps into the
+    caller, so `y` leaves F's result even though the call resolves to
+    an import."""
+    lib_dir = tmp_path / "libunit"
+    lib_dir.mkdir()
+    lib_src = _write_source(
+        lib_dir, "g.go", "package lib\nfunc G(a, b int64) int64 { return a }\n"
+    )
+    code, out, err = _run(capsys, _args(real_go_types, lib_src))
+    assert code == 0 and err == ""
+    lib_manifest = tmp_path / "lib.json"
+    lib_manifest.write_text(out)
+    caller = _write_source(
+        tmp_path,
+        "a.go",
+        "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 { return lib.G(x, y) + x }\n",
+    )
+    other = _write_source(tmp_path, "b.go", "package p\nfunc H() int64 { return 0 }\n")
+    code, out, err = _run(
+        capsys,
+        _args(
+            real_go_types,
+            caller,
+            other,
+            extra=[
+                "--import", f"lib={lib_src}",
+                "--summary-aware-calls", str(lib_manifest),
+            ],
+        ),
+    )
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    (f,) = [e for e in manifest["functions"] if e["calls"]]
+    assert f["return_dependencies"] == [0]
+    assert manifest["call_modeling"] == {
+        "summary_modeled_calls": 1,
+        "opaque_calls": 0,
+        "summary_unmatched": 0,
+    }
+    # Without the flag the same call stays the opaque union.
+    code, out, err = _run(
+        capsys,
+        _args(
+            real_go_types, caller, other, extra=["--import", f"lib={lib_src}"]
+        ),
+    )
+    assert code == 0 and err == ""
+    manifest = json.loads(out)
+    (f,) = [e for e in manifest["functions"] if e["calls"]]
+    assert f["return_dependencies"] == [0, 1]
+    assert "call_modeling" not in manifest
+
+
+def test_summary_aware_calls_malformed_manifest_fails_statically(
+    tmp_path, capsys, real_go_types
+):
+    bad = _write_source(tmp_path, "bad.json", "{")
+    caller = _write_source(tmp_path, "a.go", "package p\nfunc F() int64 { return 0 }\n")
+    code, out, err = _run(
+        capsys,
+        _args(
+            real_go_types,
+            caller,
+            extra=["--summary-aware-calls", str(bad)],
+        ),
+    )
+    assert code == 1 and "go-summaries" in err
+
+
 def test_check_round_trip_marks_everything_reusable(tmp_path, capsys):
     files = {
         "a.go": "package p\nfunc F0() int64 { return 1 }\n",

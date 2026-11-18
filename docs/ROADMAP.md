@@ -4822,6 +4822,42 @@ manifest can never weaken the audit, and manifest bytes still never
 land in the report. Reuse counts are observed metadata only:
 `summary_audits` stays advisory and carries no verdict.
 
+### go-summaries `--summary-aware-calls` (issue #900 Option B, Go first)
+
+`go-summaries --summary-aware-calls <MANIFEST>` declares a callee
+summary manifest (`mumei.go-scalar-parameter-deps/v1`). A plain
+`lib.F(args)` `direct_import` call whose callee the manifest covers
+folds the callee's declared data instead of the opaque every-argument
+union: the call's `result` becomes the union over the actuals the
+declared `return_dependencies` names, `imported` follows the callee's
+declared `effects` (an `unknown`-effects callee still transfers as
+imported and still widens store-through-alias writes), and the
+callee's declared `pinned` type identities fold like a local call's.
+The callee's declared statement reads need no fold — each maps to a
+subset of the actuals the call-site statement already reads.
+
+The declared manifest is trusted as asserted: authenticity and
+staleness stay unperformed, so `summary_authenticity` and
+`summary_staleness` still report honestly rather than silently
+upgrading. Matching is the declaration position, not the serialized
+binding id — a callee's (file digest, declaration start) mints
+identically under single-file and package unit shapes, so a
+single-file callee manifest folds into the package-minted call
+targets imports always carry; two manifest entries colliding on one
+position fold neither. Folding is monotone-widening only: a callee
+the manifest misses, or an entry that is gapped, arity-mismatched or
+non-scalar, keeps today's opaque approximation, so a partial or stale
+manifest can never narrow below the width a run without the flag
+would report. Method and receiver-carrying calls never fold — the
+manifest's parameter ordinals do not describe the receiver.
+
+A manifest derived with the flag carries `call_modeling` —
+`summary_modeled_calls` (folded), `opaque_calls` (left opaque),
+`summary_unmatched` (manifest entries no call referenced) — advisory
+counts only, never a verdict; manifests without the block load
+unchanged. The manifest path joins the declared inputs, so `--output`
+can never overwrite it. The TS/Sol/Rust ports stay open.
+
 
 ## Roadmap authority and vocabulary
 

@@ -2254,6 +2254,301 @@ def test_zero_argument_import_call(go_types_helper):
     assert transfer.result == frozenset()
 
 
+def _declared_lib_set(helper: Path, lib: dict[str, str]):
+    """The declared callee manifest `--summary-aware-calls` consumes:
+
+    the lib unit summarized the same way a prior `go-summaries` run on
+    it would have produced."""
+    files, snapshot, _ = package_unit(helper, lib)
+    return ip.summarize_go_package(files, snapshot)
+
+
+def test_summary_aware_call_folds_declared_return_dependencies(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 { return lib.G(x, y) + x }\n"
+    }
+    lib = {
+        "lib": {"g.go": "package lib\nfunc G(a, b int64) int64 { return a }\n"}
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, lib["lib"])
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    # The opaque approximation would union both arguments into the
+    # call's result; the declared summary folds only `a` (= actual 0).
+    assert result.available and result.return_dependencies == frozenset({0})
+    (transfer,) = result.calls
+    assert transfer.result == frozenset({0})
+    assert not transfer.imported
+    assert summaries.call_modeling == {
+        "summary_modeled_calls": 1,
+        "opaque_calls": 0,
+        "summary_unmatched": 0,
+    }
+
+
+def test_summary_aware_calls_absent_manifest_stays_opaque_and_silent(
+    go_types_helper,
+):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    (transfer,) = result.calls
+    assert transfer.imported
+    # No declared manifest: the manifest carries no call_modeling
+    # block at all, and reports lacking it load unchanged.
+    assert summaries.call_modeling is None
+    assert "call_modeling" not in summaries.to_dict()
+    restored = ip.GoSummarySet.from_dict(summaries.to_dict())
+    assert restored.call_modeling is None
+
+
+def test_summary_aware_call_partial_manifest_leaves_unmatched_opaque(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\nimport \"other\"\n"
+        "func F(x, y int64) int64 {\n"
+        "    return lib.G(x, y) + other.H(x, y)\n"
+        "}\n"
+    }
+    lib = {"g.go": "package lib\nfunc G(a, b int64) int64 { return a }\n"}
+    imports = {
+        "lib": lib,
+        "other": {
+            "h.go": "package other\nfunc H(a, b int64) int64 { return a }\n"
+        },
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    # Only lib's unit is declared: the other.H call keeps the opaque
+    # union, lib.G folds.
+    declared = _declared_lib_set(go_types_helper, lib)
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+    assert {t.imported for t in result.calls} == {False, True}
+    assert summaries.call_modeling["summary_modeled_calls"] == 1
+    assert summaries.call_modeling["opaque_calls"] == 1
+    assert summaries.call_modeling["summary_unmatched"] == 0
+
+
+def test_summary_aware_call_stale_callee_id_never_matches(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 { return lib.G(x, y) + x }\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nfunc G(a, b int64) int64 { return a }\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    # A manifest declared against a different lib revision names a
+    # different binding id — monotone widening means the fold can never
+    # apply to a callee it does not cover.
+    stale_lib = {
+        "lib": {"g.go": "package lib\nfunc G(a, b int64) int64 { return a + b }\n"}
+    }
+    declared = _declared_lib_set(go_types_helper, stale_lib["lib"])
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.calls[0].imported
+    assert summaries.call_modeling["summary_modeled_calls"] == 0
+    assert summaries.call_modeling["summary_unmatched"] == 1
+
+
+def test_summary_aware_call_unavailable_entry_keeps_opaque(go_types_helper):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, LIB["lib"])
+    callee = next(
+        f for f in declared.functions if f.return_dependencies == frozenset({0})
+    )
+    gapped = replace(callee, gaps=(ip.SummaryGap("declared_gap"),))
+    declared = ip.GoSummarySet(
+        declared.context_key, (gapped,), declared.target_arch
+    )
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.calls[0].imported
+    assert summaries.call_modeling["summary_modeled_calls"] == 0
+    # The manifest entry was consulted — it counts as matched even
+    # though the fold could not apply.
+    assert summaries.call_modeling["summary_unmatched"] == 0
+
+
+def test_summary_aware_call_arity_mismatch_keeps_opaque(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 { return lib.G(x, y) + x }\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nfunc G(a, b int64) int64 { return a }\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, lib["lib"])
+    # Forge the callee's identity onto an entry whose declared
+    # parameter list does not match the call's arity — a mismatched
+    # declared unit can never fold under a different shape than the
+    # call site actually binds.
+    callee = declared.functions[0]
+    mismatched = replace(callee, parameters=(callee.parameters[0],))
+    declared = ip.GoSummarySet(
+        declared.context_key, (mismatched,), declared.target_arch
+    )
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.calls[0].imported
+    assert summaries.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_summary_aware_call_out_of_range_return_dependency_keeps_opaque(
+    go_types_helper,
+):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, LIB["lib"])
+    callee = declared.functions[0]
+    corrupt = replace(callee, return_dependencies=frozenset({0, 7}))
+    declared = ip.GoSummarySet(
+        declared.context_key, (corrupt,), declared.target_arch
+    )
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    # A declared ordinal the call site cannot supply widens back to
+    # the opaque approximation rather than indexing out of range.
+    assert result.calls[0].imported
+    assert summaries.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_summary_aware_call_folds_statement_reads(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x, y int64) int64 {\n"
+        "    s := lib.G(x, y)\n"
+        "    return s\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G(a, b int64) int64 {\n"
+            "    t := a + 1\n"
+            "    return t\n"
+            "}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, lib["lib"])
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    # The call statement itself evaluates both arguments, so its row
+    # reads {0, 1} under the fold exactly as it did opaquely — the
+    # callee's declared statement reads can only name subsets of that.
+    assert result.statement_reads
+    assert any(r.deps == frozenset({0, 1}) for r in result.statement_reads)
+    assert result.calls[0].imported is False
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_summary_aware_call_method_call_stays_opaque(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v lib.T, y int64) int64 { return v.G(y) }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\ntype T struct{}\n"
+            "func (T) G(a int64) int64 { return a }\n"
+        }
+    }
+    report = package_report_imports(go_types_helper, files, lib)
+    snapshot = load_go_package_snapshot(report, files, target_arch="amd64")
+    declared = _declared_lib_set(go_types_helper, lib["lib"])
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    # A receiver-carrying call can never fold — the manifest's ordinals
+    # do not describe the receiver.
+    assert summaries.call_modeling["summary_modeled_calls"] == 0
+
+
+def test_summary_aware_call_unknown_effects_stays_imported(go_types_helper):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, LIB["lib"])
+    callee = declared.functions[0]
+    # `effects` derives from the calls: an imported transfer makes the
+    # declared callee's effects "unknown" while it stays available.
+    effectful = replace(
+        callee,
+        calls=(
+            ip.CallTransfer(
+                ByteSpan(0, 1), "opaque-builtin", (), frozenset(), imported=True
+            ),
+        ),
+    )
+    declared = ip.GoSummarySet(
+        declared.context_key, (effectful,), declared.target_arch
+    )
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.calls[0].imported
+    assert result.effects == "unknown"
+    assert summaries.call_modeling["summary_modeled_calls"] == 1
+
+
+def test_call_modeling_round_trip(go_types_helper):
+    files = {"a.go": IMPORTER}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, LIB),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, LIB["lib"])
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    restored = ip.GoSummarySet.from_dict(summaries.to_dict())
+    assert restored.call_modeling == summaries.call_modeling
+    bad = summaries.to_dict()
+    bad["call_modeling"]["opaque_calls"] = -1
+    with pytest.raises(SnapshotError):
+        ip.GoSummarySet.from_dict(bad)
+
+
 def test_direct_import_is_not_a_call_gap(go_types_helper):
     report = json.loads(
         package_report_imports(go_types_helper, {"a.go": IMPORTER}, LIB)
