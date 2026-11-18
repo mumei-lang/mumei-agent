@@ -4219,6 +4219,8 @@ def run_attempt(
     from pathlib import Path
 
     from agent.attempt_runner import dispatch_attempt
+    from agent.core_evidence import evaluate_evidence_check
+    from agent.verify_attempt import CHECK_VOCABULARY, DischargedChecks
     from agent.verification_attempt import (
         AttemptSequence,
         AttemptSequenceStore,
@@ -4272,7 +4274,34 @@ def run_attempt(
         "normalized": dispatch.run.normalized().to_dict(),
     }
     if published.selected_result is not None:
-        report["candidate"] = published.evidence_candidate().to_dict()
+        candidate = published.evidence_candidate()
+        report["candidate"] = candidate.to_dict()
+        # The manifest's strict from_dict boundary is the declared
+        # representation check: a selected run whose captured bytes
+        # restore as the declared summary set records "valid";
+        # anything else records "failed", never an error.
+        try:
+            payload = json.loads(dispatch.run.stdout)
+            SolSummarySet.from_dict(payload)
+            outcome = "valid"
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            RecursionError,
+        ):
+            outcome = "failed"
+        check = published.evidence_check(candidate, outcome)
+        report["evidence_check"] = check.to_dict()
+        report["acceptance"] = evaluate_evidence_check(
+            published, check
+        )
+        report["discharged_checks"] = sorted(
+            DischargedChecks.ESTABLISHED
+        )
+        report["checks_not_performed"] = sorted(
+            CHECK_VOCABULARY - DischargedChecks.ESTABLISHED
+        )
     return report
 
 

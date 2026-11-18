@@ -1894,6 +1894,23 @@ def test_attempt_route_emits_lineage_and_candidate(tmp_path, capsys):
         candidate["request_fingerprint"]
         == sequence["request_fingerprint"]
     )
+    check = report["evidence_check"]
+    assert check["schema_version"] == "mumei.verifier-evidence-check/v1"
+    assert check["outcome"] == "valid"
+    acceptance = report["acceptance"]
+    assert (
+        acceptance["schema_version"]
+        == "mumei.evidence-check-acceptance/v1"
+    )
+    assert acceptance["accepted"] is True
+    assert report["discharged_checks"] == [
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+    ]
+    assert report["checks_not_performed"] == ["artifact_semantics"]
 
 
 def test_attempt_route_binds_source_bytes(tmp_path, capsys):
