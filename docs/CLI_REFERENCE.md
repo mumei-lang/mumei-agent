@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 19 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 23 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -275,6 +275,10 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--summaries-manifest-map` | `<<PATH>>` | no | — | Directory audits only, requires --enable-summaries: JSON object mapping each unit label (as emitted under summary_audits) to a prior summary manifest. Units with a declared manifest run their *-summaries-reuse route and report mode/reused/derived counts; a stale or rejected manifest falls back to the produce route. |
 | `--enable-summary-attempts` | — | no | — | Directory audits only, requires --enable-summaries: run each summary unit through its declared <route>-attempt route and record the attempt report's acceptance envelope (mode/accepted/check_outcome/manifest_sha256) instead of manifest metadata — advisory; report bytes are not stored. Cannot combine with --summaries-manifest-map. |
 | `--summary-attempt-timeout` | `<<MS>>` | no | 120000 | Declared attempt bound in milliseconds passed to each <route>-attempt unit (default: 120000). |
+| `--enable-summary-plan` | — | no | — | Directory audits only, requires --enable-summaries: run the probe-boundary planner once per summary profile present among the collected units and record the advisory mumei.summaries-plan/v1 documents under summary_plans — routing only; no summary is derived. Planning executes each adapter's declared probe command. |
+| `--summary-plan-stamp` | `<<N>>` | no | 1 | Host-declared observation stamp for the probe requests --enable-summary-plan records (default: 1). |
+| `--summary-plan-tool-version` | `<<VERSION>>` | no | — | Optional declared tool version the --enable-summary-plan planner pins against. |
+| `--summary-plan-histories` | `<<PATH>>` | no | — | Optional JSON array of persisted mumei.adapter-probe-history records the --enable-summary-plan planner resumes. |
 | `--go-types` | `<<PATH>>` | no | — | Path to the provisioned tools/go-types helper binary; Go summary units record skipped_no_helper when --enable-summaries is set without it. |
 
 

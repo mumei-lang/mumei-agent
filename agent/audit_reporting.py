@@ -811,6 +811,21 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
             lines.append(
                 f"  - {entry.get('route')} {entry.get('unit')}: {status}{detail}"
             )
+    if result.summary_plans:
+        lines.append("summary_plans:")
+        for entry in result.summary_plans:
+            status = entry.get("status", "unknown")
+            if status == "planned":
+                plan = entry.get("plan") or {}
+                selected = (plan.get("plan") or {}).get("selected")
+                detail = (
+                    f" selected={selected['adapter_id']}"
+                    if type(selected) is dict
+                    else " selected=none"
+                )
+            else:
+                detail = f" {entry['error']}" if entry.get("error") else ""
+            lines.append(f"  - {entry.get('profile')}: {status}{detail}")
     if result.errors:
         lines.append(f"errors: {result.errors}")
     if result.next_steps:
