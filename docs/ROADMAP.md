@@ -5170,6 +5170,22 @@ an Evidence acceptance. This is partial C11: scheduling is observed
 dispatch, not authorization, output normalization, arbitration or
 acceptance.
 
+### C11 verify-schedule CLI route
+
+`python -m agent verify-schedule` is the consumable surface for
+`run_attempt_schedule`: it loads the declared
+`RouteRequirements`/`ResultContract` (`--request`), adapter manifests
+(`--adapters`), `PlannerPolicy` (`--policy`), optional stamped runtime
+observations (`--observations`), the source (`--source`, sha256-checked)
+and the host's argv lookup (`--argv-map`, adapter_id → argv array), then
+prints the `mumei.attempt-schedule/v1` descriptor (`--output` writes it
+to a file). Every input document is closed-shape — unknown keys are
+rejected — and the schedule's own bounds (`--max-attempts` ≤ 8,
+`--success-exit-code` repeated, `--memory-bound-mb`) are declared on the
+command line, not hidden in policy defaults. The route is dispatch only:
+like `verify-attempt` it emits a dispatch record, never an Evidence
+acceptance, and it keeps the fingerprint-only output contract.
+
 
 ## Roadmap authority and vocabulary
 
