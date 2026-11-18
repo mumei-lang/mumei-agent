@@ -3142,22 +3142,38 @@ def test_collect_summary_audits_reuse_passes_go_types_helper(
     go.parent.mkdir()
     go.write_text("x", encoding="utf-8")
     manifest = tmp_path / "prior.json"
-    manifest.write_text(
-        json.dumps({"context_key": "k", "functions": []}), encoding="utf-8"
-    )
+    # go records are keyed by binding_id + key, not name
+    prior = {
+        "context_key": "k",
+        "functions": [
+            {"binding_id": "pkg.F", "key": "F"},
+            {"binding_id": "pkg.G", "key": "G"},
+        ],
+    }
+    manifest.write_text(json.dumps(prior), encoding="utf-8")
 
     calls: list[list[str]] = []
+    merged = {
+        "context_key": "ck-fresh",
+        "functions": [
+            {"binding_id": "pkg.F", "key": "F"},          # reused
+            {"binding_id": "pkg.G", "key": "G", "new": 1},  # derived
+            {"binding_id": "pkg.H", "key": "H"},          # new
+        ],
+    }
     entries = _collect_summary_audits(
         tmp_path,
         [go],
         "/opt/go-types",
         manifest_map={"pkg": str(manifest)},
         runner=lambda argv: calls.append(argv)
-        or _fake_completed(argv, stdout=_manifest_json(0)),
+        or _fake_completed(argv, stdout=json.dumps(merged)),
     )
 
     assert entries[0]["status"] == "emitted"
     assert entries[0]["mode"] == "reuse"
+    assert entries[0]["reused_function_count"] == 1
+    assert entries[0]["derived_function_count"] == 2
     assert calls == [
         [
             "go-summaries-reuse",

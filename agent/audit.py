@@ -1188,24 +1188,34 @@ def _read_summary_manifest_map(path: Path) -> dict:
     return value
 
 
+def _summary_record_id(record: dict) -> str | None:
+    """The identity field a manifest's record is keyed on: `name` for
+    the rust/ts/sol families, `binding_id` for the go family."""
+    for field in ("name", "binding_id"):
+        value = record.get(field)
+        if type(value) is str:
+            return value
+    return None
+
+
 def _count_reused_functions(merged: dict, prior: dict) -> tuple[int, int]:
     """Partition the merged manifest's records: how many equal the
-    prior manifest's record for the same function name."""
+    prior manifest's record for the same function identity."""
     merged_functions = merged.get("functions")
     prior_functions = prior.get("functions")
     if not isinstance(merged_functions, list) or not isinstance(
         prior_functions, list
     ):
         return 0, 0
-    prior_by_name = {
-        record["name"]: record
+    prior_by_id = {
+        _summary_record_id(record): record
         for record in prior_functions
-        if type(record) is dict and type(record.get("name")) is str
+        if type(record) is dict and _summary_record_id(record) is not None
     }
     reused = sum(
         1
         for record in merged_functions
-        if type(record) is dict and record == prior_by_name.get(record.get("name"))
+        if type(record) is dict and record == prior_by_id.get(_summary_record_id(record))
     )
     return reused, len(merged_functions) - reused
 
@@ -1229,7 +1239,9 @@ def _collect_summary_audits(
     ``--summaries-manifest-map``) a unit runs its ``*-summaries-reuse``
     route instead of the produce route: the merged manifest is keyed
     to the fresh context and the entry reports `mode: "reuse"` with
-    `reused_function_count`/`derived_function_count`. A unit whose
+    `reused_function_count`/`derived_function_count` — merged records
+    matched to the prior manifest's by `name`, or `binding_id` for the
+    go family. A unit whose
     declared manifest is unreadable, malformed or rejected by the
     reuse route records `reuse_status: "stale_manifest"` and falls
     back to the produce route — a bad prior manifest can never
