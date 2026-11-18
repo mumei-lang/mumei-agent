@@ -56,6 +56,7 @@ _SUBCOMMANDS = {
     "evidence-acceptance-eval",
     "signature-eval",
     "signature-verify",
+    "recovery-eval",
     "evidence-compare",
     "evidence-identity-check",
     "evidence-producer-check",
@@ -761,6 +762,24 @@ def main() -> None:
         signature_verify_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(signature_verify_main(args))
+    elif command == "recovery-eval":
+        import argparse
+        from agent.recovery_eval import (
+            build_eval_parser as recovery_eval_build_parser,
+            main_eval as recovery_eval_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent recovery-eval",
+            description=(
+                "Fold a declared record's checks_not_performed over "
+                "supporting evaluation documents and emit the "
+                "recovery descriptor."
+            ),
+        )
+        recovery_eval_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(recovery_eval_main(args))
     elif command == "evidence-identity-check":
         import argparse
         from agent.evidence_identity import (

@@ -4747,6 +4747,32 @@ reports `false` observations, never an error. Signing, key
 generation, rotation and the Core producer side are separate later
 slices; C11 stays partial.
 
+### C11 declared unperformed-check recovery
+
+`agent.core_evidence.evaluate_unperformed_check_recovery(record,
+evidence)` and the `recovery-eval` route — the issue #897 design
+memo — compose the family's folds: given a record's declared
+`checks_not_performed` and a set of supporting documents, emit
+`mumei.unperformed-check-recovery/v1` reporting each check as
+`recovered` (a supplied document carries the declared performer
+schema AND its outcome field is `true`), `evidence_failed` (the
+performer schema was supplied but the outcome is absent or not
+`true`) or `no_evidence`.
+
+Attribution is closed: `_CHECK_PERFORMERS` pins each check name to
+its emitted schema and outcome field (`signature_verification` ←
+`signature-verification/v1`·`signature_valid`; `envelope_freshness` /
+`descriptor_freshness` / `freshness` ← `freshness-evaluation/v1`·
+`within_window`; `attempt_binding` ←
+`core-acceptance-evaluation/v1`·`attempt_bound`; `subject_binding` /
+`key_binding` ← either signature fold's `subject_bound`/`key_pinned`),
+so a document never declares its own coverage and a foreign schema
+never counts. The fold stays representation-level: it does not re-run
+checks (`recovery_enforcement`), does not verify the supporting
+documents (`evidence_authenticity` — trusted as declared) and does
+not pin a document to the record it covers (`evidence_binding`).
+Subject-bound recovery waits on producer-side fingerprint emission.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

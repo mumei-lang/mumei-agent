@@ -52,6 +52,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
 | `signature-eval` | 4 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
 | `signature-verify` | 5 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
+| `recovery-eval` | 3 | Fold a declared record's checks_not_performed over supporting evaluation documents and emit the recovery descriptor. |
 | `evidence-identity-check` | 3 | Check a declared evidence record's source binding against a declared source file and emit the representation-level file-identity descriptor. |
 | `evidence-producer-check` | 6 | Check a declared evidence record's provenance against declared producer expectations and emit the representation-level producer-identity descriptor. |
 | `evidence-compare` | 3 | Compare two declared evidence records' bound subject and specification claims and emit the representation-level comparison descriptor. |
@@ -745,6 +746,19 @@ Verify a declared producer-signature envelope's ed25519 signature under a declar
 | `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex). When supplied the verification emits subject_bound comparing it to the envelope's subject_digest. |
 | `--expected-producer-key` | `<ID>` | no | — | Declared producer key id the caller trusts, arriving over a separately trusted channel. When supplied the verification emits key_pinned comparing it to the envelope's producer_key_id. |
 | `--output` | `<PATH>` | no | — | Write the verification descriptor to PATH instead of stdout. |
+
+
+## `mumei-agent recovery-eval`
+
+Fold a declared record's checks_not_performed over supporting evaluation documents and emit the recovery descriptor.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--record` | `<PATH>` | yes | — | Declared record JSON that may carry an optional checks_not_performed string list. |
+| `--evidence` | `<PATH>` | yes | — | Supporting evaluation document JSON; repeatable. Each document is counted only when its schema_version names the declared performer for a check. |
+| `--output` | `<PATH>` | no | — | Write the recovery descriptor to PATH instead of stdout. |
 
 
 ## `mumei-agent evidence-identity-check`
