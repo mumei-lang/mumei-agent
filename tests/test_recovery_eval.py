@@ -200,6 +200,56 @@ def test_anonymous_native_acceptance_applies_to_nothing():
     assert evaluation["checks"]["artifact_semantics"] == "evidence_failed"
 
 
+def test_descriptor_record_recovers_through_declared_carrier():
+    # A Core acceptance descriptor declares its own
+    # checks_not_performed AND the evidence digest it evaluated; a
+    # recheck doc bound to the same evidence recovers its declared
+    # checks even though the descriptor's own bytes differ.
+    evidence_digest = "a" * 64
+    record = _doc(
+        "mumei.source-evidence-acceptance/v1",
+        evidence_fingerprint=evidence_digest,
+        accepted=True,
+        checks_not_performed=[
+            "claim_truth", "semantic_correspondence",
+            "artifact_semantics", "llvm_correspondence",
+        ],
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [
+            _recheck_doc(evidence_digest),
+            _accept_doc("mumei.native-evidence-acceptance/v1",
+                        evidence_digest),
+        ],
+        # the descriptor's own byte digest is different — bound docs
+        # still match its declared carrier
+        record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {
+        "claim_truth": "recovered",
+        "semantic_correspondence": "recovered",
+        "artifact_semantics": "recovered",
+        "llvm_correspondence": "no_evidence",
+    }
+
+
+def test_declared_carrier_only_binds_that_artifact():
+    record = _doc(
+        "mumei.source-evidence-acceptance/v1",
+        evidence_fingerprint="a" * 64,
+        checks_not_performed=["claim_truth"],
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_recheck_doc("b" * 64)],
+        record_digest="b" * 64,
+    )
+    # the doc binds the descriptor's byte digest but NOT its declared
+    # carrier — the declared carrier names the artifact, so it wins
+    assert evaluation["checks"]["claim_truth"] == "evidence_failed"
+
+
 def test_foreign_schema_never_counts():
     record = _record("signature_verification")
     evaluation = evaluate_unperformed_check_recovery(

@@ -763,8 +763,25 @@ def _outcome_matches(actual: object, expected: object) -> bool:
     return actual == expected
 
 
+def _record_bound_digest(record: dict, record_digest: str | None) -> str | None:
+    """The digest a bound document must name to count for *record*.
+
+    A Core descriptor declares the artifact it evaluated — its
+    `evidence_fingerprint` (or `subject_digest`/`record_digest`) names
+    the underlying record's bytes, not the descriptor's own. Folding
+    such a descriptor as the record recovers its declared checks
+    against documents bound to the same artifact, so the declared
+    carrier wins over the record's own byte digest. A record with no
+    declared carrier binds documents to its own bytes."""
+    for field in ("evidence_fingerprint", "subject_digest", "record_digest"):
+        value = record.get(field)
+        if _is_fingerprint(value):
+            return value
+    return record_digest
+
+
 def _performer_document_applies(
-    schema: str, doc: dict, record_digest: str | None
+    schema: str, doc: dict, bound_digest: str | None
 ) -> bool:
     """Whether a performer-schema document counts for *this* record.
 
@@ -779,12 +796,12 @@ def _performer_document_applies(
     still-declared check)."""
     if schema == EVIDENCE_BINDING_SCHEMA:
         return (
-            record_digest is not None
-            and doc.get("record_digest") == record_digest
+            bound_digest is not None
+            and doc.get("record_digest") == bound_digest
         )
     carrier = _BINDING_CARRIERS.get(schema)
     if carrier is not None:
-        return record_digest is not None and doc.get(carrier) == record_digest
+        return bound_digest is not None and doc.get(carrier) == bound_digest
     return True
 
 
@@ -821,17 +838,18 @@ def evaluate_unperformed_check_recovery(
 
     `record_digest` declares the SHA-256 of the record's bytes (the
     `recovery-eval` route recomputes it from the record file; dict
-    callers declare it like `expected_fingerprint`). An
-    `mumei.evidence-binding/v1` performer document then counts only
-    when it is `bound` AND its `record_digest` equals the declared
-    digest — a bound document for a *different* record can never
-    recover this record's `evidence_binding`. The Core descriptors
-    (`mumei.source-evidence-recheck/v1` and the source/native
-    acceptance descriptors) are bound the same way through their
-    `evidence_fingerprint`, so they recover `claim_truth`,
-    `freshness`, `semantic_correspondence` or `artifact_semantics`
-    only for the record they name. Without a declared digest no bound
-    document can be attributed, so those checks stay unrecovered."""
+    callers declare it like `expected_fingerprint`). Bound performer
+    documents — `mumei.evidence-binding/v1` and every subject-bearing
+    schema in `_BINDING_CARRIERS` — count only when their declared
+    carrier equals the record's bound digest: the record's own
+    declared carrier (`evidence_fingerprint`/`subject_digest`/
+    `record_digest`) when it pins another artifact, else
+    `record_digest`. So a Core acceptance descriptor folded as the
+    record is recovered by a recheck doc bound to the *same
+    evidence*, while a bound document for different bytes can never
+    recover this record's checks. Without a declared digest and no
+    declared carrier no bound document can be attributed, so those
+    checks stay unrecovered."""
     if type(record) is not dict:
         raise ValueError("unsupported check-recovery request")
     if record_digest is not None and not _is_fingerprint(record_digest):
@@ -839,6 +857,8 @@ def evaluate_unperformed_check_recovery(
     evidence = evidence or []
     if any(type(doc) is not dict for doc in evidence):
         raise ValueError("unsupported check-recovery evidence document")
+
+    bound_digest = _record_bound_digest(record, record_digest)
 
     declared = record.get("checks_not_performed")
     checks_declared = type(declared) is list
@@ -866,7 +886,7 @@ def evaluate_unperformed_check_recovery(
             if any(
                 _outcome_matches(doc.get(field), expected)
                 and _performer_document_applies(
-                    schema, doc, record_digest
+                    schema, doc, bound_digest
                 )
                 for doc in schema_to_docs[schema]
             ):

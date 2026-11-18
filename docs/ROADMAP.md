@@ -4834,9 +4834,22 @@ memo — compose the family's folds: given a record's declared
 `checks_not_performed` and a set of supporting documents, emit
 `mumei.unperformed-check-recovery/v1` reporting each check as
 `recovered` (a supplied document carries the declared performer
-schema AND its outcome field is `true`), `evidence_failed` (the
-performer schema was supplied but the outcome is absent or not
-`true`) or `no_evidence`.
+schema, its outcome field holds the declared value — `true` for the
+evaluation folds, `"consistent"` for a source recheck — and, for
+bound descriptors, its declared carrier equals the record's bound
+digest), `evidence_failed` (the performer schema was supplied but
+the outcome or the binding fails) or `no_evidence`. The bound digest
+is the record's own declared carrier
+(`evidence_fingerprint`/`subject_digest`/`record_digest`) when it
+pins another artifact — so a Core acceptance descriptor folded as
+the record is recovered by a recheck doc bound to the same
+evidence — else the record's byte digest (`record_digest`). Note
+`freshness` recovers two honest senses a consumer may want told
+apart: recency (`freshness-evaluation/v1`·`within_window` over a
+declared `produced_at`) and currency (a bound consistent recheck or
+accepted acceptance re-establishing the record's claims); the report
+names only which checks recovered, so a consumer that needs the
+distinction reads the supplied documents.
 
 Attribution is closed: `_CHECK_PERFORMERS` pins each check name to
 its emitted schema and outcome field (`signature_verification` ←
