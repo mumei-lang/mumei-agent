@@ -4317,21 +4317,27 @@ declared-manifest fold Go pioneered: when a call resolves to a
 module-external binding, the callee's entry in the declared callee
 manifest is folded into the caller's derivation — the folded result
 unions only the declared `return_dependencies` ordinals instead of
-every actual, and callee writes are modeled only when the declared
-entry's `effects` is `unknown`. Matching is by export name
-(`import {g as h}` matches the `g` entry, `ns.f` the `f` entry),
-keeping the fold to plain named calls: a member of a named import,
-a `new` expression and `import()` never fold and stay opaque. An
-entry that is unavailable, arity-mismatched or names a colliding
-export folds nothing, and the emitted manifest's advisory
-`call_modeling` counts `summary_modeled_calls`, `opaque_calls` and
-`summary_unmatched` (declared entries no call referenced). The
-attempt route forwards the flag to the produce child and binds the
-manifest's bytes into the request fingerprint — the fold is
-declared-input data, trusted as asserted like every manifest these
-routes consume. TS staleness stays record-equality, so a folded
-record simply differs when a regenerated callee manifest changes
-what it folds — no extra identity plumbing is needed.
+every actual, while writes through argument objects stay the opaque
+union over every actual (a declared `effects` records whether the
+callee CONTAINS calls, never what it writes). Matching is by export
+name carried at the last path step (`import {g as h}` matches `g`,
+`ns.f` matches `f`, `ns.g.h` matches nothing): a member deeper than
+one step, a spread call, a `new` expression and `import()` never
+fold and stay opaque. An entry that is unavailable,
+arity-mismatched, names a colliding export or carries an
+out-of-range ordinal folds nothing — the last is malformed at
+`from_dict` since no honest derivation can emit it — and the
+emitted manifest's advisory `call_modeling` counts
+`summary_modeled_calls`, `opaque_calls` and `summary_unmatched`
+(declared entries no call referenced). The manifest's canonical
+bytes fold into `context_key`, so a swapped callee manifest
+invalidates the strict whole-context gate; the attempt route
+forwards the flag to the produce child and binds the manifest's
+bytes into the request fingerprint — the fold is declared-input
+data, trusted as asserted like every manifest these routes
+consume. TS staleness stays record-equality, so a folded record
+simply differs when a regenerated callee manifest changes what it
+folds — no extra identity plumbing is needed.
 
 ### C06 declared Solidity summary route family
 
