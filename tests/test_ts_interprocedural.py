@@ -7650,3 +7650,162 @@ def test_summary_aware_context_key_binds_manifest():
     s1 = ts.summarize_typescript(src, declared=m1)
     s2 = ts.summarize_typescript(src, declared=m2)
     assert s1.context_key != s2.context_key
+
+def _reuse_attempt_args(source, manifest, attempt_timeout=60000,
+                        output=None, memory_bound_mb=None, resolve=False):
+    return type(
+        "A",
+        (),
+        {
+            "source": str(source),
+            "manifest": str(manifest),
+            "attempt_timeout": attempt_timeout,
+            "memory_bound_mb": memory_bound_mb,
+            "output": str(output) if output else None,
+            "resolve_modules": resolve,
+            "summary_aware_calls": None,
+        },
+    )()
+
+
+def test_reuse_attempt_emits_lineage_and_acceptance(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    ts.main_reuse_attempt(_reuse_attempt_args(src, manifest))
+    report = json.loads(capsys.readouterr().out)
+    assert (
+        report["schema_version"]
+        == "mumei.ts-summaries-reuse-attempt-report/v1"
+    )
+    sequence = report["sequence"]
+    assert sequence["attempts"][0]["state"] == "exited"
+    assert sequence["selected_result"]["attempt_number"] == 1
+    assert report["normalized"]["outcome"] == "exited"
+    assert (
+        report["candidate"]["schema_version"]
+        == "mumei.verifier-evidence-candidate/v1"
+    )
+    assert report["evidence_check"]["outcome"] == "valid"
+    assert report["acceptance"]["accepted"] is True
+    assert report["discharged_checks"] == [
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "semantic_correspondence",
+    ]
+
+
+def test_reuse_attempt_binds_manifest_bytes(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    ts.main_reuse_attempt(_reuse_attempt_args(src, manifest))
+    first = json.loads(capsys.readouterr().out)["sequence"][
+        "request_fingerprint"
+    ]
+    tampered = json.loads(manifest.read_text())
+    tampered["context_key"] = "tampered-context"
+    manifest.write_text(json.dumps(tampered))
+    ts.main_reuse_attempt(_reuse_attempt_args(src, manifest))
+    second = json.loads(capsys.readouterr().out)["sequence"][
+        "request_fingerprint"
+    ]
+    assert first != second
+
+
+def test_reuse_attempt_run_reuse_attempt_exits(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    report = ts.run_reuse_attempt(
+        str(src),
+        _SRC_TWO.encode(),
+        str(manifest),
+        60000,
+    )
+    assert report["normalized"]["outcome"] == "exited"
+    assert report["acceptance"]["accepted"] is True
+
+
+def test_reuse_attempt_skips_selection_when_manifest_drifts(
+    tmp_path, capsys, monkeypatch
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    from agent import attempt_runner
+
+    real_run = attempt_runner.AttemptRunner.run
+
+    def run_then_modify(
+        self, request, argv, memory_bound_mb=None, cancel_event=None,
+        feed_bytes=None,
+    ):
+        manifest.write_text("{}")
+        return real_run(
+            self,
+            request,
+            argv,
+            memory_bound_mb=memory_bound_mb,
+            cancel_event=cancel_event,
+            feed_bytes=feed_bytes,
+        )
+
+    monkeypatch.setattr(
+        attempt_runner.AttemptRunner, "run", run_then_modify
+    )
+    ts.main_reuse_attempt(_reuse_attempt_args(src, manifest))
+    report = json.loads(capsys.readouterr().out)
+    assert report["sequence"].get("selected_result") is None
+    assert "candidate" not in report
+
+
+def test_reuse_attempt_rejects_resolve_modules(tmp_path, capsys):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_reuse_attempt(
+            _reuse_attempt_args(src, manifest, resolve=True)
+        )
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "unsupported_option"
+
+
+def test_reuse_attempt_rejects_output_overwriting_manifest(
+    tmp_path, capsys
+):
+    src = tmp_path / "a.ts"
+    src.write_text(_SRC_TWO)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(ts.summarize_typescript(_SRC_TWO).to_dict())
+    )
+    with pytest.raises(SystemExit) as exc:
+        ts.main_reuse_attempt(
+            _reuse_attempt_args(src, manifest, output=manifest)
+        )
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"]["reason"] == "output_overwrites_source"

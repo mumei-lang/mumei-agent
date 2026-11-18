@@ -40,16 +40,19 @@ _SUBCOMMANDS = {
     "rust-summaries-check",
     "rust-summaries-reuse",
     "rust-summaries-attempt",
+    "rust-summaries-reuse-attempt",
     "ts-summaries",
     "ts-summaries-accept",
     "ts-summaries-check",
     "ts-summaries-reuse",
     "ts-summaries-attempt",
+    "ts-summaries-reuse-attempt",
     "sol-summaries",
     "sol-summaries-accept",
     "sol-summaries-check",
     "sol-summaries-reuse",
     "sol-summaries-attempt",
+    "sol-summaries-reuse-attempt",
     "evidence-check",
     "evidence-check-accept",
     "evidence-check-list",
@@ -1302,6 +1305,24 @@ def main() -> None:
         rust_attempt_build_parser(parser)
         args = parser.parse_args(argv[1:])
         rust_attempt_main(args)
+
+    elif command == "rust-summaries-reuse-attempt":
+        import argparse
+        from agent.rust_interprocedural import (
+            build_reuse_attempt_parser as rust_build_parser,
+            main_reuse_attempt as rust_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-summaries-reuse-attempt",
+            description=(
+                "Run the rust-summaries-reuse route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        rust_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        rust_main(args)
     elif command == "ts-summaries":
         import argparse
         from agent.ts_interprocedural import (
@@ -1372,6 +1393,24 @@ def main() -> None:
         ts_build_parser(parser)
         args = parser.parse_args(argv[1:])
         ts_main(args)
+
+    elif command == "ts-summaries-reuse-attempt":
+        import argparse
+        from agent.ts_interprocedural import (
+            build_reuse_attempt_parser as ts_build_parser,
+            main_reuse_attempt as ts_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-summaries-reuse-attempt",
+            description=(
+                "Run the ts-summaries-reuse route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
+        )
+        ts_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ts_main(args)
     elif command == "sol-summaries":
         import argparse
         from agent.sol_interprocedural import (
@@ -1438,6 +1477,24 @@ def main() -> None:
         parser = argparse.ArgumentParser(
             prog="python -m agent sol-summaries-attempt",
             description="Run the sol-summaries produce route as one declared attempt and emit the reconciled lineage descriptors.",
+        )
+        sol_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        sol_main(args)
+
+    elif command == "sol-summaries-reuse-attempt":
+        import argparse
+        from agent.sol_interprocedural import (
+            build_reuse_attempt_parser as sol_build_parser,
+            main_reuse_attempt as sol_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-summaries-reuse-attempt",
+            description=(
+                "Run the sol-summaries-reuse route as one declared "
+                "attempt and emit the reconciled lineage descriptors."
+            ),
         )
         sol_build_parser(parser)
         args = parser.parse_args(argv[1:])
