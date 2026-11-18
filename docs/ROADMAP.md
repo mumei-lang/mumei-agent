@@ -2548,11 +2548,12 @@ and the deps union the pointer's own, the indexes' and every
 indirect store exactly like `(*p)[i].F` — a third selection level
 and an anonymous `struct{...}` intermediate stay closed), while
 deeper nested derefs
-still stay closed (`**p` now
-admits one level — the inner `*p` operand must still be a bare
-identifier and the pointee chain resolves pointer →
-scalar/pointer under a `<binding>/pointee/pointee` identity or a
-named deep type, while `***p` and named-alias pointer chains
+now admit at any depth (`**p`/`***p`/`****q` — the chain of unary
+`*` operands must still end at a bare identifier, each pointee
+level resolves through the pointer fact's `elem` or a named type
+identity, and the deepest element classifies scalar/pointer under
+a `<binding>/pointee`*depth identity or a named deep type),
+while named-alias pointer chains
 (`type PP *T`, whose producer facts stay opaque) fail closed).
 Anonymous `*struct{...}` pointees now admit single-level scalar
 field access — `p.V`/`(*p).V` reads and `p.V = v`/`+=`/`++`
