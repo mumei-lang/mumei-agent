@@ -2601,8 +2601,12 @@ set (aliasing a `chan` parameter adopts its external
 sync-resource model), while `chan` results, non-scalar elements,
 rebinding a channel under a branch or loop (a conditional
 `ch2 = ch3` could mean either queue), operands in
-external state (`p.C <- x`, `close(GC)`), `len`/`cap` on channels
-and `select` stay closed — `make` —
+external state (`p.C <- x`, `close(GC)`), and `select`
+stay closed, while `len(ch)`/`cap(ch)` now admit as
+dep-free — the queue length and capacity are runtime
+state, not parameter provenance; on a `chan` parameter
+each records an imported transfer like a receive does —
+`make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
 argument pins, with the pointee's own use-site gates classifying
 what `*p`/`p.V`/`(*p)[i]` admit — and bound function values:
@@ -2883,7 +2887,8 @@ the external-state transfer model, local `make(chan T)` channels
 admit under the conflated dep-set model, and scalar-element `chan`
 parameters admit under the external sync-resource model; the
 still-closed shapes are `chan` results, non-scalar elements,
-conditionally-changed channel bindings and `select`),
+conditionally-changed channel bindings, channel operands in
+external state and `select`),
 slice/map `make` constructor
 state, selector/computed callees and function-typed parameters
 all fail closed —
