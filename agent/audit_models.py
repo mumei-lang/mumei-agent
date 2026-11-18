@@ -80,6 +80,11 @@ class AuditDirectoryResult:
     # ``audit --enable-summaries`` (route, unit, status, context key,
     # function count) — advisory; manifest bytes are never stored.
     summary_audits: list[dict] = field(default_factory=list)
+    # Advisory ``mumei.summaries-plan/v1`` documents recorded by
+    # ``audit --enable-summary-plan`` (one per summary profile present
+    # among the collected units) — routing only; a selected adapter is
+    # not an accepted manifest.
+    summary_plans: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
     finding_counts: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)

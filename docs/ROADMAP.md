@@ -3873,8 +3873,9 @@ A nonzero exit, any stderr or a non-`ok` report status fails closed
 before parsing, and the emitted manifest remains declared data — a
 reader still recomputes derived properties and reuse still goes
 through `for_function`/`stale_dependents`. Audit consumption is
-wired (`--enable-summaries`, `--summaries-manifest-map`, plus
-`--enable-summary-attempts`); Evidence normalization/acceptance
+wired (`--enable-summaries`, `--summaries-manifest-map`,
+`--enable-summary-attempts`, and `--enable-summary-plan` for the
+plan boundary); Evidence normalization/acceptance
 lives on the `*-attempt` route's envelope — the produce route
 itself still emits declared data.
 
@@ -4202,8 +4203,9 @@ Probing is availability only: the version is host-declared
 location, missing permission — is never probed at all. The returned
 `AdapterProbePlan` carries the updated `AdapterProbeHistory` records
 for retry scheduling. `summaries-plan` (below) is the first consumable
-caller and `summaries_plan` the MCP tool; audit and scheduled
-verification wiring stays open.
+caller and `summaries_plan` the MCP tool; directory audits record
+the same documents via `--enable-summary-plan` (below) while
+scheduled verification wiring stays open.
 
 
 ### C06 consumable plan route (summaries-plan)
@@ -5022,6 +5024,31 @@ mode. Entries remain advisory by construction — a refused,
 malformed or unparseable attempt report records `status: "failed"`
 without failing the audit, and report bytes never land in the
 output.
+
+### audit `--enable-summary-plan` — summary profiles through the probe-boundary planner
+
+`audit --enable-summaries --enable-summary-plan` connects the
+directory audit to the declared plan boundary: once per summary
+profile present among the collected units
+(`mumei.{go,ts,rust,sol}-scalar-parameter-deps/v1`) the audit runs
+`plan_summary_route` and records the advisory
+`mumei.summaries-plan/v1` document under `summary_plans` — the
+resulting `mumei.verification-plan/v1`, the probe observations the
+pass recorded, the updated `mumei.adapter-probe-history` records and
+their evaluations, through the same `build_plan_document` the
+`summaries-plan` CLI and `summaries_plan` MCP tool emit. Planning
+executes each adapter's declared probe command through the probe
+boundary; routing only — a selected adapter is a routing decision,
+not an accepted manifest.
+
+`--summary-plan-stamp <N>` declares the host's observation stamp
+(default 1), `--summary-plan-tool-version` pins the declared adapter
+version and `--summary-plan-histories <PATH>` resumes a JSON array
+of persisted `mumei.adapter-probe-history` records — the same
+bindings `summaries-plan` exposes, restored through the shared
+`load_plan_histories`. Entries stay advisory: a declared failure (an
+unreadable histories file, an invalid stamp, a probe-runner error)
+records `status: "failed"` per profile without failing the audit.
 
 ### go-summaries `--summary-aware-calls` (issue #900 Option B, Go first)
 

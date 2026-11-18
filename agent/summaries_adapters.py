@@ -280,35 +280,52 @@ def run_plan(args, *, runner=None) -> dict:
     `(OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError)` —
     rather than exiting, so callers choose their own error surface.
     """
-    import json
-
-    histories = ()
-    if args.histories is not None:
-        from agent.adapter_probe import AdapterProbeHistory
-
-        declared = json.loads(
-            Path(args.histories).read_text(encoding="utf-8")
-        )
-        if type(declared) is not list:
-            raise ValueError("histories file must be a JSON array")
-        histories = tuple(
-            AdapterProbeHistory.from_dict(record) for record in declared
-        )
     probe_plan = plan_summary_route(
         args.profile,
         PlannerPolicy(),
         stamp=args.stamp,
         tool_version=args.tool_version,
-        histories=histories,
+        histories=load_plan_histories(args.histories),
         rounds=args.rounds,
         max_parallel=args.max_parallel,
         runner=runner,
     )
+    return build_plan_document(args.profile, probe_plan)
+
+
+def load_plan_histories(path) -> tuple:
+    """Restore the declared ``mumei.adapter-probe-history`` JSON array.
+
+    Shared by the ``summaries-plan`` CLI and the audit
+    ``--enable-summary-plan`` wiring so both bind the same history
+    records. Raises ``(OSError, ValueError, UnicodeDecodeError,
+    json.JSONDecodeError)`` on a declared failure.
+    """
+    import json
+
+    if path is None:
+        return ()
+    from agent.adapter_probe import AdapterProbeHistory
+
+    declared = json.loads(Path(path).read_text(encoding="utf-8"))
+    if type(declared) is not list:
+        raise ValueError("histories file must be a JSON array")
+    return tuple(
+        AdapterProbeHistory.from_dict(record) for record in declared
+    )
+
+
+def build_plan_document(profile: str, probe_plan) -> dict:
+    """Serialize an ``AdapterProbePlan`` as ``mumei.summaries-plan/v1``.
+
+    Shared by ``run_plan`` and the audit ``--enable-summary-plan``
+    wiring so both surfaces emit the identical document shape.
+    """
     from agent.adapter_probe import evaluate_probe_history
 
     return {
         "schema_version": PLAN_PROFILE,
-        "profile": args.profile,
+        "profile": profile,
         "plan": probe_plan.plan.to_dict(),
         "observations": [
             {

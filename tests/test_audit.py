@@ -1826,6 +1826,10 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         summaries_manifest_map=None,
         enable_summary_attempts=False,
         summary_attempt_timeout_ms=120000,
+        enable_summary_plan=False,
+        summary_plan_stamp=1,
+        summary_plan_tool_version=None,
+        summary_plan_histories=None,
     )
 
 
@@ -3651,3 +3655,188 @@ def test_summary_attempts_flag_gating(tmp_path: Path) -> None:
     )
     assert ok.enable_summary_attempts is True
     assert ok.summary_attempt_timeout == 45000
+
+
+def test_collect_summary_plans_records_plan_documents(tmp_path: Path) -> None:
+    from agent.audit import _collect_summary_plans
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+
+    entries = _collect_summary_plans(
+        tmp_path, [ts], stamp=7, tool_version="1.0.0", histories_path=None
+    )
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["profile"] == "mumei.ts-scalar-parameter-deps/v1"
+    assert entry["status"] == "planned"
+    doc = entry["plan"]
+    assert doc["schema_version"] == "mumei.summaries-plan/v1"
+    assert doc["profile"] == "mumei.ts-scalar-parameter-deps/v1"
+    assert doc["plan"]["selected"]["adapter_id"] == "agent.ts-summaries"
+    assert doc["observations"][0]["availability"] == "available"
+    assert doc["histories"][0]["adapter_id"] == "agent.ts-summaries"
+    assert doc["evaluations"]
+
+
+def test_collect_summary_plans_dedupes_profiles(tmp_path: Path) -> None:
+    from agent.audit import _collect_summary_plans
+
+    for rel in ("a.ts", "sub/b.ts", "main.py"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+
+    entries = _collect_summary_plans(
+        tmp_path,
+        [tmp_path / "a.ts", tmp_path / "sub/b.ts", tmp_path / "main.py"],
+        stamp=7,
+        tool_version="1.0.0",
+        histories_path=None,
+    )
+
+    # two ts units collapse into one profile entry; python has no route
+    assert [entry["profile"] for entry in entries] == [
+        "mumei.ts-scalar-parameter-deps/v1"
+    ]
+
+
+def test_collect_summary_plans_failures_stay_advisory(tmp_path: Path) -> None:
+    from agent.audit import _collect_summary_plans
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+
+    # missing histories file → declared load failure, recorded per profile
+    entries = _collect_summary_plans(
+        tmp_path,
+        [ts],
+        stamp=7,
+        tool_version="1.0.0",
+        histories_path=str(tmp_path / "missing.json"),
+    )
+    assert len(entries) == 1
+    assert entries[0]["status"] == "failed"
+    assert entries[0]["error"]
+
+    # invalid stamp → declared planner failure, recorded per profile
+    entries = _collect_summary_plans(
+        tmp_path, [ts], stamp=0, tool_version="1.0.0", histories_path=None
+    )
+    assert len(entries) == 1
+    assert entries[0]["status"] == "failed"
+    assert entries[0]["error"]
+
+
+def test_audit_directory_collects_summary_plans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (src / "util.ts").write_text("export const g = () => 1\n", encoding="utf-8")
+
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(
+        src,
+        enable_summaries=True,
+        enable_summary_plan=True,
+        summary_plan_tool_version="1.0.0",
+    )
+
+    assert [entry["profile"] for entry in result.summary_plans] == [
+        "mumei.ts-scalar-parameter-deps/v1"
+    ]
+    entry = result.summary_plans[0]
+    assert entry["status"] == "planned"
+    assert entry["plan"]["schema_version"] == "mumei.summaries-plan/v1"
+    assert asdict(result)["summary_plans"] == result.summary_plans
+    assert "summary_plans:" in result.summary
+    assert "selected=agent.ts-summaries" in result.summary
+
+
+def test_audit_directory_summary_plans_opt_in(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "util.ts").write_text("export const g = () => 1\n", encoding="utf-8")
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="x",
+        forge_task_spec=None,
+        detected_language="typescript",
+        errors=[],
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src, enable_summaries=True)
+    assert result.summary_plans == []
+
+
+def test_summary_plan_flag_gating(tmp_path: Path) -> None:
+    from agent.audit import build_parser, main
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.ts").write_text("x", encoding="utf-8")
+
+    # planning requires --enable-summaries
+    no_enable = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summary-plan",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(no_enable)
+
+    ok = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summaries",
+            "--enable-summary-plan",
+            "--summary-plan-stamp",
+            "9",
+            "--summary-plan-tool-version",
+            "2.0.0",
+            "--summary-plan-histories",
+            str(tmp_path / "histories.json"),
+        ]
+    )
+    assert ok.enable_summary_plan is True
+    assert ok.summary_plan_stamp == 9
+    assert ok.summary_plan_tool_version == "2.0.0"
+    assert ok.summary_plan_histories == str(tmp_path / "histories.json")
+
+    default = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summaries",
+            "--enable-summary-plan",
+        ]
+    )
+    assert default.summary_plan_stamp == 1
+    assert default.summary_plan_tool_version is None
+    assert default.summary_plan_histories is None

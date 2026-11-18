@@ -252,6 +252,10 @@ class AuditPipeline:
         summaries_manifest_map: dict | None = None,
         enable_summary_attempts: bool = False,
         summary_attempt_timeout_ms: int | None = None,
+        enable_summary_plan: bool = False,
+        summary_plan_stamp: int = 1,
+        summary_plan_tool_version: str | None = None,
+        summary_plan_histories: str | None = None,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -270,6 +274,10 @@ class AuditPipeline:
                 summaries_manifest_map=summaries_manifest_map,
                 enable_summary_attempts=enable_summary_attempts,
                 summary_attempt_timeout_ms=summary_attempt_timeout_ms,
+                enable_summary_plan=enable_summary_plan,
+                summary_plan_stamp=summary_plan_stamp,
+                summary_plan_tool_version=summary_plan_tool_version,
+                summary_plan_histories=summary_plan_histories,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -627,6 +635,10 @@ class AuditPipeline:
         summaries_manifest_map: dict | None = None,
         enable_summary_attempts: bool = False,
         summary_attempt_timeout_ms: int | None = None,
+        enable_summary_plan: bool = False,
+        summary_plan_stamp: int = 1,
+        summary_plan_tool_version: str | None = None,
+        summary_plan_histories: str | None = None,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
@@ -655,6 +667,10 @@ class AuditPipeline:
                 summaries_manifest_map=summaries_manifest_map,
                 enable_summary_attempts=enable_summary_attempts,
                 summary_attempt_timeout_ms=summary_attempt_timeout_ms,
+                enable_summary_plan=enable_summary_plan,
+                summary_plan_stamp=summary_plan_stamp,
+                summary_plan_tool_version=summary_plan_tool_version,
+                summary_plan_histories=summary_plan_histories,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -683,6 +699,10 @@ class AuditPipeline:
         summaries_manifest_map: dict | None = None,
         enable_summary_attempts: bool = False,
         summary_attempt_timeout_ms: int | None = None,
+        enable_summary_plan: bool = False,
+        summary_plan_stamp: int = 1,
+        summary_plan_tool_version: str | None = None,
+        summary_plan_histories: str | None = None,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -761,6 +781,18 @@ class AuditPipeline:
             else []
         )
 
+        summary_plans = (
+            _collect_summary_plans(
+                source_path,
+                code_files,
+                stamp=summary_plan_stamp,
+                tool_version=summary_plan_tool_version,
+                histories_path=summary_plan_histories,
+            )
+            if enable_summary_plan and code_files
+            else []
+        )
+
         file_results: list[AuditResult] = []
         for code_path in code_files:
             audit_language = normalized_language or AUDIT_EXTENSION_MAP.get(
@@ -808,6 +840,7 @@ class AuditPipeline:
             ],
             trusted_atoms=trusted_atoms,
             summary_audits=summary_audits,
+            summary_plans=summary_plans,
         )
         _aggregate_directory_fixed_keys(result)
         result.next_steps = _generate_directory_next_steps(result)
@@ -1099,6 +1132,46 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         ),
     )
     parser.add_argument(
+        "--enable-summary-plan",
+        action="store_true",
+        help=(
+            "Directory audits only, requires --enable-summaries: run "
+            "the probe-boundary planner once per summary profile "
+            "present among the collected units and record the advisory "
+            "mumei.summaries-plan/v1 documents under summary_plans — "
+            "routing only; no summary is derived. Planning executes "
+            "each adapter's declared probe command."
+        ),
+    )
+    parser.add_argument(
+        "--summary-plan-stamp",
+        type=int,
+        default=1,
+        metavar="<N>",
+        help=(
+            "Host-declared observation stamp for the probe requests "
+            "--enable-summary-plan records (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--summary-plan-tool-version",
+        default=None,
+        metavar="<VERSION>",
+        help=(
+            "Optional declared tool version the --enable-summary-plan "
+            "planner pins against."
+        ),
+    )
+    parser.add_argument(
+        "--summary-plan-histories",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Optional JSON array of persisted mumei.adapter-probe-history "
+            "records the --enable-summary-plan planner resumes."
+        ),
+    )
+    parser.add_argument(
         "--go-types",
         default=None,
         metavar="<PATH>",
@@ -1126,6 +1199,14 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         print(
             "audit: --enable-summary-attempts cannot combine with "
             "--summaries-manifest-map",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if getattr(args, "enable_summary_plan", False) and not getattr(
+        args, "enable_summaries", False
+    ):
+        print(
+            "audit: --enable-summary-plan requires --enable-summaries",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1165,6 +1246,12 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         summary_attempt_timeout_ms=getattr(
             args, "summary_attempt_timeout", None
         ),
+        enable_summary_plan=bool(getattr(args, "enable_summary_plan", False)),
+        summary_plan_stamp=getattr(args, "summary_plan_stamp", 1),
+        summary_plan_tool_version=getattr(
+            args, "summary_plan_tool_version", None
+        ),
+        summary_plan_histories=getattr(args, "summary_plan_histories", None),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
@@ -1228,6 +1315,89 @@ def _summary_audit_units(
             )
         )
     return units
+
+
+def _collect_summary_plans(
+    source_path: Path,
+    code_files: list[Path],
+    *,
+    stamp: int,
+    tool_version: str | None,
+    histories_path: str | None,
+    runner=None,
+) -> list[dict]:
+    """Plan the summary route once per profile present among the
+    collected units and keep each advisory ``mumei.summaries-plan/v1``
+    document.
+
+    Routing only — no summary is derived and a selected adapter is a
+    routing decision, not an accepted manifest. Advisory by
+    construction: a declared planner failure (an unreadable histories
+    file, an invalid stamp, a probe-runner error) records its status
+    without failing the audit.
+    """
+    from agent.summaries_adapters import (
+        GO_SUMMARY_PROFILE,
+        RUST_SUMMARY_PROFILE,
+        SOL_SUMMARY_PROFILE,
+        TS_SUMMARY_PROFILE,
+        build_plan_document,
+        load_plan_histories,
+        plan_summary_route,
+    )
+    from agent.verification_planner import PlannerPolicy
+
+    route_profile = {
+        "go-summaries": GO_SUMMARY_PROFILE,
+        "rust-summaries": RUST_SUMMARY_PROFILE,
+        "sol-summaries": SOL_SUMMARY_PROFILE,
+        "ts-summaries": TS_SUMMARY_PROFILE,
+    }
+    profiles = sorted(
+        {
+            route_profile[route]
+            for route, _unit, _argv in _summary_audit_units(
+                source_path, code_files
+            )
+        }
+    )
+    try:
+        histories = load_plan_histories(histories_path)
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [
+            {
+                "profile": profile,
+                "status": "failed",
+                "error": _summary_error_text(str(exc), source_path, None),
+            }
+            for profile in profiles
+        ]
+    entries: list[dict] = []
+    for profile in profiles:
+        entry: dict = {"profile": profile}
+        try:
+            probe_plan = plan_summary_route(
+                profile,
+                PlannerPolicy(),
+                stamp=stamp,
+                tool_version=tool_version,
+                histories=histories,
+                runner=runner,
+            )
+        except (
+            OSError,
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+        ) as exc:
+            entry["status"] = "failed"
+            entry["error"] = _summary_error_text(str(exc), source_path, None)
+        else:
+            entry["status"] = "planned"
+            entry["plan"] = build_plan_document(profile, probe_plan)
+        entries.append(entry)
+    return entries
 
 
 def _read_summary_manifest_map(path: Path) -> dict:
