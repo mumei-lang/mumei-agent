@@ -7501,3 +7501,76 @@ def test_attempt_route_forwards_and_binds_manifest(tmp_path, capsys):
     assert (
         second["sequence"]["request_fingerprint"] != first_fp
     )
+
+
+def test_summary_aware_nested_namespace_member_stays_opaque():
+    declared = _callee_manifest(_decl_fn("g", ["a"], []))
+    s = ts.summarize_typescript(
+        "import * as ns from './m';\n"
+        "function f(x: number): number { return ns.g.h(x); }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    # `ns.g.h` is a member of ns's `g` — not the declared `g`.
+    assert fn.return_dependencies == frozenset({0})
+    assert s.call_modeling["opaque_calls"] == 1
+    # `ns.g.h` reads a member OF `g` — it never names `g` itself,
+    # so the declared entry counts as unreferenced.
+    assert s.call_modeling["summary_unmatched"] == 1
+
+
+def test_summary_aware_zero_arity_bad_ordinals_stay_opaque():
+    declared = _callee_manifest(_decl_fn("g", [], [0]))
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(x: number): number { g(); return x; }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    assert fn.available and fn.return_dependencies == frozenset({0})
+    assert s.call_modeling["opaque_calls"] == 1
+
+
+def test_summary_aware_spread_call_stays_opaque():
+    declared = _callee_manifest(_decl_fn("g", ["a", "b"], [0]))
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(xs: number, y: number): number {"
+        " return g(xs, y); }\n"
+        "function h(xs: number, y: number): number {"
+        " return g(...[xs], y); }",
+        declared=declared,
+    )
+    g_fn = next(f for f in s.functions if f.name == "f")
+    h_fn = next(f for f in s.functions if f.name == "h")
+    assert g_fn.return_dependencies == frozenset({0})
+    # `[xs]` is a known-length spread… it folds; cover the
+    # unknown-length scalar spread too:
+    s2 = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function h(xs: number, y: number): number {"
+        " return g(...xs, y); }",
+        declared=declared,
+    )
+    h2 = s2.functions[0]
+    # Unknown length — declared ordinals can't be positional.
+    assert h2.return_dependencies == frozenset({0, 1})
+    assert h_fn.return_dependencies == frozenset({0, 1})
+
+
+def test_summary_aware_fold_keeps_opaque_arg_writes():
+    declared = _callee_manifest(
+        _decl_fn("g", ["x", "y"], [0])  # effects: no calls inside
+    )
+    s = ts.summarize_typescript(
+        "import {g} from './m';\n"
+        "function f(a: number, b: number): number {"
+        " let o = {v: a}; g(o, b); return o.v; }",
+        declared=declared,
+    )
+    fn = next(f for f in s.functions if f.name == "f")
+    # The result narrows to the declared ordinal, but a callee
+    # may still write through the composite actual — the may-write
+    # keeps the full actual union.
+    assert fn.return_dependencies == frozenset({0, 1})
+

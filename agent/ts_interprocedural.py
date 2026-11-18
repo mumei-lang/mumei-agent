@@ -4307,10 +4307,14 @@ class _Builder:
                 # Any member of an imported name stays external
                 # (`ns.f`, `ns.a.b`) — the callee lives outside. A
                 # namespace's member carries the member name for a
-                # declared-manifest match; a member of a NAMED
-                # external is no longer nameable (`g.f` must not
-                # fold onto a manifest's plain `f`).
-                if val.name == "*" and key is not None:
+                # declared-manifest match, but only at the LAST
+                # path step: `ns.g.h` reads a member of `ns`'s `g`,
+                # which a manifest's `g` entry does not describe.
+                if (
+                    val.name == "*"
+                    and key is not None
+                    and idx == len(path) - 1
+                ):
                     return _External(key)
                 return _External()
             if isinstance(val, _Class):
@@ -6282,33 +6286,37 @@ class _Builder:
             not summary.available
             or summary.return_dependencies is None
             or len(summary.parameters) != len(actual)
-            or len(actual) > 0
-            and max(summary.return_dependencies, default=-1)
+            or max(summary.return_dependencies, default=-1)
             >= len(actual)
         ):
             return None
         return summary
 
     def _fold_call_result(
-        self, raw, actual, vals, span
+        self, raw, actual, vals, span, has_spread=False
     ):
         """A folded call's result deps, or None to stay opaque.
 
         `result` unions only the actuals the declared
-        `return_dependencies` names. Store-through-alias widening
-        applies only when the callee's declared `effects` is
-        `unknown` — a callee that derived no transfers asserts no
-        effectful call, so its arguments take no may-write.
+        `return_dependencies` names — the ordinal mapping is
+        positional, so a call with a `spread_element` (unknown
+        argument count) never folds. Store-through-alias widening
+        keeps the opaque union over every actual: a declared
+        `effects` only records whether the callee CONTAINS calls,
+        it cannot bound direct writes through an argument object,
+        and a write's deps need not be a subset of the result's.
         """
         summary = self._declared_call_summary(raw, actual)
-        if summary is None:
+        if summary is None or has_spread:
             self._opaque_spans.add((span.start, span.end))
             return None
         result = frozenset()
         for i in summary.return_dependencies:
             result |= actual[i]
-        if summary.effects == "unknown":
-            self._opaque_call_writes(vals, result)
+        self._opaque_call_writes(
+            vals,
+            frozenset().union(*actual) if actual else frozenset(),
+        )
         self._modeled_spans.add((span.start, span.end))
         return result
 
@@ -7397,6 +7405,12 @@ class _Builder:
             arguments = node.child_by_field_name("arguments")
             if function is None or arguments is None:
                 raise _Unsupported("unsupported_expression", _span(node))
+            # A `spread_element` makes the actual count unknowable,
+            # so declared `return_dependencies` ordinals cannot be
+            # trusted positionally — the call stays opaque.
+            has_spread = any(
+                c.type == "spread_element" for c in _children(arguments)
+            )
             # `f?.(x)` carries a `?.` marker between callee and
             # arguments; `o?.f(x)`/`o?.[k](x)` carry an
             # `optional_chain` inside the callee. On a scalar
@@ -7434,7 +7448,7 @@ class _Builder:
                     raw = frozenset()
                 if isinstance(raw, _External):
                     result_m = self._fold_call_result(
-                        raw, actual_m, vals_m, _span(node)
+                        raw, actual_m, vals_m, _span(node), has_spread
                     )
                     if result_m is None:
                         result_m = frozenset()
@@ -7763,7 +7777,7 @@ class _Builder:
                     return result_e
                 if isinstance(raw, _External):
                     result_e = self._fold_call_result(
-                        raw, actual_e, vals_e, _span(node)
+                        raw, actual_e, vals_e, _span(node), has_spread
                     )
                     if result_e is not None:
                         transfers.append(
@@ -7834,7 +7848,7 @@ class _Builder:
                 )
                 if isinstance(raw, _External):
                     result_i = self._fold_call_result(
-                        raw, actual, vals, _span(node)
+                        raw, actual, vals, _span(node), has_spread
                     )
                     if result_i is None:
                         result_i = frozenset()
