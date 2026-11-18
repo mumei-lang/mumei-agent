@@ -1775,8 +1775,12 @@ def _collect_summary_audits(
     Under ``attempt_timeout_ms`` each unit runs its
     ``<route>-attempt`` lifecycle instead; a mapped unit runs
     ``<route>-reuse-attempt`` so the request fingerprint binds the
-    manifest's bytes too, and an unreadable/malformed manifest falls
-    back to the plain ``-attempt`` route.
+    manifest's bytes too. A manifest that is unreadable, malformed, or
+    rejected by the reuse-attempt lifecycle (the route exits 0 with a
+    non-accepted report when its strict manifest restore fails) falls
+    back to the plain ``-attempt`` route with
+    ``reuse_status: "stale_manifest"`` — matching the plain reuse
+    path, a bad prior manifest can never weaken the audit.
     """
     run = runner or _run_summary_route
     entries: list[dict] = []
@@ -1798,9 +1802,10 @@ def _collect_summary_audits(
             # metadata. A unit whose label maps to a prior manifest runs
             # <route>-reuse-attempt instead: the request fingerprint
             # binds the manifest's bytes as well as the source's. An
-            # unreadable or malformed manifest falls back to the plain
-            # -attempt route with reuse_status: "stale_manifest" — a
-            # bad prior manifest can never weaken the audit.
+            # unreadable, malformed or rejected manifest falls back to
+            # the plain -attempt route with
+            # reuse_status: "stale_manifest" — a bad prior manifest
+            # can never weaken the audit.
             manifest_path = (manifest_map or {}).get(label)
             reuse_attempt = manifest_path is not None
             if reuse_attempt:
@@ -1827,66 +1832,105 @@ def _collect_summary_audits(
                         source_path,
                         go_types,
                     )
-            attempt_argv = [
-                f"{route}-{'reuse-' if reuse_attempt else ''}attempt"
-            ]
-            if route == "go-summaries":
-                attempt_argv += ["--go-types", cast(str, go_types)]
-            attempt_argv += argv_tail
-            if reuse_attempt:
-                attempt_argv += ["--manifest", manifest_path]
-            attempt_argv += [
-                "--attempt-timeout",
-                str(attempt_timeout_ms),
-            ]
-            try:
-                completed = run(attempt_argv)
-            except Exception as exc:  # runner failure (spawn, timeout)
-                entry["status"] = "failed"
-                entry["error"] = _summary_error_text(exc, source_path, go_types)
-                entries.append(entry)
-                continue
-            if completed.returncode != 0:
-                entry["status"] = "failed"
-                entry["error"] = _summary_error_text(
-                    _route_failure_text(completed), source_path, go_types
+            while True:
+                attempt_argv = [
+                    f"{route}-{'reuse-' if reuse_attempt else ''}attempt"
+                ]
+                if route == "go-summaries":
+                    attempt_argv += ["--go-types", cast(str, go_types)]
+                attempt_argv += argv_tail
+                if reuse_attempt:
+                    attempt_argv += ["--manifest", manifest_path]
+                attempt_argv += [
+                    "--attempt-timeout",
+                    str(attempt_timeout_ms),
+                ]
+                try:
+                    completed = run(attempt_argv)
+                except Exception as exc:  # runner failure (spawn, timeout)
+                    entry["status"] = "failed"
+                    entry["error"] = _summary_error_text(
+                        exc, source_path, go_types
+                    )
+                    break
+                if completed.returncode != 0:
+                    entry["status"] = "failed"
+                    entry["error"] = _summary_error_text(
+                        _route_failure_text(completed), source_path, go_types
+                    )
+                    break
+                try:
+                    report = json.loads(completed.stdout)
+                    if type(report) is not dict:
+                        raise ValueError(
+                            "attempt report is not a JSON object"
+                        )
+                except (json.JSONDecodeError, ValueError) as exc:
+                    entry["status"] = "failed"
+                    entry["error"] = _summary_error_text(
+                        str(exc), source_path, go_types
+                    )
+                    break
+                sequence = report.get("sequence")
+                selected = (
+                    type(sequence) is dict
+                    and sequence.get("selected_result") is not None
                 )
-                entries.append(entry)
-                continue
-            try:
-                report = json.loads(completed.stdout)
-                if type(report) is not dict:
-                    raise ValueError("attempt report is not a JSON object")
-            except (json.JSONDecodeError, ValueError) as exc:
-                entry["status"] = "failed"
-                entry["error"] = _summary_error_text(
-                    str(exc), source_path, go_types
+                normalized = report.get("normalized")
+                evidence_check = report.get("evidence_check")
+                acceptance = report.get("acceptance")
+                if reuse_attempt and not (
+                    selected
+                    and type(acceptance) is dict
+                    and acceptance.get("accepted") is True
+                ):
+                    # The reuse-attempt lifecycle exits 0 even when its
+                    # child rejects the manifest (schema-invalid JSON
+                    # objects pass the pre-read but fail the route's
+                    # strict restore). Mirror the plain reuse path: a
+                    # rejected manifest falls back to the -attempt
+                    # route rather than recording a summaryless
+                    # accepted: false entry.
+                    reuse_attempt = False
+                    entry["reuse_status"] = "stale_manifest"
+                    detail_parts = []
+                    if type(normalized) is dict:
+                        detail_parts.append(
+                            f"outcome={normalized.get('outcome')}"
+                        )
+                    if type(evidence_check) is dict:
+                        detail_parts.append(
+                            f"check_outcome={evidence_check.get('outcome')}"
+                        )
+                    if type(acceptance) is dict:
+                        detail_parts.append(
+                            f"accepted={acceptance.get('accepted')}"
+                        )
+                    entry["reuse_error"] = (
+                        "reuse attempt rejected the declared manifest "
+                        "(" + ", ".join(detail_parts) + ")"
+                        if detail_parts
+                        else "reuse attempt rejected the declared manifest"
+                    )
+                    continue
+                entry["status"] = "emitted"
+                entry["mode"] = (
+                    "reuse-attempt" if reuse_attempt else "attempt"
                 )
-                entries.append(entry)
-                continue
-            sequence = report.get("sequence")
-            selected = (
-                type(sequence) is dict
-                and sequence.get("selected_result") is not None
-            )
-            entry["status"] = "emitted"
-            entry["mode"] = "reuse-attempt" if reuse_attempt else "attempt"
-            entry["selected"] = bool(selected)
-            normalized = report.get("normalized")
-            if type(normalized) is dict:
-                stdout_meta = normalized.get("stdout")
-                if type(stdout_meta) is dict and type(
-                    stdout_meta.get("sha256")
+                entry["selected"] = bool(selected)
+                if type(normalized) is dict:
+                    stdout_meta = normalized.get("stdout")
+                    if type(stdout_meta) is dict and type(
+                        stdout_meta.get("sha256")
+                    ) is str:
+                        entry["manifest_sha256"] = stdout_meta["sha256"]
+                if type(evidence_check) is dict and type(
+                    evidence_check.get("outcome")
                 ) is str:
-                    entry["manifest_sha256"] = stdout_meta["sha256"]
-            evidence_check = report.get("evidence_check")
-            if type(evidence_check) is dict and type(
-                evidence_check.get("outcome")
-            ) is str:
-                entry["check_outcome"] = evidence_check["outcome"]
-            acceptance = report.get("acceptance")
-            if type(acceptance) is dict:
-                entry["accepted"] = acceptance.get("accepted")
+                    entry["check_outcome"] = evidence_check["outcome"]
+                if type(acceptance) is dict:
+                    entry["accepted"] = acceptance.get("accepted")
+                break
             entries.append(entry)
             continue
 

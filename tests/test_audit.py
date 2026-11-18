@@ -3223,6 +3223,91 @@ def test_collect_summary_audits_attempt_stale_manifest_falls_back(
         ]
 
 
+def test_collect_summary_audits_attempt_rejected_reuse_falls_back(
+    tmp_path: Path,
+) -> None:
+    """A reuse-attempt lifecycle that reports a rejected manifest
+    (the route exits 0 without a selected, accepted result — e.g. a
+    schema-invalid JSON object passing the pre-read) falls back to the
+    plain -attempt route, mirroring the non-attempt reuse path."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        rejected = _attempt_report_json(
+            selected=False, accepted=False, check_outcome="failed"
+        )
+        accepted = _attempt_report_json()
+        return _fake_completed(
+            argv,
+            stdout=rejected if "-reuse-attempt" in argv[0] else accepted,
+        )
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=1000,
+        runner=runner,
+    )
+
+    assert calls == [
+        [
+            "ts-summaries-reuse-attempt",
+            str(ts),
+            "--manifest",
+            str(manifest),
+            "--attempt-timeout",
+            "1000",
+        ],
+        ["ts-summaries-attempt", str(ts), "--attempt-timeout", "1000"],
+    ]
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "attempt"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(manifest) not in entries[0]["reuse_error"]
+    # the fallback -attempt report's envelope is what lands
+    assert entries[0]["accepted"] is True
+
+
+def test_collect_summary_audits_attempt_schema_invalid_manifest_falls_back_real_route(
+    tmp_path: Path,
+) -> None:
+    """Real route, no mocks: mapping a schema-invalid manifest (``{}``
+    passes the JSON-object pre-read but fails the route's strict
+    restore) falls back to the plain -attempt route."""
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("export const g = () => 1\n", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        attempt_timeout_ms=60000,
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "attempt"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(manifest) not in entries[0]["reuse_error"]
+    # the real -attempt lifecycle selected and accepted a summary
+    assert entries[0]["selected"] is True
+    assert entries[0]["accepted"] is True
+
+
 def test_collect_summary_audits_attempt_unmapped_unit_stays_attempt(
     tmp_path: Path,
 ) -> None:
