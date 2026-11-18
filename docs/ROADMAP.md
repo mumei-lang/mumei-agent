@@ -4875,8 +4875,9 @@ and all five non-artifact checks — `file_identity`,
 `claim_truth` — ← an accepted `verify-attempt-report/v1`. Bound
 documents match through a declared carrier pinned per schema:
 `evidence_fingerprint` on a Core descriptor, `record_digest` on a
-binding document, `candidate.output_fingerprint` on the attempt
-report — and each counts only when the carrier equals the record's
+binding document, `normalized.stdout.sha256` (the produced bytes'
+SHA-256 — `candidate.output_fingerprint` fingerprints the
+verifier-output manifest, not the record) on the attempt report — and each counts only when the carrier equals the record's
 bound digest, so a document produced for different bytes (or an
 anonymous artifact acceptance with no record input) applies to
 nothing, and without a declared `record_digest` or declared carrier

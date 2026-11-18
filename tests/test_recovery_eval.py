@@ -250,14 +250,45 @@ def test_declared_carrier_only_binds_that_artifact():
     assert evaluation["checks"]["claim_truth"] == "evidence_failed"
 
 
-def _attempt_report(fingerprint, accepted=True):
+def _attempt_report(record_digest, accepted=True):
+    """A minimal realistic verify-attempt report.
+
+    `record_digest` is the produced bytes' SHA-256, surfaced at
+    `normalized.stdout.sha256`; `candidate.output_fingerprint` stays a
+    DISTINCT verifier-output-manifest fingerprint — the fold binds the
+    record through the normalized bytes, never the manifest hash.
+    """
+    manifest_fingerprint = "f" * 64
     return _doc(
         "mumei.verify-attempt-report/v1",
-        acceptance={"accepted": accepted},
+        sequence={
+            "schema_version": "mumei.verifier-attempt-sequence/v1",
+            "request_fingerprint": "e" * 64,
+            "timeout_ms": 30000,
+            "attempts": [
+                {
+                    "request_fingerprint": "e" * 64,
+                    "attempt_number": 1,
+                    "state": "exited",
+                }
+            ],
+            "selected_result": {
+                "attempt_number": 1,
+                "output_fingerprint": manifest_fingerprint,
+            },
+        },
+        normalized={
+            "schema_version": "mumei.verifier-run-result/v1",
+            "request_fingerprint": "e" * 64,
+            "attempt_number": 1,
+            "outcome": "exited",
+            "stdout": {"sha256": record_digest, "size_bytes": 2},
+        },
         candidate={
             "schema_version": "mumei.verifier-evidence-candidate/v1",
-            "output_fingerprint": fingerprint,
+            "output_fingerprint": manifest_fingerprint,
         },
+        acceptance={"accepted": accepted},
     )
 
 

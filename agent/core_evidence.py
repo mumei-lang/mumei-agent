@@ -738,7 +738,7 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.source-evidence-acceptance/v1", "accepted", True,
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "candidate.output_fingerprint"),
+         "normalized.stdout.sha256"),
     ],
     "evidence_binding": [
         (EVIDENCE_BINDING_SCHEMA, "bound", True, "record_digest"),
@@ -752,7 +752,7 @@ _CHECK_PERFORMERS: dict = {
     # accepted verify-attempt report discharges every check of the
     # produced record but the artifact layer. Each bound document only
     # counts when its carrier — `evidence_fingerprint`, `record_digest`
-    # or the report's `candidate.output_fingerprint` — equals the
+    # or the report's `normalized.stdout.sha256` — equals the
     # record's bound digest, so an anonymous or differently-bound
     # document can never recover this record.
     "claim_truth": [
@@ -763,7 +763,7 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.native-evidence-acceptance/v1", "accepted", True,
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "candidate.output_fingerprint"),
+         "normalized.stdout.sha256"),
     ],
     "semantic_correspondence": [
         ("mumei.source-evidence-recheck/v1", "recheck", "consistent",
@@ -771,7 +771,7 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.source-evidence-acceptance/v1", "accepted", True,
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "candidate.output_fingerprint"),
+         "normalized.stdout.sha256"),
     ],
     "artifact_semantics": [
         ("mumei.native-evidence-acceptance/v1", "accepted", True,
@@ -779,18 +779,18 @@ _CHECK_PERFORMERS: dict = {
     ],
     "file_identity": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "candidate.output_fingerprint"),
+         "normalized.stdout.sha256"),
     ],
     "producer_authenticity": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "candidate.output_fingerprint"),
+         "normalized.stdout.sha256"),
     ],
     # The attempt report's sequence IS the recorded execution lineage
     # for the record its candidate produced, so an accepted report
     # performs `historical_execution` on it at representation level.
     "historical_execution": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
-         "candidate.output_fingerprint"),
+         "normalized.stdout.sha256"),
     ],
 }
 
@@ -838,8 +838,8 @@ def _performer_document_applies(
 
     A bound performer pins itself to one record's artifact through its
     declared carrier — `evidence_fingerprint` on a Core descriptor,
-    `record_digest` on a binding document, `candidate.output_fingerprint`
-    on a verify-attempt report — so it only applies when the carrier's
+    `record_digest` on a binding document,
+    `normalized.stdout.sha256` on a verify-attempt report — so it only applies when the carrier's
     declared digest equals the record's bound digest (an anonymous
     descriptor, e.g. an artifact acceptance with no record input,
     applies to nothing). A `None` bind path applies record-agnostically
@@ -893,7 +893,7 @@ def evaluate_unperformed_check_recovery(
     pins another artifact, else `record_digest`. So a Core acceptance
     descriptor folded as the record is recovered by a recheck doc
     bound to the *same evidence*, and a verify-attempt report counts
-    for the record its `candidate.output_fingerprint` produced, while
+    for the record its `normalized.stdout.sha256` produced, while
     a bound document for different bytes can never recover this
     record's checks. Without a declared digest and no declared
     carrier no bound document can be attributed, so those checks stay
