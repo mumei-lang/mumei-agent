@@ -3873,9 +3873,9 @@ A nonzero exit, any stderr or a non-`ok` report status fails closed
 before parsing, and the emitted manifest remains declared data — a
 reader still recomputes derived properties and reuse still goes
 through `for_function`/`stale_dependents`. Audit consumption is
-wired (`--enable-summaries`, `--summaries-manifest-map`,
+wired (`--enable-summaries`, `--summaries-manifest-map`, plus
 `--enable-summary-attempts`); Evidence normalization/acceptance
-lives on the `*-attempt` route's envelope, the produce route
+lives on the `*-attempt` route's envelope — the produce route
 itself still emits declared data.
 
 ### C06 declared summary manifest reuse check (go-summaries-check)
