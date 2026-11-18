@@ -2791,6 +2791,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return binding
 
+    def _external_chan_operand(self, node: Any) -> Any | None:
+        """The (target_id, fact) for a channel operand living in
+        external state — a package-level `var GC chan T` or an
+        imported member `lib.GC` — whose element is scalar. Sends,
+        receives and closes on it touch a queue outside the
+        function's locals, so they record imported transfers on the
+        target's identity exactly like a `chan` parameter's ops."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None:
+            return None
+        if inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            fact = binding.type if binding is not None else None
+            if (
+                binding is not None
+                and binding.kind == "variable"
+                and self._package_level(binding)
+                and fact is not None
+                and fact.kind == "chan"
+                and fact.elem is not None
+                and fact.elem.kind in {"integer", "boolean"}
+            ):
+                return (binding.id, fact)
+            return None
+        member = self._imported_member_operand(inner)
+        fact = member.type if member is not None else None
+        if (
+            fact is not None
+            and fact.kind == "chan"
+            and fact.elem is not None
+            and fact.elem.kind in {"integer", "boolean"}
+        ):
+            return (member.id, fact)
+        return None
+
     def _is_make_chan_call(self, node: Any) -> bool:
         """`make(chan T[, cap])` — the one in-fragment channel
         constructor. Anything else on the RHS of a channel binding
@@ -5731,9 +5779,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             | self.indirect_writes
                         )
                     else:
-                        rdeps = self.expression(
-                            right, fn, params, scope, transfers, count, 0
+                        external = (
+                            self._external_chan_operand(right)
+                            if chan is None
+                            else None
                         )
+                        if external is not None:
+                            # `for v := range GC` — elements come
+                            # from external queue state: whatever
+                            # earlier sends broadcast into
+                            # `indirect_writes`, re-joined each
+                            # fixed-point pass through the `None`
+                            # arm like a `chan` parameter's.
+                            target_id, fact = external
+                            self._pin_fact_identities(fact)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        right.start_byte,
+                                        right.end_byte,
+                                    ),
+                                    target_id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            rdeps = self.indirect_writes
+                            chan = self.bindings.get(
+                                target_id
+                            ) or self.members.get(target_id)
+                        else:
+                            rdeps = self.expression(
+                                right, fn, params, scope, transfers,
+                                count, 0,
+                            )
                     if lefts and lefts[0].text != b"_":
                         binding = self.bindings_by_span.get(self.node_key(lefts[0]))
                         if binding is not None:
@@ -6248,7 +6329,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 raise _Unsupported("unsupported_statement", _span(node))
             binding = self._chan_binding(channel, locals_, params)
             if binding is None:
-                raise _Unsupported("unsupported_statement", _span(node))
+                # `GC <- x` / `lib.GC <- x` — a channel living in
+                # external state (package-level or imported `var`).
+                # The send mutates a queue outside the function's
+                # locals: record it against the var/member's own
+                # identity like a `chan` parameter send, and
+                # broadcast the sent deps into `indirect_writes`.
+                external = self._external_chan_operand(channel)
+                if external is None:
+                    raise _Unsupported(
+                        "unsupported_statement", _span(node)
+                    )
+                target_id, fact = external
+                value_deps = self.expression(
+                    value, fn, params, locals_, transfers, count, 0
+                )
+                self._pin_fact_identities(fact)
+                self.indirect_writes |= value_deps
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            node.start_byte,
+                            node.end_byte,
+                        ),
+                        target_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return
             value_deps = self.expression(
                 value, fn, params, locals_, transfers, count, 0
             )
@@ -6969,9 +7080,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         operand, locals_, params
                     )
                     if binding is None:
-                        raise _Unsupported(
-                            "non_parameter_reference", _span(node)
+                        # `<-GC` / `<-lib.GC` — receiving a queue in
+                        # external state: whatever earlier sends put
+                        # in is in `indirect_writes`; the rest is
+                        # external content, dep-free like an imported
+                        # read. The transfer records on the
+                        # var/member's identity.
+                        external = self._external_chan_operand(operand)
+                        if external is None:
+                            raise _Unsupported(
+                                "non_parameter_reference", _span(node)
+                            )
+                        target_id, fact = external
+                        self._pin_fact_identities(fact)
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                target_id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
                         )
+                        return self.indirect_writes
                     if binding.id in params:
                         # `<-ch` on a channel parameter reads a
                         # queue the caller shares — external state
@@ -7247,9 +7382,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         arguments[0], locals_, params
                     )
                     if binding is None:
-                        raise _Unsupported(
-                            "unresolved_or_opaque_call", _span(node)
+                        # `close(GC)` / `close(lib.GC)` — closing a
+                        # queue in external state is a caller-visible
+                        # effect recorded on the var/member's own
+                        # identity, like `close` on a `chan`
+                        # parameter.
+                        external = self._external_chan_operand(
+                            arguments[0]
                         )
+                        if external is None:
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call", _span(node)
+                            )
+                        target_id, fact = external
+                        self._pin_fact_identities(fact)
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                target_id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                        return frozenset()
                     if binding.id in params:
                         # `close(ch)` on a channel parameter — the
                         # caller's queue closes, a caller-visible

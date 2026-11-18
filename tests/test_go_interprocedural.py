@@ -1476,7 +1476,7 @@ def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_hel
 def test_opaque_callee_blocks_callers_but_not_an_unrelated_function(go_types_helper):
     data = unit(
         go_types_helper,
-        "var ch chan int64; func Bad(x int64)int64{return <-ch}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
+        "var ch chan int64; func Bad(x int64)int64{select{case v:=<-ch:return v;default:return x}}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
     )
     assert not named(*data).available
     assert named(*data, "Good").available
@@ -4446,6 +4446,7 @@ METHOD_LIB = {
         "type S2 struct{ N int64\n G string\n P *T }\nvar VS2 S2\n"
         "var VMK map[MK]int64\nvar VSM map[string]S\n"
         "var PSTR *struct{ F T }\nvar PCH *chan T\n"
+        "var VC chan int64\n"
         "var V2T [][]T\nvar VM2 map[string]map[string]int64\n"
         "type NS2 []int64\nvar V2NS []NS2\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
@@ -13590,6 +13591,101 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     assert not results["Res"].available
     assert not results["Alias"].available
     assert not results["Sel"].available
+
+
+def test_package_channel_send_recv_close_admitted(go_types_helper):
+    # `GC <- x` sends into a queue living in package state: the
+    # transfer records on the var's own identity (imported) and the
+    # sent value's deps broadcast into `indirect_writes`, so `<-GC`
+    # observes them; `close(GC)` records the same caller-visible
+    # effect on the var.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGC <- x\n"
+            "\tclose(GC)\n"
+            "\treturn <-GC\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert len(result.calls) == 3
+    assert all(t.imported for t in result.calls)
+
+
+def test_imported_channel_member_send_recv_close_admitted(
+    go_types_helper,
+):
+    # `lib.VC <- x` is the imported-member spelling of the same
+    # external queue: transfers record on the member's identity.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.VC <- x\n"
+        "\tclose(lib.VC)\n"
+        "\treturn <-lib.VC\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert len(result.calls) == 3
+    assert all(t.imported for t in result.calls)
+    members = {m.name: m for m in snapshot.imported_members}
+    assert all(t.target == members["VC"].id for t in result.calls)
+
+
+def test_package_channel_range_rejoins_sends(go_types_helper):
+    # `for v := range GC` reads external queue state — whatever
+    # earlier sends broadcast — and re-joins it each fixed-point
+    # pass like a `chan` parameter's range does.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GC chan int64\n"
+            "func F(x int64, y int64) int64 {\n"
+            "\tGC <- x\n"
+            "\ts := int64(0)\n"
+            "\tfor v := range GC {\n"
+            "\t\ts += v\n"
+            "\t\tGC <- y\n"
+            "\t}\n"
+            "\treturn s\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_external_channel_boundaries_stay_closed(go_types_helper):
+    # Non-scalar element (`chan string`) and a struct-field operand
+    # (`p.C`) stay closed.
+    files = {
+        "a.go": "package p\n"
+        "var GS chan string\n"
+        "type SC struct{ C chan int64 }\n"
+        "func Str(x string) string {\n"
+        "\tGS <- x\n"
+        "\treturn x\n}\n"
+        "func Field(p *SC, x int64) int64 {\n"
+        "\tp.C <- x\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in ("Str", "Field")
+    }
+    assert not results["Str"].available
+    assert not results["Field"].available
 
 
 def test_chan_argument_propagates_queue_contents(go_types_helper):

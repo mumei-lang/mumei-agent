@@ -2598,10 +2598,15 @@ returns the parameter's provenance union the indirect writes, and
 admit as queue aliases: `ch2` resolves to the same queue as `ch`,
 so sends and receives through either name share the root's dep
 set (aliasing a `chan` parameter adopts its external
-sync-resource model), while `chan` results, non-scalar elements,
+sync-resource model) — channel operands in
+external state admit under the same model: a package-level
+`var GC chan T` or an imported member `lib.GC` records sends,
+receives, `for range` and `close` as imported transfers on the
+var's or member's own identity, receives returning the indirect
+writes — while `chan` results, non-scalar elements,
 rebinding a channel under a branch or loop (a conditional
-`ch2 = ch3` could mean either queue), operands in
-external state (`p.C <- x`, `close(GC)`), and `select`
+`ch2 = ch3` could mean either queue), field operands
+(`p.C <- x`), and `select`
 stay closed, while `len(ch)`/`cap(ch)` now admit as
 dep-free — the queue length and capacity are runtime
 state, not parameter provenance; on a `chan` parameter
