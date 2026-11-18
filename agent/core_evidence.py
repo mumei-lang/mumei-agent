@@ -739,12 +739,14 @@ _CHECK_PERFORMERS: dict = {
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
     ],
     "evidence_binding": [
         (EVIDENCE_BINDING_SCHEMA, "bound", True, "record_digest"),
     ],
     # The semantic C02 checks recover through the fingerprint-carrying
-    # Core descriptors and the verify-attempt report, mirroring the
+    # Core descriptors and the attempt reports, mirroring the
     # discharged_checks sets the declared attempt routes report: a
     # consistent source recheck or an accepted source acceptance
     # re-establishes the record's claims within its declared profile; a
@@ -764,6 +766,8 @@ _CHECK_PERFORMERS: dict = {
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
     ],
     "semantic_correspondence": [
         ("mumei.source-evidence-recheck/v1", "recheck", "consistent",
@@ -771,6 +775,8 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.source-evidence-acceptance/v1", "accepted", True,
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
     ],
     "artifact_semantics": [
@@ -780,9 +786,13 @@ _CHECK_PERFORMERS: dict = {
     "file_identity": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
     ],
     "producer_authenticity": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
     ],
     # The attempt report's sequence IS the recorded execution lineage
@@ -790,6 +800,8 @@ _CHECK_PERFORMERS: dict = {
     # performs `historical_execution` on it at representation level.
     "historical_execution": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
     ],
 }

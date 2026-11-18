@@ -1122,6 +1122,36 @@ def test_attempt_emits_lineage_normalized_and_candidate(tmp_path, capsys):
         report["candidate"]["schema_version"]
         == "mumei.verifier-evidence-candidate/v1"
     )
+    check = report["evidence_check"]
+    assert check["schema_version"] == "mumei.verifier-evidence-check/v1"
+    assert check["outcome"] == "valid"
+    acceptance = report["acceptance"]
+    assert (
+        acceptance["schema_version"]
+        == "mumei.evidence-check-acceptance/v1"
+    )
+    assert acceptance["accepted"] is True
+    assert report["discharged_checks"] == [
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+    ]
+    assert report["checks_not_performed"] == ["artifact_semantics"]
+
+
+def test_attempt_records_failed_check_on_non_manifest(tmp_path, capsys):
+    helper = tmp_path / "go-types-garbage"
+    helper.write_text("#!/bin/sh\nprintf '%s' 'not a manifest'\n")
+    helper.chmod(0o755)
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    code, out, _ = _run_attempt(capsys, _attempt_args(helper, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["evidence_check"]["outcome"] == "failed"
+    assert report["acceptance"]["accepted"] is False
+    assert report["checks_not_performed"] == ["artifact_semantics"]
 
 
 def test_attempt_timeout_records_no_selection(tmp_path, capsys):

@@ -4012,8 +4012,23 @@ no manifest bytes: the child's manifest is observed only through the
 bounded capture claim, a nonzero observed exit is still a completed
 observation (the outcome lives in the report, not this route's exit
 status) and the spawned child inherits only the caller's environment.
-No retry policy, scheduling or audit route is wired; Evidence
-normalization/acceptance stays open.
+
+When a result is selected, the route also performs the manifest's
+declared representation check itself — the captured stdout bytes are
+restored through `GoSummarySet.from_dict`, the strict
+`mumei.go-scalar-parameter-deps/v1` boundary — and records the outcome
+as a `mumei.verifier-evidence-check/v1` document
+(`sequence.evidence_check`) plus the `mumei.evidence-check-acceptance/v1`
+verdict from `evaluate_evidence_check`. On acceptance the report
+discharges the same `ESTABLISHED` set as `verify-attempt`
+(everything but `artifact_semantics`, listed under
+`discharged_checks`/`checks_not_performed`), and recovery-eval folds
+`mumei.go-summaries-attempt-report/v1` as a performer schema bound
+through `normalized.stdout.sha256`, so an accepted report recovers
+those checks on the manifest record the same way the verify-attempt
+report does. No retry policy, scheduling or audit route is wired;
+Evidence normalization/acceptance for the ts/sol/rust sibling routes
+stays open.
 
 
 ### C06 declared Rust summary route family

@@ -250,7 +250,11 @@ def test_declared_carrier_only_binds_that_artifact():
     assert evaluation["checks"]["claim_truth"] == "evidence_failed"
 
 
-def _attempt_report(record_digest, accepted=True):
+def _attempt_report(
+    record_digest,
+    accepted=True,
+    schema="mumei.verify-attempt-report/v1",
+):
     """A minimal realistic verify-attempt report.
 
     `record_digest` is the produced bytes' SHA-256, surfaced at
@@ -260,7 +264,7 @@ def _attempt_report(record_digest, accepted=True):
     """
     manifest_fingerprint = "f" * 64
     return _doc(
-        "mumei.verify-attempt-report/v1",
+        schema,
         sequence={
             "schema_version": "mumei.verifier-attempt-sequence/v1",
             "request_fingerprint": "e" * 64,
@@ -363,6 +367,35 @@ def test_real_attempt_report_recovers_produced_record(tmp_path, capsys):
         "claim_truth": "recovered",
         "historical_execution": "recovered",
     }
+
+
+def test_go_summaries_attempt_report_recovers_manifest_checks():
+    """An accepted go-summaries attempt report discharges the same
+    five checks plus historical_execution on the manifest bytes its
+    selected run produced."""
+    digest = "a" * 64
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth", "artifact_semantics",
+        "historical_execution",
+    )
+    report = _attempt_report(
+        digest, schema="mumei.go-summaries-attempt-report/v1"
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [report], record_digest=digest,
+    )
+    checks = evaluation["checks"]
+    for name in (
+        "file_identity",
+        "producer_authenticity",
+        "freshness",
+        "semantic_correspondence",
+        "claim_truth",
+        "historical_execution",
+    ):
+        assert checks[name] == "recovered", name
+    assert checks["artifact_semantics"] == "no_evidence"
 
 
 def test_attempt_report_requires_accepted_and_bound():
