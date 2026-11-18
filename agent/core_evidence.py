@@ -785,6 +785,13 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "candidate.output_fingerprint"),
     ],
+    # The attempt report's sequence IS the recorded execution lineage
+    # for the record its candidate produced, so an accepted report
+    # performs `historical_execution` on it at representation level.
+    "historical_execution": [
+        ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "candidate.output_fingerprint"),
+    ],
 }
 
 

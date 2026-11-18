@@ -281,6 +281,15 @@ def test_attempt_report_recovers_five_checks():
     }
 
 
+def test_attempt_report_recovers_historical_execution():
+    digest = "a" * 64
+    record = _record("historical_execution")
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest)], record_digest=digest,
+    )
+    assert evaluation["checks"]["historical_execution"] == "recovered"
+
+
 def test_attempt_report_requires_accepted_and_bound():
     digest = "a" * 64
     record = _record("file_identity", "claim_truth")
