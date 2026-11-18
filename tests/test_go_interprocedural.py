@@ -14370,3 +14370,52 @@ def test_named_pointer_underlying_imported_param_field_read(
     assert result.available
     assert result.return_dependencies == frozenset({0})
     assert members["S"]["id"] in result.pinned
+
+
+def test_named_pointer_underlying_pointer_pointee_deref_admits(
+    go_types_helper,
+):
+    # `type PS *[]int64; func F(p *PS) PS { return *p }` — `*p`
+    # returns the PS VALUE, a pointer-kind result, not a slice:
+    # the dereferenced pointer's own `elem` (PS's {pointer} fact)
+    # classifies the read, not PS's `elem`.
+    files = {
+        "a.go": "package p\n"
+        "type PS *[]int64\n"
+        "func F(p *PS) PS {\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_underlying_imported_named_pointer_var(
+    go_types_helper,
+):
+    # `var V *PS` imported — `*lib.V` returns a PS pointer value,
+    # so the read admits the same way a bound `*PS` does.
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype PS *[]int64\nvar V *PS\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tv := *lib.V\n\t_ = v\n\treturn x\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})

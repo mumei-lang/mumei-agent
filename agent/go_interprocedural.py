@@ -3762,16 +3762,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if named_pointee:
             target = self._pointee_type(pointee_id) if pointee_id else None
             if pointee_id:
-                # `type PP *X` — the member IS the pointer type, so
-                # the value this read returns is the pointee X: its
-                # own kind classifies the read, not PP's `pointer`
-                # kind (a `*func`/`*chan`/`*[]T` elem admits nothing
-                # a plain `*T` wouldn't).
+                # `*p` returns the pointee VALUE, whose fact is the
+                # dereferenced pointer's own `elem`: `type PS
+                # *[]int64` under `p *PS` yields a PS pointer
+                # (`elem` is PS's {pointer} fact — admit), while
+                # `type PF *func` under `p PF` yields a func
+                # (`elem` = {function} — close). Reading the
+                # resolved named type's `elem` instead would
+                # mis-classify a named-pointer pointee as ITS
+                # pointee (`*p` on `p *PS` is not a slice).
+                source = (
+                    member.type
+                    if member is not None
+                    else binding.type
+                )
                 read_fact = (
-                    target.type.elem
-                    if target is not None
-                    and target.type.kind == "pointer"
-                    else target.type if target is not None else None
+                    source.elem
+                    if source is not None and source.elem is not None
+                    else (
+                        target.type if target is not None else None
+                    )
                 )
                 if read_fact is None or read_fact.kind not in {
                     "integer",
