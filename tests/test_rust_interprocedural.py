@@ -819,6 +819,28 @@ def test_attempt_route_emits_lineage_and_candidate(tmp_path, capsys):
         candidate["request_fingerprint"]
         == sequence["request_fingerprint"]
     )
+    check = report["evidence_check"]
+    assert check["schema_version"] == "mumei.verifier-evidence-check/v1"
+    assert check["outcome"] == "valid"
+    acceptance = report["acceptance"]
+    assert (
+        acceptance["schema_version"]
+        == "mumei.evidence-check-acceptance/v1"
+    )
+    assert acceptance["accepted"] is True
+    # A summary manifest discharges only the byte/run-level checks:
+    # its dep claims stay unperformed until the strict accept route
+    # re-derives them.
+    assert report["discharged_checks"] == [
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "semantic_correspondence",
+    ]
 
 
 def test_attempt_route_binds_source_bytes(tmp_path, capsys):

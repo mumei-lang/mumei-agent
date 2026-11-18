@@ -4061,7 +4061,16 @@ production verification path:
 - `rust-summaries-attempt` runs the produce route as one declared
   attempt inside the C11 lifecycle (`dispatch_attempt` → reconcile →
   compare-and-set publication, input bytes re-hashed after the run)
-  and emits `mumei.rust-summaries-attempt-report/v1`.
+  and emits `mumei.rust-summaries-attempt-report/v1`. On a selected result the route also performs the manifest's
+declared representation check — the captured stdout is restored
+through the strict `from_dict` boundary — and emits the
+`mumei.verifier-evidence-check/v1` outcome, the
+`mumei.evidence-check-acceptance/v1` verdict and the same
+`SUMMARY_ESTABLISHED` byte-level discharge split
+`go-summaries-attempt` pioneered (`claim_truth` and
+`semantic_correspondence` stay unperformed — parsing restores shape,
+never verifies dep claims); recovery-eval folds the report
+schema as a performer bound through `normalized.stdout.sha256`.
 
 `rust_summaries_adapter()` registers the produce route as a second
 `summary_derivation` descriptor — declaring only `filesystem.read`,
@@ -4346,7 +4355,16 @@ function's declared summary, `ts-summaries-check` and
 `ts-summaries-reuse` partition and merge a declared manifest against
 the fresh derivation, and `ts-summaries-attempt` runs the produce
 route as one declared attempt through the C11 dispatch lifecycle and
-emits `mumei.ts-summaries-attempt-report/v1`. The `agent.ts-summaries`
+emits `mumei.ts-summaries-attempt-report/v1`. On a selected result the route also performs the manifest's
+declared representation check — the captured stdout is restored
+through the strict `from_dict` boundary — and emits the
+`mumei.verifier-evidence-check/v1` outcome, the
+`mumei.evidence-check-acceptance/v1` verdict and the same
+`SUMMARY_ESTABLISHED` byte-level discharge split
+`go-summaries-attempt` pioneered (`claim_truth` and
+`semantic_correspondence` stay unperformed — parsing restores shape,
+never verifies dep claims); recovery-eval folds the report
+schema as a performer bound through `normalized.stdout.sha256`. The `agent.ts-summaries`
 adapter descriptor declares `filesystem.read` only — the route runs
 in-process, so the `process.spawn` in its `probe_argv` belongs to the
 C11 probe boundary, not the route.
@@ -4399,7 +4417,16 @@ until the emitted name disambiguates), `sol-summaries-check` and
 `sol-summaries-reuse` partition and merge a declared manifest against
 the fresh derivation, and `sol-summaries-attempt` runs the produce
 route as one declared attempt through the C11 dispatch lifecycle and
-emits `mumei.sol-summaries-attempt-report/v1`. The `agent.sol-summaries`
+emits `mumei.sol-summaries-attempt-report/v1`. On a selected result the route also performs the manifest's
+declared representation check — the captured stdout is restored
+through the strict `from_dict` boundary — and emits the
+`mumei.verifier-evidence-check/v1` outcome, the
+`mumei.evidence-check-acceptance/v1` verdict and the same
+`SUMMARY_ESTABLISHED` byte-level discharge split
+`go-summaries-attempt` pioneered (`claim_truth` and
+`semantic_correspondence` stay unperformed — parsing restores shape,
+never verifies dep claims); recovery-eval folds the report
+schema as a performer bound through `normalized.stdout.sha256`. The `agent.sol-summaries`
 adapter descriptor declares `filesystem.read` only — the route runs
 in-process, so the `process.spawn` in its `probe_argv` belongs to the
 C11 probe boundary, not the route.

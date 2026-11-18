@@ -400,6 +400,42 @@ def test_go_summaries_attempt_report_recovers_manifest_checks():
     assert checks["artifact_semantics"] == "no_evidence"
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        "mumei.ts-summaries-attempt-report/v1",
+        "mumei.sol-summaries-attempt-report/v1",
+        "mumei.rust-summaries-attempt-report/v1",
+    ],
+)
+def test_summaries_attempt_reports_recover_manifest_checks(schema):
+    """An accepted ts/sol/rust summaries attempt report discharges the
+    same checks plus historical_execution on the manifest bytes its
+    selected run produced."""
+    digest = "a" * 64
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth", "artifact_semantics",
+        "historical_execution",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_attempt_report(digest, schema=schema)],
+        record_digest=digest,
+    )
+    checks = evaluation["checks"]
+    for name in (
+        "file_identity",
+        "producer_authenticity",
+        "freshness",
+        "historical_execution",
+    ):
+        assert checks[name] == "recovered", (schema, name)
+    # Parsing never verifies the manifest's dep claims
+    assert checks["claim_truth"] == "no_evidence"
+    assert checks["semantic_correspondence"] == "no_evidence"
+    assert checks["artifact_semantics"] == "no_evidence"
+
+
 def test_attempt_report_requires_accepted_and_bound():
     digest = "a" * 64
     record = _record("file_identity", "claim_truth")
