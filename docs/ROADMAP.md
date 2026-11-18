@@ -4066,8 +4066,10 @@ declared representation check — the captured stdout is restored
 through the strict `from_dict` boundary — and emits the
 `mumei.verifier-evidence-check/v1` outcome, the
 `mumei.evidence-check-acceptance/v1` verdict and the same
-`ESTABLISHED`/`artifact_semantics` discharged/not-performed split
-`go-summaries-attempt` pioneered; recovery-eval folds the report
+`SUMMARY_ESTABLISHED` byte-level discharge split
+`go-summaries-attempt` pioneered (`claim_truth` and
+`semantic_correspondence` stay unperformed — parsing restores shape,
+never verifies dep claims); recovery-eval folds the report
 schema as a performer bound through `normalized.stdout.sha256`.
 
 `rust_summaries_adapter()` registers the produce route as a second
@@ -4358,8 +4360,10 @@ declared representation check — the captured stdout is restored
 through the strict `from_dict` boundary — and emits the
 `mumei.verifier-evidence-check/v1` outcome, the
 `mumei.evidence-check-acceptance/v1` verdict and the same
-`ESTABLISHED`/`artifact_semantics` discharged/not-performed split
-`go-summaries-attempt` pioneered; recovery-eval folds the report
+`SUMMARY_ESTABLISHED` byte-level discharge split
+`go-summaries-attempt` pioneered (`claim_truth` and
+`semantic_correspondence` stay unperformed — parsing restores shape,
+never verifies dep claims); recovery-eval folds the report
 schema as a performer bound through `normalized.stdout.sha256`. The `agent.ts-summaries`
 adapter descriptor declares `filesystem.read` only — the route runs
 in-process, so the `process.spawn` in its `probe_argv` belongs to the
@@ -4418,8 +4422,10 @@ declared representation check — the captured stdout is restored
 through the strict `from_dict` boundary — and emits the
 `mumei.verifier-evidence-check/v1` outcome, the
 `mumei.evidence-check-acceptance/v1` verdict and the same
-`ESTABLISHED`/`artifact_semantics` discharged/not-performed split
-`go-summaries-attempt` pioneered; recovery-eval folds the report
+`SUMMARY_ESTABLISHED` byte-level discharge split
+`go-summaries-attempt` pioneered (`claim_truth` and
+`semantic_correspondence` stay unperformed — parsing restores shape,
+never verifies dep claims); recovery-eval folds the report
 schema as a performer bound through `normalized.stdout.sha256`. The `agent.sol-summaries`
 adapter descriptor declares `filesystem.read` only — the route runs
 in-process, so the `process.spawn` in its `probe_argv` belongs to the
