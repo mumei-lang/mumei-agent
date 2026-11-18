@@ -762,6 +762,12 @@ def summary_accept_document(args: argparse.Namespace) -> dict:
 
 ATTEMPT_REQUEST_PROFILE = "mumei.go-summaries-attempt-request/v1"
 ATTEMPT_REPORT_PROFILE = "mumei.go-summaries-attempt-report/v1"
+REUSE_ATTEMPT_REQUEST_PROFILE = (
+    "mumei.go-summaries-reuse-attempt-request/v1"
+)
+REUSE_ATTEMPT_REPORT_PROFILE = (
+    "mumei.go-summaries-reuse-attempt-report/v1"
+)
 
 
 def _file_sha256(path: str) -> str:
@@ -785,17 +791,21 @@ def _optional_file_sha256(path: str | None) -> str | None:
     return _file_sha256(path) if path is not None else None
 
 
-def _attempt_fingerprint(args: argparse.Namespace) -> str:
+def _attempt_fingerprint(
+    args: argparse.Namespace,
+    profile: str = ATTEMPT_REQUEST_PROFILE,
+) -> str:
     """Bind the request's declared inputs into one request identity.
 
     The fingerprint covers the provisioned helper's bytes, every
     declared source/import file's bytes, the target architecture and
     the inner helper bound — what the produce route would consume.
-    The attempt's own timeout_ms is the sequence's separate declared
-    field, not part of request identity.
+    A declared ``--manifest`` (the reuse attempt) joins the identity
+    the same way. The attempt's own timeout_ms is the sequence's
+    separate declared field, not part of request identity.
     """
     request = {
-        "schema_version": ATTEMPT_REQUEST_PROFILE,
+        "schema_version": profile,
         "go_types": _file_sha256(args.go_types),
         "sources": [
             {"path": path, "sha256": _file_sha256(path)}
@@ -811,6 +821,9 @@ def _attempt_fingerprint(args: argparse.Namespace) -> str:
         "target_arch": args.target_arch,
         "timeout_seconds": args.timeout,
     }
+    manifest = getattr(args, "manifest", None)
+    if manifest is not None:
+        request["manifest"] = _file_sha256(manifest)
     return hashlib.sha256(
         json.dumps(
             request, sort_keys=True, separators=(",", ":")
@@ -960,3 +973,182 @@ def run_attempt(args: argparse.Namespace) -> dict:
             CHECK_VOCABULARY - DischargedChecks.SUMMARY_ESTABLISHED
         )
     return report
+
+
+def build_reuse_attempt_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """Parser for ``go-summaries-reuse-attempt``: the reuse route's
+    declared inputs plus the attempt's own declared timeout and
+    optional memory bound. The child inherits the caller's
+    environment."""
+    parser = build_reuse_parser(parser)
+    parser.description = (
+        "Run the go-summaries-reuse route as one declared attempt "
+        "and emit the reconciled lineage descriptors."
+    )
+    parser.add_argument(
+        "--attempt-timeout",
+        type=int,
+        required=True,
+        metavar="<MS>",
+        help=(
+            "Declared attempt bound in milliseconds (required). The "
+            "inner helper's own --timeout stays a separate bound."
+        ),
+    )
+    parser.add_argument(
+        "--memory-bound-mb",
+        type=int,
+        default=None,
+        metavar="<MB>",
+        help=(
+            "Optional declared POSIX RLIMIT_AS ceiling applied to the "
+            "attempt child's whole address space."
+        ),
+    )
+    for action in parser._actions:
+        if action.dest == "output":
+            action.help = (
+                "Write the attempt report JSON here instead of stdout."
+            )
+    return parser
+
+
+def run_reuse_attempt(args: argparse.Namespace) -> dict:
+    """Run the reuse route as one declared attempt → report dict.
+
+    The same C11 lifecycle ``run_attempt`` applies to the produce
+    route: a fresh ``AttemptSequence`` keyed to the request
+    fingerprint — which also binds the declared ``--manifest``'s
+    bytes — one reserved attempt observed by ``dispatch_attempt``
+    under ``args.attempt_timeout``, reconcile and compare-and-set
+    publication. An ``exited`` run's captured stdout (the merged
+    manifest) is selected only when every declared input byte —
+    sources, imports, helper, callee manifest and the declared
+    manifest itself — is unchanged after the observed run. Returns
+    the ``mumei.go-summaries-reuse-attempt-report/v1`` document;
+    raises ``SnapshotError``/``OSError``/``UnicodeDecodeError``/
+    ``ValueError`` on a declared failure.
+    """
+    from agent.attempt_runner import dispatch_attempt
+    from agent.core_evidence import evaluate_evidence_check
+    from agent.verify_attempt import CHECK_VOCABULARY, DischargedChecks
+    from agent.verification_attempt import (
+        AttemptSequence,
+        AttemptSequenceStore,
+    )
+
+    fingerprint = _attempt_fingerprint(args, REUSE_ATTEMPT_REQUEST_PROFILE)
+    argv = (
+        sys.executable,
+        "-m",
+        "agent",
+        "go-summaries-reuse",
+        "--go-types",
+        args.go_types,
+        "--target-arch",
+        args.target_arch,
+        "--timeout",
+        str(args.timeout),
+        "--manifest",
+        args.manifest,
+    ) + tuple(
+        arg
+        for path in args.source
+        for arg in ("--source", path)
+    ) + tuple(
+        arg
+        for spec in args.imports
+        for arg in ("--import", spec)
+    ) + tuple(
+        ("--summary-aware-calls", args.summary_aware_calls)
+        if getattr(args, "summary_aware_calls", None)
+        else ()
+    )
+    sequence = AttemptSequence(fingerprint, args.attempt_timeout)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    current = store.current
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        memory_bound_mb=args.memory_bound_mb,
+    )
+    try:
+        inputs_changed = (
+            _attempt_fingerprint(args, REUSE_ATTEMPT_REQUEST_PROFILE)
+            != fingerprint
+        )
+    except (OSError, SnapshotError):
+        inputs_changed = True
+    if dispatch.run.record.state == "exited" and not inputs_changed:
+        updated = dispatch.sequence.select_result(
+            dispatch.captured_output()
+        )
+    else:
+        updated = dispatch.sequence
+    published = store.compare_and_set(current, updated)
+    report: dict[str, object] = {
+        "schema_version": REUSE_ATTEMPT_REPORT_PROFILE,
+        "sequence": published.to_dict(),
+        "normalized": dispatch.run.normalized().to_dict(),
+    }
+    if published.selected_result is not None:
+        candidate = published.evidence_candidate()
+        report["candidate"] = candidate.to_dict()
+        # The merged manifest's strict from_dict boundary is the
+        # declared representation check, same as the produce
+        # attempt: a selected run whose captured bytes restore as a
+        # `mumei.go-scalar-parameter-deps/v1` set records "valid";
+        # anything else records "failed", never an error.
+        try:
+            payload = json.loads(dispatch.run.stdout)
+            GoSummarySet.from_dict(payload)
+            outcome = "valid"
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            RecursionError,
+        ):
+            outcome = "failed"
+        check = published.evidence_check(candidate, outcome)
+        report["evidence_check"] = check.to_dict()
+        report["acceptance"] = evaluate_evidence_check(
+            published, check
+        )
+        report["discharged_checks"] = sorted(
+            DischargedChecks.SUMMARY_ESTABLISHED
+        )
+        report["checks_not_performed"] = sorted(
+            CHECK_VOCABULARY - DischargedChecks.SUMMARY_ESTABLISHED
+        )
+    return report
+
+
+def main_reuse_attempt(args: argparse.Namespace | None = None) -> int:
+    """Run the reuse route as one declared attempt.
+
+    Spawns ``python -m agent go-summaries-reuse`` with the same
+    declared inputs — including the declared ``--manifest`` — through
+    the C11 dispatch lifecycle, so manifest replay no longer stays
+    out of attempt mode: the lineage binds every byte the merge
+    consumes, and an ``exited`` run's captured stdout becomes the
+    selected result only when the drift gate passes. Emits
+    ``mumei.go-summaries-reuse-attempt-report/v1`` — the canonical
+    lineage, the normalized run-result descriptor and, on selection,
+    the evidence check and acceptance for the merged manifest —
+    never manifest bytes themselves.
+    """
+    if args is None:
+        args = build_reuse_attempt_parser().parse_args()
+    try:
+        _check_output_path(args, _declared_paths(args))
+        report = run_reuse_attempt(args)
+        document = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        _emit(document, args.output)
+    except (SnapshotError, OSError, UnicodeDecodeError) as exc:
+        print(f"go-summaries-reuse-attempt: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return 0

@@ -45,6 +45,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-accept` | 9 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 9 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
+| `go-summaries-reuse-attempt` | 10 | Run the go-summaries-reuse route as one declared attempt and emit the reconciled lineage descriptors. |
 | `evidence-check` | 6 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-list` | 6 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
@@ -665,6 +666,26 @@ Run the go-summaries produce route as one declared attempt and emit the reconcil
 | `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
 | `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
 | `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
+| `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+
+
+## `mumei-agent go-summaries-reuse-attempt`
+
+Run the go-summaries-reuse route as one declared attempt and emit the reconciled lineage descriptors.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--go-types` | `<<PATH>>` | yes | — | Path to the provisioned tools/go-types helper binary. |
+| `--source` | `<<PATH>>` | yes | — | Go source file to summarize. Repeat for a multi-file package unit; each file is declared under its basename and basenames must be unique. |
+| `--target-arch` | `{386, amd64, arm64}` | no | amd64 | Target architecture for gc sizes (default: amd64). |
+| `--timeout` | `<<SECONDS>>` | no | 30 | Helper process timeout in seconds (default: 30). |
+| `--import` | `<<IMPORT_PATH>=<FILE>>` | no | [] | Declare one source file of an importable package. Repeat per file and per import path; each path declares a package unit. Requires a multi-file --source package unit. |
+| `--output` | `<<PATH>>` | no | — | Write the attempt report JSON here instead of stdout. |
+| `--summary-aware-calls` | `<<MANIFEST>>` | no | — | Declared callee summary manifest (mumei.go-scalar-parameter-deps/v1): calls resolving to a callee it covers fold the declared return_dependencies and statement_reads instead of the opaque every-argument approximation. Advisory only — callees it misses keep opaque-call behavior. |
+| `--manifest` | `<<PATH>>` | yes | — | Summary manifest (mumei.go-scalar-parameter-deps/v1) to reuse. |
 | `--attempt-timeout` | `<<MS>>` | yes | — | Declared attempt bound in milliseconds (required). The inner helper's own --timeout stays a separate bound. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 

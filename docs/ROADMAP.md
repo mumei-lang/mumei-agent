@@ -4046,6 +4046,43 @@ it discharges. The ts/sol/rust sibling routes carry the same
 envelope, and directory audits reach the attempt lifecycle through
 `--enable-summary-attempts`; no retry policy or scheduling is wired.
 
+### go-summaries-reuse-attempt — manifest replay through the attempt lifecycle
+
+`python -m agent go-summaries-reuse-attempt` runs the reuse route as
+one declared attempt inside the C11 lifecycle, closing the last gap
+in the Go summary route family: manifest replay no longer stays out
+of attempt mode. The route spawns `python -m agent
+go-summaries-reuse` with the same declared inputs (`--go-types`,
+`--source`, `--import`, `--manifest`, `--target-arch`, `--timeout`,
+plus `--summary-aware-calls` when declared) through
+`dispatch_attempt`: a fresh `AttemptSequence` keyed to a request
+fingerprint that additionally binds the declared manifest's bytes
+under `mumei.go-summaries-reuse-attempt-request/v1`, one reserved
+attempt under the required `--attempt-timeout <MS>` bound (plus an
+optional `--memory-bound-mb` ceiling), reconcile and compare-and-set
+publication. An `exited` run's captured stdout — the merged manifest
+— becomes the selected result only when every declared input byte is
+unchanged after the observed run (the drift gate re-hashes the
+manifest too); failed, timed-out or cancelled runs publish the
+terminal lineage with no selection.
+
+The emitted `mumei.go-summaries-reuse-attempt-report/v1` carries the
+same envelope as the produce attempt — canonical lineage, the
+normalized run-result descriptor and, on selection, the evidence
+candidate, the `mumei.verifier-evidence-check/v1` outcome of
+restoring the merged bytes through `GoSummarySet.from_dict`, the
+`mumei.evidence-check-acceptance/v1` verdict, and the same
+`discharged_checks`/`checks_not_performed` split
+(`SUMMARY_ESTABLISHED`: a merged manifest's shape is restored but
+its dep claims stay unperformed until the strict accept route
+re-derives them). recovery-eval folds the report schema under the
+same four bound-report performer lists as the produce attempt.
+`go_summaries_reuse_attempt` is the matching MCP tool. The ts/sol/rust
+reuse routes still have no attempt variant, and audit
+`--enable-summary-attempts` still cannot combine with
+`--summaries-manifest-map`: mapped units keep running the plain
+reuse route.
+
 
 ### C06 declared Rust summary route family
 
@@ -5033,9 +5070,10 @@ to every unit (default 120000 — the same bound the bounded
 subprocess runner applies).
 
 The flag requires `--enable-summaries` and cannot combine with
-`--summaries-manifest-map`: there is no attempt variant of
-`*-summaries-reuse`, so manifest replay stays out of the attempt
-mode. Entries remain advisory by construction — a refused,
+`--summaries-manifest-map`: mapped units run the plain
+`*-summaries-reuse` route — `go-summaries-reuse-attempt` exists but
+the audit does not route mapped units through it. Entries remain
+advisory by construction — a refused,
 malformed or unparseable attempt report records `status: "failed"`
 without failing the audit, and report bytes never land in the
 output.
