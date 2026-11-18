@@ -249,6 +249,7 @@ class AuditPipeline:
         include_tests: bool = False,
         enable_summaries: bool = False,
         go_types: str | None = None,
+        summaries_manifest_map: dict | None = None,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -264,6 +265,7 @@ class AuditPipeline:
                 include_tests=include_tests,
                 enable_summaries=enable_summaries,
                 go_types=go_types,
+                summaries_manifest_map=summaries_manifest_map,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -618,6 +620,7 @@ class AuditPipeline:
         include_tests: bool = False,
         enable_summaries: bool = False,
         go_types: str | None = None,
+        summaries_manifest_map: dict | None = None,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
@@ -643,6 +646,7 @@ class AuditPipeline:
                 include_tests=include_tests,
                 enable_summaries=enable_summaries,
                 go_types=go_types,
+                summaries_manifest_map=summaries_manifest_map,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -668,6 +672,7 @@ class AuditPipeline:
         include_tests: bool = False,
         enable_summaries: bool = False,
         go_types: str | None = None,
+        summaries_manifest_map: dict | None = None,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -727,7 +732,12 @@ class AuditPipeline:
             errors.append(f"no supported source-code files found in directory: {source_label}")
 
         summary_audits = (
-            _collect_summary_audits(source_path, code_files, go_types)
+            _collect_summary_audits(
+                source_path,
+                code_files,
+                go_types,
+                manifest_map=summaries_manifest_map,
+            )
             if enable_summaries and code_files
             else []
         )
@@ -1035,6 +1045,19 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         ),
     )
     parser.add_argument(
+        "--summaries-manifest-map",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Directory audits only, requires --enable-summaries: JSON "
+            "object mapping each unit label (as emitted under "
+            "summary_audits) to a prior summary manifest. Units with a "
+            "declared manifest run their *-summaries-reuse route and "
+            "report mode/reused/derived counts; a stale or rejected "
+            "manifest falls back to the produce route."
+        ),
+    )
+    parser.add_argument(
         "--go-types",
         default=None,
         metavar="<PATH>",
@@ -1048,6 +1071,22 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
     args = args or build_parser().parse_args()
+    manifest_map = None
+    manifest_map_path = getattr(args, "summaries_manifest_map", None)
+    if manifest_map_path is not None:
+        if not getattr(args, "enable_summaries", False):
+            print(
+                "audit: --summaries-manifest-map requires --enable-summaries",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        try:
+            manifest_map = _read_summary_manifest_map(
+                Path(manifest_map_path)
+            )
+        except (OSError, ValueError) as exc:
+            print(f"audit: {exc}", file=sys.stderr)
+            raise SystemExit(2)
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
@@ -1061,6 +1100,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         enable_native_replay=bool(getattr(args, "enable_native_replay", False)),
         enable_summaries=bool(getattr(args, "enable_summaries", False)),
         go_types=getattr(args, "go_types", None),
+        summaries_manifest_map=manifest_map,
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
@@ -1093,6 +1133,8 @@ _SUMMARY_ROUTE_BY_EXTENSION = {
 
 _SUMMARY_ROUTE_TIMEOUT_SECONDS = 120
 _SUMMARY_ERROR_TAIL_CHARS = 400
+MAX_SUMMARY_MANIFEST_BYTES = 1024 * 1024
+MAX_SUMMARY_MANIFEST_MAP_BYTES = 1024 * 1024
 
 
 def _summary_audit_units(
@@ -1124,11 +1166,56 @@ def _summary_audit_units(
     return units
 
 
+def _read_summary_manifest_map(path: Path) -> dict:
+    """Load a ``--summaries-manifest-map`` document: a JSON object
+    mapping each audit's emitted ``unit`` label to the prior summary
+    manifest that unit should reuse."""
+    with open(path, "rb") as handle:
+        data = handle.read(MAX_SUMMARY_MANIFEST_MAP_BYTES + 1)
+    if len(data) > MAX_SUMMARY_MANIFEST_MAP_BYTES:
+        raise ValueError("summaries manifest map exceeds the bounded read limit")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise ValueError("summaries manifest map is not UTF-8 JSON") from exc
+    if type(value) is not dict or any(
+        type(k) is not str or type(v) is not str for k, v in value.items()
+    ):
+        raise ValueError(
+            "summaries manifest map must be an object of unit label to "
+            "manifest path"
+        )
+    return value
+
+
+def _count_reused_functions(merged: dict, prior: dict) -> tuple[int, int]:
+    """Partition the merged manifest's records: how many equal the
+    prior manifest's record for the same function name."""
+    merged_functions = merged.get("functions")
+    prior_functions = prior.get("functions")
+    if not isinstance(merged_functions, list) or not isinstance(
+        prior_functions, list
+    ):
+        return 0, 0
+    prior_by_name = {
+        record["name"]: record
+        for record in prior_functions
+        if type(record) is dict and type(record.get("name")) is str
+    }
+    reused = sum(
+        1
+        for record in merged_functions
+        if type(record) is dict and record == prior_by_name.get(record.get("name"))
+    )
+    return reused, len(merged_functions) - reused
+
+
 def _collect_summary_audits(
     source_path: Path,
     code_files: list[Path],
     go_types: str | None,
     *,
+    manifest_map: dict | None = None,
     runner: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
 ) -> list[dict]:
     """Run each declared produce route on its unit and keep only the
@@ -1137,6 +1224,16 @@ def _collect_summary_audits(
     Advisory by construction: a failed or skipped unit records its
     status without failing the audit, and manifest bytes are never
     stored in the report.
+
+    With ``manifest_map`` (unit label -> prior manifest path, from
+    ``--summaries-manifest-map``) a unit runs its ``*-summaries-reuse``
+    route instead of the produce route: the merged manifest is keyed
+    to the fresh context and the entry reports `mode: "reuse"` with
+    `reused_function_count`/`derived_function_count`. A unit whose
+    declared manifest is unreadable, malformed or rejected by the
+    reuse route records `reuse_status: "stale_manifest"` and falls
+    back to the produce route — a bad prior manifest can never
+    weaken the audit.
     """
     run = runner or _run_summary_route
     entries: list[dict] = []
@@ -1151,6 +1248,70 @@ def _collect_summary_audits(
         if route == "go-summaries":
             argv += ["--go-types", cast(str, go_types)]
         argv += argv_tail
+
+        prior_manifest: dict | None = None
+        manifest_path = (manifest_map or {}).get(label)
+        if manifest_path is not None:
+            try:
+                with open(manifest_path, "rb") as handle:
+                    data = handle.read(MAX_SUMMARY_MANIFEST_BYTES + 1)
+                if len(data) > MAX_SUMMARY_MANIFEST_BYTES:
+                    raise ValueError("manifest exceeds the bounded read limit")
+                candidate = json.loads(data.decode("utf-8"))
+                if type(candidate) is not dict:
+                    raise ValueError("manifest is not a JSON object")
+                prior_manifest = candidate
+            except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+                entry["reuse_status"] = "stale_manifest"
+                entry["reuse_error"] = _summary_error_text(
+                    str(exc).replace(manifest_path, "<manifest>"),
+                    source_path,
+                    go_types,
+                )
+            if prior_manifest is not None:
+                reuse_argv = [f"{route}-reuse"]
+                if route == "go-summaries":
+                    reuse_argv += ["--go-types", cast(str, go_types)]
+                reuse_argv += argv_tail + ["--manifest", manifest_path]
+                reuse_manifest: dict | None = None
+                try:
+                    completed = run(reuse_argv)
+                    if completed.returncode == 0:
+                        reuse_manifest = json.loads(completed.stdout)
+                        if type(reuse_manifest) is not dict:
+                            reuse_manifest = None
+                    else:
+                        entry["reuse_error"] = _summary_error_text(
+                            _route_failure_text(completed).replace(
+                                manifest_path, "<manifest>"
+                            ),
+                            source_path,
+                            go_types,
+                        )
+                except Exception as exc:
+                    entry["reuse_error"] = _summary_error_text(
+                        str(exc).replace(manifest_path, "<manifest>"),
+                        source_path,
+                        go_types,
+                    )
+                if reuse_manifest is not None:
+                    reused, derived = _count_reused_functions(
+                        reuse_manifest, prior_manifest
+                    )
+                    functions = reuse_manifest.get("functions")
+                    entry["status"] = "emitted"
+                    entry["mode"] = "reuse"
+                    entry["context_key"] = reuse_manifest.get("context_key")
+                    entry["function_count"] = (
+                        len(functions) if isinstance(functions, list) else 0
+                    )
+                    entry["reused_function_count"] = reused
+                    entry["derived_function_count"] = derived
+                    entries.append(entry)
+                    continue
+                entry["reuse_status"] = "stale_manifest"
+            # Stale or failed reuse falls back to the produce route.
+
         try:
             completed = run(argv)
         except Exception as exc:  # runner failure (spawn, timeout)
@@ -1171,6 +1332,8 @@ def _collect_summary_audits(
             entry["context_key"] = manifest.get("context_key")
             entry["function_count"] = len(functions) if isinstance(functions, list) else 0
             entry["status"] = "emitted"
+            if manifest_map is not None:
+                entry["mode"] = "produce"
         except (json.JSONDecodeError, AttributeError):
             entry["status"] = "failed"
             entry["error"] = "produce route emitted no manifest JSON"

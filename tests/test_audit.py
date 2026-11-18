@@ -1823,6 +1823,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         enable_native_replay=False,
         enable_summaries=False,
         go_types=None,
+        summaries_manifest_map=None,
     )
 
 
@@ -3075,3 +3076,293 @@ def test_audit_parser_accepts_summaries_flags() -> None:
     )
     assert args.enable_summaries is True
     assert args.go_types == "/opt/go-types"
+
+
+def test_collect_summary_audits_reuse_consumes_declared_manifest(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    prior = {
+        "schema_version": "mumei.summaries/v1",
+        "context_key": "ck-old",
+        "functions": [{"name": "f0", "deps": []}, {"name": "f1", "deps": []}],
+    }
+    manifest.write_text(json.dumps(prior), encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        merged = {
+            "schema_version": "mumei.summaries/v1",
+            "context_key": "ck-fresh",
+            "functions": [
+                {"name": "f0", "deps": []},
+                {"name": "f1", "deps": ["f0"]},  # derived anew
+                {"name": "f2", "deps": []},      # brand new
+            ],
+        }
+        return _fake_completed(argv, stdout=json.dumps(merged))
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        runner=runner,
+    )
+
+    assert entries == [
+        {
+            "route": "ts-summaries",
+            "unit": "main.ts",
+            "status": "emitted",
+            "mode": "reuse",
+            "context_key": "ck-fresh",
+            "function_count": 3,
+            "reused_function_count": 1,
+            "derived_function_count": 2,
+        }
+    ]
+    assert calls == [
+        ["ts-summaries-reuse", str(ts), "--manifest", str(manifest)]
+    ]
+
+
+def test_collect_summary_audits_reuse_passes_go_types_helper(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    go = tmp_path / "pkg" / "a.go"
+    go.parent.mkdir()
+    go.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}), encoding="utf-8"
+    )
+
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [go],
+        "/opt/go-types",
+        manifest_map={"pkg": str(manifest)},
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_manifest_json(0)),
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "reuse"
+    assert calls == [
+        [
+            "go-summaries-reuse",
+            "--go-types",
+            "/opt/go-types",
+            "--source",
+            str(go),
+            "--manifest",
+            str(manifest),
+        ]
+    ]
+
+
+def test_collect_summary_audits_stale_manifest_falls_back_to_produce(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    missing = tmp_path / "no-such.json"
+    malformed = tmp_path / "bad.json"
+    malformed.write_text("{not json", encoding="utf-8")
+    not_object = tmp_path / "list.json"
+    not_object.write_text("[1]", encoding="utf-8")
+    too_big = tmp_path / "big.json"
+    too_big.write_bytes(b" " * (1024 * 1024 + 1))
+
+    other = tmp_path / "other.ts"
+    other.write_text("x", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        return _fake_completed(argv, stdout=_manifest_json())
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts, other],
+        None,
+        manifest_map={
+            "main.ts": str(missing),
+            "other.ts": str(not_object),
+        },
+        runner=runner,
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "produce"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(missing) not in entries[0]["reuse_error"]
+    assert "<manifest>" in entries[0]["reuse_error"]
+    assert entries[1]["status"] == "emitted"
+    assert entries[1]["mode"] == "produce"
+    assert entries[1]["reuse_status"] == "stale_manifest"
+    # produce route ran for both stale units; no reuse argv spawned
+    assert calls == [["ts-summaries", str(ts)], ["ts-summaries", str(other)]]
+
+    # malformed JSON and oversized manifests fail the same way
+    for bad in (malformed, too_big):
+        calls.clear()
+        entries = _collect_summary_audits(
+            tmp_path,
+            [ts],
+            None,
+            manifest_map={"main.ts": str(bad)},
+            runner=runner,
+        )
+        assert entries[0]["mode"] == "produce"
+        assert entries[0]["reuse_status"] == "stale_manifest"
+        assert calls == [["ts-summaries", str(ts)]]
+
+
+def test_collect_summary_audits_rejected_reuse_falls_back_to_produce(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    manifest = tmp_path / "prior.json"
+    manifest.write_text(
+        json.dumps({"context_key": "k", "functions": []}), encoding="utf-8"
+    )
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        if argv[0] == "ts-summaries-reuse":
+            return _fake_completed(
+                argv, rc=2, stderr=f"manifest {manifest} context mismatch"
+            )
+        return _fake_completed(argv, stdout=_manifest_json())
+
+    entries = _collect_summary_audits(
+        tmp_path,
+        [ts],
+        None,
+        manifest_map={"main.ts": str(manifest)},
+        runner=runner,
+    )
+
+    assert entries[0]["status"] == "emitted"
+    assert entries[0]["mode"] == "produce"
+    assert entries[0]["reuse_status"] == "stale_manifest"
+    assert str(manifest) not in entries[0]["reuse_error"]
+    assert calls == [
+        ["ts-summaries-reuse", str(ts), "--manifest", str(manifest)],
+        ["ts-summaries", str(ts)],
+    ]
+
+
+def test_collect_summary_audits_unmapped_unit_stays_produce(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import _collect_summary_audits
+
+    ts = tmp_path / "main.ts"
+    ts.write_text("x", encoding="utf-8")
+    rs = tmp_path / "lib.rs"
+    rs.write_text("x", encoding="utf-8")
+
+    calls: list[list[str]] = []
+    entries = _collect_summary_audits(
+        tmp_path,
+        [rs, ts],
+        None,
+        manifest_map={"lib.rs": str(tmp_path / "prior.json")},
+        runner=lambda argv: calls.append(argv)
+        or _fake_completed(argv, stdout=_manifest_json()),
+    )
+
+    by_unit = {entry["unit"]: entry for entry in entries}
+    # the mapped .rs unit hit a missing manifest -> stale + produce
+    assert by_unit["lib.rs"]["mode"] == "produce"
+    assert by_unit["lib.rs"]["reuse_status"] == "stale_manifest"
+    # the unmapped .ts unit reports produce mode (map was declared)
+    assert by_unit["main.ts"]["mode"] == "produce"
+    assert "reuse_status" not in by_unit["main.ts"]
+    assert calls == [
+        ["rust-summaries", str(rs)],
+        ["ts-summaries", str(ts)],
+    ]
+
+
+def test_read_summary_manifest_map_validation(tmp_path: Path) -> None:
+    from agent.audit import _read_summary_manifest_map
+
+    good = tmp_path / "map.json"
+    good.write_text('{"a.rs": "prior.json"}', encoding="utf-8")
+    assert _read_summary_manifest_map(good) == {"a.rs": "prior.json"}
+
+    for name, payload in (
+        ("list.json", "[1]"),
+        ("nested.json", '{"a.rs": {"p": "x"}}'),
+        ("num.json", '{"a.rs": 3}'),
+    ):
+        bad = tmp_path / name
+        bad.write_text(payload, encoding="utf-8")
+        try:
+            _read_summary_manifest_map(bad)
+            raise AssertionError(f"{name} should be rejected")
+        except ValueError:
+            pass
+
+    big = tmp_path / "big.json"
+    big.write_bytes(b" " * (1024 * 1024 + 1))
+    try:
+        _read_summary_manifest_map(big)
+        raise AssertionError("oversized map should be rejected")
+    except ValueError:
+        pass
+
+
+def test_summaries_manifest_map_requires_enable_summaries(
+    tmp_path: Path,
+) -> None:
+    from agent.audit import build_parser, main
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.ts").write_text("x", encoding="utf-8")
+    map_path = tmp_path / "map.json"
+    map_path.write_text("{}", encoding="utf-8")
+
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--enable-summaries",
+            "--summaries-manifest-map",
+            str(map_path),
+        ]
+    )
+    assert args.summaries_manifest_map == str(map_path)
+
+    no_enable = build_parser().parse_args(
+        [
+            "--code-file",
+            str(src),
+            "--summaries-manifest-map",
+            str(map_path),
+        ]
+    )
+    with pytest.raises(SystemExit):
+        main(no_enable)

@@ -4797,6 +4797,32 @@ with every record shape that predates the optional field. Core-side
 emission of `produced_at` is the memo's slice 2 and stays open; C11
 stays partial.
 
+### C11 audit-side summary-manifest reuse consumption
+
+`audit --enable-summaries` only observed the declared produce routes.
+`audit --summaries-manifest-map <PATH>` — the issue #893 Option A
+slice — declares a JSON object mapping each emitted `unit` label to a
+prior summary manifest, and a mapped unit runs its
+`*-summaries-reuse` route (`ts-summaries-reuse`,
+`rust-summaries-reuse`, `sol-summaries-reuse`,
+`go-summaries-reuse` — the go unit keeps its per-directory shape and
+inherited `--go-types`/`--source` flags) instead of the produce
+route. The merged manifest is keyed to the fresh context, so the
+audit entry reports `mode: "reuse"` with `reused_function_count` /
+`derived_function_count` — how many merged records equal the prior
+manifest's record for the same function name.
+
+The flag requires `--enable-summaries` and the map document is
+bounded (1 MiB) and strictly typed (object of string to string); a
+malformed map fails the audit statically before any unit runs. A
+unit whose declared manifest is missing, oversized, malformed or
+rejected by the reuse route records `reuse_status:
+"stale_manifest"` and falls back to the produce route — a stale
+manifest can never weaken the audit, and manifest bytes still never
+land in the report. Reuse counts are observed metadata only:
+`summary_audits` stays advisory and carries no verdict.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

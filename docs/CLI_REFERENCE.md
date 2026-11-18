@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 16 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 17 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -271,6 +271,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--enable-native-replay` | — | no | — | Run each extracted Python, TypeScript, Go or Rust function natively on its counterexamples and a few boundary inputs, and check the extracted contract on the result; a violation is a confirmed code finding, and a refuted body port the native code does not reproduce is dropped. Executes the audited code locally. |
 | `--include-tests` | — | no | — | Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, tests/ dirs), which are skipped by default for directory audits. |
 | `--enable-summaries` | — | no | — | Directory audits only: invoke each declared *-summaries produce route on the collected source units and record declared manifest metadata (route, unit, status, context key, function count) under summary_audits — advisory; manifest bytes are not stored. |
+| `--summaries-manifest-map` | `<<PATH>>` | no | — | Directory audits only, requires --enable-summaries: JSON object mapping each unit label (as emitted under summary_audits) to a prior summary manifest. Units with a declared manifest run their *-summaries-reuse route and report mode/reused/derived counts; a stale or rejected manifest falls back to the produce route. |
 | `--go-types` | `<<PATH>>` | no | — | Path to the provisioned tools/go-types helper binary; Go summary units record skipped_no_helper when --enable-summaries is set without it. |
 
 
