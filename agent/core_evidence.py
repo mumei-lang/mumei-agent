@@ -634,6 +634,64 @@ def verify_signature_envelope(
     return verification
 
 
+# A 32-byte ed25519 secret key in its 64-char lowercase-hex form — the
+# same shape `mumei evidence keygen --secret-file` writes and
+# `decode_secret_key` decodes on the Core side: strictly ASCII, no
+# whitespace, prefix or surrounding bytes.
+_PRODUCER_SECRET_KEY_HEX_LEN = 64
+
+
+def sign_producer_record(
+    record: bytes,
+    secret_key: str,
+    producer_key_id: str,
+) -> dict:
+    """Sign one declared record's digest into a detached envelope.
+
+    Emits ``mumei.producer-signature/v1``: `subject_digest` is the
+    SHA-256 of the record's raw bytes (the same digest a consumer
+    reproduces with `sha256sum`), `algorithm` is `ed25519` (the only
+    admitted algorithm — no negotiation) and `signature` covers the
+    digest's lowercase-hex ASCII bytes, matching the Core
+    `crypto_verify_signature` FFI convention that
+    `verify_signature_envelope` verifies against.
+
+    `secret_key` is the 64-char lowercase-hex encoding of the 32-byte
+    ed25519 secret `mumei evidence keygen --secret-file` writes — a
+    declared input the caller supplies over its own trusted channel.
+    The key material never appears in the emitted envelope, in error
+    text, or in any output surface: the envelope carries only the
+    signature and the declared `producer_key_id` label, which the
+    consumer pins separately (`key_authenticity` stays unperformed —
+    the id is a declared label, not an attested identity).
+
+    A malformed key or an empty `producer_key_id` raises ValueError;
+    nothing else can fail. Signing is representation-level: it binds
+    the declared key to the declared bytes' digest and claims nothing
+    about freshness, revocation, or claim truth.
+    """
+    if not _is_hex(secret_key, _PRODUCER_SECRET_KEY_HEX_LEN):
+        raise ValueError("invalid producer key material")
+    if type(producer_key_id) is not str or producer_key_id == "":
+        raise ValueError("producer key id must not be empty")
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    signing_key = Ed25519PrivateKey.from_private_bytes(
+        bytes.fromhex(secret_key)
+    )
+    digest = hashlib.sha256(record).hexdigest()
+    signature = signing_key.sign(digest.encode("ascii"))
+    return {
+        "schema_version": PRODUCER_SIGNATURE_SCHEMA,
+        "subject_digest": digest,
+        "algorithm": _PRODUCER_SIGNATURE_ALGORITHM,
+        "signature": signature.hex(),
+        "producer_key_id": producer_key_id,
+    }
+
+
 # Evidence-binding schema: pin a subject-bearing document to the record
 # bytes it is said to cover.
 EVIDENCE_BINDING_SCHEMA = "mumei.evidence-binding/v1"
