@@ -728,6 +728,35 @@ def test_reuse_merges_declared_and_fresh_summaries(tmp_path, capsys):
     )
 
 
+def test_reuse_carries_call_modeling(tmp_path, capsys):
+    """A `--summary-aware-calls` reuse run keeps the modeling counts
+    the fresh derivation recorded in the merged manifest."""
+    helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
+    source = _write_source(tmp_path, "main.go", SOURCE)
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, source)
+    code, out, err = _run_reuse(
+        capsys,
+        _reuse_args(
+            helper,
+            manifest_path,
+            source,
+            extra=["--summary-aware-calls", str(manifest_path)],
+        ),
+    )
+    assert code == 0 and err == ""
+    merged = json.loads(out)
+    assert merged["call_modeling"] == {
+        "summary_modeled_calls": 0,
+        "opaque_calls": 0,
+        "summary_unmatched": len(merged["functions"]),
+    }
+    code, out, err = _run_reuse(
+        capsys, _reuse_args(helper, manifest_path, source)
+    )
+    assert code == 0 and err == ""
+    assert "call_modeling" not in json.loads(out)
+
+
 def test_reuse_output_declares_its_target_arch(tmp_path, capsys):
     helper = _write_helper(tmp_path, json.dumps(schema_fixture()).encode())
     source = _write_source(tmp_path, "main.go", SOURCE)

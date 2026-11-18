@@ -662,6 +662,7 @@ def summary_reuse_set(args: argparse.Namespace) -> "GoSummarySet":
             for f in live.functions
         ),
         live.target_arch,
+        call_modeling=live.call_modeling,
     )
 
 

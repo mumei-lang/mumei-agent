@@ -4859,8 +4859,12 @@ A manifest derived with the flag carries `call_modeling` —
 `summary_modeled_calls` (folded), `opaque_calls` (left opaque),
 `summary_unmatched` (manifest entries no call referenced) — advisory
 counts only, never a verdict; manifests without the block load
-unchanged. The manifest path joins the declared inputs, so `--output`
-can never overwrite it. The TS/Sol/Rust ports stay open.
+unchanged. A `--summary-aware-calls` reuse run keeps the counts in the
+merged manifest, and `go-summaries-attempt` forwards the flag to the
+child and binds the manifest's bytes into the request fingerprint like
+every other declared input. The manifest path joins the declared
+inputs, so `--output` can never overwrite it. The TS/Sol/Rust ports
+stay open.
 
 
 ## Roadmap authority and vocabulary
