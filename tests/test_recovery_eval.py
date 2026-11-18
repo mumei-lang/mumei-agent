@@ -360,6 +360,33 @@ def test_record_freshness_recovers_via_freshness_eval():
     assert evaluation["checks"]["record_freshness"] == "evidence_failed"
 
 
+def test_evidence_binding_pins_record_bytes_not_declared_carrier():
+    # A descriptor record declares `subject_digest` for the artifact it
+    # signs; a binding doc still evaluates THIS record's bytes.
+    artifact_digest = "b" * 64
+    record_digest = "c" * 64
+    record = _record("evidence_binding")
+    record["subject_digest"] = artifact_digest
+    bound_to_record = _doc(
+        "mumei.evidence-binding/v1", bound=True, record_digest=record_digest
+    )
+    bound_to_artifact = _doc(
+        "mumei.evidence-binding/v1",
+        bound=True,
+        record_digest=artifact_digest,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [bound_to_record], record_digest=record_digest
+    )
+    assert evaluation["checks"]["evidence_binding"] == "recovered"
+    # A doc bound to the referred artifact is not a binding of THIS
+    # record.
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [bound_to_artifact], record_digest=record_digest
+    )
+    assert evaluation["checks"]["evidence_binding"] == "evidence_failed"
+
+
 def test_foreign_schema_never_counts():
     record = _record("signature_verification")
     evaluation = evaluate_unperformed_check_recovery(

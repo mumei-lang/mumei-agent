@@ -4862,7 +4862,10 @@ so a document never declares its own coverage and a foreign schema
 never counts. The fold stays representation-level: it does not re-run
 checks (`recovery_enforcement`), does not verify the supporting
 documents (`evidence_authenticity` — trusted as declared) and does
-not pin a document to the record it covers (`evidence_binding`).
+not pin a document to the record it covers (`evidence_binding` —
+recovered below through `mumei.evidence-binding/v1`, pinned to the
+record's own bytes even when the record declares a carrier for a
+different artifact).
 
 The six C02 semantic checks all recover through bound documents,
 mirroring each attempt route's `discharged_checks`: `claim_truth`,

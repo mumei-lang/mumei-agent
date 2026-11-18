@@ -926,6 +926,13 @@ def evaluate_unperformed_check_recovery(
     for name in check_names:
         performers = _CHECK_PERFORMERS.get(name, [])
         status = "no_evidence"
+        # A binding document's `record_digest` is always the record's
+        # byte SHA-256 — `evidence_binding` pins bytes, so it compares
+        # against `record_digest` even when the record declares a
+        # carrier for a different artifact.
+        comparison_digest = (
+            record_digest if name == "evidence_binding" else bound_digest
+        )
         for schema, field, expected, bind_path in performers:
             if schema not in schema_to_docs:
                 continue
@@ -934,7 +941,7 @@ def evaluate_unperformed_check_recovery(
             if any(
                 _outcome_matches(_dotted(doc, field), expected)
                 and _performer_document_applies(
-                    bind_path, doc, bound_digest
+                    bind_path, doc, comparison_digest
                 )
                 for doc in schema_to_docs[schema]
             ):
