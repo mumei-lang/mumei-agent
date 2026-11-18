@@ -2603,10 +2603,14 @@ external state admit under the same model: a package-level
 `var GC chan T` or an imported member `lib.GC` records sends,
 receives, `for range` and `close` as imported transfers on the
 var's or member's own identity, receives returning the indirect
-writes — while `chan` results, non-scalar elements,
+writes — and a bound pointer's scalar-element `chan` field
+(`p.C <- x`, `<-p.W.C`, `close(p.C)`, `for range p.C`) admits
+the same way, the queue living in caller memory: ops record on
+the field member's identity, sends broadcast into the indirect
+writes, reads union `deps(root)` — while `chan` results,
+non-scalar elements,
 rebinding a channel under a branch or loop (a conditional
-`ch2 = ch3` could mean either queue), field operands
-(`p.C <- x`), and `select`
+`ch2 = ch3` could mean either queue), and `select`
 stay closed, while `len(ch)`/`cap(ch)` now admit as
 dep-free — the queue length and capacity are runtime
 state, not parameter provenance; on a `chan` parameter

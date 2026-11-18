@@ -1626,6 +1626,60 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return pointees, field_member, root_ref
 
+    def _bound_field_chan(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[tuple[Any, ...], Any, Any] | None:
+        """`p.C` / `p.W.C` — a scalar-element `chan` field reached
+        through a bound pointer (`p` a `*S` parameter or local).
+
+        The queue lives in caller memory like the pointee itself, so
+        a send/recv/close/range on it is an external mutation under
+        the same model a `chan` parameter or package chan var uses:
+        sends broadcast into `indirect_writes`, reads observe
+        `deps(root) ∪ indirect_writes`, and every op records an
+        imported transfer on the field member's identity. The
+        returned triple mirrors `_bound_field_read`'s — the
+        traversed `type` pointee members (for pinning), the leaf
+        `chan` member, and the root identifier's reference — or
+        None when the leaf is not a scalar-element `chan` var
+        member."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "selector_expression":
+            return None
+        operand = inner.child_by_field_name("operand")
+        field = inner.child_by_field_name("field")
+        if operand is None or field is None:
+            return None
+        resolved = self._bound_selector_pointees(operand, locals_, params)
+        if resolved is None:
+            return None
+        pointees, root_ref = resolved
+        field_ref = self.references.get(self.node_key(field))
+        field_member = None
+        if field_ref is not None and field_ref.kind == "import":
+            field_member = self.members.get(field_ref.binding_id)
+        else:
+            field_member = self._local_field(field_ref)
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind not in {"var", "variable"}
+            or not self._scalar_chan_fact(field_member.type)
+        ):
+            return None
+        return pointees, field_member, root_ref
+
     def _bound_pointee_index_field(
         self,
         node: Any,
@@ -2849,14 +2903,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
 
     def _external_chan_id(self, target_id: str) -> bool:
         """A transfer target naming an external `chan` operand —
-        a package-level chan var's binding or an imported member —
-        so a callee's recorded ops on it mean the caller shares the
-        queue."""
+        a package-level chan var's binding, an imported member, or
+        a scope-less struct field's `chan` member — so a callee's
+        recorded ops on it mean the caller shares the queue."""
         binding = self.bindings.get(target_id)
         if (
             binding is not None
             and binding.kind == "variable"
-            and self._package_level(binding)
+            and (
+                self._package_level(binding)
+                or binding.scope is None
+            )
             and self._scalar_chan_fact(binding.type)
         ):
             return True
@@ -5864,6 +5921,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             chan = self.bindings.get(
                                 target_id
                             ) or self.members.get(target_id)
+                        elif (
+                            field_chan := self._bound_field_chan(
+                                right, scope, params
+                            )
+                        ) is not None:
+                            # `for v := range p.C` — the caller-memory
+                            # queue a bound pointer's field names:
+                            # the pointer's deps join the read, the
+                            # member's id records the mutation, and
+                            # the element re-joins `indirect_writes`
+                            # through the `None` arm.
+                            pointees, member, root_ref = field_chan
+                            self.pinned.update(
+                                p.id
+                                for p in pointees
+                                if not p.id.endswith("/pointee")
+                            )
+                            self._pin_member_type(member)
+                            self._pin_fact_identities(member.type)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        right.start_byte,
+                                        right.end_byte,
+                                    ),
+                                    member.id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            rdeps = (
+                                self.indirect_writes
+                                | self._pointer_deps(
+                                    root_ref.binding_id, params, scope
+                                )
+                            )
+                            chan = (
+                                self.members.get(member.id)
+                                or self.bindings.get(member.id)
+                            )
                         else:
                             rdeps = self.expression(
                                 right, fn, params, scope, transfers,
@@ -6401,16 +6500,44 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # locals: record it against the var/member's own
                 # identity like a `chan` parameter send, and
                 # broadcast the sent deps into `indirect_writes`.
+                # `p.C <- x` — a channel field of a bound pointer's
+                # pointee — mutates caller memory the same way,
+                # recorded on the field member's identity.
                 external = self._external_chan_operand(channel)
-                if external is None:
+                field_chan = (
+                    self._bound_field_chan(channel, locals_, params)
+                    if external is None
+                    else None
+                )
+                if external is None and field_chan is None:
                     raise _Unsupported(
                         "unsupported_statement", _span(node)
                     )
-                target_id, fact = external
+                if external is not None:
+                    target_id, fact = external
+                else:
+                    pointees, member, root_ref = field_chan
+                    target_id, fact = member.id, member.type
+                    self.pinned.update(
+                        p.id
+                        for p in pointees
+                        if not p.id.endswith("/pointee")
+                    )
+                    self._pin_member_type(member)
                 value_deps = self.expression(
                     value, fn, params, locals_, transfers, count, 0
                 )
                 self._pin_fact_identities(fact)
+                if field_chan is not None:
+                    # The send's destination read — like `(*p)[i]` —
+                    # observes the pointer's deps and every earlier
+                    # indirect store.
+                    self._record_read(
+                        self._pointer_deps(
+                            root_ref.binding_id, params, locals_
+                        )
+                        | self.indirect_writes
+                    )
                 self.indirect_writes |= value_deps
                 transfers.append(
                     CallTransfer(
@@ -7151,13 +7278,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # in is in `indirect_writes`; the rest is
                         # external content, dep-free like an imported
                         # read. The transfer records on the
-                        # var/member's identity.
+                        # var/member's identity. `<-p.C` reads the
+                        # caller-memory queue a bound pointer's field
+                        # names — the pointer's own deps join like a
+                        # `(*p)[i]` read's.
                         external = self._external_chan_operand(operand)
-                        if external is None:
+                        field_chan = (
+                            self._bound_field_chan(
+                                operand, locals_, params
+                            )
+                            if external is None
+                            else None
+                        )
+                        if external is None and field_chan is None:
                             raise _Unsupported(
                                 "non_parameter_reference", _span(node)
                             )
-                        target_id, fact = external
+                        if external is not None:
+                            target_id, fact = external
+                            base_deps = frozenset()
+                        else:
+                            pointees, member, root_ref = field_chan
+                            target_id, fact = member.id, member.type
+                            self.pinned.update(
+                                p.id
+                                for p in pointees
+                                if not p.id.endswith("/pointee")
+                            )
+                            self._pin_member_type(member)
+                            base_deps = self._pointer_deps(
+                                root_ref.binding_id, params, locals_
+                            )
                         self._pin_fact_identities(fact)
                         transfers.append(
                             CallTransfer(
@@ -7172,7 +7323,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 imported=True,
                             )
                         )
-                        return self.indirect_writes
+                        return self.indirect_writes | base_deps
                     if binding.id in params:
                         # `<-ch` on a channel parameter reads a
                         # queue the caller shares — external state
@@ -7452,15 +7603,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # queue in external state is a caller-visible
                         # effect recorded on the var/member's own
                         # identity, like `close` on a `chan`
-                        # parameter.
+                        # parameter. `close(p.C)` closes the queue
+                        # a bound pointer's field names in caller
+                        # memory.
                         external = self._external_chan_operand(
                             arguments[0]
                         )
-                        if external is None:
+                        field_chan = (
+                            self._bound_field_chan(
+                                arguments[0], locals_, params
+                            )
+                            if external is None
+                            else None
+                        )
+                        if external is None and field_chan is None:
                             raise _Unsupported(
                                 "unresolved_or_opaque_call", _span(node)
                             )
-                        target_id, fact = external
+                        if external is not None:
+                            target_id, fact = external
+                        else:
+                            pointees, member, root_ref = field_chan
+                            target_id, fact = member.id, member.type
+                            self.pinned.update(
+                                p.id
+                                for p in pointees
+                                if not p.id.endswith("/pointee")
+                            )
+                            self._pin_member_type(member)
                         self._pin_fact_identities(fact)
                         transfers.append(
                             CallTransfer(
