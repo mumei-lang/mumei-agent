@@ -7,6 +7,7 @@ import json
 import pytest
 
 from agent.core_evidence import (
+    _CHECK_PERFORMERS,
     UNPERFORMED_CHECK_RECOVERY_SCHEMA,
     evaluate_unperformed_check_recovery,
 )
@@ -250,7 +251,11 @@ def test_declared_carrier_only_binds_that_artifact():
     assert evaluation["checks"]["claim_truth"] == "evidence_failed"
 
 
-def _attempt_report(record_digest, accepted=True):
+def _attempt_report(
+    record_digest,
+    accepted=True,
+    schema="mumei.verify-attempt-report/v1",
+):
     """A minimal realistic verify-attempt report.
 
     `record_digest` is the produced bytes' SHA-256, surfaced at
@@ -260,7 +265,7 @@ def _attempt_report(record_digest, accepted=True):
     """
     manifest_fingerprint = "f" * 64
     return _doc(
-        "mumei.verify-attempt-report/v1",
+        schema,
         sequence={
             "schema_version": "mumei.verifier-attempt-sequence/v1",
             "request_fingerprint": "e" * 64,
@@ -365,6 +370,36 @@ def test_real_attempt_report_recovers_produced_record(tmp_path, capsys):
     }
 
 
+def test_go_summaries_attempt_report_recovers_manifest_checks():
+    """An accepted go-summaries attempt report discharges the same
+    five checks plus historical_execution on the manifest bytes its
+    selected run produced."""
+    digest = "a" * 64
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth", "artifact_semantics",
+        "historical_execution",
+    )
+    report = _attempt_report(
+        digest, schema="mumei.go-summaries-attempt-report/v1"
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [report], record_digest=digest,
+    )
+    checks = evaluation["checks"]
+    for name in (
+        "file_identity",
+        "producer_authenticity",
+        "freshness",
+        "historical_execution",
+    ):
+        assert checks[name] == "recovered", name
+    # Parsing never verifies the manifest's dep claims
+    assert checks["claim_truth"] == "no_evidence"
+    assert checks["semantic_correspondence"] == "no_evidence"
+    assert checks["artifact_semantics"] == "no_evidence"
+
+
 def test_attempt_report_requires_accepted_and_bound():
     digest = "a" * 64
     record = _record("file_identity", "claim_truth")
@@ -462,7 +497,8 @@ def test_missing_or_malformed_declaration():
     ):
         evaluation = evaluate_unperformed_check_recovery(record, [])
         assert evaluation["checks_declared"] is False
-        assert evaluation["checks"] == {}
+        # undeclared records fold over every known check
+        assert set(evaluation["checks"]) == set(_CHECK_PERFORMERS)
         assert evaluation["recovered"] == []
     # non-string entries inside the list are skipped
     evaluation = evaluate_unperformed_check_recovery(
@@ -472,6 +508,31 @@ def test_missing_or_malformed_declaration():
     assert evaluation["checks"] == {
         "signature_verification": "recovered"
     }
+
+
+def test_undeclared_record_requires_bound_documents():
+    """Record-agnostic performers can only count against the
+    record's own declared list: a signature-verification doc for
+    some other artifact must not recover an undeclared record."""
+    evaluation = evaluate_unperformed_check_recovery(
+        {"any": "manifest"},
+        [_doc("mumei.signature-verification/v1", signature_valid=True)],
+        record_digest="a" * 64,
+    )
+    assert evaluation["checks_declared"] is False
+    assert evaluation["checks"]["signature_verification"] == "no_evidence"
+    assert evaluation["recovered"] == []
+    # A bound attempt report still recovers the undeclared record.
+    digest = "b" * 64
+    report = _attempt_report(
+        digest, schema="mumei.go-summaries-attempt-report/v1"
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        {"any": "manifest"}, [report], record_digest=digest,
+    )
+    assert evaluation["checks"]["file_identity"] == "recovered"
+    assert evaluation["checks"]["historical_execution"] == "recovered"
+    assert evaluation["checks"]["signature_verification"] == "no_evidence"
 
 
 def test_rejects_non_dict_inputs():

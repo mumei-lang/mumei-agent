@@ -1122,6 +1122,53 @@ def test_attempt_emits_lineage_normalized_and_candidate(tmp_path, capsys):
         report["candidate"]["schema_version"]
         == "mumei.verifier-evidence-candidate/v1"
     )
+    check = report["evidence_check"]
+    assert check["schema_version"] == "mumei.verifier-evidence-check/v1"
+    assert check["outcome"] == "valid"
+    acceptance = report["acceptance"]
+    assert (
+        acceptance["schema_version"]
+        == "mumei.evidence-check-acceptance/v1"
+    )
+    assert acceptance["accepted"] is True
+    # A summary manifest discharges only the byte/run-level checks:
+    # its dep claims stay unperformed until the strict accept route
+    # re-derives them.
+    assert report["discharged_checks"] == [
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "semantic_correspondence",
+    ]
+
+
+def test_attempt_records_failed_check_on_non_manifest(tmp_path, capsys):
+    helper = tmp_path / "go-types-garbage"
+    helper.write_text("#!/bin/sh\nprintf '%s' 'not a manifest'\n")
+    helper.chmod(0o755)
+    source = _write_source(tmp_path, "f.go", SOURCE)
+    code, out, _ = _run_attempt(capsys, _attempt_args(helper, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["evidence_check"]["outcome"] == "failed"
+    assert report["acceptance"]["accepted"] is False
+    # The produced bytes still discharge their identity/provenance/
+    # freshness — the representation check's outcome is a separate
+    # claim, same convention as verify-attempt.
+    assert report["discharged_checks"] == [
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+    ]
+    assert report["checks_not_performed"] == [
+        "artifact_semantics",
+        "claim_truth",
+        "semantic_correspondence",
+    ]
 
 
 def test_attempt_timeout_records_no_selection(tmp_path, capsys):

@@ -739,12 +739,14 @@ _CHECK_PERFORMERS: dict = {
          "evidence_fingerprint"),
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
     ],
     "evidence_binding": [
         (EVIDENCE_BINDING_SCHEMA, "bound", True, "record_digest"),
     ],
     # The semantic C02 checks recover through the fingerprint-carrying
-    # Core descriptors and the verify-attempt report, mirroring the
+    # Core descriptors and the attempt reports, mirroring the
     # discharged_checks sets the declared attempt routes report: a
     # consistent source recheck or an accepted source acceptance
     # re-establishes the record's claims within its declared profile; a
@@ -780,9 +782,13 @@ _CHECK_PERFORMERS: dict = {
     "file_identity": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
     ],
     "producer_authenticity": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
     ],
     # The attempt report's sequence IS the recorded execution lineage
@@ -790,6 +796,8 @@ _CHECK_PERFORMERS: dict = {
     # performs `historical_execution` on it at representation level.
     "historical_execution": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
+         "normalized.stdout.sha256"),
+        ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
     ],
 }
@@ -871,7 +879,15 @@ def evaluate_unperformed_check_recovery(
     Schema-open on the record: any object may declare
     ``checks_not_performed`` (non-list/non-string entries are skipped
     and the fold reports ``checks_declared: false`` when the list is
-    absent or invalid). Fail-closed on the evidence: a document is
+    absent or invalid); a record declaring none — a produced summary
+    manifest carries no check fields — is folded over every check
+    ``_CHECK_PERFORMERS`` knows, so a bound attempt report still
+    recovers what it discharges. Undeclared records recover only
+    through bound documents: record-agnostic performers (whose entry
+    carries no `bind_path`, e.g. signature-verification and
+    freshness-eval reports) are skipped, because without the
+    record's own declaration nothing scopes such a document to this
+    record. Fail-closed on the evidence: a document is
     only counted when it is a dict whose ``schema_version`` exactly
     names the declared performer.
 
@@ -910,11 +926,15 @@ def evaluate_unperformed_check_recovery(
 
     declared = record.get("checks_not_performed")
     checks_declared = type(declared) is list
-    check_names = (
-        [name for name in declared if type(name) is str]
-        if checks_declared
-        else []
-    )
+    if checks_declared:
+        check_names = [name for name in declared if type(name) is str]
+    else:
+        # A record that declares no performed/unperformed checks (a
+        # freshly produced manifest carries no check fields at all)
+        # still gets a fold: every check a performer is known for is
+        # a candidate, so a bound attempt report can recover what it
+        # discharges. `checks_declared: false` marks the default.
+        check_names = sorted(_CHECK_PERFORMERS)
 
     schema_to_docs: dict = {}
     for doc in evidence:
@@ -935,6 +955,15 @@ def evaluate_unperformed_check_recovery(
         )
         for schema, field, expected, bind_path in performers:
             if schema not in schema_to_docs:
+                continue
+            if bind_path is None and not checks_declared:
+                # Record-agnostic documents count only against the
+                # record's own declared list — without it nothing
+                # scopes them to this record, so an unrelated
+                # signature-verification or freshness report would
+                # otherwise be attributed to it. Undeclared records
+                # recover only through bound documents (each matched
+                # against the record's bound digest below).
                 continue
             if status == "no_evidence":
                 status = "evidence_failed"

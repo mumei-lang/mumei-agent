@@ -872,6 +872,8 @@ def run_attempt(args: argparse.Namespace) -> dict:
     on a declared failure.
     """
     from agent.attempt_runner import dispatch_attempt
+    from agent.core_evidence import evaluate_evidence_check
+    from agent.verify_attempt import CHECK_VOCABULARY, DischargedChecks
     from agent.verification_attempt import (
         AttemptSequence,
         AttemptSequenceStore,
@@ -928,7 +930,33 @@ def run_attempt(args: argparse.Namespace) -> dict:
         "normalized": dispatch.run.normalized().to_dict(),
     }
     if published.selected_result is not None:
-        report["candidate"] = (
-            published.evidence_candidate().to_dict()
+        candidate = published.evidence_candidate()
+        report["candidate"] = candidate.to_dict()
+        # The manifest's strict from_dict boundary is the declared
+        # representation check: a selected run whose captured bytes
+        # restore as a `mumei.go-scalar-parameter-deps/v1` set records
+        # "valid"; anything else — malformed JSON, a foreign schema,
+        # a malformed member — records "failed", never an error.
+        try:
+            payload = json.loads(dispatch.run.stdout)
+            GoSummarySet.from_dict(payload)
+            outcome = "valid"
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            RecursionError,
+        ):
+            outcome = "failed"
+        check = published.evidence_check(candidate, outcome)
+        report["evidence_check"] = check.to_dict()
+        report["acceptance"] = evaluate_evidence_check(
+            published, check
+        )
+        report["discharged_checks"] = sorted(
+            DischargedChecks.SUMMARY_ESTABLISHED
+        )
+        report["checks_not_performed"] = sorted(
+            CHECK_VOCABULARY - DischargedChecks.SUMMARY_ESTABLISHED
         )
     return report
