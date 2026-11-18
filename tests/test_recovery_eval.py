@@ -321,6 +321,50 @@ def test_attempt_report_recovers_historical_execution():
     assert evaluation["checks"]["historical_execution"] == "recovered"
 
 
+def test_real_attempt_report_recovers_produced_record(tmp_path, capsys):
+    """The fold binds a REAL verify-attempt report's declared digests.
+
+    Runs the route against a stub Core so the report shape — where the
+    produced bytes' digest lands — is exercised end to end rather than
+    handwritten."""
+    from tests.test_verify_attempt import (
+        EVIDENCE,
+        _args,
+        _run,
+        _write_core,
+        _write_source,
+    )
+
+    core = _write_core(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"]["accepted"] is True
+
+    # The produced record is the run's stdout bytes verbatim.
+    record_bytes = json.dumps(EVIDENCE).encode()
+    record_digest = hashlib.sha256(record_bytes).hexdigest()
+    assert report["normalized"]["stdout"]["sha256"] == record_digest
+
+    record = _record(
+        "file_identity", "producer_authenticity", "freshness",
+        "semantic_correspondence", "claim_truth",
+        "historical_execution",
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [report], record_digest=record_digest,
+    )
+    assert evaluation["checks"] == {
+        "file_identity": "recovered",
+        "producer_authenticity": "recovered",
+        "freshness": "recovered",
+        "semantic_correspondence": "recovered",
+        "claim_truth": "recovered",
+        "historical_execution": "recovered",
+    }
+
+
 def test_attempt_report_requires_accepted_and_bound():
     digest = "a" * 64
     record = _record("file_identity", "claim_truth")
