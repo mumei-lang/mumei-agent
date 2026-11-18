@@ -8437,7 +8437,7 @@ def run_attempt(
             )
             != fingerprint
         )
-    except OSError:
+    except (OSError, ValueError):
         drifted = True
     if dispatch.run.record.state == "exited" and not drifted:
         updated = dispatch.sequence.select_result(
