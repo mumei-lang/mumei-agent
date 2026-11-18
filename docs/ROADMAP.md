@@ -2593,8 +2593,14 @@ an external sync-resource model: a send records an imported
 transfer on the parameter's binding and broadcasts the sent deps
 into indirect writes (a later `<-ch` can observe them), a receive
 returns the parameter's provenance union the indirect writes, and
-`close(ch)` is a caller-visible effect — while `chan` results,
-non-scalar elements, channel aliases (`ch2 := ch`), operands in
+`close(ch)` is a caller-visible effect — channel-name copies
+(`ch2 := ch`, `var ch2 = ch`, an unconditional `ch2 = ch3`) now
+admit as queue aliases: `ch2` resolves to the same queue as `ch`,
+so sends and receives through either name share the root's dep
+set (aliasing a `chan` parameter adopts its external
+sync-resource model), while `chan` results, non-scalar elements,
+rebinding a channel under a branch or loop (a conditional
+`ch2 = ch3` could mean either queue), operands in
 external state (`p.C <- x`, `close(GC)`), `len`/`cap` on channels
 and `select` stay closed — `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
@@ -2877,7 +2883,7 @@ the external-state transfer model, local `make(chan T)` channels
 admit under the conflated dep-set model, and scalar-element `chan`
 parameters admit under the external sync-resource model; the
 still-closed shapes are `chan` results, non-scalar elements,
-channel aliases and `select`),
+conditionally-changed channel bindings and `select`),
 slice/map `make` constructor
 state, selector/computed callees and function-typed parameters
 all fail closed —
