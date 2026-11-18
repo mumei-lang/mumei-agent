@@ -617,7 +617,7 @@ def test_accept_route_emits_the_live_record_not_the_forged_one(
     src.write_text(_RS_SRC)
     manifest = tmp_path / "m.json"
     forged = summarize_rust(_RS_SRC).to_dict()
-    forged["functions"][0]["return_dependencies"] = [1, 2, 3]
+    forged["functions"][0]["return_dependencies"] = []
     manifest.write_text(json.dumps(forged))
     with pytest.raises(SystemExit):
         rust.main_accept(_rust_args(src, manifest, "f"))
@@ -2188,11 +2188,32 @@ def test_aware_arity_mismatch_stays_opaque():
 
 
 def test_aware_ordinal_out_of_range_stays_opaque():
-    declared = _callee_manifest(_decl_fn("f", ["a", "b"], {2}))
-    r = summarize_rust(_SRC, declared=declared)
+    # `from_dict` rejects the entry as malformed — the runtime
+    # gate is exercised through a directly built set.
+    bad = rust.RustFunctionSummary(
+        name="f",
+        params=("a", "b"),
+        available=True,
+        return_dependencies=frozenset({2}),
+        calls=[],
+        gaps=[],
+    )
+    r = summarize_rust(
+        _SRC,
+        declared=rust.RustSummarySet(
+            "declared-context", PROFILE, [bad]
+        ),
+    )
     aware = next(f for f in r.functions if f.name == "caller")
     assert aware.return_dependencies == frozenset({0, 1})
     assert r.call_modeling["opaque_calls"] == 1
+
+
+def test_manifest_rejects_an_out_of_range_ordinal():
+    r = summarize_rust("fn f(x: u64) -> u64 { x }").to_dict()
+    r["functions"][0]["return_dependencies"] = [1]
+    with pytest.raises(ValueError, match="malformed"):
+        RustSummarySet.from_dict(r)
 
 
 def test_aware_void_call_never_folds():

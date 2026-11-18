@@ -234,6 +234,13 @@ class RustFunctionSummary:
             available == (restored_deps is not None)
             and available == (not restored_gaps)
         )
+        # An ordinal outside the declared parameter range can never
+        # come from an honest derivation — the record is malformed
+        # rather than merely unmatchable.
+        _require_manifest(
+            restored_deps is None
+            or max(restored_deps, default=-1) < len(parameters)
+        )
         return cls(
             _string(v["name"]),
             tuple(_string(p) for p in parameters),
