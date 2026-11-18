@@ -13210,6 +13210,29 @@ def test_local_channel_alias_tuple_swap_uses_prestate(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_local_channel_alias_swap_keeps_earlier_alias_queue(
+    go_types_helper,
+):
+    # `c := a; a, b = b, a; c <- x; return <-b` — after the swap a
+    # and b each name the other's original queue, and `c` still
+    # names a's original queue (the same one `b` now holds): the
+    # send lands in the queue `<-b` reads.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\ta := make(chan int64)\n"
+            "\tb := make(chan int64)\n"
+            "\tc := a\n"
+            "\ta, b = b, a\n"
+            "\tc <- x\n"
+            "\treturn <-b\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_parameter_alias_send_recv(go_types_helper):
     # `ch2 := p` on a `chan` parameter aliases the caller-shared
     # queue: the send records the imported transfer on p's

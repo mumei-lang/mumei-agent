@@ -2725,12 +2725,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         so every channel operation resolves through `chan_aliases`
         before the local-vs-parameter classification reads it. An
         unaliased name is its own root."""
-        seen: set[str] = set()
-        root = binding_id
-        while root in self.chan_aliases and root not in seen:
-            seen.add(root)
-            root = self.chan_aliases[root]
-        return root
+        # `chan_aliases` stores the resolved queue — the binding id
+        # of the channel the alias source stood for at admission —
+        # not a next hop, so a single lookup resolves it. Walking
+        # further misreads `a, b = b, a`: `a`'s queue legitimately
+        # becomes `b`'s token while `b`'s becomes `a`'s, and a walk
+        # turns that swap into a name cycle that resolves send and
+        # receive to different slots.
+        return self.chan_aliases.get(binding_id, binding_id)
 
     def _chan_alias_target(
         self, node: Any, locals_: dict, params: dict
