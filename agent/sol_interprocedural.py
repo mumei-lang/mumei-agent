@@ -660,7 +660,16 @@ class _Builder:
         summaries = []
         for name, fn_node in self.functions.items():
             try:
-                summaries.append(self._summarize(name, fn_node))
+                # A callee already summarized inline for an
+                # earlier caller is reused — re-walking it would
+                # double-count its calls in the `call_modeling`
+                # advisory.
+                cached = self.summaries.get(name)
+                summaries.append(
+                    cached
+                    if cached is not None
+                    else self._summarize(name, fn_node)
+                )
             except RecursionError:
                 summaries.append(
                     SolFunctionSummary(
@@ -3273,18 +3282,23 @@ class _Builder:
             callee_name = (
                 f"{ext_member[0].text.decode()}.{ext_member[1]}"
             )
+            # `f{value: b}(a)` appends the call options as one
+            # trailing actual entry — they are not parameters,
+            # so arity and ordinals are checked against the real
+            # argument prefix only.
+            param_actual = actual[: len(args)]
             declared_entry = self._declared_entry(callee_name)
             foldable = (
                 declared_entry is not None
                 and not void
                 and not named_args
                 and declared_entry.available
-                and len(declared_entry.params) == len(actual_t)
+                and len(declared_entry.params) == len(param_actual)
                 and max(
                     declared_entry.return_dependencies,
                     default=-1,
                 )
-                < len(actual_t)
+                < len(param_actual)
             )
             if foldable:
                 # `--summary-aware-calls` fold: the declared
@@ -3293,15 +3307,17 @@ class _Builder:
                 # (the base object is still opaque), and
                 # `effects` stays `unknown` — the manifest cannot
                 # bound writes through argument objects, so the
-                # opaque write approximation never narrows.
+                # opaque write approximation never narrows. Call
+                # options stay in the result too — the manifest
+                # does not describe them either.
                 folded = frozenset().union(
-                    *(actual_t[i] for i in declared_entry.return_dependencies)
+                    *(param_actual[i] for i in declared_entry.return_dependencies)
                 ) if declared_entry.return_dependencies else frozenset()
-                result_deps = folded | base_deps
+                result_deps = folded | opt_deps | base_deps
                 self._modeled_calls += 1
             else:
                 result_deps = actual_union | base_deps
-                if self._declared:
+                if self._declared_set is not None:
                     self._opaque_calls += 1
             summary.calls.append(
                 SolCall(
@@ -4130,11 +4146,16 @@ def _attempt_fingerprint(
         # source: bound by bytes, unreadable is a lifecycle
         # failure, never a silently wider request.
         try:
-            blob = Path(summary_aware_calls).read_bytes()
+            with open(summary_aware_calls, "rb") as handle:
+                blob = handle.read(MAX_MANIFEST_BYTES + 1)
         except OSError as exc:
             raise ValueError(
                 "summary-aware-calls manifest unreadable"
             ) from exc
+        if len(blob) > MAX_MANIFEST_BYTES:
+            raise ValueError(
+                "summary-aware-calls manifest too large"
+            )
         request_doc["summary_aware_calls"] = {
             "path": summary_aware_calls,
             "sha256": hashlib.sha256(blob).hexdigest(),

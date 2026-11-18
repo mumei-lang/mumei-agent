@@ -3397,6 +3397,62 @@ def test_manifest_rejects_an_out_of_range_ordinal():
         sol.SolSummarySet.from_dict(s)
 
 
+def test_summary_aware_call_options_are_not_parameters():
+    # `ext.g{value: b}(a)` — the options group is appended as one
+    # trailing actual entry, so a 2-param manifest must NOT match:
+    # folding `deps={0}` would drop `b`'s deps.
+    src = (
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.g{value: b}(a); } }"
+    )
+    s = _aware(src, _decl_fn("g", ("x", "y"), {0}))
+    f = _result(s)
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0, 1})
+    assert s.call_modeling["summary_modeled_calls"] == 0
+    assert s.call_modeling["opaque_calls"] == 1
+
+
+def test_summary_aware_call_options_fold_over_real_args():
+    # With a manifest matching the real arity the call folds —
+    # and the option value's deps ride the result like the
+    # receiver's, since the manifest does not describe them.
+    src = (
+        "contract C {"
+        " function f(uint256 a, uint256 b) public returns (uint256) {"
+        "   return ext.g{value: b}(a); } }"
+    )
+    s = _aware(src, _decl_fn("g", ("x",), {0}))
+    f = _result(s)
+    (call,) = f.calls
+    assert call.result_dependencies == frozenset({0, 1})
+    assert s.call_modeling["summary_modeled_calls"] == 1
+
+
+def test_summary_aware_empty_manifest_counts_opaque():
+    s = _aware(_CALLER)
+    assert s.call_modeling == {
+        "summary_modeled_calls": 0,
+        "opaque_calls": 1,
+        "summary_unmatched": 0,
+    }
+
+
+def test_summary_aware_opaque_call_counted_once_per_call():
+    # `caller` walks first and summarizes `helper` inline; the
+    # top-level loop must not recount helper's opaque call.
+    src = (
+        "contract C {"
+        " function caller(uint256 a) public returns (uint256) {"
+        "   return helper(a); }"
+        " function helper(uint256 x) internal returns (uint256) {"
+        "   return ext.g(x); } }"
+    )
+    s = _aware(src)
+    assert s.call_modeling["opaque_calls"] == 1
+
+
 def test_summary_aware_call_named_arguments_stay_opaque():
     src = (
         "contract C {"
@@ -3619,6 +3675,20 @@ def test_attempt_fingerprint_binds_callee_manifest(tmp_path):
     with pytest.raises(ValueError):
         sol._attempt_fingerprint(
             str(src), raw, str(tmp_path / "absent.json")
+        )
+
+
+def test_attempt_fingerprint_bounds_manifest_read(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "a.sol"
+    src.write_text(_CALLER)
+    lib = tmp_path / "big.json"
+    lib.write_bytes(b"x" * 64)
+    monkeypatch.setattr(sol, "MAX_MANIFEST_BYTES", 8)
+    with pytest.raises(ValueError, match="too large"):
+        sol._attempt_fingerprint(
+            str(src), src.read_bytes(), str(lib)
         )
 
 
