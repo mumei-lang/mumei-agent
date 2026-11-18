@@ -11277,11 +11277,14 @@ def test_bound_pointee_indexed_field_read_observes_indirect_store(
     assert result.return_dependencies == frozenset({0, 1, 2, 3})
 
 
-def test_bound_pointee_indexed_nested_element_field_read_closed(
+def test_bound_pointee_indexed_nested_element_field_read(
     go_types_helper,
 ):
-    # `(*p)[i].V.G` — a field on the element's own struct field
-    # traverses a second level and stays closed.
+    # `(*p)[i].V.G` — one deeper level: the intermediate `V` is a
+    # named-struct member whose type pins, and `G` resolves through
+    # its own reference like any leaf. The element is caller memory
+    # like `(*p)[i].V` itself, so the deps union the pointer's own
+    # (param 0), the index's (param 1), and every indirect store.
     files = {
         "a.go": "package p\n"
         "type Q struct{ V S }\ntype S struct{ G int64 }\n"
@@ -11292,8 +11295,74 @@ def test_bound_pointee_indexed_nested_element_field_read_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+    g_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "G" and b.kind == "variable" and b.scope is None
+    )
+    s_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "S" and b.kind == "type"
+    )
+    assert any(c.target == g_id and c.imported for c in result.calls)
+    assert s_id in result.pinned
+
+
+def test_bound_pointee_indexed_nested_field_read_observes_store(
+    go_types_helper,
+):
+    # `(*p)[i].V.G` must see an earlier indirect store like the
+    # one-level read does.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ G int64 }\ntype Q struct{ V S; W int64 }\n"
+        "func F(p *[]Q, q *Q, i, x int64) int64 {\n"
+        "\t(*q).W = x\n\treturn (*p)[i].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1, 2, 3})
+
+
+def test_bound_pointee_indexed_nested_field_read_third_level_closed(
+    go_types_helper,
+):
+    # `(*p)[i].V.G.H` — a third selection level stays closed: the
+    # intermediate chain admits at most one named-struct member.
+    files = {
+        "a.go": "package p\n"
+        "type R struct{ H int64 }\ntype S struct{ G R }\n"
+        "type Q struct{ V S }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\treturn (*p)[i].V.G.H\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
     assert not result.available
-    assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_bound_pointee_indexed_nested_field_read_anonymous_closed(
+    go_types_helper,
+):
+    # `(*p)[i].V.G` where `V` is an anonymous `struct{...}` member —
+    # no named identity to pin, so the intermediate stays closed.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V struct{ G int64 } }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\treturn (*p)[i].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
 
 
 def test_package_container_var_indexed_element_field_read(
@@ -11569,16 +11638,59 @@ def test_bound_map_pointee_range_string_key_closed(
     assert result.gaps[0].reason == "binding_unavailable"
 
 
-def test_bound_pointee_indexed_nested_field_store_closed(
+def test_bound_pointee_indexed_nested_field_store(
     go_types_helper,
 ):
-    # `(*p)[i].V.G = w` — a second traversal level past the element
-    # stays closed like the nested read does.
+    # `(*p)[i].V.G = w` — one deeper store level: the leaf `G`
+    # records the mutation and the value's deps fold into
+    # `indirect_writes`, so the read-back observes them.
     files = {
         "a.go": "package p\n"
         "type S struct{ G int64 }\ntype Q struct{ V S }\n"
         "func F(p *[]Q, i, w int64) int64 {\n"
-        "\t(*p)[i].V.G = w\n\treturn i\n}\n"
+        "\t(*p)[i].V.G = w\n\treturn (*p)[i].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1, 2})
+    g_id = next(
+        b.id for b in snapshot.bindings
+        if b.name == "G" and b.kind == "variable" and b.scope is None
+    )
+    assert any(c.target == g_id and c.imported for c in result.calls)
+
+
+def test_bound_pointee_indexed_nested_field_inc(go_types_helper):
+    # `(*p)[i].V.G++` — the increment records the leaf field's own
+    # identity like the one-level field's does.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ G int64 }\ntype Q struct{ V S }\n"
+        "func F(p *[]Q, i int64) int64 {\n"
+        "\t(*p)[i].V.G++\n\treturn (*p)[i].V.G\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_pointee_indexed_nested_field_store_third_level_closed(
+    go_types_helper,
+):
+    # `(*p)[i].V.G.H = w` — the third selection level stays closed
+    # for stores like reads.
+    files = {
+        "a.go": "package p\n"
+        "type R struct{ H int64 }\ntype S struct{ G R }\n"
+        "type Q struct{ V S }\n"
+        "func F(p *[]Q, i, w int64) int64 {\n"
+        "\t(*p)[i].V.G.H = w\n\treturn i\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     result = named_package(

@@ -2536,8 +2536,14 @@ outside the scalar signature fragment, so the call records an
 imported transfer, argument deps union, `&x` arguments fold and
 `effects` stays unknown, while each element name carries
 deps(args) ∪ escaped ∪ indirect writes and the index/key stays
-dep-free — while nested element
-fields (`(*p)[i].F.G` reads or stores) and deeper nested derefs
+dep-free — and nested element
+fields admit one deeper level (`(*p)[i].F.G` reads, stores and
+inc/dec: the intermediate `F` must be a `var` member whose named
+struct type pins, the leaf `G` resolves through its own reference,
+and the deps union the pointer's own, the indexes' and every
+indirect store exactly like `(*p)[i].F` — a third selection level
+and an anonymous `struct{...}` intermediate stay closed), while
+deeper nested derefs
 still stay closed (`**p` now
 admits one level — the inner `*p` operand must still be a bare
 identifier and the pointee chain resolves pointer →
