@@ -5138,6 +5138,38 @@ as declared — its own checks and signature are not re-verified) and
 `binding_enforcement` (the report is an observation; gating is a host
 decision) stay in `checks_not_performed`. C11 stays partial.
 
+### C11 bounded attempt scheduling with declared retry/fallback
+
+`agent.attempt_schedule.run_attempt_schedule(registry, request, policy,
+source, expected_source_sha256, argv_for, ...)` composes the declared
+boundaries without new authority: `registry.plan` → `PreparedSourceRequest`
+→ `AttemptSequence.begin_attempt` → `dispatch_attempt` → on a non-success
+terminal outcome `registry.replan` with the failed adapter excluded, until
+`max_attempts` (≤ `MAX_SCHEDULE_ATTEMPTS` = 8). `argv_for(adapter_id)` is
+the host's declared argv lookup — `None` records the round as
+`not_dispatched` and falls back like a failed run, so an adapter without a
+declared command is skipped, never run. `success_exit_codes` (default
+`{0}`) is the host's declared exit mapping: `exited` with any other code
+is a scheduling failure, not a verdict. Fallback requires permissive
+routing (automatic selection or `allow_fallback`); an explicit
+non-fallback selection ends a failed schedule as `fallback_denied`, and a
+set `cancel_event` ends it as `cancelled` — a stop decision, not a
+failure the policy may route around. A selectionless plan reports
+`not_schedulable`.
+
+The result, `AttemptScheduleResult`, folds into
+`mumei.attempt-schedule/v1`: per-round `ordinal`, `adapter_id`,
+`plan_fingerprint`, `request_fingerprint`, `terminal_state` (including
+`not_dispatched`) and `exit_code`, plus `outcome` ∈
+{`selected`, `exhausted`, `not_schedulable`, `fallback_denied`,
+`cancelled`}. Each adapter attempt is its own `AttemptSequence`, so a
+fallback never contaminates the prior attempt's lineage. The descriptor
+carries fingerprints only — no argv, source or output bytes — and
+`selected` names which adapter produced a declared-success exit, never
+an Evidence acceptance. This is partial C11: scheduling is observed
+dispatch, not authorization, output normalization, arbitration or
+acceptance.
+
 
 ## Roadmap authority and vocabulary
 
