@@ -87,15 +87,25 @@ def test_bound_acceptance_descriptor():
 
 
 def test_bound_recheck_diagnostic():
-    # `recheck-source --json` pins the same `evidence_fingerprint`
-    # convention, so the consistency diagnostic binds like an
-    # acceptance descriptor.
-    descriptor = _acceptance()
-    descriptor["schema_version"] = "mumei.source-evidence-recheck/v1"
-    binding = evaluate_evidence_binding(_RECORD, descriptor)
+    # The real `recheck-source` consistent diagnostic — schema,
+    # `evidence_schema_version`, `evidence_fingerprint`, `recheck` —
+    # binds like an acceptance descriptor. A fingerprint that does
+    # not match the record bytes reports `bound` as an observation,
+    # not an error.
+    diagnostic = {
+        "schema_version": "mumei.source-evidence-recheck/v1",
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "evidence_fingerprint": _DIGEST,
+        "recheck": "consistent",
+    }
+    binding = evaluate_evidence_binding(_RECORD, diagnostic)
     assert binding["carrier_match"] is True
     assert binding["subject_declared"] is True
     assert binding["bound"] is True
+    diagnostic["evidence_fingerprint"] = _OTHER
+    assert (
+        evaluate_evidence_binding(_RECORD, diagnostic)["bound"] is False
+    )
 
 
 def test_digest_mismatch_is_an_observation_not_an_error():
