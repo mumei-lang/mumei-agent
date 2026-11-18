@@ -2292,6 +2292,47 @@ def test_summary_aware_call_folds_declared_return_dependencies(go_types_helper):
     }
 
 
+def test_summary_aware_call_records_transitive_fold_targets(
+    go_types_helper,
+):
+    """A folded call's staleness covers the callee's own call targets:
+
+    `lib.G` calls `lib.H`, so the transfer that folded G's declared
+    deps records H's identity too — a change under h.go flags F even
+    though the directly named callee's bytes never moved."""
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.G(x) }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G(a int64) int64 { return H(a) }\n",
+            "h.go": "package lib\nfunc H(a int64) int64 { return a }\n",
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    declared = _declared_lib_set(go_types_helper, lib["lib"])
+    summaries = ip.summarize_go_package(files, snapshot, declared=declared)
+    result = named_package(files, snapshot, summaries, "F")
+    (transfer,) = result.calls
+    g_entry = next(f for f in declared.functions if f.call_targets)
+    (h_id,) = g_entry.call_targets
+    assert transfer.folded_targets == (h_id,)
+    assert result.call_targets == frozenset({transfer.target, h_id})
+    # Old-H absent from the fresh bindings flags F; a `known` set
+    # covering both leaves it live.
+    assert result.binding_id in summaries.stale_dependents(
+        {transfer.target}
+    )
+    assert result.binding_id not in summaries.stale_dependents(
+        {transfer.target, h_id}
+    )
+
+
 def test_summary_aware_calls_absent_manifest_stays_opaque_and_silent(
     go_types_helper,
 ):

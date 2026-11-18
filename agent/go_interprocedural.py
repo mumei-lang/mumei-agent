@@ -188,6 +188,13 @@ class CallTransfer:
     # `imported` marks a `direct_import` call: the callee body is opaque to
     # the fragment, so its effects cannot be claimed `none`.
     imported: bool = False
+    # `folded_targets` records the callee identities a
+    # `--summary-aware-calls` fold embedded into `result` — the declared
+    # callee's own `call_targets` transitively through the manifest —
+    # so `stale_dependents` flags this summary when any folded dep
+    # churns, not only the directly named callee. Emitted only when
+    # non-empty; reports lacking the field load unchanged.
+    folded_targets: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         result = {
@@ -198,23 +205,33 @@ class CallTransfer:
         }
         if self.imported:
             result["imported"] = True
+        if self.folded_targets:
+            result["folded_targets"] = sorted(self.folded_targets)
         return result
 
     @classmethod
     def from_dict(cls, value: Any) -> "CallTransfer":
         v = _manifest_record(
-            value, ("span", "target", "arguments", "result"), ("imported",)
+            value,
+            ("span", "target", "arguments", "result"),
+            ("imported", "folded_targets"),
         )
         span = _span_from_dict(v["span"])
         _require_restore(span is not None)
         arguments = _list(v["arguments"])
         _require_restore(len(arguments) <= MAX_MANIFEST_MEMBERS)
+        folded = ()
+        if "folded_targets" in v:
+            folded_list = _list(v["folded_targets"])
+            _require_restore(len(folded_list) <= MAX_MANIFEST_MEMBERS)
+            folded = tuple(_string(t) for t in folded_list)
         return cls(
             span,
             _string(v["target"]),
             tuple(_deps_from_list(a) for a in arguments),
             _deps_from_list(v["result"]),
             _boolean(v["imported"]) if "imported" in v else False,
+            folded,
         )
 
 
@@ -399,9 +416,10 @@ class FunctionSummary:
         slash-suffixed.)
         """
         return frozenset(
-            call.target
+            target
             for call in self.calls
-            if not call.target.endswith("/pointee")
+            for target in (call.target, *call.folded_targets)
+            if not target.endswith("/pointee")
         )
 
     def to_dict(self) -> dict:
@@ -7582,6 +7600,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     actual,
                     result,
                     imported=declared.effects == "unknown",
+                    folded_targets=self._declared_transitive_targets(
+                        declared
+                    ),
                 )
             )
             if declared.effects == "unknown":
@@ -7668,6 +7689,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         return summary
+
+    def _declared_transitive_targets(
+        self, summary: "FunctionSummary"
+    ) -> tuple[str, ...]:
+        """Callee identities a folded summary's declared deps ride on.
+
+        The fold embeds the callee's declared result through the actual
+        arguments, so this summary's staleness now covers whatever the
+        callee's own `call_targets` reached — the manifest's declared
+        entries followed transitively, plus any outside it (the
+        callee's own imports stay valid anchors: the declared input
+        asserted them). Keeping the chain in `call_targets` lets
+        `stale_dependents` flag this summary when a transitive dep
+        churns even though the directly named callee's own bytes did
+        not change.
+        """
+        seen = set()
+        stack = list(summary.call_targets)
+        while stack:
+            target = stack.pop()
+            if target in seen:
+                continue
+            seen.add(target)
+            key = _declared_key(target)
+            if key is not None:
+                nxt = self.declared.get(key)
+                if nxt is not None:
+                    stack.extend(nxt.call_targets)
+        seen.discard(summary.binding_id)
+        return tuple(sorted(seen))
 
     def _store_call_writes(
         self,

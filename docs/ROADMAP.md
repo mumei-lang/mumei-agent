@@ -4834,7 +4834,11 @@ declared `effects` (an `unknown`-effects callee still transfers as
 imported and still widens store-through-alias writes), and the
 callee's declared `pinned` type identities fold like a local call's.
 The callee's declared statement reads need no fold — each maps to a
-subset of the actuals the call-site statement already reads.
+subset of the actuals the call-site statement already reads. A folded
+call's transfer also records `folded_targets` — the callee's own
+`call_targets` transitively through the manifest — so
+`stale_dependents` flags the caller when a folded dep two hops out
+churns even though the directly named callee's bytes never moved.
 
 The declared manifest is trusted as asserted: authenticity and
 staleness stay unperformed, so `summary_authenticity` and
