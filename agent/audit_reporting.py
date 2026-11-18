@@ -884,6 +884,17 @@ def _build_report(result: AuditResult) -> str:
     if result.native_replays:
         lines.append("native_replays:")
         lines.extend(_native_replay_text(r) for r in result.native_replays)
+    if result.scheduled_verification is not None:
+        schedule = result.scheduled_verification
+        if schedule.get("status") == "error":
+            lines.append(
+                f"scheduled_verification: error: {schedule.get('error')}"
+            )
+        else:
+            lines.append(
+                f"scheduled_verification: outcome={schedule.get('outcome')} "
+                f"attempts={len(schedule.get('attempts') or [])}"
+            )
     if result.errors:
         lines.append(f"errors: {result.errors}")
     lines.append("migration_hints:")

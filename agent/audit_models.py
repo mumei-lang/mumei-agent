@@ -40,6 +40,13 @@ class AuditResult:
     # outside_requires / raised / unexpressible / unsupported / inconclusive)
     # and reason. ``violates`` entries are the confirmed code findings.
     native_replays: list[dict] = field(default_factory=list)
+    # ``mumei.attempt-schedule/v1`` descriptor from the opt-in
+    # ``--enable-scheduled-verification`` lane: the unit's generated .mm spec
+    # is dispatched through ``run_attempt_schedule`` against the host's
+    # declared adapters/policy. A dispatch record — never a verdict or an
+    # Evidence acceptance — so it does not alter ``verification_status`` or
+    # ``success``.
+    scheduled_verification: dict | None = None
     # Findings per level: ``code`` (verification_violations: evidence against
     # the code), ``confirmed`` (the ``code`` findings reproduced on the native
     # code by native replay), ``spec`` (spec health and spec/code cross-check diagnostics:

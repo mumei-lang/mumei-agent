@@ -1893,7 +1893,10 @@ above. Independent branches may still conflict: host attempt-number uniqueness,
 cross-attempt/backend arbitration/replay protection, final preflight/authority checks,
 actual execution/cancellation/cleanup/resource enforcement, output collection and
 Evidence normalization/acceptance are still open. There is no pre-start
-cancellation flow, retry/fallback scheduler or default CLI/MCP/audit integration.
+cancellation flow; the retry/fallback scheduler
+(`run_attempt_schedule`), the `verify-schedule` CLI route, the
+`verify_schedule` MCP tool and `audit --enable-scheduled-verification`
+integration have since landed.
 This is partial C11/C13, with Core meaning/acceptance, C12's demand gate, existing
 assurance/Lean/native/LLVM behavior and deferred WASM unchanged. No external
 verifier, dependency, file/environment/network access or plugin loading is added.
@@ -5185,6 +5188,25 @@ rejected — and the schedule's own bounds (`--max-attempts` ≤ 8,
 command line, not hidden in policy defaults. The route is dispatch only:
 like `verify-attempt` it emits a dispatch record, never an Evidence
 acceptance, and it keeps the fingerprint-only output contract.
+
+### C11 audit-side scheduled verification
+
+`audit --enable-scheduled-verification` wires the scheduler into the
+audit lane: each unit's generated `.mm` spec is dispatched through
+`run_attempt_schedule` against the host's declared
+`--schedule-request`/`--schedule-adapters`/`--schedule-argv-map`/
+`--schedule-policy` inputs (plus optional `--schedule-observations`,
+`--schedule-max-attempts`, `--schedule-success-exit-code` and
+`--schedule-memory-bound-mb`). The declared argv is a prefix — the
+unit's generated spec path is appended as the final argument — and the
+resulting `mumei.attempt-schedule/v1` descriptor records on each
+unit's `scheduled_verification` field, a dispatch record that never
+alters `verification_status` or `success`. The enable flag requires
+all four declared input paths; every `--schedule-*` option without it
+is a static error, and declared-path failures are redacted like the
+`verify-schedule` route. `scheduled_verification` stays out of the
+MCP `audit_schema` vocabulary — it is a CLI observational lane, not a
+finding contract.
 
 
 ## Roadmap authority and vocabulary

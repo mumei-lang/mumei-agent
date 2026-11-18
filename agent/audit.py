@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
@@ -72,6 +74,7 @@ from agent.audit_reporting import (
     _verification_issue_strings,
     _verification_status_from_foreign_result,
 )
+from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
 from agent.extract_spec import _collect_code_files
@@ -97,6 +100,21 @@ from agent.strategies.foreign_code_strategy_helpers import (
 )
 from agent.spec_completeness_checker import check_forge_spec_domain_completeness
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
+from agent.verification_planner import (
+    AdapterRegistry,
+    PlannerPolicy,
+    RouteRequirements,
+    RuntimeObservation,
+)
+from agent.verify_schedule import (
+    SOURCE_INPUT_FORMAT,
+    _load_argv_map,
+    _load_observations,
+    _load_policy,
+    _load_registry,
+    _load_request,
+    _redact_declared_paths,
+)
 
 SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript", "go", "solidity")
 
@@ -256,6 +274,7 @@ class AuditPipeline:
         summary_plan_stamp: int = 1,
         summary_plan_tool_version: str | None = None,
         summary_plan_histories: str | None = None,
+        scheduled_verification: "_ScheduledVerification | None" = None,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -278,6 +297,7 @@ class AuditPipeline:
                 summary_plan_stamp=summary_plan_stamp,
                 summary_plan_tool_version=summary_plan_tool_version,
                 summary_plan_histories=summary_plan_histories,
+                scheduled_verification=scheduled_verification,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -292,6 +312,7 @@ class AuditPipeline:
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
+                scheduled_verification=scheduled_verification,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -314,6 +335,7 @@ class AuditPipeline:
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
+        scheduled_verification: "_ScheduledVerification | None" = None,
     ) -> AuditResult:
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
@@ -407,6 +429,11 @@ class AuditPipeline:
                 spec_path.write_text(spec_source, encoding="utf-8")
                 health_report = self._check_spec_health(spec_path, tmp)
                 spec_health_issues = _spec_health_issue_strings(health_report)
+            scheduled_document = (
+                _run_scheduled_verification(scheduled_verification, spec_path)
+                if scheduled_verification is not None and spec_path.is_file()
+                else None
+            )
 
             # V1-A-2: with a domain hint the extracted spec is also checked
             # against the domain's required-condition checklist; missing
@@ -584,6 +611,7 @@ class AuditPipeline:
             trusted_atoms=trusted_atoms,
             body_ports=body_ports,
             native_replays=native_replays,
+            scheduled_verification=scheduled_document,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
@@ -639,6 +667,7 @@ class AuditPipeline:
         summary_plan_stamp: int = 1,
         summary_plan_tool_version: str | None = None,
         summary_plan_histories: str | None = None,
+        scheduled_verification: "_ScheduledVerification | None" = None,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
@@ -671,6 +700,7 @@ class AuditPipeline:
                 summary_plan_stamp=summary_plan_stamp,
                 summary_plan_tool_version=summary_plan_tool_version,
                 summary_plan_histories=summary_plan_histories,
+                scheduled_verification=scheduled_verification,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -703,6 +733,7 @@ class AuditPipeline:
         summary_plan_stamp: int = 1,
         summary_plan_tool_version: str | None = None,
         summary_plan_histories: str | None = None,
+        scheduled_verification: "_ScheduledVerification | None" = None,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -808,7 +839,8 @@ class AuditPipeline:
                     auto_heal=auto_heal,
                     enable_lean_bridge=enable_lean_bridge,
                     enable_body_port=enable_body_port,
-                enable_native_replay=enable_native_replay,
+                    enable_native_replay=enable_native_replay,
+                    scheduled_verification=scheduled_verification,
                 )
             except Exception as exc:
                 file_result = AuditResult(
@@ -1181,7 +1213,202 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "--enable-summaries is set without it."
         ),
     )
+    parser.add_argument(
+        "--enable-scheduled-verification",
+        action="store_true",
+        default=False,
+        help=(
+            "Dispatch each unit's generated .mm spec through "
+            "run_attempt_schedule against the declared "
+            "--schedule-request/--schedule-adapters/--schedule-argv-map/"
+            "--schedule-policy inputs and record the "
+            "mumei.attempt-schedule/v1 descriptor per unit. Dispatch "
+            "record only — never a verdict. Requires the four declared "
+            "input paths."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-request",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Declared RouteRequirements JSON for "
+            "--enable-scheduled-verification (source input contract "
+            "required)."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-adapters",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Declared JSON array of adapter manifests for "
+            "--enable-scheduled-verification."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-argv-map",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Declared JSON object mapping adapter_id to its argv prefix "
+            "for --enable-scheduled-verification; the unit's generated "
+            "spec path is appended as the final argument."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-policy",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Declared planner policy JSON for "
+            "--enable-scheduled-verification; allowed_permissions must "
+            "be declared."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-observations",
+        default=None,
+        metavar="<PATH>",
+        help=(
+            "Optional declared JSON array of runtime observations for "
+            "--enable-scheduled-verification."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-max-attempts",
+        type=int,
+        default=None,
+        metavar="<N>",
+        help=(
+            "Bounded schedule attempts per unit for "
+            f"--enable-scheduled-verification (default: {MAX_SCHEDULE_ATTEMPTS})."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-success-exit-code",
+        type=int,
+        action="append",
+        default=None,
+        metavar="<N>",
+        help=(
+            "Declared exit code counting as a scheduling success for "
+            "--enable-scheduled-verification (repeatable; default {0})."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-memory-bound-mb",
+        type=int,
+        default=None,
+        metavar="<MB>",
+        help=(
+            "Optional declared POSIX RLIMIT_AS ceiling per scheduled "
+            "attempt child."
+        ),
+    )
     return parser
+
+@dataclass(frozen=True)
+class _ScheduledVerification:
+    """Host-declared scheduling inputs for ``--enable-scheduled-verification``.
+
+    The planner request/registry/argv-map/policy/observations are loaded once
+    and shared across audit units. ``declared`` lists the supplied input paths
+    so per-unit failure text can redact them."""
+
+    request: RouteRequirements
+    registry: AdapterRegistry
+    argv_map: dict[str, tuple[str, ...]]
+    policy: PlannerPolicy
+    observations: tuple[RuntimeObservation, ...] | None
+    max_attempts: int
+    success_exit_codes: frozenset[int]
+    memory_bound_mb: int | None
+    declared: tuple[str, ...]
+
+
+def _scheduled_verification_declared_paths(args: argparse.Namespace) -> tuple[str, ...]:
+    paths = [
+        args.schedule_request,
+        args.schedule_adapters,
+        args.schedule_argv_map,
+        args.schedule_policy,
+    ]
+    if getattr(args, "schedule_observations", None) is not None:
+        paths.append(args.schedule_observations)
+    return tuple(paths)
+
+
+def _load_scheduled_verification(args: argparse.Namespace) -> _ScheduledVerification:
+    request = _load_request(args.schedule_request)
+    if (
+        request.input_format != SOURCE_INPUT_FORMAT
+        or request.result_contract is None
+    ):
+        raise ValueError(
+            "scheduled verification requires the source input contract and format"
+        )
+    return _ScheduledVerification(
+        request=request,
+        registry=_load_registry(args.schedule_adapters),
+        argv_map=_load_argv_map(args.schedule_argv_map),
+        policy=_load_policy(args.schedule_policy),
+        observations=_load_observations(args.schedule_observations),
+        max_attempts=(
+            args.schedule_max_attempts
+            if args.schedule_max_attempts is not None
+            else MAX_SCHEDULE_ATTEMPTS
+        ),
+        success_exit_codes=(
+            frozenset({0})
+            if args.schedule_success_exit_code is None
+            else frozenset(args.schedule_success_exit_code)
+        ),
+        memory_bound_mb=args.schedule_memory_bound_mb,
+        declared=_scheduled_verification_declared_paths(args),
+    )
+
+
+def _run_scheduled_verification(
+    context: _ScheduledVerification,
+    source_path: Path,
+) -> dict:
+    """Dispatch one unit's generated .mm spec through ``run_attempt_schedule``.
+
+    Each declared argv is a prefix: the unit's spec path is appended as the
+    final argument so the adapter receives the source under audit. The result
+    is the ``mumei.attempt-schedule/v1`` dispatch record — outcome/terminal
+    states, never a verification verdict or an Evidence acceptance."""
+    source = source_path.read_bytes()
+
+    def argv_for(adapter_id: str) -> tuple[str, ...] | None:
+        argv = context.argv_map.get(adapter_id)
+        if argv is None:
+            return None
+        return (*argv, str(source_path))
+
+    try:
+        schedule = run_attempt_schedule(
+            context.registry,
+            context.request,
+            context.policy,
+            source,
+            hashlib.sha256(source).hexdigest(),
+            argv_for,
+            observations=context.observations,
+            max_attempts=context.max_attempts,
+            success_exit_codes=context.success_exit_codes,
+            memory_bound_mb=context.memory_bound_mb,
+        )
+    except (OSError, ValueError) as exc:
+        # A scheduling failure is not evidence against the audited code, so it
+        # records on the field instead of failing the audit.
+        return {
+            "status": "error",
+            "error": _redact_declared_paths(str(exc), context.declared),
+        }
+    return schedule.to_dict()
+
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
     args = args or build_parser().parse_args()
@@ -1226,6 +1453,67 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         except (OSError, ValueError) as exc:
             print(f"audit: {exc}", file=sys.stderr)
             raise SystemExit(2)
+    scheduled_requested = (
+        any(
+            getattr(args, name, None) is not None
+            for name in (
+                "schedule_request",
+                "schedule_adapters",
+                "schedule_argv_map",
+                "schedule_policy",
+                "schedule_observations",
+                "schedule_max_attempts",
+                "schedule_success_exit_code",
+                "schedule_memory_bound_mb",
+            )
+        )
+    )
+    enable_scheduled = bool(getattr(args, "enable_scheduled_verification", False))
+    if scheduled_requested and not enable_scheduled:
+        print(
+            "audit: --schedule-* options require "
+            "--enable-scheduled-verification",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    scheduled_verification = None
+    if enable_scheduled:
+        missing = [
+            f"--schedule-{name}"
+            for name in ("request", "adapters", "argv-map", "policy")
+            if getattr(args, f"schedule_{name.replace('-', '_')}", None) is None
+        ]
+        if missing:
+            print(
+                "audit: --enable-scheduled-verification requires "
+                + ", ".join(missing),
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if getattr(args, "output", None) is not None:
+            target = os.path.realpath(args.output)
+            if any(
+                os.path.realpath(path) == target
+                for path in _scheduled_verification_declared_paths(args)
+            ):
+                print(
+                    "audit: --output must not overwrite a declared "
+                    "schedule input",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+        try:
+            scheduled_verification = _load_scheduled_verification(args)
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            print(
+                "audit: "
+                + _redact_declared_paths(
+                    str(exc),
+                    _scheduled_verification_declared_paths(args),
+                ),
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
@@ -1252,6 +1540,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             args, "summary_plan_tool_version", None
         ),
         summary_plan_histories=getattr(args, "summary_plan_histories", None),
+        scheduled_verification=scheduled_verification,
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
