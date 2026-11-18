@@ -7170,19 +7170,50 @@ def test_statement_reads_for_of_and_augmented():
 def test_statement_reads_invoked_callable_attributes_to_caller():
     # Reads inside an invoked callable's body attribute to the
     # caller's frames under the callee's own statement spans —
-    # inlined like the Go model's `_sequence` on the body.
-    s = _fn(
-        "function g(a: number): number {"
-        " let y = a + 1;"
-        " return y; }"
+    # inlined like the Go model's `_sequence` on the body. A local
+    # arrow value takes the inlining path (a top-level declaration
+    # call would only return the actuals union).
+    src = (
         "function f(x: number): number {"
+        " const g = (a: number): number => {"
+        "   let y = a + 1;"
+        "   return y; };"
         " let z = g(x);"
-        " return z; }",
-        name="f",
+        " return z; }"
+    )
+    s = _fn(src, name="f")
+    assert s.available
+    callee_span = (
+        src.index("let y = a + 1;"),
+        src.index("let y = a + 1;") + len("let y = a + 1;"),
+    )
+    reads = _reads(s)
+    # The callee statement's own span records {0} — `a`'s ordinal
+    # inside `g` — and the call statement records {0} for `x`.
+    assert reads.get(callee_span) == frozenset({0}), reads
+    assert list(reads.values()).count(frozenset({0})) >= 2
+
+
+def test_statement_reads_call_actuals_and_yield_operand():
+    # An inlined callee returning a constant still reads its
+    # actual: `g(x)` records {0} for the argument, and `yield x`
+    # records its operand even though the yield value is dep-free.
+    s = _fn(
+        "function f(x: number): number {"
+        " const g = (v: number): number => 0;"
+        " g(x);"
+        " return 0; }"
     )
     assert s.available
-    # `let y = a + 1` inside g surfaces in f's reads.
     assert frozenset({0}) in _reads(s).values()
+    gen = _fn(
+        "function* f(x: number): Generator<number, number, void> {"
+        " yield x;"
+        " return 0; }",
+        name="f",
+    )
+    assert gen.available
+    assert frozenset({0}) in _reads(gen).values()
 
 
 def test_statement_reads_absent_when_closed():
