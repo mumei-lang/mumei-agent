@@ -796,9 +796,12 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
         lines.append("summary_audits:")
         for entry in result.summary_audits:
             status = entry.get("status", "unknown")
-            if status == "emitted" and entry.get("mode") == "attempt":
+            if status == "emitted" and entry.get("mode") in (
+                "attempt",
+                "reuse-attempt",
+            ):
                 detail = (
-                    f" mode=attempt selected={entry.get('selected')}"
+                    f" mode={entry['mode']} selected={entry.get('selected')}"
                     f" accepted={entry.get('accepted')}"
                 )
             elif status == "emitted":

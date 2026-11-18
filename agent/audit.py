@@ -1138,7 +1138,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "summary_audits) to a prior summary manifest. Units with a "
             "declared manifest run their *-summaries-reuse route and "
             "report mode/reused/derived counts; a stale or rejected "
-            "manifest falls back to the produce route."
+            "manifest falls back to the produce route. With "
+            "--enable-summary-attempts a mapped unit runs its "
+            "*-summaries-reuse-attempt route instead."
         ),
     )
     parser.add_argument(
@@ -1150,7 +1152,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "route and record the attempt report's acceptance envelope "
             "(mode/accepted/check_outcome/manifest_sha256) instead of "
             "manifest metadata — advisory; report bytes are not stored. "
-            "Cannot combine with --summaries-manifest-map."
+            "With --summaries-manifest-map a mapped unit runs its "
+            "*-summaries-reuse-attempt route (mode reuse-attempt); a "
+            "stale manifest falls back to the plain -attempt route."
         ),
     )
     parser.add_argument(
@@ -1417,15 +1421,6 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
     ):
         print(
             "audit: --enable-summary-attempts requires --enable-summaries",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    if getattr(args, "enable_summary_attempts", False) and getattr(
-        args, "summaries_manifest_map", None
-    ) is not None:
-        print(
-            "audit: --enable-summary-attempts cannot combine with "
-            "--summaries-manifest-map",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1776,6 +1771,12 @@ def _collect_summary_audits(
     reuse route records `reuse_status: "stale_manifest"` and falls
     back to the produce route — a bad prior manifest can never
     weaken the audit.
+
+    Under ``attempt_timeout_ms`` each unit runs its
+    ``<route>-attempt`` lifecycle instead; a mapped unit runs
+    ``<route>-reuse-attempt`` so the request fingerprint binds the
+    manifest's bytes too, and an unreadable/malformed manifest falls
+    back to the plain ``-attempt`` route.
     """
     run = runner or _run_summary_route
     entries: list[dict] = []
@@ -1794,12 +1795,47 @@ def _collect_summary_audits(
         if attempt_timeout_ms is not None:
             # Attempt mode: the <route>-attempt lifecycle — the report's
             # acceptance envelope is recorded instead of manifest
-            # metadata. There is no attempt variant of *-summaries-reuse,
-            # so manifest replay stays out of this mode.
-            attempt_argv = [f"{route}-attempt"]
+            # metadata. A unit whose label maps to a prior manifest runs
+            # <route>-reuse-attempt instead: the request fingerprint
+            # binds the manifest's bytes as well as the source's. An
+            # unreadable or malformed manifest falls back to the plain
+            # -attempt route with reuse_status: "stale_manifest" — a
+            # bad prior manifest can never weaken the audit.
+            manifest_path = (manifest_map or {}).get(label)
+            reuse_attempt = manifest_path is not None
+            if reuse_attempt:
+                try:
+                    with open(manifest_path, "rb") as handle:
+                        data = handle.read(MAX_SUMMARY_MANIFEST_BYTES + 1)
+                    if len(data) > MAX_SUMMARY_MANIFEST_BYTES:
+                        raise ValueError(
+                            "manifest exceeds the bounded read limit"
+                        )
+                    candidate = json.loads(data.decode("utf-8"))
+                    if type(candidate) is not dict:
+                        raise ValueError("manifest is not a JSON object")
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    ValueError,
+                    RecursionError,
+                ) as exc:
+                    reuse_attempt = False
+                    entry["reuse_status"] = "stale_manifest"
+                    entry["reuse_error"] = _summary_error_text(
+                        str(exc).replace(manifest_path, "<manifest>"),
+                        source_path,
+                        go_types,
+                    )
+            attempt_argv = [
+                f"{route}-{'reuse-' if reuse_attempt else ''}attempt"
+            ]
             if route == "go-summaries":
                 attempt_argv += ["--go-types", cast(str, go_types)]
-            attempt_argv += argv_tail + [
+            attempt_argv += argv_tail
+            if reuse_attempt:
+                attempt_argv += ["--manifest", manifest_path]
+            attempt_argv += [
                 "--attempt-timeout",
                 str(attempt_timeout_ms),
             ]
@@ -1834,7 +1870,7 @@ def _collect_summary_audits(
                 and sequence.get("selected_result") is not None
             )
             entry["status"] = "emitted"
-            entry["mode"] = "attempt"
+            entry["mode"] = "reuse-attempt" if reuse_attempt else "attempt"
             entry["selected"] = bool(selected)
             normalized = report.get("normalized")
             if type(normalized) is dict:

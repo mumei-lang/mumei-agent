@@ -4084,9 +4084,13 @@ mirror it one-to-one (single declared source, `--manifest` bound into
 the fingerprint, identical envelope and `SUMMARY_ESTABLISHED`
 discharge, matching `*_summaries_reuse_attempt` MCP tools), and
 recovery-eval folds the three sibling report schemas under the same
-four performer lists. Audit `--enable-summary-attempts` still cannot
-combine with `--summaries-manifest-map`: mapped units keep running
-the plain reuse route.
+four performer lists. Audit `--enable-summary-attempts` now combines
+with `--summaries-manifest-map`: a mapped unit runs its
+`<route>-reuse-attempt` route (entry `mode: "reuse-attempt"`, same
+acceptance-envelope fields), and an unreadable or malformed prior
+manifest falls back to the plain `-attempt` route with
+`reuse_status: "stale_manifest"` — a bad prior manifest can never
+weaken the audit.
 
 
 ### C06 declared Rust summary route family
