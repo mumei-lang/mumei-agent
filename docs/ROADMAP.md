@@ -4875,7 +4875,10 @@ mirroring each attempt route's `discharged_checks`: `claim_truth`,
 `artifact_semantics` ← an accepted `native-evidence-acceptance/v1`;
 and all five non-artifact checks — `file_identity`,
 `producer_authenticity`, `freshness`, `semantic_correspondence` and
-`claim_truth` — ← an accepted `verify-attempt-report/v1`. Bound
+`claim_truth` — ← an accepted `verify-attempt-report/v1`, whose
+attempt sequence is also the recorded execution lineage, so the
+same bound report performs `historical_execution` on the record its
+run produced. Bound
 documents match through a declared carrier pinned per schema:
 `evidence_fingerprint` on a Core descriptor, `record_digest` on a
 binding document, `normalized.stdout.sha256` (the produced bytes'
@@ -4910,8 +4913,11 @@ timestamp inside the signed `subject_digest` upgrades it) and
 decision). A record with no `produced_at` reports
 `freshness_claimed: false` — never an error — so the fold composes
 with every record shape that predates the optional field. Core-side
-emission of `produced_at` is the memo's slice 2 and stays open; C11
-stays partial.
+emission of `produced_at` is the memo's slice 2 — landed on mumei as
+an opt-in `--produced-at` stamp on Evidence records
+([mumei#1110](https://github.com/mumei-lang/mumei/pull/1110)) — and
+`record_freshness` joins the recovery fold through this same
+document; C11 stays partial.
 
 ### C11 audit-side summary-manifest reuse consumption
 
