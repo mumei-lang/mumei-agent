@@ -3872,8 +3872,11 @@ the binary (`--go-types`) and supplies every byte the helper reads.
 A nonzero exit, any stderr or a non-`ok` report status fails closed
 before parsing, and the emitted manifest remains declared data — a
 reader still recomputes derived properties and reuse still goes
-through `for_function`/`stale_dependents`. No audit, MCP or planner
-route is wired yet, and Evidence normalization/acceptance stays open.
+through `for_function`/`stale_dependents`. Audit consumption is
+wired (`--enable-summaries`, `--summaries-manifest-map`, plus
+`--enable-summary-attempts`); Evidence normalization/acceptance
+lives on the `*-attempt` route's envelope — the produce route
+itself still emits declared data.
 
 ### C06 declared summary manifest reuse check (go-summaries-check)
 
@@ -3897,9 +3900,9 @@ enforces, so a host that consumes `reusable` under `context_match:
 false` is choosing per-function freshness over the strict whole-set
 check — `stale_dependents` itself stays a detection helper and what
 to recompute remains the host's call. `--output` may not equal any
-declared input (sources, import files or the manifest itself). No
-scheduling, re-derivation or audit route is wired yet; Evidence
-normalization/acceptance stays open.
+declared input (sources, import files or the manifest itself). Audit
+consumption is wired (`--summaries-manifest-map`); Evidence
+normalization/acceptance lives on the `*-attempt` route's envelope.
 
 ### C06 declared summary manifest reuse (go-summaries-reuse)
 
@@ -3923,8 +3926,9 @@ identity-survival rule — the strict whole-set gate is still
 `for_function`/`for_package_function` against the live context key, and
 `stale_dependents` still flags what must be re-derived. `--output` may
 not equal any declared input (sources, import files or the manifest
-itself). No scheduling or audit route is wired yet; Evidence
-normalization/acceptance stays open.
+itself). Audit consumption is wired (`--summaries-manifest-map`);
+Evidence normalization/acceptance lives on the `*-attempt` route's
+envelope.
 
 ### C06 declared summary strict acceptance (go-summaries-accept)
 
@@ -3944,8 +3948,10 @@ any tamper channel in the declared record itself.
 The weaker identity partition never authorizes here: reuse's
 per-function freshness choice stays the host's, while accept refuses
 a summary after any change anywhere in the unit. `--output` may not
-equal any declared input. No scheduling or audit route is wired yet;
-Evidence normalization/acceptance stays open.
+equal any declared input. Audit consumption is wired
+(`--summaries-manifest-map`); the strict route's re-derivation is
+what performs the summary claim checks the attempt envelope leaves
+unperformed.
 
 ### C06 declared summary attempt MCP tool (go_summaries_attempt)
 
@@ -4032,9 +4038,9 @@ performer schema for exactly those checks plus `historical_execution`,
 bound through `normalized.stdout.sha256`, and folds any record that
 declares no `checks_not_performed` — a produced manifest carries none —
 over the full known-check vocabulary so the bound report recovers what
-it discharges. No retry policy, scheduling or audit route is wired;
-Evidence normalization/acceptance for the ts/sol/rust sibling routes
-stays open.
+it discharges. The ts/sol/rust sibling routes carry the same
+envelope, and directory audits reach the attempt lifecycle through
+`--enable-summary-attempts`; no retry policy or scheduling is wired.
 
 
 ### C06 declared Rust summary route family
@@ -4175,8 +4181,9 @@ capability.
 
 A descriptor is routing metadata only: registering it spawns no
 process and accepts no manifest — the host still runs the route and
-owns acceptance. No production verification path consults this
-registry yet; planner/audit wiring for the summary routes stays open.
+owns acceptance. Audit wiring for the produce/reuse/attempt routes
+landed (`--enable-summaries` family); no production verification
+path consults this registry yet.
 
 
 ### C06 summary-route probe wiring
@@ -4195,7 +4202,8 @@ Probing is availability only: the version is host-declared
 location, missing permission — is never probed at all. The returned
 `AdapterProbePlan` carries the updated `AdapterProbeHistory` records
 for retry scheduling. `summaries-plan` (below) is the first consumable
-caller; audit, MCP and scheduled verification wiring stays open.
+caller and `summaries_plan` the MCP tool; audit and scheduled
+verification wiring stays open.
 
 
 ### C06 consumable plan route (summaries-plan)
@@ -4463,7 +4471,7 @@ flag and reuse keeps the counts in the merged manifest.
 `sol-summaries-attempt` forwards the flag to the child and binds the
 manifest's bytes into the request fingerprint like every other
 declared input; the manifest path joins the declared inputs, so
-`--output` can never overwrite it. The Rust port stays open.
+`--output` can never overwrite it.
 
 ### C06 declared summaries in directory audits (audit --enable-summaries)
 
@@ -5065,7 +5073,6 @@ flag it. The callee manifest's canonical bytes also fold into the
 produced `context_key`, so a changed callee manifest invalidates the
 strict whole-context gate — `for_function`/`for_package_function`
 take the same declared set when the manifest was derived with one.
-The TS/Sol/Rust ports stay open.
 
 
 ### C11 declared evidence binding over record bytes
