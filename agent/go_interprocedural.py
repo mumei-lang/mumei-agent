@@ -1841,6 +1841,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             pointee = self._pointee_type(inner_field.type.type_id)
             if pointee is None:
                 return None
+            if pointee.type.kind == "pointer":
+                # `t.W` on a `W PP` field (`type PP *S`) — the named
+                # pointer type's member IS the pointer; its whole
+                # fact pins, and the pointee resolves one hop deeper
+                # through its `elem`.
+                self._pin_fact_identities(inner_field.type)
+                pointee = self._pointer_underlying_pointee(
+                    pointee, inner_field.id
+                )
+                if pointee is None:
+                    return None
             return (*inner_pointees, inner_field, pointee), root_ref
         if operand.type != "identifier" or operand.text == b"_":
             return None
@@ -1856,6 +1867,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             pointee = self._pointee_type(binding.type.type_id)
             if pointee is None:
                 return None
+            if pointee.type.kind == "pointer":
+                # `p PP` on `type PP *T` — PP's member IS the pointer
+                # type; its whole fact pins (PP and every identity
+                # its elem tree names), and the pointee resolves one
+                # hop deeper exactly like `p *T` does.
+                self._pin_fact_identities(pointee.type)
+                pointee = self._pointer_underlying_pointee(
+                    pointee, ref.binding_id
+                )
+                if pointee is None:
+                    return None
             return (pointee,), ref
         # `t *struct{...}` — an anonymous struct pointee names no
         # `type` member, but the pointee fact still classifies the
@@ -2016,9 +2038,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
         identity the imported unit's own report assigns it, so pinning
         it lets `stale_dependents` flag this summary when the type —
         not just the member — is redeclared.
+
+        A pointer var's `pointee_type_ids` pin on reads too, not only
+        on the `*lib.V = v` write path — `*lib.V` on a `var V PP`
+        (`type PP *T`) records PP as the transfer identity, leaving T
+        reachable only through the pointee ids the producer
+        declared.
         """
         if member.type.type_id:
             self.pinned.add(member.type.type_id)
+        pointee_ids = getattr(member, "pointee_type_ids", None)
+        if pointee_ids:
+            self.pinned.update(pointee_ids)
 
     def _composite_var_read(
         self,
@@ -3190,16 +3221,51 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         if binding.type.type_id:
             target = self._pointee_type(binding.type.type_id)
-            if (
-                target is None
-                or target.type.kind not in {"slice", "array", "map"}
-            ):
+            if target is None:
+                return None
+            if target.type.kind == "pointer":
+                # `type PP *[]T` — the declared type names the
+                # pointer itself; the container pointee is its
+                # `elem`, pinned with PP's whole fact.
+                self._pin_fact_identities(target.type)
+                elem = target.type.elem
+                if elem is None or elem.kind not in {
+                    "slice",
+                    "array",
+                    "map",
+                }:
+                    return None
+                return (
+                    ref,
+                    elem.type_id or f"{ref.binding_id}/pointee",
+                    elem,
+                )
+            if target.type.kind not in {"slice", "array", "map"}:
                 return None
             return ref, binding.type.type_id, target.type
         elem = binding.type.elem
         if elem is None or elem.kind not in {"slice", "array", "map"}:
             return None
         return ref, f"{ref.binding_id}/pointee", elem
+
+    def _pointer_underlying_pointee(
+        self, member: PackageMember, owner_id: str
+    ) -> Any | None:
+        """The pointee a `type PP *T` member's `elem` names — the
+        named pointee's `type` member, or an anonymous
+        `*struct{...}` pointee under `owner_id`'s `/pointee`
+        identity (which can never redeclare, so it flags no false
+        staleness). An unnamed pointee with no modelled shape
+        (`*int64` on a basic type, or a missing elem) stays
+        closed."""
+        elem = member.type.elem
+        if elem is None:
+            return None
+        if elem.type_id:
+            return self._pointee_type(elem.type_id)
+        if elem.kind == "struct":
+            return _AnonymousPointee(owner_id + "/pointee", elem)
+        return None
 
     def _package_container_pointee(
         self, node: Any
@@ -7236,6 +7302,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             for p in (*target.parameters, *target.results):
                 if p.type.type_id:
                     self.pinned.add(p.type.type_id)
+                    # `p PP` on `type PP *T` — PP's member carries the
+                    # pointee identity in its `elem`, which pins with
+                    # it exactly like the imported signature_type_ids
+                    # the producer now emits for the same param.
+                    named = self._pointee_type(p.type.type_id)
+                    if named is not None and named.type.kind == "pointer":
+                        self._pin_fact_identities(named.type)
             # The callee's effect opacity propagates: a local callee that
             # itself performs imported transfers leaves this caller's
             # effects unbounded the same way a direct_import does.

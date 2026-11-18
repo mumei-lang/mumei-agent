@@ -360,6 +360,71 @@ func TestPointerVarDeclaresPointeeMember(t *testing.T) {
 		t.Fatalf("a struct pointee must still be declared: %+v", sm)
 	}
 }
+
+func TestNamedPointerUnderlyingTypes(t *testing.T) {
+	// `type PP *T` names a pointer through its underlying: the type
+	// member itself reads `pointer` — `type_id` keeps PP's own
+	// identity (a name a declaration can redeclare) while `elem`
+	// carries the pointee fact. A var or signature typed `PP` then
+	// declares both PP and T, exactly like `*T` declares T.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(v lib.PP) int64 { _ = lib.VS\n\treturn int64(*lib.VV) + lib.G(v) }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\ntype PP *T\ntype PS *[]T\nvar VV PP\nvar VS PS\nfunc G(v PP) int64 { return 0 }"},
+			{"t.go", "package lib\ntype T int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	pp, ok := members["PP"]
+	if !ok || pp.Kind != "type" || pp.Type.Kind != "pointer" || pp.Type.TypeID != pp.ID {
+		t.Fatalf("a named pointer-underlying type member is missing or misclassified: %+v", pp)
+	}
+	tm, ok := members["T"]
+	if !ok || tm.Kind != "type" || tm.Type.Kind != "integer" {
+		t.Fatalf("the pointee type member is missing or misclassified: %+v", tm)
+	}
+	if pp.Type.Elem == nil || pp.Type.Elem.Kind != "integer" || pp.Type.Elem.TypeID != tm.ID {
+		t.Fatalf("the named pointer fact lost its pointee: %+v", pp.Type.Elem)
+	}
+	ps, ok := members["PS"]
+	if !ok || ps.Type.Kind != "pointer" || ps.Type.TypeID != ps.ID ||
+		ps.Type.Elem == nil || ps.Type.Elem.Kind != "slice" ||
+		ps.Type.Elem.Elem == nil || ps.Type.Elem.Elem.TypeID != tm.ID {
+		t.Fatalf("a named pointer-to-slice member is misclassified: %+v", ps)
+	}
+	vv, ok := members["VV"]
+	if !ok || vv.Kind != "var" || vv.Type.Kind != "pointer" || vv.Type.TypeID != pp.ID {
+		t.Fatalf("a `var V PP` member must name PP: %+v", vv)
+	}
+	if vv.PointeeTypeIDs == nil || len(*vv.PointeeTypeIDs) != 1 ||
+		(*vv.PointeeTypeIDs)[0] != tm.ID ||
+		vv.PointeeKind == nil || *vv.PointeeKind != "integer" {
+		t.Fatalf("a `var V PP` member lost the pointee it underlies: %+v", vv)
+	}
+	if vs, ok := members["VS"]; !ok || vs.Type.TypeID != ps.ID ||
+		vs.PointeeKind == nil || *vs.PointeeKind != "slice" ||
+		vs.PointeeTypeIDs == nil || len(*vs.PointeeTypeIDs) != 1 ||
+		(*vs.PointeeTypeIDs)[0] != tm.ID {
+		t.Fatalf("a `var VS PS` member lost its container pointee: %+v", vs)
+	}
+	// A `p lib.PP` parameter pins PP AND the pointee T it underlies —
+	// the caller relies on PP's `*T` shape as surely as on a `*T`.
+	g, ok := members["G"]
+	if !ok {
+		t.Fatal("the referenced function member is missing")
+	}
+	if len(g.SignatureTypeIDs) != 2 || g.SignatureTypeIDs[0] != pp.ID || g.SignatureTypeIDs[1] != tm.ID {
+		t.Fatalf("a `PP` parameter did not pin the declared type and its pointee: %v", g.SignatureTypeIDs)
+	}
+}
+
 func TestErrorPointerVarRecordsNoEmptyMember(t *testing.T) {
 	// `var PE *error` — `error` is a universe object with no imported
 	// identity, so the pointee emits no member; a member with an

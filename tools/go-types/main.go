@@ -590,7 +590,26 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 		// the consumer needs the pointee's own fact to classify a
 		// `*lib.V` dereference read, exactly like a signature's
 		// `signature_type_ids` declaring the types a contract names.
-		if ptr, ok := obj.Type().(*types.Pointer); ok {
+		// `var V PP` on `type PP *T` is pointer-typed through its
+		// underlying — PP's own member record must exist too, since
+		// the var's `type_id` now names it.
+		var ptr *types.Pointer
+		if p, ok := obj.Type().(*types.Pointer); ok {
+			ptr = p
+		} else if p, ok := obj.Type().Underlying().(*types.Pointer); ok {
+			ptr = p
+			switch dt := obj.Type().(type) {
+			case *types.Named:
+				if pid := ix.typeID(dt.Obj()); pid != "" {
+					ix.recordMember(dt.Obj(), pid)
+				}
+			case *types.Alias:
+				if pid := ix.typeID(dt.Obj()); pid != "" {
+					ix.recordMember(dt.Obj(), pid)
+				}
+			}
+		}
+		if ptr != nil {
 			var elem *types.TypeName
 			switch e := ptr.Elem().(type) {
 			case *types.Named:
@@ -680,7 +699,8 @@ func (ix *indexer) recordPointeeMembers(t types.Type, seen map[string]bool) {
 func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 	seen := map[string]bool{}
 	var ids []string
-	add := func(t types.Type) {
+	var add func(t types.Type)
+	add = func(t types.Type) {
 		// `*lib.T` names `lib.T` as surely as the pointee's own
 		// declaration does — a pointer-typed parameter or result must
 		// pin the same identity.
@@ -699,9 +719,21 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		if obj == nil {
 			return
 		}
-		if id := ix.typeID(obj); id != "" && !seen[id] {
+		if id := ix.typeID(obj); id != "" {
+			if seen[id] {
+				return
+			}
 			seen[id] = true
 			ids = append(ids, id)
+		}
+		// A named/alias parameter or result whose underlying is a
+		// pointer — `type PP *T` — pins the pointee too: an admitted
+		// caller relies on PP's `*T` shape as surely as on a declared
+		// `*T`. (A `**T` parameter never reaches here: the one-layer
+		// unwrap above leaves an unnamed pointer, which returns
+		// early like before.)
+		if p, ok := t.Underlying().(*types.Pointer); ok {
+			add(p.Elem())
 		}
 	}
 	if sig.Recv() != nil {
@@ -859,6 +891,17 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	}
 	seen[t] = true
 	defer delete(seen, t)
+	if p, ok := t.Underlying().(*types.Pointer); ok {
+		// `type PP *T` — a named/alias type whose underlying is a
+		// pointer. Unlike a direct `*T` (where `type_id` names the
+		// pointee), `type_id` keeps the declared type's own identity
+		// — PP is a name a declaration can redeclare — while `elem`
+		// carries the pointee fact and any identity it names.
+		f.Kind = "pointer"
+		e := ix.typeOfRec(p.Elem(), seen)
+		f.Elem = &e
+		return f
+	}
 	if s, ok := t.Underlying().(*types.Slice); ok {
 		// `[]T` — or a named/alias type whose underlying is a slice,
 		// which keeps the identity the switch above already set.
