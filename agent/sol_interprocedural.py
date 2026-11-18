@@ -232,23 +232,33 @@ class SolStatementRead:
 
     span: tuple[int, int]
     deps: frozenset[int]
+    # Token of the module declaring the statement — "" for the
+    # importer's own file. Spans are byte offsets, file-local:
+    # without this a statement inlined from an imported module
+    # would merge into a same-byte local statement's record.
+    module: str = ""
 
     def to_dict(self) -> dict:
         return {
             "span": [self.span[0], self.span[1]],
             "deps": sorted(self.deps),
+            "module": self.module,
         }
 
     @classmethod
     def from_dict(cls, value) -> "SolStatementRead":
-        v = _manifest_record(value, ("span", "deps"))
+        v = _manifest_record(
+            value, ("span", "deps"), ("module",)
+        )
         span = _list(v["span"])
         _require_manifest(
             len(span) == 2
             and all(isinstance(b, int) and b >= 0 for b in span)
         )
         return cls(
-            (span[0], span[1]), _deps_from_list(v["deps"])
+            (span[0], span[1]),
+            _deps_from_list(v["deps"]),
+            _string(v.get("module", "")),
         )
 
 
@@ -470,7 +480,16 @@ class _Builder:
         # reads cover its nested expressions and any inlined
         # callee/modifier bodies (keyed by the callee's own spans).
         self._read_stack: list[frozenset[int]] = []
-        self._stmt_reads: dict[tuple[int, int], frozenset[int]] = {}
+        # Keys are (module token, start_byte, end_byte) — a body
+        # inlined from an imported module keeps its own token so
+        # same-byte statements in two files never merge.
+        self._stmt_reads: dict[
+            tuple[str, int, int], frozenset[int]
+        ] = {}
+        # Module token of the body currently being walked — the
+        # summarized function's module, or an inlined modifier's
+        # declaring module while its body runs.
+        self._mod_stack: list[str] = []
         self._state_vars: dict[str, set[str]] = {}
         self._overload_groups: dict[str, list[str]] = {}
         self.modifiers: dict[str, object] = {}
@@ -1343,10 +1362,24 @@ class _Builder:
         prev_alias = self._storage_alias
         prev_reads = self._stmt_reads
         prev_stack = self._read_stack
+        prev_mod_stack = self._mod_stack
         self._decls = [set()]
         self._storage_alias = {}
         self._read_stack = []
         self._stmt_reads = {}
+        # Module token of this function's declaring file: the
+        # contract prefix for `tok.C.f`, the name prefix for a
+        # free `tok.f` — "" for the importer's own file.
+        qcontract = self.contracts[key]
+        if qcontract:
+            fn_mod = (
+                qcontract.rsplit(".", 1)[0]
+                if "." in qcontract
+                else ""
+            )
+        else:
+            fn_mod = key.rsplit(".", 1)[0] if "." in key else ""
+        self._mod_stack = [fn_mod]
         try:
             try:
                 rets = self._run_body(
@@ -1357,11 +1390,15 @@ class _Builder:
                 return summary
         finally:
             summary.statement_reads = tuple(
-                SolStatementRead(span, deps)
-                for span, deps in sorted(self._stmt_reads.items())
+                SolStatementRead(span, deps, mod)
+                for (mod, span_s, span_e), deps in sorted(
+                    self._stmt_reads.items()
+                )
+                for span in [(span_s, span_e)]
             )
             self._read_stack = prev_stack
             self._stmt_reads = prev_reads
+            self._mod_stack = prev_mod_stack
             self._writes.pop()
             self._decls = prev_decls
             self._storage_alias = prev_alias
@@ -1505,11 +1542,18 @@ class _Builder:
                 )
 
             self._placeholder.append(_wrapped)
+            # The modifier's statements live in its declaring
+            # module — tag them so same-byte offsets in two files
+            # never merge into one read record.
+            self._mod_stack.append(
+                c.rsplit(".", 1)[0] if "." in c else ""
+            )
             try:
                 return self._block(
                     mbody, mlocals, mparam_index, summary
                 )
             finally:
+                self._mod_stack.pop()
                 self._placeholder.pop()
         finally:
             self._inline_depth -= 1
@@ -1545,9 +1589,11 @@ class _Builder:
         self, st, locals_, param_index, summary
     ) -> frozenset[int] | None:
         # Every expression evaluated under this statement — its
-        # own and any inlined callee/modifier body's — lands in
+        # own and any INLINED callee/modifier body's — lands in
         # the open frames; nested statements pop their own record
-        # under their own span.
+        # under their own span. A call composed from summaries
+        # (not inlined) attributes to the callee's own summary,
+        # not this frame.
         self._read_stack.append(frozenset())
         try:
             return self._statement_inner(
@@ -1555,7 +1601,8 @@ class _Builder:
             )
         finally:
             frame = self._read_stack.pop()
-            key = (st.start_byte, st.end_byte)
+            mod = self._mod_stack[-1] if self._mod_stack else ""
+            key = (mod, st.start_byte, st.end_byte)
             self._stmt_reads[key] = self._stmt_reads.get(
                 key, frozenset()
             ) | frame
@@ -1573,6 +1620,9 @@ class _Builder:
                 bare = frozenset()
                 for rn in getattr(self, "_ret_names", ()):
                     bare |= locals_.get(rn, frozenset())
+                # A bare `return` still reads back the named
+                # result slots.
+                self._record_read(bare)
                 return bare
             tinner = _children(expr)
             if (
@@ -2240,6 +2290,9 @@ class _Builder:
             )
             if expr.type == "augmented_assignment_expression":
                 deps |= locals_[lident.text.decode()]
+                # `a += b` reads the old value — `_expr` only saw
+                # the RHS, so record the merged set.
+                self._record_read(deps)
             raw = lident.text.decode()
             lnames = self._storage_targets(raw)
             if (
@@ -2314,6 +2367,9 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_statement", _span(expr)
                 )
+            # `a++`/`a--` read the old value — no `_expr` ran
+            # the operand on this statement path.
+            self._record_read(locals_[tident.text.decode()])
             if self._writes:
                 self._writes[-1].add(tident.text.decode())
             tname = tident.text.decode()

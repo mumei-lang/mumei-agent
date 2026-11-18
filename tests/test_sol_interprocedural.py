@@ -3158,3 +3158,49 @@ def test_statement_reads_manifest_optional():
         f.pop("statement_reads", None)
     restored = sol.SolSummarySet.from_dict(s)
     assert all(fn.statement_reads == () for fn in restored.functions)
+
+
+def test_statement_reads_augmented_and_update_operands():
+    # `a += b` reads the old LHS value; `a++` reads `a` — both
+    # were evaluated without _expr seeing the operand.
+    src = """contract C {
+  function f(uint256 a, uint256 b) public pure returns (uint256) {
+    uint256 x = a;
+    x += b;
+    x++;
+    return x;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    reads = _reads(s)
+    assert any(frozenset({0, 1}) <= r for r in reads.values())
+
+
+def test_statement_reads_bare_return_named_result():
+    # `return;` reads back the named result slot — dep {0}.
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256 r) {
+    r = a;
+    return;
+  }
+}"""
+    s = _fn(src, "f")
+    assert s.available
+    assert frozenset({0}) in _reads(s).values()
+
+
+def test_statement_reads_module_tag_roundtrip():
+    # Imported-module statements carry the module token; the
+    # importer's own statements carry "".
+    src = """contract C {
+  function f(uint256 a) public pure returns (uint256) {
+    return a;
+  }
+}"""
+    s = _summarize(src)
+    fn = next(f for f in s.functions if f.name.endswith(".f"))
+    assert all(r.module == "" for r in fn.statement_reads)
+    restored = sol.SolSummarySet.from_dict(s.to_dict())
+    rfn = next(f for f in restored.functions if f.name.endswith(".f"))
+    assert rfn.statement_reads == fn.statement_reads
