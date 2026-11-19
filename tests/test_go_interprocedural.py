@@ -25125,3 +25125,38 @@ def test_range_over_array_value_result_call_reads_copy(
     )
     assert result.available
     assert result.return_dependencies == frozenset({1})
+
+
+def test_range_over_imported_pointer_result_reads_live_pointee(
+    go_types_helper,
+):
+    # `for _, v := range lib.G(p)` where the imported `G` returns
+    # `*[N]T` resolves its result through the member's declared
+    # type — the live-pointee rule applies on the imported path
+    # the same as the local one.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range lib.G(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q *[4]int64) *[4]int64 { return q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
