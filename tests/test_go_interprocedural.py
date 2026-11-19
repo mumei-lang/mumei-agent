@@ -24204,3 +24204,305 @@ def test_func_elem_nested_keyed_rune_int(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_call_result_index_read_slice(go_types_helper):
+    # `lib.G(a)[i]` — an index read on an imported call's composite
+    # result: the element is scalar, so the read carries the call's
+    # dep set plus the index's, and the bare composite binding stays
+    # closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64, i int) int64 {\n"
+        "\treturn lib.G(a)[i]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_call_result_index_read_map_literal_key(go_types_helper):
+    # `lib.M(a)["k"]` — a literal map key carries no deps; the element
+    # read keeps only the call's dep set.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\treturn lib.M(a)[\"k\"]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func M(x int64) map[string]int64 { return map[string]int64{\"k\":x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_call_result_index_read_nested(go_types_helper):
+    # `lib.N(a)[i][j]` — the descent consumes one elem fact per level
+    # and unions every level's index deps.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64, i int, j int) int64 {\n"
+        "\treturn lib.N(a)[i][j]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func N(x int64) [][]int64 { return [][]int64{{x}} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_call_result_index_read_struct_elem_closed(go_types_helper):
+    # `lib.S(a)[i]` — a struct element produces a value the fragment's
+    # model cannot hold: closed like a struct element of an imported
+    # container.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64, i int) lib.Pair {\n"
+        "\treturn lib.S(a)[i]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "type Pair struct{ A int64 }\n"
+            "func S(x int64) []Pair { return []Pair{{x}} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_call_result_index_read_bare_composite_stays_closed(go_types_helper):
+    # `s := lib.G(a); s[0]` — binding the composite result still fails
+    # closed; only the directly-indexed scalar read admits.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\treturn s[0]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_call_result_index_read_local_callee_stays_closed(go_types_helper):
+    # `g(a)[i]` on a local callee — a callee returning a composite is
+    # not summarizable, so the call operand keeps the whole function
+    # closed: only imported callees (declared result_types) admit.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) []int64 { return make([]int64, x) }\n"
+        "func F(a int64, i int) int64 {\n"
+        "\treturn G(a)[i]\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_call_result_index_read_comma_ok(go_types_helper):
+    # `v, ok := lib.M(a)["k"]` — the comma-ok pair on a call result's
+    # map element: both names take the read's dep set (call deps ∪
+    # index deps).
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tv, ok := lib.M(a)[\"k\"]\n"
+        "\t_ = ok\n"
+        "\treturn v\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(x int64) map[string]int64 {\n"
+            "\treturn map[string]int64{\"k\": x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_index_read_comma_ok_nested(go_types_helper):
+    # `v, ok := lib.N(a)[i]["k"]` — the outermost index's own
+    # container is still a map after one elem descent.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(a int64, i int) int64 {\n"
+        "\tv, _ := lib.N(a)[i][\"k\"]\n"
+        "\treturn v\n}\n"
+    }
+    lib = {
+        "lib": {
+            "n.go": "package lib\n"
+            "func N(x int64) []map[string]int64 {\n"
+            "\treturn []map[string]int64{{\"k\": x}}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+    assert 1 in result.return_dependencies
+
+
+def test_call_result_index_read_comma_ok_local_callee(go_types_helper):
+    # `v, ok := G(a)["k"]` on a LOCAL callee — its composite result
+    # is not summarizable, so the pair stays closed.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) map[string]int64 {\n"
+        "\treturn map[string]int64{\"k\": x}\n}\n"
+        "func F(a int64) int64 {\n"
+        "\tv, ok := G(a)[\"k\"]\n"
+        "\t_ = ok\n"
+        "\treturn v\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_call_result_index_read_func_arg_write_back(go_types_helper):
+    # `lib.G(h, x)[0]` — the opaque callee may invoke the passed
+    # func value: `h`'s captured write lands on `g` at the call site,
+    # so `return g` carries the argument deps.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar g int64\n"
+        "\th := func(v int64) { g = v }\n"
+        "\t_ = lib.G(h, x)[0]\n"
+        "\treturn g\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(h func(int64), x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_index_read_transfer_records_args(go_types_helper):
+    # The opaque fold records the call like any other bodyless
+    # callee: per-argument dep sets and the result union on the
+    # transfer, plus the call in `opaque_calls` accounting.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(a int64, i int) int64 {\n"
+        "\treturn lib.G(a)[i]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    transfers = [t for t in result.calls if t.imported]
+    assert any(
+        frozenset({0}) in t.arguments for t in transfers
+    ), transfers

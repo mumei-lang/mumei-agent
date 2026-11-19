@@ -3903,6 +3903,18 @@ call at the selector chain's base takes this path — an identifier
 base keeps the local composite path and its promoted-field gate,
 and an index on a call result like `g(a)[0]` stays closed with
 the callee's unsupported signature).
+An index read on a call result — `lib.G(a)[i]`,
+`lib.M(a)["k"]`, `lib.N(a)[i][j]` — admits when the callee's
+declared single-result type names a container (slice, array or
+map) whose element is scalar-or-pointer: the element's provenance
+is the call's own dep set plus each index's deps, with the
+container/element/key identities pinned. An imported callee whose
+composite result stays `external_or_bodyless` still admits through
+the index (the member's `result_types` carry the fact) — the call
+folds through the minimal opaque-argument union — while the bare
+composite binding (`s := lib.G(a)`) stays closed, as do struct
+elements, multi-result calls and local callees whose composite
+result is not summarizable.
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.
