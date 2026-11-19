@@ -237,15 +237,45 @@ var errUnresolvedImport = fmt.Errorf("unresolved import")
 // pointer result carries the same arg-union dep set as a scalar one:
 // the dep model tracks the binding, not the pointee, and the caller's
 // own gates decide whether a `*T` binding can store it.
+func scalarResultOK(t types.Type) bool {
+	if _, ok := t.Underlying().(*types.Pointer); ok {
+		return true
+	}
+	b, ok := t.Underlying().(*types.Basic)
+	return ok && (b.Info()&types.IsInteger != 0 || b.Kind() == types.Bool)
+}
+
 func allScalarResults(sig *types.Signature) bool {
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
-		t := res.At(i).Type()
-		if _, ok := t.Underlying().(*types.Pointer); ok {
-			continue
+		if !scalarResultOK(res.At(i).Type()) {
+			return false
 		}
-		b, ok := t.Underlying().(*types.Basic)
-		if !ok || (b.Info()&types.IsInteger == 0 && b.Kind() != types.Bool) {
+	}
+	return true
+}
+
+// scalarChanElemOK: `chan T` with a scalar (integer/boolean) element —
+// the element kind the consumer's queue dep model can hold.
+func scalarChanElemOK(t types.Type) bool {
+	ch, ok := t.Underlying().(*types.Chan)
+	if !ok {
+		return false
+	}
+	b, ok := ch.Elem().Underlying().(*types.Basic)
+	return ok && (b.Info()&types.IsInteger != 0 || b.Kind() == types.Bool)
+}
+
+// importedResultsOK admits a signature when every result is
+// scalar/pointer or a scalar-element `chan` — a multi-result callee
+// like `func G() (chan int64, int64)` whose chan slot the consumer
+// binds as an external queue like `ch := lib.G()`. `chan chan T` and
+// other composites stay `external_or_bodyless` at any position.
+func importedResultsOK(sig *types.Signature) bool {
+	res := sig.Results()
+	for i := 0; i < res.Len(); i++ {
+		t := res.At(i).Type()
+		if !scalarResultOK(t) && !scalarChanElemOK(t) {
 			return false
 		}
 	}
@@ -259,15 +289,7 @@ func allScalarResults(sig *types.Signature) bool {
 // channel stay closed.
 func singleScalarChanResult(sig *types.Signature) bool {
 	res := sig.Results()
-	if res.Len() != 1 {
-		return false
-	}
-	ch, ok := res.At(0).Type().Underlying().(*types.Chan)
-	if !ok {
-		return false
-	}
-	b, ok := ch.Elem().Underlying().(*types.Basic)
-	return ok && (b.Info()&types.IsInteger != 0 || b.Kind() == types.Bool)
+	return res.Len() == 1 && scalarChanElemOK(res.At(0).Type())
 }
 
 // directImportID admits an imported call only when it is summarizable:
@@ -283,7 +305,7 @@ func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 		return "", 0, false
 	}
 	sig, ok := f.Type().(*types.Signature)
-	if !ok || (!allScalarResults(sig) && !singleScalarChanResult(sig)) {
+	if !ok || !importedResultsOK(sig) {
 		return "", 0, false
 	}
 	// A generic callee must go through the instantiation gate — the

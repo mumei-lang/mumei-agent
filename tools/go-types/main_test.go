@@ -221,6 +221,46 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 	}
 }
 
+func TestMultiResultChanCalleeAdmits(t *testing.T) {
+	// `ch, n := lib.G()` where `lib.G` declares `(chan int64,
+	// int64)` — the call records `direct_import` with arity 2 and
+	// the member's `result_types` carries the chan slot's fact, so
+	// the consumer can bind the slot as an external queue like
+	// `ch, n := g()` does for a same-package callee.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { ch, n := lib.G(); ch <- n; return <-ch }"}}
+	imports := []importedUnit{{"lib", []namedSource{
+		{"g.go", "package lib\nfunc G() (chan int64, int64) { return make(chan int64), 0 }"},
+	}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_import" || out.Calls[0].Results != 2 {
+		t.Fatalf("a scalar-chan multi-result callee was rejected: %+v", out.Calls)
+	}
+	var gMember *member
+	for i := range out.ImportedMembers {
+		if out.ImportedMembers[i].Name == "G" {
+			gMember = &out.ImportedMembers[i]
+		}
+	}
+	if gMember == nil {
+		t.Fatal("the imported callee's member is missing")
+	}
+	if len(gMember.ResultTypes) != 2 || gMember.ResultTypes[0].Kind != "chan" ||
+		gMember.ResultTypes[0].Elem == nil || gMember.ResultTypes[0].Elem.BasicName != "int64" ||
+		gMember.ResultTypes[1].Kind != "integer" {
+		t.Fatalf("the member's result_types lost the chan slot: %+v", gMember.ResultTypes)
+	}
+	// A `chan chan int64` at any result position still rejects —
+	// a queue of queues stays out of the dep model.
+	imports[0].Sources[0].Source = "package lib\nfunc G() (chan chan int64, int64) { return nil, 0 }"
+	out = analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if len(out.Calls) > 0 && out.Calls[0].Kind == "direct_import" {
+		t.Fatal("a non-scalar chan element result was admitted")
+	}
+}
+
 func TestNestedNamedTypeArgumentPinsEveryIdentity(t *testing.T) {
 	// `lib.GI[other.N[lib.T]](n)` substitutes a generic named type —
 	// the call record must pin BOTH the outer `N` and the nested `T`,
