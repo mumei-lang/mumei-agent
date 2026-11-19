@@ -2620,7 +2620,13 @@ writes and observe the caller's queue through them,
 exactly like a parameter — and an unconditional
 `ch = g()` rebind reseats the name to the callee's
 queue the same way (a passthrough callee makes `ch`
-name the argument's queue; any prior alias drops). An
+name the argument's queue; any prior alias drops).
+An imported `lib.G()` binds the same way: the
+producer declares the member's `result_types` and
+classifies the call `direct_import` when the lone
+result is a scalar-element `chan`, so `ch :=
+lib.G()` admits as an external queue whose ops
+record on the member's identity. An
 alias to that name
 (`ch2 := ch`) follows the external queue through the
 root binding, a bare read or argument surfaces the
@@ -2640,8 +2646,8 @@ sees writes the untaken path delivered. A fresh
 `make` on an unaliased name keeps the old conflated
 admission since every name resolving to it already
 converges on the same slot. Still closed:
-non-scalar elements, an imported `lib.G()` channel
-result (the signature carries no element kind), and
+non-scalar elements (including an imported callee's
+`chan chan T` result), and
 a multi-result callee — while `select` now admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
 a bare `<-ch`) or send (`ch <- v`) runs in a fresh
