@@ -22403,7 +22403,7 @@ def test_func_elem_index_write_literal_admitted(go_types_helper):
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    fs[0] = func() int64 { return y }\n"
         "    y = x\n"
         "    return fs[0]()\n"
@@ -22425,7 +22425,7 @@ def test_func_elem_index_write_identifier_adopts_records(
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    cl := func() int64 { return y }\n"
         "    fs[0] = cl\n"
         "    y = x\n"
@@ -22463,7 +22463,7 @@ def test_func_elem_index_write_computed_index(go_types_helper):
         go_types_helper,
         "func F(x int64, i int64) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    cl := func() int64 { return y }\n"
         "    fs[i] = cl\n"
         "    y = x\n"
@@ -22483,7 +22483,7 @@ def test_func_elem_index_write_conditional(go_types_helper):
         go_types_helper,
         "func F(x int64, b bool) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    cl := func() int64 { return y }\n"
         "    if b {\n"
         "        fs[0] = cl\n"
@@ -22507,7 +22507,7 @@ def test_func_elem_index_write_tuple_swap_uses_pre_state(
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    cl := func() int64 { return y }\n"
         "    g := func() int64 { return x }\n"
         "    cl, fs[0] = g, cl\n"
@@ -22552,7 +22552,7 @@ def test_func_elem_index_write_keeps_records_after_reseat(
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    cl := func() int64 { return y }\n"
         "    fs[0] = cl\n"
         "    cl = func() int64 { return x }\n"
@@ -22573,7 +22573,7 @@ def test_func_elem_index_write_nil_stays_admitted(go_types_helper):
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    var y int64\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    fs[0] = func() int64 { return y }\n"
         "    fs[0] = nil\n"
         "    y = x\n"
@@ -22592,7 +22592,7 @@ def test_func_elem_index_write_call_result_admitted(go_types_helper):
         go_types_helper,
         "func mk(a int64) func() int64 { return nil }\n"
         "func F(x int64) int64 {\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    fs[0] = mk(x)\n"
         "    return fs[0]()\n"
         "}",
@@ -22610,7 +22610,7 @@ def test_func_elem_index_write_method_value_admitted(go_types_helper):
         "type S struct{}\n"
         "func (S) M() int64 { return 0 }\n"
         "func F(x int64) int64 {\n"
-        "    fs := []func() int64{}\n"
+        "    fs := []func() int64{nil}\n"
         "    s := S{}\n"
         "    fs[0] = s.M\n"
         "    return fs[0]()\n"
@@ -22727,6 +22727,202 @@ def test_func_elem_index_write_stays_closed(go_types_helper):
         "    var y int64\n"
         "    f := func() int64 { return y }\n"
         "    fm[\"k\"][0] = f\n"
+        "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_alias_share_write_seen_through_other_name(go_types_helper):
+    # `fs2 := fs` shares the backing — a store through one name lands
+    # in the other's element records, so `fs2[0]()` resolves the
+    # element's captured reads.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := fs\n"
+        "    fs[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := fs\n"
+        "    fs2[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_assignment_alias_share(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    var fs2 []func() int64\n"
+        "    fs2 = fs\n"
+        "    fs2[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_tuple_store_reads_old_records(go_types_helper):
+    # `cl, fs[0] = g, cl` — the parallel store adopts cl's OLD record
+    # (capturing `y`), so `fs[0]()` sees `y`'s deps, not `g`'s.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    cl := func() int64 { return y }\n"
+        "    fs := []func() int64{nil}\n"
+        "    g := func() int64 { return x }\n"
+        "    cl, fs[0] = g, cl\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_branch_local_capture_survives_merge(go_types_helper):
+    # `t` dies at the branch merge, but the stored literal still reads
+    # the value it held — the merged summary freezes its deps.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{nil}\n"
+        "    if x > 0 {\n"
+        "        t := x\n"
+        "        fs[0] = func() int64 { return t }\n"
+        "    }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_selector_rhs_store(go_types_helper):
+    # `fs[0] = s.f` — the stored element is the field's value: the
+    # literal's captures recorded under the member's identity adopt
+    # onto the container.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S struct { f func() int64 }\n"
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    s := S{}\n"
+        "    s.f = func() int64 { return y }\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs[0] = s.f\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_reseat_detaches_old_backing(go_types_helper):
+    # `fs = []func(){nil}` reseats fs — writes through the old sharer
+    # fs2 still reach fs2's call, and fs keeps its own empty slice.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := fs\n"
+        "    fs = []func() int64{nil}\n"
+        "    fs2[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_append_forms(go_types_helper):
+    # `fs = append(fs, func(){...})` — the appended literal's captures
+    # land on the container like a composite element.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs = append(fs, func() int64 { return y })\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `fs = append(fs, f)` — identifier element.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    f := func() int64 { return y }\n"
+        "    fs = append(fs, f)\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `fs2 := append(fs, f)` — the result may reuse the argument's
+    # array, so the fresh name shares the backing and its elements.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := append(fs, func() int64 { return y })\n"
+        "    y = x\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `append` on a non-func container stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    xs := []int64{}\n"
+        "    xs = append(xs, x)\n"
         "    return x\n"
         "}",
     )
