@@ -16425,6 +16425,28 @@ def test_bound_method_value_conditional_rebind_escapes_receiver(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_bound_method_value_chan_receiver_send_broadcasts(
+    go_types_helper,
+):
+    # `f := ch.Send` on a named `chan` type — the callee's send
+    # lands in a queue the caller shares, so a later `<-ch` observes
+    # the sent value's deps.
+    files = {
+        "a.go": "package p\n"
+        "type C chan int64\n"
+        "func (c C) Send(v int64) int64 { c <- v; return v }\n"
+        "func F(ch C, v int64) int64 {\n"
+        "\tf := ch.Send\n"
+        "\tf(v)\n"
+        "\tr := <-ch\n"
+        "\treturn r\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_package_function_var_call_records_imported_transfer(
     go_types_helper,
 ):

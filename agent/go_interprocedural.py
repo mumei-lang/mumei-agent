@@ -10560,6 +10560,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                     locals_[recv_id] = base | stored
+            elif (
+                recv_binding is not None
+                and recv_binding.type.kind == "chan"
+            ):
+                # `f := c.Send` on a named `chan` type — the callee's
+                # `c <- x` lands in the queue the caller shares.
+                # A parameter or callee-produced channel broadcasts
+                # like `G(ch)`'s sends; a `make(chan)` local folds
+                # into the binding's queue deps.
+                if (
+                    recv_id in params
+                    or recv_id in self.external_chan_locals
+                ):
+                    self.indirect_writes |= stored
+                locals_[recv_id] = (
+                    locals_.get(recv_id)
+                    or recv_deps
+                ) | stored
             if any(
                 self._external_chan_id(c.target) for c in callee.calls
             ):
