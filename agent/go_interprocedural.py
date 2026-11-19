@@ -3303,12 +3303,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 pool.extend(reversed(current.named_children))
         return frozenset(names)
 
-    def _call_result_struct_literal(self, node: Any) -> Any | None:
+    def _call_result_struct_literal(
+        self, node: Any, result_index: int = 0
+    ) -> Any | None:
         """(literal, file) for the `struct{...}` literal a `:=`/`var`
         RHS binds — a composite literal's own `type` child, or the
-        result signature literal of a direct local call's single
-        anonymous-struct result. The signature literal lives in the
-        callee's file; a composite literal in the current one."""
+        result signature literal of a direct local call's anonymous-
+        struct result at `result_index` (`_, s := G()` picks slot 1).
+        The signature literal lives in the callee's file; a composite
+        literal in the current one."""
         inner = node
         while (
             inner is not None
@@ -3335,9 +3338,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         target = self.functions.get(call.target)
         if (
             target is None
-            or len(target.results) != 1
-            or target.results[0].type.kind != "struct"
-            or target.results[0].type.type_id
+            or len(target.results) <= result_index
+            or target.results[result_index].type.kind != "struct"
+            or target.results[result_index].type.type_id
         ):
             return None
         fn_binding = self.bindings.get(target.binding_id)
@@ -3364,11 +3367,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for c in result_node.named_children
                 if c.type == "parameter_declaration"
             ]
-            literal = (
-                decls[0].child_by_field_name("type")
-                if len(decls) == 1
-                else None
-            )
+            # `(a int64, s struct{ V int64 })` — slot i's type lives on
+            # the declaration that covers it; a declaration spans one
+            # result per name, or exactly one when it carries none.
+            literal = None
+            slot = result_index
+            for param_decl in decls:
+                width = (
+                    sum(
+                        1
+                        for c in param_decl.named_children
+                        if c.type == "identifier"
+                    )
+                    or 1
+                )
+                if slot < width:
+                    literal = param_decl.child_by_field_name("type")
+                    break
+                slot -= width
         if literal is None or literal.type != "struct_type":
             return None
         file = (
@@ -5287,9 +5303,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and not binding.type.type_id
                 ):
                     lit_result = (
-                        self._call_result_struct_literal(rights[i])
-                        if i < len(rights)
-                        else None
+                        self._call_result_struct_literal(rights[0], i)
+                        if len(lefts) != len(rights)
+                        else self._call_result_struct_literal(
+                            rights[i]
+                        )
                     )
                     anchor = (
                         FileSpan(
@@ -5670,10 +5688,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding.type.kind == "struct"
                         and not binding.type.type_id
                         and spec.child_by_field_name("type") is None
-                        and i < len(value_nodes)
+                        and (i < len(value_nodes) or multi)
                     ):
-                        lit_result = self._call_result_struct_literal(
-                            value_nodes[i]
+                        lit_result = (
+                            self._call_result_struct_literal(
+                                value_nodes[0], i
+                            )
+                            if multi
+                            else self._call_result_struct_literal(
+                                value_nodes[i]
+                            )
                         )
                         if lit_result is not None:
                             self.anon_struct_anchor[binding.id] = (

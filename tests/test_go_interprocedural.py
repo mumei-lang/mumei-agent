@@ -2929,6 +2929,47 @@ def test_multi_result_chan_slot_var_form_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_multi_result_anon_struct_slot_fields(go_types_helper):
+    # `_, s := G(x)` — slot 1's anonymous struct declares its fields
+    # inside G's result list; the bound name anchors there so `s.V`
+    # reads the conflated result dependencies.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) (int64, struct{ V int64 }) {\n"
+        "\treturn x, struct{ V int64 }{V: x}\n}\n"
+        "func F(a int64) int64 {\n"
+        "\t_, s := G(a)\n"
+        "\treturn s.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_anon_struct_named_and_var_forms(go_types_helper):
+    # Named result declarations (`n int64, s struct{...}`) map slots
+    # across declarations; `var _, s = G(x)` binds the same way.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) (n int64, s struct{ V int64 }) {\n"
+        "\tn = x\n"
+        "\ts.V = x\n"
+        "\treturn\n}\n"
+        "func F(a int64) int64 {\n"
+        "\tvar _, s = G(a)\n"
+        "\treturn s.V\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_multi_result_arity_mismatch_stays_closed(go_types_helper):
     # `a, b := f()` admits only when the record's declared arity equals
     # the tuple width — a forged `results: 3` on a two-wide unpack must
