@@ -1476,7 +1476,7 @@ def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_hel
 def test_opaque_callee_blocks_callers_but_not_an_unrelated_function(go_types_helper):
     data = unit(
         go_types_helper,
-        "var ch chan int64; func Bad(x int64)int64{select{case v:=<-ch:return v;default:return x}}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
+        "func Bad(x int64)int64{defer func(){}(); return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
     )
     assert not named(*data).available
     assert named(*data, "Good").available
@@ -13400,7 +13400,9 @@ def test_channel_len_through_alias(go_types_helper):
 def test_channel_boundaries_stay_closed(go_types_helper):
     # A send through a selector (`p.C <- x`) admits under the same
     # external model a `chan` parameter or package var uses; only
-    # `make([]T)` and `select` (no CFG) stay opaque here.
+    # `make([]T)` stays opaque here. A select is modelled like an
+    # if/else chain whose guards are comm ops: the receive's name
+    # takes the queue's deps and every alternative joins by union.
     slice_make = named(
         *unit(
             go_types_helper,
@@ -13418,7 +13420,8 @@ def test_channel_boundaries_stay_closed(go_types_helper):
             "\tdefault:\n\t\treturn 0\n\t}\n}\n",
         )
     )
-    assert not select_case.available
+    assert select_case.available
+    assert select_case.return_dependencies == frozenset({0})
 
 
 def test_channel_non_scalar_element_stays_closed(go_types_helper):
@@ -13551,9 +13554,12 @@ def test_chan_parameter_records_effects_and_staleness(go_types_helper):
 
 
 def test_chan_parameter_boundaries_stay_closed(go_types_helper):
-    # Non-scalar elements, a receive-valued binding and select all
-    # stay closed. A scalar `chan` result (`Res`) admits — ops on
-    # the bound name follow the external queue model.
+    # Non-scalar elements and a receive-valued binding stay closed.
+    # A scalar `chan` result (`Res`) admits — ops on the bound name
+    # follow the external queue model — and a select over a `chan`
+    # parameter admits: each comm case binds the queue's deps and
+    # the alternatives union back, so `v` reads the channel's dep
+    # and `x` its own.
     files = {
         "a.go": "package p\n"
         "func Ptr(ch chan *int64) int64 { return 0 }\n"
@@ -13580,7 +13586,8 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     assert not results["Ptr"].available
     assert results["Res"].available
     assert not results["Alias"].available
-    assert not results["Sel"].available
+    assert results["Sel"].available
+    assert results["Sel"].return_dependencies == frozenset({0, 1})
 
 
 def test_package_channel_send_recv_close_admitted(go_types_helper):
@@ -15809,3 +15816,103 @@ def test_chan_result_rebind_passthrough_resolves_pre_state(
     assert result.available
     assert result.return_dependencies == frozenset({0, 2})
     assert result.effects == "unknown"
+
+
+def test_select_receive_binds_queue_deps(go_types_helper):
+    # `v := <-ch` inside a select binds the queue's deps like any
+    # other receive; the alternative joins back by union.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64) int64 {\n"
+            "\tvar r int64\n"
+            "\tselect {\n"
+            "\tcase x := <-ch:\n"
+            "\t\tr = x\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_select_comma_ok_and_assign_forms(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64) int64 {\n"
+            "\tvar r int64\n"
+            "\tselect {\n"
+            "\tcase x, ok := <-ch:\n"
+            "\t\tif ok {\n"
+            "\t\t\tr = x\n"
+            "\t\t}\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_select_send_case_admits(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64, y int64) int64 {\n"
+            "\tselect {\n"
+            "\tcase ch <- y:\n"
+            "\t}\n"
+            "\treturn y\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_select_non_identifier_store_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64, st struct{ V int64 }) int64 {\n"
+            "\tselect {\n"
+            "\tcase st.V = <-ch:\n"
+            "\t}\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert not result.available
+
+
+def test_select_break_exits_the_select(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64) int64 {\n"
+            "\tvar r int64\n"
+            "\tfor {\n"
+            "\t\tselect {\n"
+            "\t\tcase x := <-ch:\n"
+            "\t\t\tr = x\n"
+            "\t\t\tbreak\n"
+            "\t\t}\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_empty_select_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tselect {}\n"
+            "\treturn x\n}\n",
+        )
+    )
+    assert not result.available

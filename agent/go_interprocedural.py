@@ -2836,6 +2836,59 @@ member, or one explicit dereference of one (`(*t).F` — the same
         operator = node.child_by_field_name("operator")
         return operator is not None and operator.type == "<-"
 
+    def _select_receive(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        conditional: bool,
+    ) -> None:
+        """A `communication_case` receive — `v := <-ch`, `v, ok := <-ch`,
+        `v = <-ch`, `v, ok = <-ch` or a bare `<-ch`. The receive
+        evaluates like any `<-` expression (the operand gates the same
+        way); each bound name takes the receive's deps — the comma-ok
+        flag conservatively shares them, matching `v, ok := <-ch`.
+        Only bare-identifier stores admit: `s.V = <-ch` stays closed.
+        """
+        lefts: list = []
+        recv = None
+        for child in node.children:
+            if child.type == "expression_list":
+                lefts = _children(child)
+            elif child.is_named:
+                recv = child
+        if recv is None:
+            raise _Unsupported("unsupported_statement", _span(node))
+        recv_deps = self.expression(
+            recv, fn, params, locals_, transfers, count, 0
+        )
+        for lhs in lefts:
+            if lhs.text == b"_":
+                continue
+            if lhs.type != "identifier":
+                raise _Unsupported("unsupported_statement", _span(node))
+            binding = self.bindings_by_span.get(self.node_key(lhs))
+            if binding is None:
+                ref = self.references.get(self.node_key(lhs))
+                if ref is not None and ref.binding_id:
+                    binding = self.bindings.get(ref.binding_id)
+            if binding is None or binding.type.kind not in {
+                "integer",
+                "boolean",
+                "pointer",
+            }:
+                raise _Unsupported("binding_unavailable", _span(node))
+            # `:=` binds fresh names (and a reused one keeps the
+            # skipped path's value under `conditional`), `=` stores
+            # into the existing binding — `_store` already gives the
+            # may-skip union semantics both need inside a case.
+            self._store(
+                locals_, params, binding.id, recv_deps, conditional
+            )
+
     def _is_chan_binding(self, binding_id: str) -> bool:
         """The bound name's declared type is a channel."""
         binding = self.bindings.get(binding_id)
@@ -7186,6 +7239,57 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.expression(
                 inner[0], fn, params, locals_, transfers, count, 0
             )
+            return
+        if kind == "select_statement":
+            # A select is a nondeterministic choice: each case's
+            # communication op and body run in a fresh alternative
+            # scope and every alternative joins back by union — like
+            # an if/else chain whose guards are comm ops. `break`
+            # inside a select body exits the select itself, matching
+            # the switch frames. An empty `select {}` blocks forever —
+            # it never reaches the following statements, so it stays
+            # outside the fragment.
+            clauses = [
+                c
+                for c in node.named_children
+                if c.type in {"communication_case", "default_case"}
+            ]
+            if not clauses:
+                raise _Unsupported("unsupported_statement", _span(node))
+            frame = {"kind": "switch", "exited": False}
+            self.frames.append(frame)
+            try:
+                for clause in clauses:
+                    branch = dict(locals_)
+                    ptr_branch = dict(self._ptr_deps)
+                    for sub in clause.named_children:
+                        if sub.type == "send_statement":
+                            self._branch_statement(
+                                sub, fn, params, branch, transfers,
+                                count, deps, saw_return, conditional,
+                            )
+                        elif sub.type == "receive_statement":
+                            self._select_receive(
+                                sub, fn, params, branch, transfers,
+                                count, conditional,
+                            )
+                    body = next(
+                        (
+                            c
+                            for c in clause.named_children
+                            if c.type == "statement_list"
+                        ),
+                        None,
+                    )
+                    self._branch_sequence(
+                        _children(body) if body is not None else [],
+                        fn, params, branch, transfers,
+                        count, deps, saw_return, conditional,
+                    )
+                    self._join(locals_, branch, params)
+                    self._join_ptr(ptr_branch, params)
+            finally:
+                self.frames.pop()
             return
         if kind == "send_statement":
             # `ch <- x` on a local channel — the queue is one
