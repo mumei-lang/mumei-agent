@@ -9242,18 +9242,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.bindings.get(ref.binding_id)
             if ref is not None else None
         )
+        package_var = (
+            binding is not None
+            and binding.kind == "variable"
+            and self._package_level(binding)
+        )
         if (
             binding is None
             or binding.type.kind != "function"
             or (
                 ref.binding_id not in locals_
                 and ref.binding_id not in params
+                and not package_var
             )
         ):
-            # Only a function-local callee admits: a package-level
-            # `var Alias = Id` can be reassigned by any caller, so
-            # invoking it is an opaque external call — it keeps the
-            # `indirect_or_selector` record closed like before.
+            # Only a function-local callee or a package-level `var`
+            # admits: a package-level `var Alias = Id` can be
+            # reassigned by any caller, so invoking it is an opaque
+            # external call below — a function-typed package var
+            # reads external state dep-free like a member read and
+            # always records the external effect (its callee is
+            # unknown to the caller).
             raise _Unsupported("unsupported_expression", _span(node))
         captured = self.closure_captures.get(ref.binding_id)
         if captured is not None:
@@ -9318,6 +9327,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if (
             ref.binding_id in self.pointee_closures
             or chan_captured_external
+            or package_var
         ):
             transfers.append(
                 CallTransfer(

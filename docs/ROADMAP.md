@@ -2656,9 +2656,14 @@ call `h(args)` admits with deps(captured) ∪ deps(args) ∪
 indirect writes, and a literal that captures a pointer-typed
 enclosing binding records an imported transfer on the bound
 name's identity (effects unknown — the captured pointer may aim
-at caller memory). Calls or writes inside the literal,
-selector/computed callees, function-typed parameters and
-package-level `var Alias = Id` callables stay closed),
+at caller memory). A package-level `var Alias = Id` call
+admits as an opaque external call — the callee is
+reassignable by any caller, so `Alias(args)` is dep-free
+for the callee, unions the args and indirect writes, and
+always records an imported transfer on the var's real
+binding identity (effects unknown). Calls or writes inside
+the literal, selector/computed callees and function-typed
+parameters stay closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies

@@ -162,7 +162,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
     [
         "func Ext(x int64) int64; func F(x int64) int64 { return Ext(x) }",
         "func F(f func(int64) int64, x int64) int64 { return f(x) }",
-        "func Id(x int64) int64 {return x}; var Alias = Id; func F(x int64) int64 {return Alias(x)}",
         "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
         "func F(x int64) int64 {return 1.0}",
@@ -16053,3 +16052,74 @@ def test_select_pointer_store_does_not_leak_into_later_clause(
     )
     assert store_read.deps == frozenset({0})
     assert result.return_dependencies == frozenset({0})
+
+
+def test_package_function_var_call_records_imported_transfer(
+    go_types_helper,
+):
+    # `var Alias = Id` is package state any caller can rebind —
+    # invoking it is an opaque external call: dep-free for the
+    # callee, args evaluated, imported transfer on the var's real
+    # binding identity.
+    files = {
+        "a.go": "package p\n"
+        "func Id(v int64) int64 { return v }\n"
+        "var Alias = Id\n"
+        "func F(x int64) int64 { return Alias(x) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    (call,) = [c for c in result.calls if c.imported]
+    known = {b.id for b in snapshot.bindings}
+    assert call.target in known
+    assert summaries.stale_dependents(known) == frozenset()
+
+
+def test_package_function_var_call_unions_indirect_writes(
+    go_types_helper,
+):
+    # The callee is unknown — like every opaque call the result
+    # unions indirect writes it could observe.
+    files = {
+        "a.go": "package p\n"
+        "func Id(v int64) int64 { return v }\n"
+        "var Alias = Id\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\tch <- x\n"
+        "\treturn Alias(0)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_package_function_var_call_under_branch_stays_closed(
+    go_types_helper,
+):
+    # A maybe-skipped call to a package var is still an external
+    # call — branches already record calls unconditionally, so the
+    # effect admission matches local calls under branches.
+    files = {
+        "a.go": "package p\n"
+        "func Id(v int64) int64 { return v }\n"
+        "var Alias = Id\n"
+        "func F(c bool, x int64) int64 {\n"
+        "\tif c {\n"
+        "\t\treturn Alias(x)\n"
+        "\t}\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
