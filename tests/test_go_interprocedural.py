@@ -13080,21 +13080,48 @@ def test_local_channel_alias_binds_stay_closed(go_types_helper):
         "\tch := make(chan int64)\n"
         "\tch2 := make(chan int64)\n"
         "\tch2 = nil\n\tch2 <- x\n\treturn <-ch\n}\n",
-        "func F(x int64, b bool) int64 {\n"
-        "\tch := make(chan int64)\n"
-        "\tch2 := make(chan int64)\n"
-        "\tch3 := make(chan int64)\n"
-        "\tif b {\n\t\tch2 = ch3\n\t}\n"
-        "\tch2 <- x\n\treturn <-ch\n}\n",
-        "func F(x int64, b bool) int64 {\n"
-        "\tch := make(chan int64)\n"
-        "\tch2 := ch\n"
-        "\tch3 := make(chan int64)\n"
-        "\tif b {\n\t\tch2 = ch3\n\t}\n"
-        "\tch2 <- x\n\treturn <-ch\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available
+
+
+def test_local_channel_conditional_alias_rebind_detaches(
+    go_types_helper,
+):
+    # `if b { ch2 = ch3 }` — ch2 may name either queue after the
+    # join, so it detaches to an external queue and the send
+    # broadcasts. A receive through an unrelated local name keeps
+    # its own contents; a name that may have been `ch2`'s queue
+    # reads the broadcast too.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := make(chan int64)\n"
+            "\tch3 := make(chan int64)\n"
+            "\tif b {\n\t\tch2 = ch3\n\t}\n"
+            "\tch2 <- x\n\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+    # `ch2 := ch` means ch2 may still name ch's queue — ch is
+    # promoted external so `<-ch` unions the broadcast send.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, b bool) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tch2 := ch\n"
+            "\tch3 := make(chan int64)\n"
+            "\tif b {\n\t\tch2 = ch3\n\t}\n"
+            "\tch2 <- x\n\treturn <-ch\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_local_channel_alias_send_observed_through_source(
@@ -15734,11 +15761,10 @@ def test_chan_result_rebind_in_tuple_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
-def test_chan_result_rebind_under_branch_stays_closed(
-    go_types_helper,
-):
-    # A conditional `ch = g()` could mean either queue — like a
-    # conditional alias reseat, it stays closed.
+def test_chan_result_rebind_under_branch_admitted(go_types_helper):
+    # A conditional `ch = g()` could mean either queue — the name
+    # detaches to an external queue so sends broadcast and a receive
+    # covers either path's contents.
     files = {
         "a.go": "package p\n"
         "func g() chan int64 { return make(chan int64) }\n"
@@ -15754,7 +15780,109 @@ def test_chan_result_rebind_under_branch_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_chan_alias_conditional_rebind_unions_queues(go_types_helper):
+    # `if c { ch = q }` — after the join `ch` can name EITHER q's
+    # queue or the local one, so the receive must union both: the
+    # local queue's `x` (untaken) and q's param slot (taken).
+    files = {
+        "a.go": "package p\n"
+        "func F(c bool, x int64, q chan int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tif c {\n"
+        "\t\tch = q\n"
+        "\t}\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_conditional_rebind_passthrough(go_types_helper):
+    # `if c { ch = g(q) }` with `g` a passthrough — the taken path
+    # seats `ch` on q's queue; the merged model covers both.
+    files = {
+        "a.go": "package p\n"
+        "func g(p chan int64) chan int64 { return p }\n"
+        "func F(c bool, x int64, q chan int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tif c {\n"
+        "\t\tch = g(q)\n"
+        "\t}\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+    assert result.effects == "unknown"
+
+
+def test_chan_conditional_make_over_aliased_name(go_types_helper):
+    # `if c { ch = make(chan int64, 1) }` where `ch` still aliases
+    # `q` — the taken path seats a fresh queue, the untaken path
+    # keeps q's; both are promoted external so a later send
+    # broadcasts and a receive unions the queues' deps.
+    files = {
+        "a.go": "package p\n"
+        "func F(c bool, x int64, q chan int64) int64 {\n"
+        "\tch := q\n"
+        "\tif c {\n"
+        "\t\tch = make(chan int64, 1)\n"
+        "\t}\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+    assert result.effects == "unknown"
+
+
+def test_chan_conditional_rebind_old_queue_alias_still_reads(
+    go_types_helper,
+):
+    # `z := t` keeps the old queue's identity after a conditional
+    # `ch = q` detached `ch` — a send through `ch` may still land in
+    # `t`'s queue (untaken path), and `<-z` must see it via the
+    # external broadcast.
+    files = {
+        "a.go": "package p\n"
+        "func F(c bool, x int64, q chan int64) int64 {\n"
+        "\tt := make(chan int64, 1)\n"
+        "\tz := t\n"
+        "\tch := t\n"
+        "\tif c {\n"
+        "\t\tch = q\n"
+        "\t}\n"
+        "\tch <- x\n"
+        "\treturn <-z\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # On the untaken path `ch <- x` lands in `t`'s queue which `z`
+    # still names — the send's broadcast reaches `<-z`.
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
 
 
 

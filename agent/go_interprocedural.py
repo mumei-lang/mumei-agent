@@ -6232,18 +6232,90 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "binding_unavailable", _span(node)
                         )
                     if conditional or self._may_skip > 0:
-                        # A maybe-skipped rebind cannot pick "either
-                        # queue": the alias change is conditional, so
-                        # only a fresh `make` on an unaliased name
-                        # admits — the dep union covers both queues.
-                        if (
-                            chan_alias is not None
-                            or call_result
-                            or ref.binding_id in self.chan_aliases
+                        # A maybe-skipped rebind can leave the name
+                        # meaning EITHER its old queue or the new
+                        # one, and the conflated dep set has no
+                        # "either queue" union. A fresh `make` on an
+                        # unaliased name admits as before — the
+                        # slot's dep union covers both queues —
+                        # since every name resolving to it converges
+                        # on the same slot. Any other shape (an alias
+                        # reseat `ch = q`, a passthrough `ch = g(q)`,
+                        # an external `ch = g()`, or a `make` over a
+                        # currently-aliased name) detaches the name
+                        # into an external queue: its slot unions the
+                        # old queue's contents with the RHS deps, and
+                        # every queue it could still mean is promoted
+                        # external so sends broadcast and reads union
+                        # `indirect_writes` — a name that kept the
+                        # old queue's identity under another alias
+                        # (`z := t_old` before `ch = q`) still sees
+                        # writes the untaken path delivered there.
+                        if fresh_make and (
+                            ref.binding_id not in self.chan_aliases
                         ):
-                            raise _Unsupported(
-                                "binding_unavailable", _span(node)
+                            pass
+                        else:
+                            passthrough = (
+                                call_result_targets[i]
+                                if call_result
+                                else None
                             )
+                            target = (
+                                chan_alias
+                                if chan_alias is not None
+                                else passthrough
+                            )
+                            if (
+                                target is None
+                                and not call_result
+                                and not fresh_make
+                            ):
+                                raise _Unsupported(
+                                    "binding_unavailable", _span(node)
+                                )
+                            root_before = self._chan_root(
+                                ref.binding_id
+                            )
+                            old_queue = locals_.get(root_before)
+                            if (
+                                old_queue is None
+                                and root_before in params
+                            ):
+                                old_queue = frozenset(
+                                    {params[root_before]}
+                                )
+                            self.chan_aliases.pop(
+                                ref.binding_id, None
+                            )
+                            self.external_chan_locals.add(
+                                ref.binding_id
+                            )
+                            if root_before != ref.binding_id:
+                                self.external_chan_locals.add(
+                                    root_before
+                                )
+                            if (
+                                target is not None
+                                and target.id != ref.binding_id
+                            ):
+                                self.external_chan_locals.add(
+                                    target.id
+                                )
+                            base = locals_.get(ref.binding_id)
+                            if (
+                                base is None
+                                and ref.binding_id in params
+                            ):
+                                base = frozenset(
+                                    {params[ref.binding_id]}
+                                )
+                            locals_[ref.binding_id] = (
+                                (base or frozenset())
+                                | (old_queue or frozenset())
+                                | value
+                            )
+                            continue
                     if chan_alias is not None:
                         self.chan_aliases[ref.binding_id] = chan_alias.id
                         # A reseat redirects only the name — the
