@@ -3560,10 +3560,10 @@ tracked composite. `&st` and `&st.V` therefore raise
 parens/selectors/indexes), and a chain through a *pointer-typed*
 intermediate field (`st.A.N` where `A *P2`) stays closed — the
 deref reads caller memory the conflated set cannot represent.
-Composite-typed package globals, method values (`f := st.M`),
-`st[i]` and `*st.V` stay closed. Direct method *calls* (`st.M(x)`,
-`T.M(st, x)`) admit in the Go interprocedural frontier's
-method-call slice below.
+Composite-typed package globals, `st[i]` and `*st.V` stay closed.
+Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
+interprocedural frontier's method-call slice below; bound method
+*values* (`f := st.M`) admit in the slice after it.
 
 ### C07 per-statement read attribution
 
@@ -3674,13 +3674,35 @@ interface underlyings, type parameters and instantiated types), the
 callee must be non-generic, non-variadic and single-result like
 every other admitted function, and the receiver's declared fact must
 sit in the admitted kinds (scalar, pointer, struct, scalar-element
-`chan`). A bound method *value* (`f := st.M`) and result-less or
-generic/variadic/interface-receiver methods stay closed; method
-calls on imported named types keep the `direct_import` path. An
-effectful pointer-receiver callee conservatively folds the write
-deps into the receiver binding — `st.M()` on a value variable
-auto-takes `&st`, so the fold applies even when the operand isn't
-`&st`-shaped.
+`chan`). Result-less or generic/variadic/interface-receiver
+methods stay closed; method calls on imported named types keep the
+`direct_import` path. An effectful pointer-receiver callee
+conservatively folds the write deps into the receiver binding —
+`st.M()` on a value variable auto-takes `&st`, so the fold applies
+even when the operand isn't `&st`-shaped.
+
+### Go deep-analysis: bound method values (`f := st.M`)
+
+`f := st.M`, `var f = st.M` and `f = st.M` record the
+`(method, receiver)` binding pair under the bound name — the
+selector's field resolves to a same-package method whose receiver
+operand is a bare identifier. A `g := f`/`var g = f`/`g = f`
+identifier copy propagates the pair like closure captures, and any
+other RHS clears it. A `f(args)` call then resolves through the
+method's summary exactly like `st.M(args)`: the recorded receiver
+re-resolves at the CALL site (a `st = …` reseat between bind and
+call tracks the current set), sits at actuals index 0, and an
+effectful `*T`-receiver callee folds its write deps back into the
+receiver binding — into `indirect_writes` plus escaped bindings
+when the receiver itself is a bound pointer.
+
+A conditional rebind (`if c { f = t.M }`) drops the pair rather
+than pick an alternative — the call then runs opaque like any
+unrecorded local func var, unioning every may-rebind's receiver
+deps. `St.M` (a method *expression*, whose operand names a type,
+not a variable) and a computed receiver (`g().M`) record nothing —
+calls through them keep the `indirect_or_selector` record closed
+like before.
 
 ### C06 imported method calls on concrete named types
 

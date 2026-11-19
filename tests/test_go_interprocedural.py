@@ -6509,17 +6509,13 @@ def test_local_struct_value_pointer_leaf_field(
 def test_local_struct_value_boundaries(
     go_types_helper,
 ):
-    # Named slices and bound method VALUES stay closed (a direct
-    # `st.M()` call admits through the method-call slice — covered
-    # below; anonymous `struct{...}` values admit — covered by
-    # the dedicated anonymous-struct tests).
+    # Named slices stay closed (a direct `st.M()` call admits through
+    # the method-call slice and `f := st.M` through bound method
+    # values — both covered by their own tests; anonymous
+    # `struct{...}` values admit — covered by the dedicated
+    # anonymous-struct tests).
     for decl, body in [
         ("type S []int64", "sl := S{x}; return sl[0]"),
-        (
-            "type P struct{ V int64 }\n"
-            "func (P) M() int64 { return 0 }",
-            "st := P{V: x}; f := st.M; return f()",
-        ),
     ]:
         files = {
             "a.go": f"package p\n{decl}\n"
@@ -16207,6 +16203,248 @@ def test_method_expr_chan_result_passthrough_skips_receiver(
     result = named_package(files, snapshot, summaries, "F")
     assert result.available
     assert result.return_dependencies == frozenset({2, 3})
+
+
+def test_bound_method_value_call_resolves_through_summary(go_types_helper):
+    # `f := s.M; f(2)` — the bound receiver sits at actuals[0] like
+    # `s.M(2)`, so the callee's `st.V + x` reports the deps seeded
+    # into `s`, not the argument's.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := s.M\n"
+        "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_bound_method_value_receiver_freezes_at_bind(
+    go_types_helper,
+):
+    # A Go method value COPIES its receiver at bind time — `s = …`
+    # after `f := s.M` does not change which receiver `f(2)` calls:
+    # the deps stay the ORIGINAL receiver's ({0}), not the reseat's.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := s.M\n"
+        "\ts = St{V: b}\n"
+        "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_method_value_copy_propagates(go_types_helper):
+    # `g := f` where f is a bound method value copies the
+    # (method, receiver) pair — `g(2)` resolves through M's summary.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := s.M\n"
+        "\tg := f\n"
+        "\treturn g(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_method_value_var_and_assign_forms(go_types_helper):
+    # `var f = s.M` binds like `f := s.M`; `f = t.M` rebinds.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tvar f = s.M\n"
+        "\tt := St{V: b}\n"
+        "\tf = t.M\n"
+        "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_bound_method_value_pointer_receiver_writes_back(
+    go_types_helper,
+):
+    # `f := s.M` on a `*St` method captures `&s` — the callee's field
+    # write folds into the receiver binding, so `s.V` afterwards
+    # carries every actual.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st *St) M(x int64) int64 { st.V = x; return st.V }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := s.M\n"
+        "\tf(b)\n"
+        "\treturn s.V\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_type_operand_stays_closed(go_types_helper):
+    # `f := St.M` is a method EXPRESSION — the type-name operand is
+    # not a variable receiver, so a call through `f` stays closed.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := St.M\n"
+        "\treturn f(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+
+
+def test_bound_method_value_conditional_rebind_stays_closed(
+    go_types_helper,
+):
+    # `f = t.M` under a branch only MAY reseat f — the old record's
+    # alternative stays live, so the binding drops its pair and the
+    # call runs opaque like any unrecorded local func var: result
+    # deps union every receiver alternative {0,1}.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := s.M\n"
+        "\tif b > 0 {\n"
+        "\t\tt := St{V: b}\n"
+        "\t\tf = t.M\n"
+        "\t}\n"
+        "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_parallel_swap_uses_prestate(
+    go_types_helper,
+):
+    # `f, g = g, f` swaps two bound method values — the copy reads
+    # the map from BEFORE either store, so `g(2)` resolves f's OLD
+    # (method, receiver) pair, receiver deps {0} not {1}.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tt := St{V: b}\n"
+        "\tf := s.M\n"
+        "\tg := t.M\n"
+        "\tf, g = g, f\n"
+        "\treturn g(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_method_value_conditional_rebind_drops_captures(
+    go_types_helper,
+):
+    # A conditional `f = s.M` over a literal-bound `f` leaves BOTH
+    # callees possible — the captures must drop with the record so
+    # the call runs opaque and unions every alternative's deps.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64, c int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := func(x int64) int64 { return b }\n"
+        "\tif c > 0 {\n"
+        "\t\tf = s.M\n"
+        "\t}\n"
+        "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_conditional_rebind_escapes_receiver(
+    go_types_helper,
+):
+    # A conditional method switch drops the record — but the OLD
+    # `*T`-receiver method may still run on the untaken path, so its
+    # writes must still fold into the receiver binding. `s.V` after
+    # the opaque call observes the callee's stored deps.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st *St) Set(v int64) { st.V = v }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tt := St{V: b}\n"
+        "\tf := s.Set\n"
+        "\tif b > 0 {\n"
+        "\t\tf = t.Set\n"
+        "\t}\n"
+        "\tf(b)\n"
+        "\treturn s.V\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_chan_receiver_send_broadcasts(
+    go_types_helper,
+):
+    # `f := ch.Send` on a named `chan` type — the callee's send
+    # lands in a queue the caller shares, so a later `<-ch` observes
+    # the sent value's deps.
+    files = {
+        "a.go": "package p\n"
+        "type C chan int64\n"
+        "func (c C) Send(v int64) int64 { c <- v; return v }\n"
+        "func F(ch C, v int64) int64 {\n"
+        "\tf := ch.Send\n"
+        "\tf(v)\n"
+        "\tr := <-ch\n"
+        "\treturn r\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_package_function_var_call_records_imported_transfer(
