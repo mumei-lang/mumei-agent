@@ -4249,3 +4249,83 @@ def test_file_store_dir_fsync_unsupported_is_tolerated(
     sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
     store.publish(sequence)
     assert store.current == sequence
+
+
+def test_sequence_reconcile_identical_is_idempotent():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    assert sequence.reconcile(sequence) is sequence
+
+
+def test_sequence_reconcile_accepts_strict_extension():
+    base = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    extended = base.begin_attempt().reconcile_report(
+        AttemptRecord(FINGERPRINT, 2, 10, PREFIXES["ready"])
+    )
+    assert base.reconcile(extended) is extended
+
+
+def test_sequence_reconcile_accepts_prefix_candidate():
+    base = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    extended = base.begin_attempt()
+    assert extended.reconcile(base) is extended
+
+
+def test_sequence_reconcile_rejects_divergent_fork():
+    base = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    first = base.reconcile_report(
+        AttemptRecord(FINGERPRINT, 1, 10, PREFIXES["exited"])
+    )
+    second = base.reconcile_report(
+        AttemptRecord(FINGERPRINT, 1, 10, PREFIXES["failed"])
+    )
+    with pytest.raises(ValueError):
+        first.reconcile(second)
+    with pytest.raises(ValueError):
+        second.reconcile(first)
+
+
+def test_sequence_reconcile_rejects_competing_selected_results():
+    exited = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    output = output_snapshot(exited.current)
+    closed = exited.select_result(output)
+    reopened = AttemptSequence(
+        FINGERPRINT,
+        10,
+        (sequence_record("exited"), sequence_record("ready", 2)),
+    )
+    with pytest.raises(ValueError):
+        closed.reconcile(reopened)
+
+
+def test_sequence_reconcile_rejects_foreign_fingerprint():
+    first = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    second = AttemptSequence(
+        "b" * 64, 10, (AttemptRecord("b" * 64, 1, 10, PREFIXES["exited"]),)
+    )
+    with pytest.raises(ValueError):
+        first.reconcile(second)
+
+
+def test_sequence_reconcile_rejects_stamp_regression():
+    exited = AttemptSequence(
+        FINGERPRINT, 10, (sequence_record("exited"),), report_stamp=5
+    )
+    stale = AttemptSequence(
+        FINGERPRINT, 10, (sequence_record("exited"),), report_stamp=3
+    )
+    assert exited.reconcile(stale) is exited
+
+
+def test_sequence_reconcile_closed_beats_open_prefix():
+    exited = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    output = output_snapshot(exited.current)
+    closed = exited.select_result(output)
+    assert closed.reconcile(exited) is closed
+    assert exited.reconcile(closed) is closed
+
+
+@pytest.mark.parametrize("value", [None, FINGERPRINT, (), record()])
+def test_sequence_reconcile_rejects_non_sequences(value):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(ValueError):
+        sequence.reconcile(value)

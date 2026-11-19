@@ -430,6 +430,30 @@ class AttemptSequence:
             return result
         return replace(result, report_stamp=report_stamp)
 
+    def reconcile(self, incoming: "AttemptSequence") -> "AttemptSequence":
+        """Merge an independently-published candidate against this value.
+
+        Two callers that each extended an older common prefix can diverge —
+        publication serializes writes, not the histories behind them. The
+        declared arbitration is lineage order only: an identical or
+        prefix-shorter candidate keeps this value, a strict extension
+        returns the candidate, and every true fork — different records at a
+        shared ordinal, competing selected results, a stamp regression or a
+        foreign request binding — fails closed. This arbitrates between
+        VALUES; which side was the canonical store's own stays a host duty.
+        """
+        if type(incoming) is not AttemptSequence:
+            raise ValueError(
+                "sequence reconciliation requires an attempt sequence"
+            )
+        if incoming == self:
+            return self
+        if _is_lineage_extension(self, incoming):
+            return incoming
+        if _is_lineage_extension(incoming, self):
+            return self
+        raise ValueError("attempt sequences diverged")
+
     def request_execution(self) -> "AttemptExecutionRequest":
         """Declare the current reserved attempt runnable; does not start it.
 
