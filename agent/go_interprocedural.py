@@ -3238,6 +3238,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and fact.elem.kind in {"integer", "boolean"}
         )
 
+    def _calls_touch_external_chan(
+        self, calls: Iterable[CallTransfer]
+    ) -> bool:
+        """A recorded transfer — or a local callee reachable through
+        one — operates on a channel outside the caller's bindings.
+        `mid(v) { inner(v) }` where `inner` sends on `GC` leaves the
+        `GC` transfer inside `inner`'s summary, not `mid`'s, so the
+        check walks the local call graph with a `seen` bound."""
+        seen: set[str] = set()
+        stack = list(calls)
+        while stack:
+            c = stack.pop()
+            if self._external_chan_id(c.target):
+                return True
+            if c.target in seen or c.target not in self.functions:
+                continue
+            seen.add(c.target)
+            nested = self.summarize(c.target)
+            if nested is not None and nested.available:
+                stack.extend(nested.calls)
+        return False
+
     def _external_chan_id(self, target_id: str) -> bool:
         """A transfer target naming an external `chan` operand —
         a package-level chan var's binding, an imported member, or
@@ -10926,10 +10948,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # binding, but `GC` is no argument, so the call's
             # deps broadcast into `indirect_writes` for a later
             # `<-GC`/`range GC` to observe.
-            if any(
-                self._external_chan_id(c.target)
-                for c in callee.calls
-            ):
+            if self._calls_touch_external_chan(callee.calls):
                 self.indirect_writes |= stored
         return result
 
@@ -12464,9 +12483,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     locals_.get(recv_id)
                     or recv_deps
                 ) | stored
-            if any(
-                self._external_chan_id(c.target) for c in callee.calls
-            ):
+            if self._calls_touch_external_chan(callee.calls):
                 self.indirect_writes |= stored
         return result
 
@@ -12904,10 +12921,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # The declared callee's recorded ops on an external
                 # channel share its queue with the caller — same
                 # broadcast the local-callee site applies.
-                if any(
-                    self._external_chan_id(c.target)
-                    for c in declared.calls
-                ):
+                if self._calls_touch_external_chan(declared.calls):
                     self.indirect_writes |= stored
             # The callee's declared type pins fold like a local
             # call's — redeclaring any of them flags this summary.

@@ -19529,3 +19529,25 @@ def test_void_callee_pure_effects_none(go_types_helper):
     # An empty void body has no statements — the unsupported_body
     # gate keeps it closed rather than claiming effects none.
     assert not s.available
+
+
+def test_void_callee_external_chan_write_reaches_through_two_hops(
+    go_types_helper,
+):
+    # `mid(x)` calls `inner` which sends on the shared package chan
+    # `GC` — the write folds transitively, so `return <-GC` after
+    # the call observes x's deps exactly like a direct `G(x)` send.
+    files = {
+        "a.go": "package p\n"
+        "var GC chan int64\n"
+        "func inner(v int64) { GC <- v }\n"
+        "func mid(v int64) { inner(v) }\n"
+        "func F(x int64) int64 { mid(x); return <-GC }\n"
+        "func G(x int64) int64 { inner(x); return <-GC }\n"
+        "func H(x int64) int64 { GC <- x; return <-GC }\n"
+    }
+    source, snapshot, summaries = _method_unit(go_types_helper, files)
+    f = named_package(files, snapshot, summaries, "F")
+    h = named_package(files, snapshot, summaries, "H")
+    assert f.available and h.available
+    assert f.return_dependencies == h.return_dependencies
