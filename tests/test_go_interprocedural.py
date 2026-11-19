@@ -23158,3 +23158,51 @@ def test_func_elem_parallel_append_same_backing(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_copy_uses_eval_backing(go_types_helper):
+    # `a, b, c = d, a, append(a, z)` — `a` reseats onto `d`'s
+    # backing, but `b = a` copies the OLD array `a` named at
+    # resolution time, so `b` and `c` keep the old backing and a
+    # later `a[0]` write lands in `d`'s, not theirs.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    d := []func() int64{}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, b, c = d, a, append(a, z)\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    _ = d\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_parallel_copy_keeps_old_sharer(go_types_helper):
+    # Same shape: `b` stays on the backing `c` appended from, so an
+    # element write through `b` still reaches `c[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    d := []func() int64{}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, b, c = d, a, append(a, z)\n"
+        "    b[0] = func() int64 { return x }\n"
+        "    _ = a\n"
+        "    _ = d\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})

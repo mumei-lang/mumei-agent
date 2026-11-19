@@ -7709,6 +7709,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # element write lands) no longer share that backing —
             # subtract them from the resolution-time snapshot.
             func_elem_reseated: set[str] = set()
+            # Which backing each reseated name landed on, as the
+            # resolution-time member set of its RHS source — `b`
+            # in `a, b, c = d, a, append(a, z)` reseats onto the
+            # backing `a` named at eval time (the same one `b`
+            # already held), so it stays an append sharer even
+            # though no surviving member name groups with it.
+            func_elem_reseat_backings: dict[str, set[str]] = {}
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -8867,6 +8874,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # sharers keep, not to `a`'s new backing.
                         self._func_elem_reseat(ref.binding_id)
                         func_elem_reseated.add(ref.binding_id)
+                        func_elem_reseat_backings[ref.binding_id] = (
+                            groups_after_eval.get(src_id, set())
+                            | {src_id}
+                        )
                     # A maybe-skipped copy leaves the name holding
                     # EITHER function value. When the source carries
                     # a resolvable record the union covers both
@@ -9070,10 +9081,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # backing like `fs2 := fs`; a definite
                         # rebind first left the backing it used to
                         # share (group membership is a single
-                        # backing).
-                        self._func_elem_share(
-                            ref.binding_id, src_id
-                        )
+                        # backing). The backing the RHS named is
+                        # the resolution-time one: `a, b = d, a`
+                        # reseated `a` before this store landed,
+                        # but `b` still copies the OLD array, so
+                        # share against the operand's eval-time
+                        # members — like the append operand below —
+                        # and drop members reseated onto a
+                        # different backing.
+                        share_members = (
+                            groups_after_eval.get(src_id, set())
+                            | {src_id}
+                        ) - {ref.binding_id}
+                        share_eval = share_members | {ref.binding_id}
+                        for member_id in set(share_members):
+                            if (
+                                member_id in func_elem_reseated
+                                and not (
+                                    func_elem_reseat_backings.get(
+                                        member_id, set()
+                                    )
+                                    & share_eval
+                                )
+                            ):
+                                share_members.discard(member_id)
+                        for member_id in share_members:
+                            self._func_elem_share(
+                                ref.binding_id, member_id
+                            )
                 elif (
                     not compound
                     and i not in func_elem_targets
@@ -9149,6 +9184,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         ):
                             self._func_elem_reseat(ref.binding_id)
                             func_elem_reseated.add(ref.binding_id)
+                            func_elem_reseat_backings[
+                                ref.binding_id
+                            ] = (
+                                groups_after_eval.get(
+                                    append_cont, set()
+                                )
+                                | {append_cont}
+                            )
                             # The name points at the append result's
                             # backing now — its own old elements stay
                             # reachable only through the sharers the
@@ -9176,19 +9219,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             | {append_cont}
                         ) - {ref.binding_id}
                         # A member reseated in this statement only
-                        # leaves the operand's backing when its NEW
-                        # name is not grouped with that backing:
-                        # `a, c = a2, append(a, z)` reseats `a` onto
-                        # `a2`'s — the same — backing, so `a`'s
-                        # later element writes still land in `c`.
+                        # leaves the operand's backing when the
+                        # backing it reseated ONTO is a different
+                        # one: `a, c = a2, append(a, z)` reseats `a`
+                        # onto `a2`'s — the same — backing, so `a`'s
+                        # later element writes still land in `c`;
+                        # `b` in `a, b, c = d, a, append(a, z)`
+                        # reseats onto the operand's own backing.
+                        append_eval = (
+                            groups_after_eval.get(append_cont, set())
+                            | {append_cont}
+                        )
                         for member_id in set(append_members):
                             if (
                                 member_id in func_elem_reseated
                                 and not (
-                                    self._func_elem_groups.get(
+                                    func_elem_reseat_backings.get(
                                         member_id, set()
                                     )
-                                    & (append_members - {member_id})
+                                    & append_eval
                                 )
                             ):
                                 append_members.discard(member_id)
@@ -9251,6 +9300,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # still share it before the group drops.
                             self._func_elem_reseat(ref.binding_id)
                             func_elem_reseated.add(ref.binding_id)
+                            func_elem_reseat_backings[
+                                ref.binding_id
+                            ] = {ref.binding_id}
                             self.opaque_callees.discard(
                                 ref.binding_id
                             )
@@ -9286,6 +9338,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if not conditional and self._may_skip == 0:
                             self._func_elem_reseat(ref.binding_id)
                             func_elem_reseated.add(ref.binding_id)
+                            func_elem_reseat_backings[
+                                ref.binding_id
+                            ] = {ref.binding_id}
                         self._adopt_container_element_records(
                             (
                                 rights[i]
