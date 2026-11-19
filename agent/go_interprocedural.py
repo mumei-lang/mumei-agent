@@ -12948,8 +12948,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # without a matching declaration stay closed.
             member = self._package_member(node)
             if member is not None and member.kind == "var":
-                if member.type.kind not in {"integer", "boolean", "pointer"}:
+                if member.type.kind not in {
+                    "integer",
+                    "boolean",
+                    "pointer",
+                } and self._external_chan_operand(node, params) is None:
                     raise _Unsupported("non_parameter_reference", _span(node))
+                # A `chan` member (`lib.GC`) names a queue in
+                # external state — the same dep-free imported read a
+                # package-level `var GC chan T` identifier already
+                # takes. Admitting it here lets `g(lib.GC)` and
+                # `lib.G(lib.GC)` promote the queue like a `chan`
+                # parameter argument instead of closing the call.
                 self._pin_member_type(member)
                 transfers.append(
                     CallTransfer(

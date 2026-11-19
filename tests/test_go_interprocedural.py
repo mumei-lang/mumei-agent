@@ -24730,3 +24730,79 @@ def test_func_value_chan_result_external_operand_arg(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_selector_arg(go_types_helper):
+    # `ch := g(lib.GC)` — the imported `chan` member argument is a
+    # non-identifier operand: it promotes through the external
+    # operand arm like `GC`, so `ch` may literally be that queue.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, g func(chan int64) chan int64) int64 {\n"
+        "\tch := g(lib.GC)\n"
+        "\tch <- x\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GC chan int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_call_selector_chan_arg(go_types_helper):
+    # `ch := lib.G(lib.GC)` — an imported callee receives the same
+    # selector argument: the member read evaluates dep-free and the
+    # queue promotes into the external model.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.G(lib.GC)\n"
+        "\tch <- x\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar GC chan int64\n"
+            "func G(q chan int64) chan int64 { return q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_selector_chan_member_alias_source_stays_closed(go_types_helper):
+    # `ch := lib.GC` — a selector is not an identifier alias source;
+    # binding the queue under a local name stays closed like
+    # `ch := GC` on a package-level var.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.GC\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GC chan int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
