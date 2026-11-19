@@ -1761,6 +1761,23 @@ class _Builder:
         self._pin_fact_identities(fact)
         return True
 
+    def _array_arg_shares_memory(self, t) -> bool:
+        # `[N][]T`, `[N]*T`, `[N]map[K]T`, `[N]chan T`,
+        # `[N]func()` args copy the array header but their
+        # elements still aim at caller-shared memory — the
+        # callee's `p[i][j] = x` lands in the caller's slice
+        # backing. Only a scalar-element array isolates the
+        # callee's writes.
+        elem = getattr(t, "elem", None)
+        return elem is not None and elem.kind in {
+            "slice",
+            "map",
+            "chan",
+            "function",
+            "pointer",
+            "struct",
+        }
+
     def _opaque_container_bind(
         self, rhs: Any
     ) -> frozenset[tuple[int, int, int]] | None:
@@ -1826,10 +1843,16 @@ class _Builder:
                             arg_binding is not None
                             and arg_binding.type is not None
                             and arg_binding.type.kind == "array"
+                            and not self._array_arg_shares_memory(
+                                arg_binding.type
+                            )
                         ):
-                            # An array argument copies into the
-                            # callee's parameter — the result can
-                            # never alias `a`'s backing.
+                            # A scalar-element array argument
+                            # copies cleanly into the callee's
+                            # parameter — the result can never
+                            # alias `a`'s backing. An array of
+                            # slices/maps/pointers still shares
+                            # the elements' memory, so it folds.
                             continue
                         toks |= self._opaque_container_tokens.get(
                             arg_ref.binding_id, frozenset()
@@ -18246,6 +18269,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             ref.binding_id
                         ).type.kind
                         != "array"
+                        or self._array_arg_shares_memory(
+                            self.bindings.get(ref.binding_id).type
+                        )
                     )
                 ):
                     # `lib.Update(s, b)` — a tracked opaque

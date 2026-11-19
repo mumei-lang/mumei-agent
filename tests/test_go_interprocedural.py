@@ -24366,6 +24366,8 @@ def _opaque_composite_lib():
             "func Id(s []int64) []int64 { return s }\n"
             "func U(s []int64, b int64) {}\n"
             "func UA(a [4]int64, b int64) {}\n"
+            "func GAS(x int64) [1][]int64 { return [1][]int64{{x}} }\n"
+            "func US(a [1][]int64, b int64) {}\n"
             "var VA []int64\n"
         }
     }
@@ -25513,4 +25515,22 @@ def test_opaque_composite_range_over_array_reads_start_copy(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+def test_opaque_composite_array_of_slices_arg_shares_elem_memory(
+    go_types_helper,
+):
+    # `lib.US(s, b)` on a `[1][]int64` arg — the array header
+    # copies into the callee but the slice element's backing is
+    # shared: a callee write through `a[0][j]` lands in the
+    # caller's slice.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.GAS(a)\n"
+        "\tlib.US(s, b)\n"
+        "\treturn s[0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
 
