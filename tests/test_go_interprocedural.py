@@ -24365,6 +24365,7 @@ def _opaque_composite_lib():
             "\treturn []int64{x, y}\n}\n"
             "func Id(s []int64) []int64 { return s }\n"
             "func U(s []int64, b int64) {}\n"
+            "func UA(a [4]int64, b int64) {}\n"
             "var VA []int64\n"
         }
     }
@@ -25447,3 +25448,69 @@ def test_opaque_composite_comma_ok_map_read(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+def test_opaque_composite_range_over_bound_map_key_rejoins(
+    go_types_helper,
+):
+    # `for k := range *p` — a key stored through the same pointer
+    # mid-iteration surfaces on a later pass, so `k` re-joins the
+    # indirect writes like the element position does.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *map[int64]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor k := range *p {\n"
+        "\t\t(*p)[b] = 1\n"
+        "\t\tr += k\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_array_arg_writes_land_in_callee_copy(
+    go_types_helper,
+):
+    # `a := lib.GA(x); lib.UA(a, b)` — an array argument copies
+    # into the callee's parameter, so `a`'s own writes inside `UA`
+    # never reach the caller's `a`.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.GA(a)\n"
+        "\tlib.UA(s, b)\n"
+        "\treturn s[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_composite_range_over_array_reads_start_copy(
+    go_types_helper,
+):
+    # `for _, v := range s` over a bound `[N]T` iterates a copy
+    # made at range start — `s[0] = b` inside the body must not
+    # leak into the elements `v` reads.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.GA(a)\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range s {\n"
+        "\t\ts[0] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
