@@ -24628,3 +24628,92 @@ def test_call_result_range_local_still_works(go_types_helper):
     )
     assert result.available
     assert 0 in result.return_dependencies
+
+
+def test_call_result_range_chan_alias_arg(go_types_helper):
+    # `for range lib.G(alias, x)` — the callee's sends land on the
+    # root queue the alias stands for, so `<-q` observes `x`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\talias := q\n"
+        "\tfor range lib.G(alias, x) {\n"
+        "\t}\n"
+        "\treturn <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(c chan int64, x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_call_result_range_no_empty_transfer_target(go_types_helper):
+    # A bodyless imported callee records `call.target == ""` — the
+    # range transfer pins the member's id instead so no empty
+    # identity reaches the transfer list.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range lib.G(a) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert all(t.target for t in result.calls)
+
+
+def test_call_result_range_parenthesized_callee(go_types_helper):
+    # `for range *(lib.P)(a)` — the parenthesized selector still
+    # resolves the member, so the result admits and the callee
+    # identity pins.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range *(lib.P)(a) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func P(x int64) *[]int64 { return &[]int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+    assert all(t.target for t in result.calls)

@@ -10375,6 +10375,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             callee = call_operand.child_by_field_name(
                                 "function"
                             )
+                            while (
+                                callee is not None
+                                and callee.type
+                                == "parenthesized_expression"
+                            ):
+                                callee = next(
+                                    (
+                                        c
+                                        for c in callee.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
                             if (
                                 callee is not None
                                 and callee.type == "selector_expression"
@@ -10764,24 +10777,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    if (
-                        computed_call is not None
-                        and computed[2] != computed_call.target
-                    ):
+                    if computed_call is not None:
                         # `*G()` — the shared transfer above pins the
                         # result pointee's identity; the call itself
                         # pins the callee's. A direct container
                         # result (`G()`) names `call.target` in both,
                         # so the shared transfer already covers it.
-                        transfers.append(
-                            CallTransfer(
-                                computed_call.span,
-                                computed_call.target,
-                                computed_args,
-                                frozenset(),
-                                imported=True,
-                            )
+                        # A bodyless imported callee records an empty
+                        # `call.target` — the member's id stands in
+                        # for it (an empty identity would mark every
+                        # consumer summary stale).
+                        second_target = computed_call.target or (
+                            call_member.id
+                            if call_member is not None
+                            else ""
                         )
+                        if second_target and computed[2] != second_target:
+                            transfers.append(
+                                CallTransfer(
+                                    computed_call.span,
+                                    second_target,
+                                    computed_args,
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
                     value_deps = frozenset()
                     if bound is not None and len(lefts) == 2:
                         # `for range *p` — each element is caller
@@ -17379,14 +17399,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # a local channel's conflated set gains the deps;
                     # a channel parameter's live in external state,
                     # so they broadcast into `indirect_writes` where
-                    # a later `<-ch` observes them.
-                    if binding.id in params or (
-                        binding.id in self.external_chan_locals
+                    # a later `<-ch` observes them. `G(alias)` names
+                    # the root queue the alias stands for — storing
+                    # on the alias's own slot would hide the send
+                    # from `<-ch`.
+                    chan_id = self._chan_root(binding.id)
+                    if chan_id in params or (
+                        chan_id in self.external_chan_locals
                     ):
                         self.indirect_writes |= stored
-                    elif binding.id in locals_:
-                        locals_[binding.id] = (
-                            locals_.get(binding.id, frozenset())
+                    elif chan_id in locals_:
+                        locals_[chan_id] = (
+                            locals_.get(chan_id, frozenset())
                             | stored
                         )
                 elif (
