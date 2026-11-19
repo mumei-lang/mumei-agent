@@ -10945,9 +10945,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if kind in {"int_literal", "rune_literal"}:
             return frozenset()
         if kind == "nil":
-            # `nil` carries no deps like a literal — a nil read on
-            # a non-nilable type cannot compile anyway.
-            return frozenset()
+            ref = self.references.get(self.node_key(node))
+            if ref is not None and ref.binding_id:
+                # `nil` is a redefinable identifier — a shadowed
+                # nil resolves through `locals_`/`params` like
+                # any other name.
+                kind = "identifier"
+            else:
+                # `nil` carries no deps like a literal — a nil
+                # read on a non-nilable type cannot compile anyway.
+                return frozenset()
         if kind in {"identifier", "true", "false", "iota"}:
             ref = self.references.get(self.node_key(node))
             # Reassigned names (including parameters) resolve through

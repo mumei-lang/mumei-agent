@@ -21260,6 +21260,29 @@ def test_nil_channel_argument_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset()
 
 
+def test_shadowed_nil_param_resolves(go_types_helper):
+    # `func F(nil int64) { return nil }` — `nil` is a redefinable
+    # identifier, so the read resolves the parameter, not the
+    # dep-free literal.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(nil int64) int64 { return nil }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_shadowed_nil_local_stays_closed(go_types_helper):
+    # `nil := x` — declaring a variable named `nil` stays closed
+    # rather than mis-modeling the shadowing bind.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { nil := x; return nil }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
 def test_nil_collection_result_admitted(go_types_helper):
     # `mk() []func` returning nil — the nil result admits, and the
     # bound container call `fs[0]()` runs opaque on the slot.
