@@ -20044,18 +20044,20 @@ def test_call_result_promoted_field_through_pointer_reads_external(
     # `g(q).P` on `type S struct{ *Q }` — `P` promotes through the
     # embedded pointer: the syntactic chain names no `*`, but the
     # read dereferences caller memory, so it records an external
-    # effect and joins escaped deps like `g().P.V` does.
+    # effect and joins escaped deps like `g().P.V` does. `P` is a
+    # scalar field read directly into the return, so the external
+    # effect comes from the selector alone — no later dereference
+    # produces it.
     files = {
         "a.go": "package p\n"
-        "type Q struct{ P *int64 }\n"
+        "type Q struct{ P int64 }\n"
         "type S struct{ *Q }\n"
         "func g(q int64) S { return S{} }\n"
         "func F(q int64) int64 {\n"
         "    b := q\n"
         "    p := &b\n"
         "    _ = p\n"
-        "    v := g(q).P\n"
-        "    return *v\n"
+        "    return g(q).P\n"
         "}\n"
     }
     snapshot = load_go_package_snapshot(
@@ -20067,6 +20069,70 @@ def test_call_result_promoted_field_through_pointer_reads_external(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_promoted_through_value_embed_stays_local(
+    go_types_helper,
+):
+    # `g(x).P` on `type S struct{ R *R; Q }` — `P` promotes through
+    # the VALUE-embedded `Q`, not the unrelated pointer `R *R`:
+    # the read stays a call-result dep — no external effect.
+    files = {
+        "a.go": "package p\n"
+        "type R struct{ V int64 }\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ R *R; Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+    assert not [c for c in result.calls if c.imported]
+
+
+def test_call_result_anon_struct_embedded_pointer_reads_external(
+    go_types_helper,
+):
+    # `g(x).P` on `func g() struct{ *Q }` — the anonymous result's
+    # embedded `*Q` is dereferenced by the promoted read: same
+    # external effect as the named `type S struct{ *Q }` form.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "func g(x int64) struct{ *Q } { return struct{ *Q }{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
     assert any(t.imported for t in result.calls)
 
