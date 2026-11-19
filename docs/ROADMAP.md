@@ -2872,7 +2872,6 @@ deps ride the result's dep set — so `f := mk(x)` binds an opaque
 func value whose calls resolve through the ordinary func-value
 path (`var f = mk()` and `f = mk()` admit identically, and a
 multi-result signature with a func slot unpacks the same way).
-`return nil` stays closed.
 An imported func-result callee (`f := lib.Mk()`) records
 `direct_import` and binds an opaque func value the same way —
 see the C06 imported-callee section below.
@@ -2895,9 +2894,7 @@ may capture the queue, so a later `ch <- x` reaches `fs[k]()` via
 `indirect_writes`. A `nil` literal admits as a dep-free value in
 every expression position (`return nil`, `G(nil)`, `f = nil`,
 `p == nil`) — a nil read on a non-nilable type cannot compile, and
-the nil queue holds nothing. `map[K]func` results stay closed: a
-keyed slot is not a numbered element, so the conflated dep set
-cannot say which slot the call invokes.
+the nil queue holds nothing.
 A `map[K]func` call result admits through the same gate:
 `lib.Mk(x)["k"]()` runs the keyed element as an opaque call on
 the container's slot — which value a map key holds is as
@@ -2909,7 +2906,41 @@ way a `[]func` local does (`fm := lib.Mk(x)`, `var fm =
 lib.Mk(x)`, `fm = lib.Mk(x)`): a keyed slot is as unknowable as
 a numbered index, so `fm["k"]()` calls opaque on the
 container's slot and the producing call's `chan` arguments
-promote through it.
+promote through it. `make` on a func-element collection binds
+the same way (`fs := make([]func, n)`, `make(map[K]func)`,
+`make(FM, n)` on a named collection type): a fresh empty
+container whose dep set starts empty and grows by element
+stores, while `make` on a non-func collection still cannot
+bind.
+An element store into a bound container — `fs[i] = v`,
+`fm[k] = v` — unions the stored value's deps into the
+container's conflated set, and a func-typed RHS is recorded
+element-wise: a literal's captures, write targets and inner
+calls record under the container's name like a composite
+element's, and an identifier or selector RHS adopts the
+referent's own func records into the container (read from the
+pre-state, so `cl, fs[0] = g, cl` still hands `fs[0]` `cl`'s
+OLD records — the element store is not a name rebind, so the
+record-clearing that a scalar store's name gets does not apply).
+A computed index or key evaluates like an argument on the store
+side too. Copies share the backing (`fs2 := fs`, `fs2 = fs`,
+`var fs2 = fs`): an element store through any name in the group
+unions into every member's records, while a definite non-append
+reseat (`fs = mk()`, `fs = []func(){…}`, `fs = nil`) hands the
+old elements to the names still sharing the array and detaches.
+`append` admits on a bound func-element container
+(`fs = append(fs, f)`, `fs2 := append(fs, f)`, a `fs2...`
+spread): the result may reuse the argument's array, so the name
+joins the argument's group, and each appended element records
+like a composite literal's — a literal argument climbs through
+the argument list the same way. An element literal or store
+inside a branch keeps the deps of branch-local bindings it
+captures even after the merge drops them: a closure stored into
+a container still reads the value the capture held at the merge.
+A param container's elements live in caller memory, a
+scalar-element container has no func records, and a nested
+`fm[k][i]` write is a container-of-container the index model
+does not reach — all three stores stay closed.
 A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
 inner callee resolves) admits as an opaque indirect call: Go
 evaluates the callee expression before the arguments, so the

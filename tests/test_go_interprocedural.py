@@ -22503,6 +22503,1033 @@ def test_func_elem_named_container_type_pins_identity(go_types_helper):
     assert fm.type.type_id in result.pinned
 
 
+def test_func_elem_index_write_literal_admitted(go_types_helper):
+    # `fs[0] = func(){ return y }` — a literal element write records
+    # its captures under the container like a literal element of
+    # `fs := []func(){...}`; the reseat between the write and the
+    # call resolves at call time.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_identifier_adopts_records(
+    go_types_helper,
+):
+    # `fs[0] = cl` — storing a bound closure into a func-element
+    # container unions its func records into the container's, like
+    # an identifier element of `fs := []func(){cl}`: `cl`'s captured
+    # `y` re-resolves to `x` at the call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    cl := func() int64 { return y }\n"
+        "    fs[0] = cl\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_map_adopts_records(go_types_helper):
+    # `fm["k"] = cl` — a keyed container element write adopts the
+    # stored value's records the same way a slice index does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := map[string]func() int64{}\n"
+        "    cl := func() int64 { return y }\n"
+        "    fm[\"k\"] = cl\n"
+        "    y = x\n"
+        "    return fm[\"k\"]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_computed_index(go_types_helper):
+    # `fs[i] = cl` — a computed index evaluates like an argument:
+    # `i`'s own dep joins the call's read set.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, i int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    cl := func() int64 { return y }\n"
+        "    fs[i] = cl\n"
+        "    y = x\n"
+        "    return fs[i]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_index_write_conditional(go_types_helper):
+    # `if b { fs[0] = cl }` — a conditional element write keeps the
+    # container's records unioned: the call still resolves the
+    # stored alternative's captures.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, b bool) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    cl := func() int64 { return y }\n"
+        "    if b {\n"
+        "        fs[0] = cl\n"
+        "    }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_tuple_swap_uses_pre_state(
+    go_types_helper,
+):
+    # `cl, fs[0] = g, cl` — the parallel store reads the pre-state:
+    # `fs[0]` adopts `cl`'s OLD record (capturing `y`), and `cl`
+    # binds `g` at the same time.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    cl := func() int64 { return y }\n"
+        "    g := func() int64 { return x }\n"
+        "    cl, fs[0] = g, cl\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_writeback_carries_sources(
+    go_types_helper,
+):
+    # `fs[0] = cl` where `cl` writes `y = v` — the write records
+    # adopt too: `fs[0]()` folds the call's deps into `y` like the
+    # bound-literal path.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    v := x; var y int64\n"
+        "    cl := func() { y = v }\n"
+        "    fs := []func(){}\n"
+        "    fs[0] = cl\n"
+        "    fs[0]()\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_keeps_records_after_reseat(
+    go_types_helper,
+):
+    # `fs[0] = cl; cl = func(){ return x }` — reseating `cl` does
+    # not move the stored element: the container snapped `cl`'s
+    # records at write time like a stored field does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    cl := func() int64 { return y }\n"
+        "    fs[0] = cl\n"
+        "    cl = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    # `y` was never reseated to `x` — the stored literal still
+    # reads the empty `y`, so the call contributes nothing.
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_index_write_nil_stays_admitted(go_types_helper):
+    # `fs[0] = nil` — writing the zero func value clears an element;
+    # the union keeps the other element's captures.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs[0] = func() int64 { return y }\n"
+        "    fs[0] = nil\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_call_result_admitted(go_types_helper):
+    # `fs[0] = mk(x)` — a call result element is an opaque func
+    # value: `mk`'s declared deps fold into the container's slot.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(a int64) func() int64 { return nil }\n"
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs[0] = mk(x)\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_index_write_method_value_admitted(go_types_helper):
+    # `fs[0] = s.M` — a method value element: the container records
+    # the selector's own deps; the element call stays admitted.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S struct{}\n"
+        "func (S) M() int64 { return 0 }\n"
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{nil}\n"
+        "    s := S{}\n"
+        "    fs[0] = s.M\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_index_write_make_container_binds(go_types_helper):
+    # `fs := make([]func, n)` — a fresh empty container binds like
+    # the `[]func(){}` literal: later element stores land.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := make([]func() int64, 2)\n"
+        "    f := func() int64 { return y }\n"
+        "    fs[1] = f\n"
+        "    y = x\n"
+        "    return fs[1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `make(map[K]func)` — a keyed container binds the same way.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := make(map[string]func() int64)\n"
+        "    f := func() int64 { return y }\n"
+        "    fm[\"k\"] = f\n"
+        "    y = x\n"
+        "    return fm[\"k\"]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_make_named_and_rebind(go_types_helper):
+    # `make(FM)` on a declared collection type binds through the
+    # type's fact, and `fs = make([]func, n)` rebinds an existing
+    # name to a fresh empty container.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type FM map[string]func() int64\n"
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := make(FM)\n"
+        "    f := func() int64 { return y }\n"
+        "    fm[\"k\"] = f\n"
+        "    y = x\n"
+        "    return fm[\"k\"]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    var fs []func() int64\n"
+        "    f := func() int64 { return y }\n"
+        "    fs = make([]func() int64, 1)\n"
+        "    fs[0] = f\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_stays_closed(go_types_helper):
+    # A param container's elements live in caller memory — storing
+    # into `fs[0]` is an external mutation the summary cannot
+    # model; a scalar-element container stays closed the same way,
+    # and a nested `fm[k][i]` write is a container-of-container the
+    # index model does not reach.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fs []func() int64, f func() int64) int64 {\n"
+        "    fs[0] = f\n"
+        "    return 0\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    vs := []int64{}\n"
+        "    vs[0] = x\n"
+        "    return vs[0]\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fm := map[string][]func() int64{}\n"
+        "    var y int64\n"
+        "    f := func() int64 { return y }\n"
+        "    fm[\"k\"][0] = f\n"
+        "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_alias_share_write_seen_through_other_name(go_types_helper):
+    # `fs2 := fs` shares the backing — a store through one name lands
+    # in the other's element records, so `fs2[0]()` resolves the
+    # element's captured reads.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := fs\n"
+        "    fs[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := fs\n"
+        "    fs2[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_assignment_alias_share(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    var fs2 []func() int64\n"
+        "    fs2 = fs\n"
+        "    fs2[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_tuple_store_reads_old_records(go_types_helper):
+    # `cl, fs[0] = g, cl` — the parallel store adopts cl's OLD record
+    # (capturing `y`), so `fs[0]()` sees `y`'s deps, not `g`'s.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    cl := func() int64 { return y }\n"
+        "    fs := []func() int64{nil}\n"
+        "    g := func() int64 { return x }\n"
+        "    cl, fs[0] = g, cl\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_branch_local_capture_survives_merge(go_types_helper):
+    # `t` dies at the branch merge, but the stored literal still reads
+    # the value it held — the merged summary freezes its deps.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{nil}\n"
+        "    if x > 0 {\n"
+        "        t := x\n"
+        "        fs[0] = func() int64 { return t }\n"
+        "    }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_selector_rhs_store(go_types_helper):
+    # `fs[0] = s.f` — the stored element is the field's value: the
+    # literal's captures recorded under the member's identity adopt
+    # onto the container.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S struct { f func() int64 }\n"
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    s := S{}\n"
+        "    s.f = func() int64 { return y }\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs[0] = s.f\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_reseat_detaches_old_backing(go_types_helper):
+    # `fs = []func(){nil}` reseats fs — writes through the old sharer
+    # fs2 still reach fs2's call, and fs keeps its own empty slice.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := fs\n"
+        "    fs = []func() int64{nil}\n"
+        "    fs2[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_append_forms(go_types_helper):
+    # `fs = append(fs, func(){...})` — the appended literal's captures
+    # land on the container like a composite element.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs = append(fs, func() int64 { return y })\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `fs = append(fs, f)` — identifier element.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    f := func() int64 { return y }\n"
+        "    fs = append(fs, f)\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `fs2 := append(fs, f)` — the result may reuse the argument's
+    # array, so the fresh name shares the backing and its elements.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs2 := append(fs, func() int64 { return y })\n"
+        "    y = x\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # `append` on a non-func container stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    xs := []int64{}\n"
+        "    xs = append(xs, x)\n"
+        "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_alias_store_accumulates_into_sharer(go_types_helper):
+    # `fs[0] = g` after `fs2 := append(fs, lit)` — the element store
+    # reaches the sharer's dep set like the container's own store
+    # does: it accumulates, so the appended element's deps survive.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fs2 := append(fs, func() int64 { return y })\n"
+        "    fs[0] = func() int64 { return 0 }\n"
+        "    y = x\n"
+        "    return fs2[1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_tuple_reseat_keeps_old_sharer_write(go_types_helper):
+    # `a, a[0] = b, f` — the element write lands in the OLD backing
+    # `a` named when the statement resolved, which `a2` still
+    # shares. The holder set unions the resolution-time sharers
+    # with the landing-time group.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{func() int64 { return 1 }}\n"
+        "    a, a[0] = b, func() int64 { return y }\n"
+        "    _ = b\n"
+        "    y = x\n"
+        "    return a2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_append_result_call_writeback(go_types_helper):
+    # `append(fs, func(){y = x})[0]()` — the appended literal
+    # recorded under the container's binding, so a direct call on
+    # the append result folds its write-back like `fs[i]()` does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    _ = fs\n"
+        "    append(fs, func() int64 { y = x; return y })[1]()\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_paren_append_rhs(go_types_helper):
+    # `fs = (append(fs, lit))` — parens unwrap before the append
+    # arm, so the appended literal's captures stay on `fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs = (append(fs, func() int64 { return y }))\n"
+        "    y = x\n"
+        "    return fs[1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_tuple_reseat_alias_does_not_leak(go_types_helper):
+    # `a2, a[0] = b, f` — `a2` reseats to `b` before the element
+    # write lands, so `f`'s records must not reach `a2`: the call
+    # resolves `b`'s element (dep {1}) and nothing of `f`'s write.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, y0 int64) int64 {\n"
+        "    var y int64\n"
+        "    f := func() int64 { y = x; return y }\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{func() int64 { return y0 }}\n"
+        "    a2, a[0] = b, f\n"
+        "    _ = a\n"
+        "    return a2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_func_elem_append_reseat_drops_stale_records(go_types_helper):
+    # `a = append(b, lit)` — the name reseats to the append result's
+    # backing, so the OLD element's captures must not survive on
+    # `a`. Both the bare and the parenthesized RHS take the same
+    # reseat arm.
+    for rhs in ("append(b, func() int64 { return 0 })",
+                "(append(b, func() int64 { return 0 }))"):
+        source, snapshot, summaries = unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "    var y int64\n"
+            "    a := []func() int64{func() int64 { return x }}\n"
+            "    b := []func() int64{func() int64 { return y }}\n"
+            f"    a = {rhs}\n"
+            "    y = 1\n"
+            "    return a[0]()\n"
+            "}",
+        )
+        result = named(source, snapshot, summaries)
+        assert result.available
+        assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_paren_append_index_call(go_types_helper):
+    # `(append(fs, f))[i]()` — parens unwrap before the
+    # call-expression operand check, so the append operand still
+    # names `fs`'s binding and the call folds the element's write.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{}\n"
+        "    f := func() int64 { y = x; return y }\n"
+        "    return (append(fs, f))[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_alias_share_time_deps_preserved(go_types_helper):
+    # `fs2 := fs` when the element's write target ALREADY carries
+    # deps — the alias keeps the stored write-back record, so a
+    # call through `fs2` still folds `y`'s assignment to `x`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, z int64) int64 {\n"
+        "    var y int64\n"
+        "    y = x\n"
+        "    f := func(v int64) int64 { y = v; return y }\n"
+        "    fs := []func(int64) int64{f}\n"
+        "    fs2 := fs\n"
+        "    fs2[0](z)\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_parallel_append_reads_old_container(go_types_helper):
+    # `a, c = append(b, z), append(a, z)` — `append(a, z)` reads
+    # `a`'s backing BEFORE `a`'s own store, so `c` shares the OLD
+    # group's elements, not `b`'s that `a` just received.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return x }}\n"
+        "    b := []func() int64{func() int64 { return 0 }}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, c = append(b, z), append(a, z)\n"
+        "    _ = c\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_append_result_group(go_types_helper):
+    # `a, c = append(b, z), append(a, z)` — `c` joins `a`'s OLD
+    # backing group: an element store through a pre-statement sharer
+    # (`a2 := a`) lands in the same backing `c` returned.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, c = append(b, z), append(a, z)\n"
+        "    a2[0] = func() int64 { return x }\n"
+        "    _ = a2\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_append_same_backing(go_types_helper):
+    # `a2 := a` then `a, c = a2, append(a, z)` — `a` reseats onto
+    # `a2`'s backing, which IS the operand's backing, so a later
+    # `a[0]` write still lands in the slice `c` returned.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
+        "    a2 := a\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, c = a2, append(a, z)\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = a2\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_copy_chain_stays_shared(go_types_helper):
+    # `c, b = d, c` with a/b/c/d all on one backing — both copies
+    # land on THE SAME eval-time class, so the share survives and a
+    # `b[0]` write still reaches `c[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := b\n"
+        "    d := a\n"
+        "    c, b = d, c\n"
+        "    b[0] = func() int64 { return x }\n"
+        "    _ = a\n"
+        "    _ = d\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_self_copy_rejoins_eval_class(go_types_helper):
+    # `a, a, b = d, a, a` — the second `a` lands on its eval-time
+    # backing (shared with `b`), and `b = a` lands on the same
+    # class: the post-state `a` and `b` share, so `a[0]` reaches
+    # `b[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    d := []func() int64{}\n"
+        "    a, a, b = d, a, a\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = d\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_fresh_backing_leaves_append(go_types_helper):
+    # `a, b = make(…), append(a, z)` — `a` lands on a FRESH backing
+    # (empty landing class), `b` on the operand's eval class, so a
+    # later `a[0]` write must not reach `b[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var b []func() int64\n"
+        "    a, b = make([]func() int64, 1), append(a, z)\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_parallel_cross_copy_splits_backings(go_types_helper):
+    # `a, c = c, b` — `a` lands on `c`'s backing, `c` on the {a,b}
+    # eval class; the two post-state backings are distinct, so an
+    # `a[0]` write must not reach `c[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := []func() int64{func() int64 { return 0 }}\n"
+        "    a, c = c, b\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_parallel_copy_uses_eval_backing(go_types_helper):
+    # `a, b, c = d, a, append(a, z)` — `a` reseats onto `d`'s
+    # backing, but `b = a` copies the OLD array `a` named at
+    # resolution time, so `b` and `c` keep the old backing and a
+    # later `a[0]` write lands in `d`'s, not theirs. `a` has spare
+    # capacity so `append` really does reuse its array.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
+        "    b := a\n"
+        "    d := []func() int64{}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, b, c = d, a, append(a, z)\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    _ = d\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_parallel_copy_keeps_old_sharer(go_types_helper):
+    # Same shape: `b` stays on the backing `c` appended from, so an
+    # element write through `b` still reaches `c[0]()`. `a` has
+    # spare capacity so `append` really does reuse its array.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
+        "    b := a\n"
+        "    d := []func() int64{}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, b, c = d, a, append(a, z)\n"
+        "    b[0] = func() int64 { return x }\n"
+        "    _ = a\n"
+        "    _ = d\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_self_assign_keeps_sharer(go_types_helper):
+    # `b, a[0] = b, f` — the self-copy `b = b` is not a reseat:
+    # `b` stays a holder of the shared backing, so the literal
+    # written through `a[0]` is still reachable from `b[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    b, a[0] = b, func() int64 { return x }\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_conditional_reseat_does_not_merge_backings(
+    go_types_helper,
+):
+    # `c := b`; a conditional `b = a2` rebind leaves `b` sharing
+    # EITHER backing — never fusing them. `d := a2` shares only
+    # `a2`'s backing, so the `c[0]` write must not reach `d[0]()`,
+    # while `b[0]()` still may see it through `b`'s old backing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, cond bool) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := b\n"
+        "    a2 := []func() int64{func() int64 { return 0 }}\n"
+        "    if cond {\n"
+        "        b = a2\n"
+        "    }\n"
+        "    d := a2\n"
+        "    c[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    return d[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_conditional_reseat_maybe_sharer_sees_write(
+    go_types_helper,
+):
+    # Same shape: `b` may still hold `c`'s backing, so the `c[0]`
+    # write DOES reach `b[0]()` — a may-share, not a merge.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, cond bool) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := b\n"
+        "    a2 := []func() int64{func() int64 { return 0 }}\n"
+        "    if cond {\n"
+        "        b = a2\n"
+        "    }\n"
+        "    c[0] = func() int64 { return x }\n"
+        "    _ = a2\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_copy_preserves_eval_literal_records(
+    go_types_helper,
+):
+    # `a, a[0] = b, f` — `a` stays on the shared backing, so the
+    # literal's captures recorded under `a` during RHS eval survive
+    # the `a = b` record copy. After `y = z` the element call must
+    # resolve `f`'s capture live, like the sequential `a[0] = f`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(y int64, z int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    a, a[0] = b, func() int64 { return y }\n"
+        "    y = z\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_eval_class_drops_reseated_default_token(
+    go_types_helper,
+):
+    # `a = e` reseats `a` onto a fresh backing; a later parallel
+    # `x, c = z, a` copies `a`'s CURRENT array only — the name's
+    # default backing token must not pull `b`'s old array back
+    # into `c`'s share class.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(y int64, z int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    e := []func() int64{func() int64 { return 0 }}\n"
+        "    a = e\n"
+        "    var c []func() int64\n"
+        "    var x int64\n"
+        "    x, c = z, a\n"
+        "    _ = x\n"
+        "    b[0] = func() int64 { return y }\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
 def test_func_elem_collection_arg_folds_element_writes(go_types_helper):
     # `g(fs)` — an opaque callee may invoke `fs[k]` inside; a
     # collection argument queues like a passed func value so its
