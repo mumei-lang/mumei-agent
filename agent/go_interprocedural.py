@@ -10231,7 +10231,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self.func_aliases.pop(target, None)
                 self.opaque_callees.add(target)
             if (
-                binding_id in self.closure_star_writes
+                unbounded
+                or binding_id in self.closure_star_writes
                 or binding_id in self.closure_inner_calls
             ):
                 self.indirect_writes |= arg_deps
