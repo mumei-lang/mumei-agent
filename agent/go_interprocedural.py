@@ -8997,6 +8997,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dict(self.closure_writes),
                         set(self.closure_star_writes),
                         set(self.closure_inner_calls),
+                        set(self.opaque_callees),
                     )
                     resolution_changed = False
                     self._branch_sequence(
@@ -9021,6 +9022,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dict(self.closure_writes),
                         set(self.closure_star_writes),
                         set(self.closure_inner_calls),
+                        set(self.opaque_callees),
                     )
                     if resolution_after != resolution_before:
                         resolution_changed = True
@@ -9033,6 +9035,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             frozenset(resolution_after[5].items()),
                             frozenset(resolution_after[6]),
                             frozenset(resolution_after[7]),
+                            frozenset(resolution_after[8]),
                         )
                         if snapshot in seen_resolutions:
                             # An oscillating resolution (`f, g = g, f`
@@ -9164,6 +9167,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     )
                             self.external_chan_locals |= (
                                 cur_ce | prev_ce
+                            )
+                            # An alternating opaque mark resolves to
+                            # opaque like every other resolution set —
+                            # a name that MAY hold an unresolvable
+                            # callee in either state keeps the
+                            # external-capable model.
+                            self.opaque_callees |= (
+                                resolution_before[8]
+                                | resolution_after[8]
                             )
                         else:
                             seen_resolutions.add(snapshot)
