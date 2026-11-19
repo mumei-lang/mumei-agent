@@ -821,3 +821,27 @@ func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
 		)
 	}
 }
+
+func TestImportedFuncResultAdmits(t *testing.T) {
+	// `f := lib.Mk()` — a `func`-typed result records
+	// `direct_import` like a scalar one: the value carries no
+	// scalar deps and the consumer binds the name as an opaque
+	// func value whose calls resolve through the func-value path.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { f := lib.Mk(); return f() }"}}
+	imports := []importedUnit{{"lib", []namedSource{
+		{"m.go", "package lib\nfunc Mk() func() int64 { return nil }\nfunc M2() (func() int64, int64) { return nil, 7 }"},
+	}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	if len(out.Calls) != 2 || out.Calls[0].Kind != "direct_import" {
+		t.Fatalf("a func-typed imported result was rejected: %+v", out.Calls)
+	}
+	// A multi-result signature with a func slot admits the same way.
+	unit[0].Source = "package p\nimport \"lib\"\nfunc F() int64 { f, n := lib.M2(); return f() + n }"
+	out = analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if len(out.Calls) != 2 || out.Calls[0].Kind != "direct_import" || out.Calls[0].Results != 2 {
+		t.Fatalf("a multi-result func-slot callee was rejected: %+v", out.Calls)
+	}
+}
