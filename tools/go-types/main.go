@@ -1289,8 +1289,18 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 						}
 						var typeArgIDs []string
 						if named, ok := rt.(*types.Named); ok {
+							namedID := ix.typeID(named.Obj())
 							if id == "" {
-								id = ix.typeID(named.Obj())
+								id = namedID
+							} else if namedID != "" && namedID != id {
+								// `type A = I`: the alias's own declaration
+								// is the target, but the underlying named
+								// interface's identity rides the wire's
+								// extra pin slot too — regenerating `I`
+								// in another file must still stale every
+								// admitted caller, not just edits to the
+								// alias line itself.
+								typeArgIDs = append(typeArgIDs, namedID)
 							}
 							if targs := named.TypeArgs(); targs != nil && targs.Len() > 0 {
 								seen := map[string]bool{}

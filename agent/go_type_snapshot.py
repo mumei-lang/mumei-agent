@@ -145,7 +145,9 @@ class Call:
     # instantiated interface receiver's type arguments resolve to on
     # an `interface_dispatch` call — the substituted identities are
     # declared nowhere else, so the call record carries them for
-    # staleness pinning.
+    # staleness pinning. An alias receiver (`type A = I`) rides it
+    # too: the target is the alias's own declaration while the
+    # underlying named interface's identity pins alongside.
     type_arg_type_ids: tuple[str, ...] = ()
 
 
@@ -311,9 +313,13 @@ class PackageCall:
     # tuple unpacking `a, b := lib.F(x)`. 0 means zero or one result.
     results: int = 0
     # `type_arg_type_ids` pins the named/alias identities an
-    # instantiated callee's type arguments resolve to — the substituted
-    # identities are declared nowhere else, so the call record carries
-    # them for staleness pinning exactly like a member's signature ids.
+    # instantiated callee's or receiver's type arguments resolve to —
+    # the substituted identities are declared nowhere else, so the
+    # call record carries them for staleness pinning exactly like a
+    # member's signature ids. An alias interface receiver
+    # (`type A = I`) rides it too: the target is the alias's own
+    # declaration while the underlying named interface's identity
+    # pins alongside.
     type_arg_type_ids: tuple[str, ...] = ()
 
 

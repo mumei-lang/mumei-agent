@@ -5324,16 +5324,21 @@ def test_interface_dispatch_method_value_receiver_stays_closed(go_types_helper):
 
 
 def test_interface_dispatch_func_result_stays_closed(go_types_helper):
-    # `i.Iter()` returns a `func` value — the opaque-external dep
-    # model cannot read a func/chan/composite result (a caller would
-    # then call or range it), so only scalar results admit.
+    # `I2.Iter(recv)` — a method EXPRESSION whose result is a `func`
+    # value: the opaque-external dep model cannot read a func/chan/
+    # composite result (a caller would then call or range it), so the
+    # scalar-result gate keeps it `method_generic_or_variadic`. A
+    # method-value `i.Iter()` stays closed regardless — an
+    # interface-typed operand never admits — which is why this test
+    # must reach the gate through the method-expression shape.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(i lib.I2) func() int64 { return i.Iter() }\n"
+        "func F(t lib.T) func() int64 { return lib.I2.Iter(t) }\n"
     }
     lib = {
         "lib": {
-            "m.go": "package lib\n"
+            "m.go": "package lib\ntype T int64\n"
+            "func (t T) Iter() func() int64 { return nil }\n"
             "type I2 interface{ Iter() func() int64 }\n"
         }
     }
@@ -5413,6 +5418,47 @@ def test_interface_dispatch_alias_receiver_target(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset(
         {0, 1}
+    )
+
+
+def test_interface_dispatch_named_alias_pins_underlying(go_types_helper):
+    # `lib.IA` aliases the NAMED interface `lib.I` — the target is the
+    # alias's own declaration, but regenerating `I` in another file
+    # must stale every admitted caller too, so `I`'s identity rides
+    # the record's `type_arg_type_ids` pin slot.
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype T int64\n"
+            "func (t T) M(v int64) int64 { return v }\n"
+            "type I interface{ M(int64) int64 }\n"
+            "type IA = I\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64) int64 { return lib.IA.M(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "interface_dispatch"
+    assert call["target"].startswith("sha256:")
+    assert len(call["type_arg_type_ids"]) == 1
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset(
+        {0, 1}
+    )
+    assert frozenset(call["type_arg_type_ids"]) <= frozenset(
+        result.pinned
     )
 
 

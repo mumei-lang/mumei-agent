@@ -3987,7 +3987,10 @@ carries `method_expr` and its `target` pins the named
 interface's own declaration id (`lib.I`) so a method-set
 redeclare stales every admitted caller; an unnamed
 `interface{ M() }` receiver records an empty target and an alias
-to one carries the alias's declaration. A method-value call
+to one carries the alias's declaration — with the underlying
+named interface's identity riding `type_arg_type_ids` too when
+the alias names one (`type A = I`), so regenerating `I` in
+another file still stales the caller. A method-value call
 `i.M(x)` names an interface-typed operand — always an
 unsupported binding the receiver read cannot survive — so it
 keeps `method_generic_or_variadic`, and a method promoted
