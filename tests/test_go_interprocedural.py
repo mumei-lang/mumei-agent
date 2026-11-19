@@ -13359,6 +13359,100 @@ def test_bound_closure_tuple_swap(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+def test_passed_func_value_invocation_folds_literal_writes(
+    go_types_helper,
+):
+    # `P(h, x)` — the callee may invoke `h`, which may still be the
+    # literal that writes `a = v` (the conditional `h = cb` keeps
+    # both alternatives live). The literal's named write target must
+    # land: `return a` reports x's dep — the generic indirect_writes
+    # broadcast alone misses `a`, which never escaped.
+    files = {
+        "f.go": "package p\n"
+        "func P(f func(int64), v int64) { f(v) }\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\th := func(v int64) { a = v }\n"
+        "\tif b { h = cb }\n"
+        "\tP(h, x)\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
+def test_loop_opaque_mark_change_forces_another_pass(go_types_helper):
+    # `h = cb` at the loop body's END changes only the opaque mark —
+    # no dep set grows — but the NEXT pass's `h(x)` must still fold
+    # the callback-invocable effects: escaped `a` gains `x`'s dep
+    # through the opaque write-back, and `cb`'s own index joins.
+    files = {
+        "f.go": "package p\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\tp := &a\n"
+        "\th := func(v int64) {}\n"
+        "\tfor i := 0; i < 3; i++ {\n"
+        "\t\th(x)\n"
+        "\t\tif b { h = cb }\n"
+        "\t}\n"
+        "\t_ = p\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
+def test_loop_redeclared_literal_drops_stale_opaque_mark(
+    go_types_helper,
+):
+    # Inside the loop `h` is ALWAYS the fresh literal at call time —
+    # the trailing `h = cb` must not leak its opaque mark into the
+    # next iteration's redeclaration, or `h(x)` would fold callback
+    # writes that cannot run.
+    files = {
+        "f.go": "package p\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\tfor i := 0; i < 3; i++ {\n"
+        "\t\th := func(v int64) {}\n"
+        "\t\th(x)\n"
+        "\t\tif b { h = cb }\n"
+        "\t}\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({3})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_conditional_rebind_mixed_literal_and_callback(go_types_helper):
+    # `f := cb` then a conditional literal store: the name resolves
+    # to EITHER callee — the call folds the literal's write target
+    # AND the external callback's deps, not just one alternative.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\tf := cb\n"
+        "\tif b { f = func(v int64) { a = v } }\n"
+        "\tf(x)\n"
+        "\treturn a\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
 def test_double_pointer_read(
     go_types_helper,
 ):
