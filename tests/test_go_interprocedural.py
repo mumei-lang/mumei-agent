@@ -20829,3 +20829,71 @@ def test_imported_func_result_arg_capture(go_types_helper):
         result.available
         and result.return_dependencies == frozenset({0})
     )
+
+
+def test_func_arg_parenthesized_invocation_queued(go_types_helper):
+    # `P((h), x)` — a parenthesized func-value argument must queue
+    # the same callback invocation as the bare `P(h, x)` form:
+    # without the paren unwrap the arg list contains no queued node
+    # and the literal's write `a = v` never lands on `return a`.
+    files = {
+        "f.go": "package p\n"
+        "func P(f func(int64), v int64) { f(v) }\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\th := func(v int64) { a = v }\n"
+        "\tif b { h = cb }\n"
+        "\tP((h), x)\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_alias_resolves_like_function_name(go_types_helper):
+    # `h := Id; P(h, x)` resolves identically to `P(Id, x)`: the
+    # bounded pure callee keeps its own effects instead of the
+    # opaque-arg broadcast. Both forms agree here — the alias used
+    # to mark `h` opaque and over-report `x` on the receive.
+    files = {
+        "f.go": "package p\n"
+        "var Hold func(int64)\n"
+        "func Id(v int64) {}\n"
+        "func P(f func(int64), v int64) { Hold = f }\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\th := Id\n"
+        "\tP(h, x)\n"
+        "\treturn <-q\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_opaque_callback_writes_back_escaped(
+    go_types_helper,
+):
+    # `P(h, x)` with `h` an opaque param: the unknown callback may
+    # write through any captured pointer — escaped `b` (`p := &b`)
+    # must gain the call's deps. Without the unbounded write-back
+    # `return b` missed `x` entirely — an under-approximation.
+    files = {
+        "f.go": "package p\n"
+        "func P(f func(int64), v int64) { f(v) }\n"
+        "func F(x int64, h func(int64)) int64 {\n"
+        "\tb := int64(0)\n"
+        "\tp := &b\n"
+        "\t_ = p\n"
+        "\tP(h, x)\n"
+        "\treturn b\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
