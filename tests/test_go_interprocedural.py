@@ -24778,4 +24778,5 @@ def test_call_result_index_read_comma_ok_parens_callee(go_types_helper):
     )
     assert result.available
     assert 0 in result.return_dependencies
-    assert all(t.target for t in result.calls)
+    member = next(m for m in snapshot.imported_members if m.name == "M")
+    assert any(t.target == member.id for t in result.calls)
