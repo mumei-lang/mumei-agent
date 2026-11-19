@@ -8854,6 +8854,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 inner[0], fn, params, locals_, transfers, count, 0
             )
             return
+        if kind in {"go_statement", "defer_statement"}:
+            # `go f(x)` / `defer f(x)` — Go evaluates the call's
+            # function and arguments at the statement itself; only
+            # the invocation is concurrent or deferred, so its
+            # result is discarded while its effects fold here the
+            # same may-happen way a regular call's do: a deferred
+            # call runs before the function returns and a goroutine
+            # races with it, so a later read cannot tell whether
+            # the callee's writes landed — the union covers both.
+            # The inner node must evaluate as a supported call on
+            # its own; a literal callee is rejected upstream by the
+            # extractor's `closure` kind.
+            inner = _children(node)
+            if len(inner) != 1:
+                raise _Unsupported("unsupported_statement", _span(node))
+            self.expression(
+                inner[0], fn, params, locals_, transfers, count, 0
+            )
+            return
         if kind == "select_statement":
             # A select is a nondeterministic choice: each case's
             # communication op and body run in a fresh alternative

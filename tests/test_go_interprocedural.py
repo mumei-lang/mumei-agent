@@ -19476,3 +19476,97 @@ def test_imported_chan_result_named_elem_pins_identity(
     )
     assert result.available
     assert set(member.signature_type_ids) <= set(result.pinned)
+
+
+def test_go_statement_admitted(go_types_helper):
+    # `go g(x)`: the callee and its arguments evaluate at the
+    # statement, the goroutine's result is discarded — the call
+    # folds like a plain call whose effects may (or may not)
+    # happen.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func g(x int64) int64 { q <- x; return x }; "
+        "func F(x int64) int64 { go g(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_statement_admitted(go_types_helper):
+    # `defer g(x)`: arguments evaluate at the statement, the call
+    # runs before the function returns — its effects fold exactly
+    # like the plain call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func g(x int64) int64 { q <- x; return x }; "
+        "func F(x int64) int64 { defer g(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_go_pure_callee_admitted(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func g(x int64) int64 { return x }; "
+        "func F(x int64) int64 { go g(x); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    g_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "g"
+    )
+    assert any(c.target == g_id for c in result.calls)
+
+
+def test_go_func_literal_stays_closed(go_types_helper):
+    # `go func(){...}()` — the extractor classifies a func_literal
+    # callee as `closure`, which the CFG gate keeps closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { go func() { }(); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_defer_void_callee_stays_closed(go_types_helper):
+    # A void callee is outside the signature model — `defer s(x)`
+    # closes like the plain call on an unavailable callee does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func s(x int64) { q <- x }; "
+        "func F(x int64) int64 { defer s(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_go_statement_imported_callee(go_types_helper):
+    # `go lib.G(x)` — the `special` marker rides the package call
+    # record, and the imported callee still classifies.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { go lib.G(x); return x }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G(x int64) int64 { return x }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    call = next(c for c in snapshot.calls if c.special)
+    assert call.special == "concurrent" and call.kind == "direct_import"
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})

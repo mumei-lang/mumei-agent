@@ -119,8 +119,6 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
     "body,reason",
     [
         ("switch v := x.(type) { case int: return 1 }", "unsupported_type_switch"),
-        ("defer f(); return 0", "unsupported_defer"),
-        ("go f(); return 0", "unsupported_go"),
         ("goto done; done: return 0", "unsupported_goto"),
         ("outer: x := 1; return x", "labelled_statement"),
         ("outer: if true { return 1 }", "labelled_statement"),
@@ -183,9 +181,9 @@ def test_assignments_kill_guard_facts_and_shadowing_is_local() -> None:
 
 
 def test_gap_does_not_discard_existing_resource_findings() -> None:
-    flow = dataflow_facts.analyze_function("mu.Lock(); defer other(); return 0", "go")
+    flow = dataflow_facts.analyze_function("mu.Lock(); switch v := x.(type) { case int: _ = v }; return 0", "go")
     assert flow is not None and flow.cfg is None
-    assert flow.cfg_gaps[0].reason == "unsupported_defer"
+    assert flow.cfg_gaps[0].reason == "unsupported_type_switch"
     assert "lock_held_at_return" in {issue.category for issue in flow.issues}
     assert flow.facts_for_return(2) is None
 

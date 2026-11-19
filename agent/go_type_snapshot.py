@@ -149,6 +149,11 @@ class Call:
     # too: the target is the alias's own declaration while the
     # underlying named interface's identity pins alongside.
     type_arg_type_ids: tuple[str, ...] = ()
+    # `special` marks a call evaluated inside a `go` or `defer`
+    # statement — "concurrent" or "deferred": the callee classifies
+    # normally since the arguments evaluate at the statement; only
+    # the invocation's timing differs.
+    special: str = ""
 
 
 @dataclass(frozen=True)
@@ -321,6 +326,11 @@ class PackageCall:
     # declaration while the underlying named interface's identity
     # pins alongside.
     type_arg_type_ids: tuple[str, ...] = ()
+    # `special` marks a call evaluated inside a `go` or `defer`
+    # statement — "concurrent" or "deferred": the callee classifies
+    # normally since the arguments evaluate at the statement; only
+    # the invocation's timing differs.
+    special: str = ""
 
 
 @dataclass(frozen=True)
@@ -711,6 +721,7 @@ def load_go_snapshot(
                     "method",
                     "method_expr",
                     "type_arg_type_ids",
+                    "special",
                 }
             )
             c = item
@@ -773,6 +784,8 @@ def load_go_snapshot(
                     for i in type_arg_ids
                 )
             )
+            special = _string(c.get("special", ""))
+            _require(special in {"", "concurrent", "deferred"})
             calls.append(
                 Call(
                     sp,
@@ -783,6 +796,7 @@ def load_go_snapshot(
                     method,
                     method_expr,
                     tuple(type_arg_ids),
+                    special,
                 )
             )
         gaps = []
@@ -1125,6 +1139,7 @@ def load_go_package_snapshot(
                     "method_expr",
                     "results",
                     "type_arg_type_ids",
+                    "special",
                 }
             )
             c = item
@@ -1220,6 +1235,8 @@ def load_go_package_snapshot(
                     for a in args
                 )
             )
+            special = _string(c.get("special", ""))
+            _require(special in {"", "concurrent", "deferred"})
             calls.append(
                 PackageCall(
                     sp,
@@ -1231,6 +1248,7 @@ def load_go_package_snapshot(
                     method_expr,
                     results,
                     tuple(type_arg_ids),
+                    special,
                 )
             )
         gaps = []

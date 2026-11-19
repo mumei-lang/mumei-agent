@@ -93,7 +93,9 @@ class CFGConstruction:
     gaps: tuple[CFGGap, ...] = ()
 
 
-_SIMPLE = frozenset({"define", "assign", "inc", "dec", "const", "var", "expr"})
+_SIMPLE = frozenset(
+    {"define", "assign", "inc", "dec", "const", "var", "expr", "go", "defer"}
+)
 _STRUCTURED = frozenset(
     {"if", "for", "range", "block", "return", "terminate", "switch"}
 )
