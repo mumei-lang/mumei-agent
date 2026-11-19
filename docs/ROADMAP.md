@@ -3301,7 +3301,11 @@ is therefore not a gap a resolved report emits. `direct_import` is only
 classified for callees whose results are all scalar — a composite
 result at any arity stays `external_or_bodyless` and fails closed (a
 `range` over a composite operand would break the integer-only range
-model). A multi-valued scalar callee is admitted and declares its
+model). A `func`-typed result admits the same way a `func` parameter
+does: `f := lib.Mk()` binds an opaque func value whose calls resolve
+through the func-value path, and a multi-result signature carrying a
+func slot (`f, n := lib.Mk()`) binds the slot opaquely beside the
+conflated scalar results. A multi-valued scalar callee is admitted and declares its
 arity on the call record; see the C06 multi-valued imported results
 slice below. A variadic callee (`lib.W(x, y)`, `WV(x, y)`) admits the
 same way — every argument is an independent expression whose

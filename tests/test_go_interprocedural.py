@@ -20163,6 +20163,7 @@ def test_defer_indirect_callee_arg_deps_reach_named_result(
     assert 0 in result.return_dependencies
 
 
+
 def test_func_result_return_named_admitted(go_types_helper):
     # `func mk() func() int64 { return G }` — a func-typed result
     # carries no scalar deps; the name reads dep-free.
@@ -20348,3 +20349,77 @@ def test_func_result_captured_chan_send_after_bind(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.return_dependencies == frozenset({0})
+
+
+
+def test_imported_func_result_binds_opaque(go_types_helper):
+    # `f := lib.Mk()` — a func-typed imported result records
+    # `direct_import` and the name binds an opaque func value;
+    # `f()` resolves through the func-value path.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(); return f() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\nfunc Mk() func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    call = snapshot.calls[0]
+    assert call.kind == "direct_import"
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_imported_func_result_args_fold(go_types_helper):
+    # `f := lib.Mk(); f(x)` — the opaque call unions its args.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(); return f(x) }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\nfunc Mk() func(int64) int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_func_result_multi_slot(go_types_helper):
+    # `f, n := lib.Mk()` — the func slot binds opaque beside the
+    # conflated scalar slot, like the local multi-result unpack.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f, n := lib.Mk(); return f() + n }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk() (func() int64, int64) { return nil, 7 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
