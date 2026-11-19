@@ -163,7 +163,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func Ext(x int64) int64; func F(x int64) int64 { return Ext(x) }",
         "func F(x int64) float64 {return 1.0}",
         "func F(x int64) int64 {return 1.0}",
-        "func F(x int64) int64 {return (func() int64 {return x})()}",
         "func G(){}; func F(x int64) int64 {defer G(); return x}",
         "func G(){}; func F(x int64) int64 {go G(); return x}",
         "func F(x []int64) int64 {return x[0]}",
@@ -12196,6 +12195,192 @@ def test_selector_func_field_call_writes_back(go_types_helper):
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_call(go_types_helper):
+    # `func() int64 { return x }()` — the literal is the callee,
+    # so the call resolves its capture like a bound literal's.
+    data = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\treturn func() int64 { return x }()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_immediate_func_literal_call_with_arg(go_types_helper):
+    # `func(a int64) int64 { return a + x }(y)` — the result
+    # unions the captured `x` and the argument `y`.
+    data = unit(
+        go_types_helper,
+        "func F(x int64, y int64) int64 {\n"
+        "\treturn (func(a int64) int64 { return a + x })(y)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_immediate_func_literal_pointer_capture(go_types_helper):
+    # A literal dereferencing a captured pointer reads caller
+    # memory: the escaped binding unions in and the read records
+    # an external effect.
+    data = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tp := &x\n"
+        "\treturn func() int64 { return *p }()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_capture_resolves_after_arg_writes(
+    go_types_helper,
+):
+    # `func() int64 { return x }(G(&x, y))` — Go runs the argument
+    # first, so the literal's `x` reads the state after `G` stored
+    # `y` through `&x`; a constant result still carries the write.
+    data = unit(
+        go_types_helper,
+        "func G(p *int64, y int64) int64 { *p = y; return 1 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\treturn func(a int64) int64 { return x }(G(&x, y))\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_immediate_func_literal_chan_arg_recv_external(
+    go_types_helper,
+):
+    # `func(ch) { <-ch }(q)` — a receive on a channel passed as an
+    # argument reads an external queue the caller shares: records
+    # the same imported effect a captured channel would.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return <-ch }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_chan_alias_recv_external(
+    go_types_helper,
+):
+    # `func(ch) { c := ch; <-c }(q)` — a literal-internal alias of
+    # the channel parameter still receives on the caller's queue.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { c := ch; return <-c }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_paren_chan_recv_external(
+    go_types_helper,
+):
+    # `func(ch) { <-(ch) }(q)` — a parenthesized operand resolves
+    # to the same receive.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return <-(ch) }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_variadic_chan_recv_external(
+    go_types_helper,
+):
+    # `func(qs ...chan) { <-qs[0] }(q1, q2)` — a receive through a
+    # variadic slice element reads whichever argument queue carried
+    # it, so both external queues mark the effect.
+    data = unit(
+        go_types_helper,
+        "func F(q1 chan int64, q2 chan int64) int64 {\n"
+        "\treturn func(qs ...chan int64) int64 { return <-qs[0] }(q1, q2)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_unused_chan_arg_no_effect(
+    go_types_helper,
+):
+    # `func(ch) { return x }(q)` — the channel argument is never
+    # received on, so it carries no external effect: the summary
+    # must not mark the call unknown.
+    data = unit(
+        go_types_helper,
+        "func F(x int64, q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return x }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_immediate_func_literal_chan_arg_through_call_result(
+    go_types_helper,
+):
+    # `func(ch) { <-ch }(Id(q))` — the argument is a callee-produced
+    # queue: receiving on the literal's chan parameter reads an
+    # external queue just like a `ch := g()` binding would.
+    data = unit(
+        go_types_helper,
+        "func Id(q chan int64) chan int64 { return q }\n"
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return <-ch }(Id(q))\n}",
+    )
+    result = named(*data, name="F")
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_internal_call_closed(
+    go_types_helper,
+):
+    # `func() int64 { return G() }()` — a call inside the literal
+    # defers an effect the model cannot sequence: stays closed,
+    # like a bound literal would.
+    data = unit(
+        go_types_helper,
+        "func G() int64 { return 1 }\n"
+        "func F(x int64) int64 {\n"
+        "\treturn func() int64 { return G() }()\n}",
+    )
+    result = named(*data)
+    assert not result.available
+
+
+def test_nested_call_callee_stays_closed(go_types_helper):
+    # `h()()` — the outer call's callee is itself a call
+    # expression, which no callee identity resolves: closed.
+    data = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\th := func() func() int64 {\n"
+        "\t\treturn func() int64 { return x }\n"
+        "\t}\n"
+        "\treturn h()()\n}",
+    )
+    result = named(*data)
+    assert not result.available
 
 
 def test_bound_closure_var_declaration(go_types_helper):

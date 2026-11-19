@@ -10332,26 +10332,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             raise _Unsupported("non_parameter_reference", _span(node))
         return frozenset()
 
-    def _func_literal(
+    def _func_literal_capture(
         self,
         node: Any,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
-    ) -> frozenset[int]:
-        """`func(...) T { ... }` — a deferred body admitted by
-        conservative free-variable capture.
+    ) -> tuple[frozenset[int], set[str], bool]:
+        """Free-variable scan of a `func` literal: (deps, captured
+        binding ids, whether any capture is a pointer).
 
-        The literal's statements never sequence, so the literal's
-        deps are the union of every enclosing-scope binding it
-        references — what `h()`'s result depends on. A call inside
-        the literal defers an effect the sequencing model cannot
-        place, a write targets state the caller can observe out of
-        order, and a reference to anything but the enclosing
-        function's own params/locals (package vars, imported
-        members, fields the literal cannot pin) reads storage the
-        capture cannot describe — all stay closed. Names declared
-        inside the literal (its own params and locals) are not
-        captured: their span sits inside the literal's."""
+        Same gate as `_func_literal` — the literal's statements
+        never sequence, so a call/assignment/send/go/defer inside
+        stays closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -10372,16 +10364,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ref = self.references.get(self.node_key(cur))
                 if ref is not None and ref.kind != "universe":
                     bid = ref.binding_id
-                    if bid in params:
-                        deps |= frozenset({params[bid]})
+                    # `locals_` wins over the parameter ordinal: a
+                    # reassigned parameter (`x = g()` or a `G(&x, y)`
+                    # call fold) carries its CURRENT deps there —
+                    # reading `params` first would report the stale
+                    # pre-assignment set.
+                    if bid in locals_:
+                        deps |= locals_[bid]
                         captured.add(bid)
                         binding = self.bindings.get(bid)
                         captures_pointer |= (
                             binding is not None
                             and binding.type.kind == "pointer"
                         )
-                    elif bid in locals_:
-                        deps |= locals_[bid]
+                    elif bid in params:
+                        deps |= frozenset({params[bid]})
                         captured.add(bid)
                         binding = self.bindings.get(bid)
                         captures_pointer |= (
@@ -10406,6 +10403,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 "binding_unavailable", _span(cur)
                             )
             stack.extend(_children(cur))
+        return deps, captured, captures_pointer
+
+    def _func_literal(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        """`func(...) T { ... }` — a deferred body admitted by
+        conservative free-variable capture.
+
+        The literal's statements never sequence, so the literal's
+        deps are the union of every enclosing-scope binding it
+        references — what `h()`'s result depends on. A call inside
+        the literal defers an effect the sequencing model cannot
+        place, a write targets state the caller can observe out of
+        order, and a reference to anything but the enclosing
+        function's own params/locals (package vars, imported
+        members, fields the literal cannot pin) reads storage the
+        capture cannot describe — all stay closed. Names declared
+        inside the literal (its own params and locals) are not
+        captured: their span sits inside the literal's."""
+        deps, captured, captures_pointer = self._func_literal_capture(
+            node, params, locals_
+        )
         # Find the name this literal binds (`h := func()...`,
         # `var h = func()...`, `h = func()...`) and record which
         # enclosing bindings it captured, so `h()` can resolve
@@ -10561,6 +10583,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if c.type != "comment"
                 ),
                 None,
+            )
+        if callee is not None and callee.type == "func_literal":
+            # `func(...) T { ... }(args)` — the literal IS the
+            # callee, known at this point like a bound literal's.
+            return self._immediate_literal_call(
+                node, callee, arguments, fn, params, locals_,
+                transfers, count, depth,
             )
         if callee is not None and callee.type != "identifier":
             # `s.f(args)` / `m[k](args)` — the callee is read through
@@ -11221,6 +11250,254 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 self.indirect_writes |= stored
         return result
+
+    def _immediate_literal_call(
+        self,
+        node: Any,
+        literal: Any,
+        arguments: list[Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[Any],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """`func(...) T { ... }(args)` — a literal invoked in place.
+
+        The callee is this very literal, so the call models like a
+        bound-literal `h()` whose captures are the literal's own
+        free variables resolved right here: the result unions their
+        CURRENT dep sets, the arguments, and `indirect_writes` (a
+        captured pointer may read caller memory the capture cannot
+        name). A literal that captures a pointer unions the escaped
+        bindings and records an imported transfer on the captured
+        pointer, and one capturing a parameter or external channel
+        may receive on it inside — the same receive-side effect a
+        bound literal records. The literal's own gate still applies:
+        an internal call, assignment, send, go or defer stays
+        closed, so no write-back runs here."""
+        # Go evaluates the arguments before the body, so captures and
+        # alias resolution read the state AFTER `G(&x, y)`-shaped
+        # arguments land — an arg that stores through `&x` or reseats
+        # a channel alias changes what the literal's free names mean.
+        arg_deps: frozenset[int] = frozenset()
+        for arg in arguments:
+            arg_deps |= self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+        deps, captured, captures_pointer = self._func_literal_capture(
+            literal, params, locals_
+        )
+        deps |= self.indirect_writes | arg_deps
+        pointer_capture = next(
+            (
+                cbid
+                for cbid in captured
+                if (
+                    (binding := self.bindings.get(cbid)) is not None
+                    and binding.type.kind == "pointer"
+                )
+            ),
+            None,
+        )
+        # `<-ch` inside the literal (a unary receive, or a range over
+        # the channel) may pull from an external queue — one captured
+        # by name, or one passed in as an argument
+        # (`func(ch) { <-ch }(q)`). A channel operand only carries the
+        # effect when the body actually RECEIVES on it: `func(ch)
+        # { return x }(q)` never touches the queue, so recording the
+        # op would mark the summary `unknown` and fold phantom
+        # write-throughs into the caller's deps.
+        lit_param_ids: list[str | None] = []
+        lit_variadic = False
+        plist = literal.child_by_field_name("parameters")
+        if plist is not None:
+            for decl in plist.named_children:
+                if decl.type not in {
+                    "parameter_declaration",
+                    "variadic_parameter_declaration",
+                }:
+                    continue
+                if decl.type == "variadic_parameter_declaration":
+                    lit_variadic = True
+                for c in decl.named_children:
+                    if c.type == "identifier":
+                        pb = self.bindings_by_span.get(self.node_key(c))
+                        lit_param_ids.append(
+                            pb.id if pb is not None else None
+                        )
+        # `c := ch` inside the literal aliases the queue under an
+        # internal name — a receive on the alias reaches the root, so
+        # map each simple `name := identifier`/`name = identifier`
+        # before scanning receives.
+        lit_chan_alias: dict[str, str] = {}
+        recv_bids: set[str] = set()
+        # The DFS below pops children in reverse order, so a use
+        # could scan before its declaration — collect the simple
+        # `name := identifier`/`name = identifier` aliases in a
+        # separate pass first.
+        alias_stack = [literal]
+        while alias_stack:
+            cur = alias_stack.pop()
+            alias_stack.extend(_children(cur))
+            if cur.type in {
+                "short_var_declaration",
+                "var_declaration",
+            }:
+                left = cur.child_by_field_name("left")
+                right = cur.child_by_field_name("right")
+                lefts = _children(left) if left is not None else []
+                rights = _children(right) if right is not None else []
+                if (
+                    len(lefts) == len(rights) == 1
+                    and lefts[0].type == "identifier"
+                    and rights[0].type == "identifier"
+                ):
+                    lb = self.bindings_by_span.get(
+                        self.node_key(lefts[0])
+                    )
+                    rr = self.references.get(
+                        self.node_key(rights[0])
+                    )
+                    if lb is not None and rr is not None:
+                        lit_chan_alias[lb.id] = rr.binding_id
+
+        def _recv_base_bid(opnd: Any) -> str | None:
+            # `<-(ch)` / `range (ch)` unwrap like every operand read;
+            # `<-qs[0]` on a `...chan` parameter receives through the
+            # variadic slice's element, whose base is the param.
+            while (
+                opnd is not None
+                and opnd.type == "parenthesized_expression"
+            ):
+                opnd = next(
+                    (
+                        c
+                        for c in opnd.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if opnd is None:
+                return None
+            if opnd.type == "index_expression":
+                return _recv_base_bid(
+                    opnd.child_by_field_name("operand")
+                )
+            if opnd.type == "identifier":
+                rr = self.references.get(self.node_key(opnd))
+                if rr is not None:
+                    bid = rr.binding_id
+                    seen: set[str] = set()
+                    while bid in lit_chan_alias and bid not in seen:
+                        seen.add(bid)
+                        bid = lit_chan_alias[bid]
+                    return bid
+            return None
+
+        stack = [literal]
+        while stack:
+            cur = stack.pop()
+            operand = None
+            is_range = False
+            if cur.type == "unary_expression":
+                op = cur.child_by_field_name("operator")
+                if op is not None and op.type == "<-":
+                    operand = cur.child_by_field_name("operand")
+            elif cur.type == "range_clause":
+                operand = cur.child_by_field_name("right")
+                is_range = True
+            if operand is not None:
+                # `range qs` over a `...chan` slice yields its
+                # elements without receiving — only `range qs[i]` (a
+                # channel element) or `range ch` (a channel binding)
+                # pulls. A bare `<-x` operand is a channel by type.
+                norm = operand
+                while (
+                    norm is not None
+                    and norm.type == "parenthesized_expression"
+                ):
+                    norm = next(
+                        (
+                            c
+                            for c in norm.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                rbid = _recv_base_bid(operand)
+                if rbid is not None and (
+                    not is_range
+                    or (norm is not None and norm.type == "index_expression")
+                    or self._scalar_chan_binding(rbid)
+                ):
+                    recv_bids.add(rbid)
+            stack.extend(_children(cur))
+        external_chans: set[str] = set()
+        for cbid in captured:
+            if self._scalar_chan_binding(cbid) and cbid in recv_bids:
+                root = self._chan_root(cbid)
+                if (
+                    root in params
+                    or root in self.external_chan_locals
+                ):
+                    external_chans.add(root)
+        for i, arg in enumerate(arguments):
+            if i < len(lit_param_ids):
+                param_bid = lit_param_ids[i]
+            elif lit_variadic and lit_param_ids:
+                # Every argument at and past the last declared
+                # position lands in the variadic slice — `func(qs
+                # ...chan){<-qs[0]}(q1, q2)` receives through ANY of
+                # them.
+                param_bid = lit_param_ids[-1]
+            else:
+                param_bid = None
+            if param_bid is None or param_bid not in recv_bids:
+                continue
+            cb = self._chan_binding(arg, locals_, params)
+            root = cb.id if cb is not None else None
+            if root is not None and (
+                root in params or root in self.external_chan_locals
+            ):
+                external_chans.add(root)
+                continue
+            ext = self._external_chan_operand(arg)
+            if ext is not None:
+                external_chans.add(ext[0])
+                continue
+            # `func(ch) { <-ch }(Id(q))` — the argument is a
+            # callee-produced queue, external like a `ch := g()`
+            # binding is: record the receive against the callee's
+            # identity.
+            target = self._chan_result_call(arg)
+            if target is not None:
+                external_chans.add(target.binding_id)
+        if captures_pointer:
+            for escaped_id in self.escaped:
+                if escaped_id in locals_:
+                    deps |= locals_[escaped_id]
+                elif escaped_id in params:
+                    deps |= frozenset({params[escaped_id]})
+        for target in (
+            ([pointer_capture] if captures_pointer else [])
+            + sorted(external_chans)
+        ):
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file,
+                        node.start_byte,
+                        node.end_byte,
+                    ),
+                    target,
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+        return deps
 
     def _direct_import_call(
         self,
