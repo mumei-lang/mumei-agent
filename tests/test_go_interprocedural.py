@@ -17299,17 +17299,65 @@ def test_select_send_case_admits(go_types_helper):
 
 
 def test_select_non_identifier_store_stays_closed(go_types_helper):
+    # `a[i] = <-ch` — an index into an unbound container has no
+    # binding to fold the received deps into, so it stays closed.
     result = named(
         *unit(
             go_types_helper,
-            "func F(ch chan int64, st struct{ V int64 }) int64 {\n"
+            "func F(ch chan int64) int64 {\n"
+            "\tvar a [4]int64\n"
             "\tselect {\n"
-            "\tcase st.V = <-ch:\n"
+            "\tcase a[0] = <-ch:\n"
             "\t}\n"
             "\treturn 0\n}\n",
         )
     )
     assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `s.V = <-ch` — a field store on a local composite folds the
+        # receive into the base binding like the plain assignment.
+        (
+            "func F(ch chan int64) int64 {\n"
+            "\tvar s struct{ V int64 }\n"
+            "\tselect {\n"
+            "\tcase s.V = <-ch:\n"
+            "\t\treturn s.V\n"
+            "\t}\n"
+            "\treturn 0\n}\n",
+            frozenset({0}),
+        ),
+        # `*p = <-ch` — a bound-pointer store lands in untracked
+        # memory: the deps fold into escaped bindings and
+        # `indirect_writes`, so a later `*p` read observes them.
+        (
+            "func F(ch chan int64, p *int64) int64 {\n"
+            "\tselect {\n"
+            "\tcase *p = <-ch:\n"
+            "\t}\n"
+            "\treturn *p\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `*p = <-ch` may aim at an escaped local — `return y`
+        # observes the receive.
+        (
+            "func F(ch chan int64) int64 {\n"
+            "\tvar y int64\n"
+            "\tp := &y\n"
+            "\tselect {\n"
+            "\tcase *p = <-ch:\n"
+            "\t}\n"
+            "\treturn y\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_select_composite_receive_stores(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
 
 
 def test_select_break_exits_the_select(go_types_helper):

@@ -3047,6 +3047,167 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 pending.append(("member", lhs, member, extras))
                 continue
+            # `s.V = <-ch` / `*p = <-ch` — a field store through a
+            # pointer-typed binding or a local composite admits the
+            # same way the ordinary assignment does: external memory
+            # records the mutation, the received deps accumulate
+            # into the base binding, and a declared-type base also
+            # broadcasts into `indirect_writes`.
+            write_target = self._opaque_write_target(
+                lhs, locals_, params
+            )
+            if write_target is not None:
+                type_id, ref, nested = write_target
+                # The store's destination read mirrors `=`:
+                # a bound-pointer base reads the pointer's
+                # provenance (plus the indirect stores a nested
+                # `t.W.f` traversal may read), while a tracked
+                # local composite reads its continuing dep set.
+                if type_id:
+                    dest = self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if nested:
+                        dest = dest | self.indirect_writes
+                else:
+                    dest = locals_.get(
+                        ref.binding_id,
+                        frozenset({params[ref.binding_id]})
+                        if ref.binding_id in params
+                        else frozenset(),
+                    )
+                self._record_read(dest)
+                if type_id:
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            type_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                pending.append(
+                    ("field", ref, bool(type_id), nested)
+                )
+                continue
+            # `(*p)[i] = <-ch` — a store through a bound container
+            # pointee writes element memory no binding tracks: the
+            # received deps union into every escaped binding plus
+            # `indirect_writes`, like the assignment's alias fold.
+            bound_write = self._bound_container_write(
+                lhs, locals_, params
+            )
+            if bound_write is not None:
+                pointee_id, extras, fact, ref = bound_write
+                dest_deps = self._pointer_deps(
+                    ref.binding_id, params, locals_
+                )
+                self._record_read(dest_deps)
+                self._pin_fact_identities(fact)
+                for extra in reversed(extras):
+                    if extra.type in _INDEX_LITERALS:
+                        continue
+                    self._record_read(
+                        self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    )
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            lhs.start_byte,
+                            lhs.end_byte,
+                        ),
+                        pointee_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                pending.append(("alias",))
+                continue
+            # `(*p)[i].F = <-ch` — a field store through the element a
+            # bound container pointee's index selects: same alias fold,
+            # the leaf field's identity records the mutation.
+            indexed_field = self._bound_pointee_index_field(
+                lhs, locals_, params
+            )
+            if indexed_field is not None:
+                (
+                    _root, _pid, fact, extras, field_member,
+                    mid_members, ref,
+                ) = indexed_field
+                self._pin_fact_identities(fact)
+                for mid_member in mid_members:
+                    self._pin_fact_identities(mid_member.type)
+                if field_member.type is not None:
+                    self._pin_fact_identities(field_member.type)
+                for extra in reversed(extras):
+                    if extra.type in _INDEX_LITERALS:
+                        continue
+                    self._record_read(
+                        self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    )
+                self._record_read(
+                    self._pointer_deps(ref.binding_id, params, locals_)
+                )
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            lhs.start_byte,
+                            lhs.end_byte,
+                        ),
+                        field_member.id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                pending.append(("alias",))
+                continue
+            # `*p = <-ch` — a store through a bound pointer lands in
+            # untracked memory; the received deps fold into every
+            # escaped binding plus `indirect_writes`, like `*p = v`.
+            bound_ptr = self._bound_pointer_write(
+                lhs, locals_, params
+            )
+            if bound_ptr is not None:
+                pointee_id, ref, extra = bound_ptr
+                self._record_read(
+                    self._deref_read_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if extra
+                    else self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                )
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            lhs.start_byte,
+                            lhs.end_byte,
+                        ),
+                        pointee_id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                pending.append(("alias",))
+                continue
             if lhs.type != "identifier":
                 raise _Unsupported("unsupported_statement", _span(node))
             binding = self.bindings_by_span.get(self.node_key(lhs))
@@ -3076,6 +3237,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, member, extras, fn, params, locals_,
                     transfers, count, eval_extras=False,
                 )
+            elif entry[0] == "field":
+                _, ref, bcast, nested = entry
+                base = (
+                    locals_.get(ref.binding_id)
+                    if ref.binding_id in locals_
+                    else frozenset({params[ref.binding_id]})
+                    if ref.binding_id in params
+                    else frozenset()
+                )
+                self._store(
+                    locals_, params, ref.binding_id,
+                    base | recv_deps, conditional,
+                )
+                if bcast:
+                    self.indirect_writes |= recv_deps
+            elif entry[0] == "alias":
+                self.indirect_writes |= recv_deps
+                for escaped_id in self.escaped:
+                    esc_base = (
+                        locals_.get(escaped_id)
+                        if escaped_id in locals_
+                        else frozenset({params[escaped_id]})
+                        if escaped_id in params
+                        else frozenset()
+                    )
+                    self._store(
+                        locals_, params, escaped_id,
+                        esc_base | recv_deps, conditional,
+                    )
             else:
                 _, binding = entry
                 # `:=` binds fresh names (and a reused one keeps the
