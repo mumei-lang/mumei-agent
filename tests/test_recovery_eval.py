@@ -841,3 +841,33 @@ def test_conflicting_bound_revocation_docs_stay_evidence_failed():
         ]
         == "evidence_failed"
     )
+
+
+def test_unbound_performer_docs_disagreeing_recover_on_any_true():
+    # Record-agnostic performer docs (bind_path=None) are not scoped
+    # to this record — an eval doc reporting `subject_bound: false`
+    # for a different record's envelope must not veto a `true` doc.
+    from agent.core_evidence import evaluate_unperformed_check_recovery
+
+    record = {
+        "checks_not_performed": ["subject_binding"],
+    }
+    good = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "envelope_match": True,
+        "subject_bound": True,
+        "subject_digest": "a" * 64,
+    }
+    unrelated = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "envelope_match": True,
+        "subject_bound": False,
+        "subject_digest": "b" * 64,
+    }
+    report = evaluate_unperformed_check_recovery(
+        record, [good, unrelated]
+    )
+    assert report["checks"]["subject_binding"] == "recovered"
+    # Only the unrelated doc still fails.
+    report = evaluate_unperformed_check_recovery(record, [unrelated])
+    assert report["checks"]["subject_binding"] == "evidence_failed"
