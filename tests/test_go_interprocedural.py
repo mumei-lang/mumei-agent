@@ -18524,6 +18524,200 @@ def test_imported_chan_result_passthrough_arg_shares_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_imported_multi_result_chan_slot_admitted(go_types_helper):
+    # `ch, n := lib.G()` where `lib.G` declares `(chan int64,
+    # int64)` — the bound slot's imported `result_types` entry is a
+    # scalar chan, so `ch` binds a callee-produced external queue
+    # like the same-package `ch, n := g()` does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch, n := lib.G()\n"
+        "\tch <- x\n"
+        "\treturn <-ch + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G() (chan int64, int64) {\n"
+            "\treturn make(chan int64), 0\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_multi_result_chan_slot_shares_arg_queue(
+    go_types_helper,
+):
+    # `ch, n := lib.G(q)` — the opaque imported callee may return
+    # `q` itself at the chan slot, so `q`'s queue joins the
+    # external model: a send through `ch` reaches a receive on `q`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tch, n := lib.G(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q chan int64) (chan int64, int64) {\n"
+            "\treturn q, 0\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_multi_result_chan_slot_second_position(
+    go_types_helper,
+):
+    # `n, ch := lib.G()` — the chan sits at result slot 1; only the
+    # per-position declared type decides admission, so `ch` still
+    # binds an external queue and `n` stays a plain call dep.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn, ch := lib.G()\n"
+        "\tch <- x\n"
+        "\treturn <-ch + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G() (int64, chan int64) {\n"
+            "\treturn 0, make(chan int64)\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_multi_result_nonscalar_chan_stays_closed(
+    go_types_helper,
+):
+    # `ch, n := lib.G()` with `chan chan int64` at the chan slot —
+    # a queue of queues stays out of the dep model.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch, _ := lib.G()\n"
+        "\t_ = ch\n"
+        "\treturn x\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G() (chan chan int64, int64) {\n"
+            "\treturn nil, 0\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_multi_result_chan_var_decl_shares_arg_queue(
+    go_types_helper,
+):
+    # `var ch, n = lib.G(q)` — the declaration form admits like
+    # `:=`: the chan slot binds an external queue and `q`'s queue
+    # joins the external model since `G` may return it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tvar ch, n = lib.G(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q chan int64) (chan int64, int64) {\n"
+            "\treturn q, 0\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_multi_result_chan_assign_shares_arg_queue(
+    go_types_helper,
+):
+    # `ch, n = lib.G(q)` — the assignment form reseats `ch` to an
+    # external queue and promotes `q`: a send through `ch` reaches
+    # a receive on `q`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tch := make(chan int64)\n"
+        "\tvar n int64\n"
+        "\tch, n = lib.G(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q chan int64) (chan int64, int64) {\n"
+            "\treturn q, 0\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_range_over_imported_chan_result_reads_queue(
     go_types_helper,
 ):

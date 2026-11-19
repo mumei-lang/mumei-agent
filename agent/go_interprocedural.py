@@ -3332,7 +3332,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         return None
 
     def _imported_chan_result_args(
-        self, node: Any, locals_: dict, params: dict
+        self, node: Any, locals_: dict, params: dict, index: int = 0
     ) -> tuple:
         """The channel arguments of an imported `ch := lib.G(...)`
         call — every `chan` argument's resolved root binding.
@@ -3340,7 +3340,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         The imported callee's body is opaque: `lib.G(q)` may hand
         the caller's own queue back (`return q`), so each channel
         argument must join the external model — the result may
-        literally be that queue."""
+        literally be that queue. `index` is the bound result slot —
+        a multi-result callee admits at the slot declaring the
+        scalar `chan` (`ch, n := lib.G(q)`)."""
         inner = node
         while (
             inner is not None
@@ -3358,8 +3360,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         member = self.members.get(call.target)
         if (
             member is None
-            or len(member.result_types) != 1
-            or not self._scalar_chan_fact(member.result_types[0])
+            or index >= len(member.result_types)
+            or not self._scalar_chan_fact(member.result_types[index])
         ):
             return ()
         arg_list = next(
@@ -3413,16 +3415,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if inner is None or inner.type != "call_expression":
             return None
         call = self.calls.get(self.node_key(inner))
-        if call is None or call.kind != "direct_local":
+        if call is None:
             return None
-        target = self.functions.get(call.target)
-        if (
-            target is None
-            or index >= len(target.results)
-            or not self._scalar_chan_fact(target.results[index].type)
-        ):
-            return None
-        return target
+        if call.kind == "direct_local":
+            target = self.functions.get(call.target)
+            if (
+                target is None
+                or index >= len(target.results)
+                or not self._scalar_chan_fact(
+                    target.results[index].type
+                )
+            ):
+                return None
+            return target
+        if call.kind == "direct_import":
+            member = self.members.get(call.target)
+            if (
+                member is None
+                or index >= len(member.result_types)
+                or not self._scalar_chan_fact(
+                    member.result_types[index]
+                )
+            ):
+                return None
+            return member
+        return None
 
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
         """The DIRECT field names a `struct{...}` literal declares —
@@ -5407,7 +5424,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # the bound name's slot.
                         for arg_root in (
                             self._imported_chan_result_args(
-                                rights[i], locals_, params
+                                chan_rhs,
+                                locals_,
+                                params,
+                                i if len(rights) == 1 else 0,
                             )
                         ):
                             self.external_chan_locals.add(arg_root)
@@ -5775,6 +5795,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.chan_aliases[binding.id] = target.id
                         else:
                             self.external_chan_locals.add(binding.id)
+                            for arg_root in (
+                                self._imported_chan_result_args(
+                                    value_nodes[0],
+                                    locals_,
+                                    params,
+                                    i,
+                                )
+                            ):
+                                self.external_chan_locals.add(
+                                    arg_root
+                                )
+                                value = value | locals_.get(
+                                    arg_root,
+                                    (
+                                        frozenset({params[arg_root]})
+                                        if arg_root in params
+                                        else frozenset()
+                                    ),
+                                )
                     elif (
                         binding.type.kind == "chan"
                         and value_nodes

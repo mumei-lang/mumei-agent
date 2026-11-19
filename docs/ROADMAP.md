@@ -2660,10 +2660,18 @@ aliases the argument's queue instead — while a
 non-scalar element at the slot stays closed. A fresh
 `make` on an unaliased name keeps the old conflated
 admission since every name resolving to it already
-converges on the same slot. Still closed:
-non-scalar elements (including an imported callee's
-`chan chan T` result), and
-a multi-result callee — while `select` now admits: each communication case's
+converges on the same slot. An imported
+multi-result callee admits the same slot: `ch, n :=
+lib.G()` records `direct_import` when every result
+is scalar/pointer or a scalar-element `chan` (the
+member's `result_types` carries each slot's fact),
+the chan name's position binds an external queue,
+and the call's `chan` arguments join the external
+model since the opaque callee may return one — the
+`var` and plain-assignment forms admit identically,
+while a `chan chan T` or other non-scalar result at
+any position stays closed. Still closed:
+non-scalar elements — while `select` now admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
 a bare `<-ch`) or send (`ch <- v`) runs in a fresh
 alternative scope and every alternative joins back by
