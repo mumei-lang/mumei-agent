@@ -12939,8 +12939,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        """`s.f(args)` / `m[k](args)` — an `indirect_or_selector`
-        call whose callee is read through a field or an index.
+        """`s.f(args)` / `m[k](args)` / `mk(x)()` — an
+        `indirect_or_selector` call whose callee is read through a
+        field, an index, or a call result.
 
         Which function value the slot holds is unknowable here, so
         the call runs opaque like a func-typed parameter or a
@@ -13052,6 +13053,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     index, fn, params, locals_, transfers, count,
                     depth + 1,
                 )
+        elif callee_node.type == "call_expression":
+            # `mk(x)()` / `lib.Mk(x)()` — the callee is the func
+            # value a call returns. Go evaluates the callee
+            # expression before the arguments, so the inner call's
+            # own records and argument deps land first; the outer
+            # call then runs opaque on the result — the inner
+            # call's span stands in for the anonymous callee like
+            # an immediate literal call's does. An inner call the
+            # model cannot evaluate fails closed here.
+            callee_deps = self.expression(
+                callee_node, fn, params, locals_, transfers, count,
+                depth + 1,
+            )
+            target_id = self._immediate_span_id(callee_node)
         if target_id is None:
             raise _Unsupported("unsupported_expression", _span(node))
         deps = callee_deps | self.indirect_writes

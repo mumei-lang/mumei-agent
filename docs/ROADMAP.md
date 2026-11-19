@@ -2832,10 +2832,20 @@ deps ride the result's dep set — so `f := mk(x)` binds an opaque
 func value whose calls resolve through the ordinary func-value
 path (`var f = mk()` and `f = mk()` admit identically, and a
 multi-result signature with a func slot unpacks the same way).
-`return nil` and a call-result callee (`mk()()`) stay closed,
+`return nil` stays closed,
 and an imported func-result callee (`lib.Mk()`) stays
 `external_or_bodyless` at the producer's call classification —
 no `direct_import` record names it.
+A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
+inner callee resolves) admits as an opaque indirect call: Go
+evaluates the callee expression before the arguments, so the
+inner call's own records land first, the outer call's result
+unions the inner call's dep set with the arguments', and the
+external effect records an `imported` transfer on the inner
+call's span identity — an anonymous callee with no binding to
+name, like an immediate literal call's. `mk()()()` nests the
+same evaluation. An inner call the model cannot evaluate keeps
+the outer call closed.
 
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.

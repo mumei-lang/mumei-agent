@@ -13067,9 +13067,12 @@ def test_immediate_func_literal_internal_call_opaque_effect(
     assert result.effects == "unknown"
 
 
-def test_nested_call_callee_stays_closed(go_types_helper):
+def test_nested_call_callee_runs_opaque(go_types_helper):
     # `h()()` — the outer call's callee is itself a call
-    # expression, which no callee identity resolves: closed.
+    # expression: the inner `h()` evaluates first (its bound
+    # literal's captured `x` rides the result deps), then the
+    # outer call runs opaque on the anonymous func value — an
+    # imported transfer on `h()`'s span.
     data = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
@@ -13079,7 +13082,11 @@ def test_nested_call_callee_stays_closed(go_types_helper):
         "\treturn h()()\n}",
     )
     result = named(*data)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    imports = [c for c in result.calls if c.imported]
+    assert len(imports) == 1
 
 
 def test_bound_closure_var_declaration(go_types_helper):
@@ -20455,13 +20462,91 @@ def test_func_result_nil_stays_closed(go_types_helper):
     assert not mk.available
 
 
-def test_func_result_direct_call_stays_closed(go_types_helper):
-    # `mk()()` — a call result as the callee operand is a computed
-    # base the func-value path cannot bind; stays closed.
+def test_func_result_direct_call_runs_opaque(go_types_helper):
+    # `mk(x)()` — the callee operand is a call result: the inner
+    # call evaluates first (its transfer lands on mk's binding),
+    # then the outer call runs opaque on the anonymous func value
+    # — an imported transfer on the inner call's span, the
+    # external effect, and the inner call's dep set.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { return G }; "
+        "func mk(x int64) func() int64 { return func() int64 { return x } }; "
+        "func F(x int64) int64 { return mk(x)() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    imports = [c for c in result.calls if c.imported]
+    assert len(imports) == 1
+
+
+def test_func_result_direct_call_dep_free_result_stays_empty(
+    go_types_helper,
+):
+    # `mk(x)()` where `mk` returns `G` — the func value is opaque
+    # but `mk`'s result carries no `x` dep, so the outer call's
+    # result is parameter-independent. Not empty-as-in-`{}`
+    # opaque: the result genuinely ignores `x`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() int64 { return G }; "
         "func G() int64 { return 1 }; "
+        "func F(x int64) int64 { return mk(x)() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_func_result_direct_call_chain_runs_opaque(go_types_helper):
+    # `mk()()()` — each nesting level re-enters the
+    # call-expression callee branch: the innermost `mk(x)`
+    # transfer lands on mk's binding, the anonymous results each
+    # record a span-identity imported transfer.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() func() int64 {\n"
+        "    return func() func() int64 {\n"
+        "        return func() int64 { return x }\n"
+        "    }\n"
+        "}\n"
+        "func F(x int64) int64 { return mk(x)()() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    imports = [c for c in result.calls if c.imported]
+    assert len(imports) == 2
+
+
+def test_func_result_direct_call_parenthesized_runs_opaque(
+    go_types_helper,
+):
+    # `(mk(x))()` — a parenthesized call-result callee unwraps to
+    # the same opaque call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() int64 { return func() int64 { return x } }; "
+        "func F(x int64) int64 { return (mk(x))() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_func_result_direct_call_inner_closed_stays_closed(
+    go_types_helper,
+):
+    # `mk()()` where `mk`'s result is `nil` — the inner call
+    # cannot produce a func value, so the outer call fails
+    # closed through the inner evaluation.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() func() int64 { return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
