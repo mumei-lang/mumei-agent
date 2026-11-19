@@ -2947,7 +2947,14 @@ the single-level containers, `fm[k][i] = f` (literal, identifier
 or `nil` RHS) stores an element under the root binding's slot,
 `fm2 := fm` / `fm2 = fm` share the backing, and `fm[k][i]()` calls
 opaque on the root slot — both index expressions evaluate into the
-call's dep set when they are not literals. The conflation depth is
+call's dep set when they are not literals. Inner-slot donor keys
+resolve canonically (`1`, `0x1` and `'\x01'` name the same Go
+element, `"a"` and `` `a` `` the same map key; a keyed element
+continues the implicit index like Go's own layout), a store through `fm[k][i]` folds the
+stored value's deps into the donor backing's set so the call reads
+the same slot, and a donor reseat with no surviving sharer parks
+the old backing's element records under a surrogate donor the
+nested call still resolves. The conflation depth is
 exactly one extra level: a third index (`fm[k][i][j]`), an element
 read (`v := fm[k][i]`), an `append` into the inner collection
 (`append(fm[k], f)`), a whole-inner-container store

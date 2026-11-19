@@ -23944,3 +23944,96 @@ def test_func_elem_nested_donated_slot_aliased(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_donor_reseat_surrogate(go_types_helper):
+    # `fs = []func(){…}` reseats `fs` with no surviving sharer — the
+    # old backing `fm[0]` still aliases keeps its elements under a
+    # surrogate donor id, so `fm[0][0]()` still reaches the stored
+    # literal's captures.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fs[0] = func() int64 { return x }\n"
+        "    fs = []func() int64{func() int64 { return 0 }}\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_store_reads_donor_deps(go_types_helper):
+    # `fs[0] = cb` folds the param func value's deps into `fs`'s own
+    # set — `fm[0]` aliases that backing, so the nested call reads
+    # the donor's dep set and reports the callback's index too.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(cb func(int64) int64, x int64) int64 {\n"
+        "    fs := []func(int64) int64{\n"
+        "        func(y int64) int64 { return 0 },\n"
+        "    }\n"
+        "    fm := [][]func(int64) int64{fs}\n"
+        "    fs[0] = cb\n"
+        "    return fm[0][0](x)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_nested_keyed_continues_index(go_types_helper):
+    # `[][]func{1: du, fs}` — Go continues the implicit index after
+    # a keyed element, so `fs` lands at index 2; `fm[2][i]` writes
+    # reach its backing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    du := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{1: du, fs}\n"
+        "    fm[2][0] = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_keyed_notation_equiv(go_types_helper):
+    # `0x1` and `1` name the same Go element — the canonical slot
+    # key unifies spellings so `fm[1][i]` reaches the donor.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{0x1: fs}\n"
+        "    fm[1][0] = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_keyed_rune_int(go_types_helper):
+    # `'\\x01'` and `1` name the same element — rune keys resolve to
+    # the rune's ordinal.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{'\\x01': fs}\n"
+        "    fm[1][0] = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})

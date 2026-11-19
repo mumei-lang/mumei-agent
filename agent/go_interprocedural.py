@@ -68,6 +68,7 @@ No processes, imports, persistent caches or existing audit routes are invoked.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -143,6 +144,63 @@ _INDEX_LITERALS = frozenset(
         "raw_string_literal",
     }
 )
+
+
+def _go_int_literal(text: str) -> int | None:
+    """Value of a Go integer literal — decimal, `0x`/`0X` hex,
+    `0o`/`0O` and leading-zero octal, `0b`/`0B` binary, with `_`
+    digit separators. None when the text does not parse."""
+    t = text.replace("_", "")
+    try:
+        if t[:2].lower() in {"0x", "0o", "0b"}:
+            return int(t, 0)
+        if len(t) > 1 and t[0] == "0":
+            return int(t, 8)
+        return int(t, 10)
+    except ValueError:
+        return None
+
+
+def _go_rune_literal(text: str) -> int | None:
+    """Ordinal of the character a Go rune literal names — `'a'`,
+    `'\\x41'`, `'\\u1234'`, `'\\101'`, `'\\n'`. None when it does not
+    parse."""
+    inner = text[1:-1] if len(text) >= 2 else text
+    if len(inner) == 1 and inner != "\\":
+        return ord(inner)
+    if not inner.startswith("\\"):
+        return None
+    esc = inner[1:]
+    single = {
+        "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9,
+        "v": 11, "\\": 92, "'": 39, '"': 34, "0": 0,
+    }
+    if esc in single:
+        return single[esc]
+    try:
+        if esc[:1] == "x" and len(esc) == 3:
+            return int(esc[1:], 16)
+        if esc[:1] == "u" and len(esc) == 5:
+            return int(esc[1:], 16)
+        if esc[:1] == "U" and len(esc) == 9:
+            return int(esc[1:], 16)
+        if esc and esc[0].isdigit():
+            return int(esc, 8)
+    except ValueError:
+        return None
+    return None
+
+
+def _go_interpreted_string(text: str) -> str:
+    """Content of a Go interpreted string literal with escapes
+    resolved; the unquoted raw text when parsing fails."""
+    try:
+        value = ast.literal_eval(text)
+        if isinstance(value, str):
+            return value
+    except (SyntaxError, ValueError):
+        pass
+    return text[1:-1] if len(text) >= 2 else text
 
 
 def _scalar_const_type(t: Any) -> bool:
@@ -1439,15 +1497,31 @@ class _Builder:
         if body is None:
             return
         stack = []
-        for position, element in enumerate(body.named_children):
-            slot = str(position)
+        # Go continues the implicit index after each keyed element —
+        # `[]func{1: a, b}` puts `b` at index 2, not 1 — so the slot
+        # counter follows the running index, not the position.
+        next_index = 0
+        for element in body.named_children:
+            slot = f"i:{next_index}"
+            next_index += 1
             if element.type == "keyed_element":
                 key_node = element.child_by_field_name("key")
                 value_node = element.child_by_field_name("value")
                 if key_node is not None:
-                    slot = key_node.text.decode(
-                        "utf-8", errors="replace"
+                    key_slot = self._func_elem_slot_key(key_node)
+                    slot = (
+                        key_slot
+                        if key_slot is not None
+                        else "r:" + key_node.text.decode(
+                            "utf-8", errors="replace"
+                        )
                     )
+                    if key_slot is not None and key_slot.startswith(
+                        "i:"
+                    ):
+                        # A keyed element reseats the implicit index —
+                        # `[]func{1: a, b}` puts `b` at index 2.
+                        next_index = int(key_slot[2:]) + 1
                 if value_node is not None:
                     stack.append((value_node, slot))
             else:
@@ -1655,6 +1729,29 @@ class _Builder:
             if member_toks & toks
         } | {binding_id}
 
+    def _func_elem_slot_key(self, node: Any) -> str | None:
+        """Canonical slot key for a literal index/key node —
+        `1`, `0x1` and `'\\x01'` name the same Go element, `"a"`
+        and `` `a` `` the same map key. Integer-kind keys carry an
+        `i:` tag, string-kind an `s:` tag, anything else `r:` with
+        the raw text. None for a non-literal (computed) node."""
+        while node.type == "literal_element" and node.named_children:
+            node = node.named_children[0]
+        text = node.text.decode("utf-8", errors="replace")
+        if node.type == "int_literal":
+            value = _go_int_literal(text)
+            return f"i:{value}" if value is not None else f"r:{text}"
+        if node.type == "rune_literal":
+            value = _go_rune_literal(text)
+            return f"i:{value}" if value is not None else f"r:{text}"
+        if node.type == "interpreted_string_literal":
+            return f"s:{_go_interpreted_string(text)}"
+        if node.type == "raw_string_literal":
+            return f"s:{text[1:-1]}"
+        if node.type in {"float_literal", "imaginary_literal"}:
+            return f"r:{text}"
+        return None
+
     def _func_elem_slot_donors(
         self, binding_id: str, inner_index: Any
     ) -> set[str]:
@@ -1667,7 +1764,7 @@ class _Builder:
         sees `fm`'s donors without copying the table."""
         members = self._func_elem_sharers(binding_id)
         literal_key = (
-            inner_index.text.decode("utf-8", errors="replace")
+            self._func_elem_slot_key(inner_index)
             if inner_index is not None
             and inner_index.type in _INDEX_LITERALS
             else None
@@ -1738,13 +1835,35 @@ class _Builder:
         # it (`fm := [][]func{fs}` slot 0) still alias the OLD
         # backing, so swap the name for the group members that keep
         # sharing it; the container's own donor table drops with it.
-        self._func_elem_inner_donors.pop(binding_id, None)
+        inner_donors = self._func_elem_inner_donors.pop(
+            binding_id, None
+        )
         surviving.discard(binding_id)
+        replacement = surviving
+        if not surviving:
+            # No live name shares the old backing — park its element
+            # records under a surrogate id the donor sets can still
+            # resolve, or `fm[0][i]` loses every element the old
+            # slice carried.
+            surrogate = binding_id + "/func_elem"
+            replacement = {surrogate}
+            if captured:
+                self.closure_captures[surrogate] = captured
+            if writes:
+                self.closure_writes[surrogate] = writes
+            if starred:
+                self.closure_star_writes.add(surrogate)
+            if called:
+                self.closure_inner_calls.add(surrogate)
+            if inner_donors:
+                self._func_elem_inner_donors[surrogate] = inner_donors
+            if binding_id in self.opaque_callees:
+                self.opaque_callees.add(surrogate)
         for slots in self._func_elem_inner_donors.values():
             for donor_set in slots.values():
                 if binding_id in donor_set:
                     donor_set.discard(binding_id)
-                    donor_set |= surviving
+                    donor_set |= replacement
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
@@ -15836,6 +15955,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for t in nested_record_ids
                 )
             )
+            # An element store folds the stored value's deps into the
+            # donor's set (`fs[0] = cb` gives `fs` cb's deps) — the
+            # nested call resolves that same slot, so it reads each
+            # aliased backing's set too, not just the records.
+            for did in nested_record_ids:
+                if did == target_id:
+                    continue
+                if did in locals_:
+                    deps |= locals_[did]
+                elif did in params:
+                    deps |= frozenset({params[did]})
+                elif did in self._dead_local_deps:
+                    deps |= self._dead_local_deps[did]
         else:
             captured = self.closure_captures.get(target_id)
         if captured is not None:
