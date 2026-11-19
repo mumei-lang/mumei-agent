@@ -839,6 +839,12 @@ class _Builder:
         # between the literal and the call (`p := &a; h := func(){*p};
         # p = &b; h()` reads `b`, not `a`).
         self.closure_captures: dict[str, frozenset[str]] = {}
+        # Bound method values — `f := s.M` records `(method binding,
+        # receiver binding)` under `f`'s id so a later `f(args)`
+        # resolves through the method's summary like `s.M(args)` does.
+        # The receiver id re-resolves at call time, so a `s = …`
+        # reseat between the two tracks the current dep set.
+        self.bound_method_values: dict[str, tuple[str, str]] = {}
         # Channel aliases — `ch2 := ch` / `var ch2 = ch` / `ch2 = x`
         # copies one queue's name, not its contents, so sends through
         # the alias must land in the SOURCE binding's dep set. The
@@ -1007,6 +1013,50 @@ class _Builder:
                 return member
             return None
         return self._local_field(field_ref)
+
+    def _method_value_parts(
+        self, node: Any
+    ) -> tuple[str, str] | None:
+        """`(method binding id, receiver binding id)` of a method
+        value `s.M`, or None when the selector isn't one.
+
+        The field must resolve to a same-package method record
+        (receiver non-null) and the operand — parens unwrapped —
+        to a bare identifier; a type-name operand (`St.M`, a method
+        *expression* value) carries no receiver binding and a
+        computed operand (`g().M`) binds no stable receiver, so both
+        stay closed.
+        """
+        if node is None or node.type != "selector_expression":
+            return None
+        field = node.child_by_field_name("field")
+        field_ref = (
+            self.references.get(self.node_key(field))
+            if field is not None
+            else None
+        )
+        method_fn = (
+            self.functions.get(field_ref.binding_id)
+            if field_ref is not None
+            else None
+        )
+        if method_fn is None or method_fn.receiver is None:
+            return None
+        operand = node.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = next(
+                (c for c in operand.named_children if c.type != "comment"),
+                None,
+            )
+        if operand is None or operand.type != "identifier":
+            return None
+        operand_ref = self.references.get(self.node_key(operand))
+        if operand_ref is None:
+            return None
+        return method_fn.binding_id, operand_ref.binding_id
 
     def _local_composite_base(
         self, node: Any, locals_: dict[str, frozenset[int]]
@@ -5120,6 +5170,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.pointee_closures.add(binding.id)
                     else:
                         self.pointee_closures.discard(binding.id)
+                    # `g := f` where f is a bound method value copies
+                    # the (method, receiver) pair like the captures.
+                    src_mv = (
+                        self.bound_method_values.get(src_id)
+                        if src_id is not None
+                        else None
+                    )
+                    if src_mv is not None:
+                        self.bound_method_values[binding.id] = src_mv
+                    else:
+                        self.bound_method_values.pop(binding.id, None)
+                elif (
+                    len(lefts) == len(rights)
+                    and rights[i].type == "selector_expression"
+                ):
+                    # `f := s.M` — bind the method value's (method,
+                    # receiver) pair under the fresh name; a
+                    # non-method selector RHS clears it.
+                    mv = self._method_value_parts(rights[i])
+                    if mv is not None:
+                        self.bound_method_values[binding.id] = mv
+                    else:
+                        self.bound_method_values.pop(binding.id, None)
+                elif len(lefts) == len(rights):
+                    # Any other RHS clears a bound-method record an
+                    # earlier bind left on the reused name.
+                    self.bound_method_values.pop(binding.id, None)
                 # `cp := st` — a copied anonymous struct shares st's
                 # declared type, so cp's fields follow st's anchor,
                 # not cp's own name. `p := G(x)` declares its fields
@@ -5400,6 +5477,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         else:
                             self.closure_captures.pop(binding.id, None)
+                        src_mv = (
+                            self.bound_method_values.get(src_id)
+                            if src_id is not None
+                            else None
+                        )
+                        if src_mv is not None:
+                            self.bound_method_values[binding.id] = (
+                                src_mv
+                            )
+                        else:
+                            self.bound_method_values.pop(
+                                binding.id, None
+                            )
                         if (
                             src_id is not None
                             and src_id in pointee_before
@@ -5449,6 +5539,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.anon_struct_field_names.pop(
                                     binding.id, None
                                 )
+                    elif (
+                        not multi
+                        and value_nodes
+                        and len(names) == len(value_nodes)
+                        and value_nodes[i].type
+                        == "selector_expression"
+                    ):
+                        # `var f = s.M` — bind the method value's
+                        # (method, receiver) pair like `f := s.M`.
+                        mv = self._method_value_parts(value_nodes[i])
+                        if mv is not None:
+                            self.bound_method_values[binding.id] = mv
+                        else:
+                            self.bound_method_values.pop(
+                                binding.id, None
+                            )
+                    elif not multi and value_nodes:
+                        self.bound_method_values.pop(binding.id, None)
                     # `var p = G(x)` — an anonymous-struct result's
                     # fields live inside G's signature literal, like
                     # `p := G(x)`; anchor the field window there.
@@ -6317,6 +6425,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     else:
                         self.closure_captures.pop(ref.binding_id, None)
+                    src_mv = (
+                        self.bound_method_values.get(src_id)
+                        if src_id is not None
+                        else None
+                    )
+                    if src_mv is not None and not (
+                        conditional or self._may_skip > 0
+                    ):
+                        self.bound_method_values[ref.binding_id] = src_mv
+                    else:
+                        self.bound_method_values.pop(
+                            ref.binding_id, None
+                        )
                     if (
                         src_id is not None
                         and src_id in pointee_before
@@ -6324,6 +6445,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.pointee_closures.add(ref.binding_id)
                     else:
                         self.pointee_closures.discard(ref.binding_id)
+                elif (
+                    not compound
+                    and len(lefts) == len(rights)
+                    and rights[i].type == "selector_expression"
+                    and ref is not None
+                ):
+                    # `f = s.M` — rebind to a method value; a
+                    # conditional rebind keeps the old alternative, so
+                    # pop instead.
+                    mv = self._method_value_parts(rights[i])
+                    if mv is not None and not (
+                        conditional or self._may_skip > 0
+                    ):
+                        self.bound_method_values[ref.binding_id] = mv
+                    else:
+                        self.bound_method_values.pop(
+                            ref.binding_id, None
+                        )
+                elif not compound and ref is not None:
+                    self.bound_method_values.pop(ref.binding_id, None)
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
@@ -8138,6 +8279,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 return frozenset()
             if member is None:
+                # `s.M` — a bound method value: the selector field
+                # resolves to a same-package method, not a field.
+                # The receiver operand evaluates like the `st.M()`
+                # call operand; the binding site records the
+                # (method, receiver) pair under the new name so a
+                # later `f(args)` resolves through the method's
+                # summary. `St.M` (a type-name operand) and
+                # `g().M` (a computed receiver) evaluate the operand
+                # too but record nothing — a call through them keeps
+                # the `indirect_or_selector` record closed.
+                if self._method_value_parts(node) is not None:
+                    operand = node.child_by_field_name("operand")
+                    if operand is None:
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    return self.expression(
+                        operand, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
                 # `lib.VS.F` / `VS.F` — a field of an imported struct
                 # var. The field is external state like the member
                 # itself: the read is dep-free but records the imported
@@ -9636,6 +9797,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # invoking it is an opaque external call — it keeps the
             # `indirect_or_selector` record closed like before.
             raise _Unsupported("unsupported_expression", _span(node))
+        bound_mv = self.bound_method_values.get(ref.binding_id)
+        if bound_mv is not None:
+            return self._bound_method_call(
+                node, arguments, bound_mv, fn, params, locals_,
+                transfers, count, depth,
+            )
         captured = self.closure_captures.get(ref.binding_id)
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
@@ -9718,6 +9885,143 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
         return deps
+
+    def _bound_method_call(
+        self,
+        node: Any,
+        arguments: list[Any],
+        bound_mv: tuple[str, str],
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """`f(args)` where `f := s.M` bound a method value.
+
+        The call resolves through the method's summary like
+        `s.M(args)`: the receiver binding recorded at the bind site
+        re-resolves HERE (a `s = …` reseat between them tracks the
+        current set, like a captured binding in `_bound_closure_call`)
+        and sits at actuals[0], matching the receiver-as-parameter-0
+        convention.
+        """
+        method_id, recv_id = bound_mv
+        target = self.functions.get(method_id)
+        if (
+            target is None
+            or target.receiver is None
+            or target.generic
+            or target.variadic
+        ):
+            raise _Unsupported("unsupported_expression", _span(node))
+        if len(arguments) != len(target.parameters):
+            raise _Unsupported(
+                "callee_unavailable", _span(node), method_id
+            )
+        recv_binding = self.bindings.get(recv_id)
+        if recv_id in locals_:
+            recv_deps = locals_[recv_id]
+        elif recv_id in params:
+            recv_deps = frozenset({params[recv_id]})
+        else:
+            raise _Unsupported("unsupported_expression", _span(node))
+        if (
+            recv_binding is not None
+            and recv_binding.type.kind == "pointer"
+            and target.receiver.type.kind != "pointer"
+        ):
+            # `p.V()` on a value receiver auto-derefs — the callee
+            # reads pointee memory, which broadcasts through
+            # `indirect_writes`, not `p`'s own set.
+            recv_deps |= self.indirect_writes
+        actual = (
+            recv_deps,
+            *(
+                self.expression(
+                    arg, fn, params, locals_,
+                    transfers, count, depth + 1,
+                )
+                for arg in arguments
+            ),
+        )
+        callee = self.summarize(method_id)
+        if not callee.available:
+            reason = (
+                "recursive_call_graph"
+                if any(
+                    g.reason == "recursive_call_graph"
+                    for g in callee.gaps
+                )
+                else "callee_unsupported"
+            )
+            raise _Unsupported(reason, _span(node), method_id)
+        assert callee.return_dependencies is not None
+        result = frozenset(
+            i
+            for parameter in callee.return_dependencies
+            for i in actual[parameter]
+        )
+        for p in (
+            *((target.receiver,) if target.receiver is not None else ()),
+            *target.parameters,
+            *target.results,
+        ):
+            if p.type.type_id:
+                self.pinned.add(p.type.type_id)
+                named = self._pointee_type(p.type.type_id)
+                if (
+                    named is not None
+                    and named.type.kind == "pointer"
+                ):
+                    self._pin_fact_identities(named.type)
+        transfers.append(
+            CallTransfer(
+                FileSpan(
+                    self.current_file,
+                    node.start_byte,
+                    node.end_byte,
+                ),
+                method_id,
+                actual,
+                result,
+                imported=callee.effects == "unknown",
+            )
+        )
+        if callee.effects == "unknown":
+            stored = (
+                frozenset().union(*actual) if actual else frozenset()
+            )
+            self._store_call_writes(
+                list(arguments), stored, locals_, params
+            )
+            if target.receiver.type.kind == "pointer":
+                # `f := s.M` on a `*T` method captures `&s` — the
+                # callee's writes land in the receiver binding like
+                # `st.M()`'s auto-ref fold. A pointer receiver
+                # binding (`f := p.M`) writes through the pointer —
+                # broadcast like `*p = v`.
+                if (
+                    recv_binding is not None
+                    and recv_binding.type.kind == "pointer"
+                ):
+                    self.indirect_writes |= stored
+                    for escaped_id in self.escaped:
+                        if escaped_id in locals_:
+                            locals_[escaped_id] |= stored
+                        elif escaped_id in params:
+                            locals_[escaped_id] = (
+                                frozenset({params[escaped_id]})
+                                | stored
+                            )
+                else:
+                    locals_[recv_id] = recv_deps | stored
+            if any(
+                self._external_chan_id(c.target) for c in callee.calls
+            ):
+                self.indirect_writes |= stored
+        return result
 
     def _direct_import_call(
         self,
