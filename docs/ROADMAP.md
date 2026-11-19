@@ -5568,6 +5568,42 @@ Signing claims nothing beyond producing the envelope: key generation
 revocation policy, and the Core producer signing its own records are
 separate slices; C11 stays partial.
 
+### C11 declared key-revocation list
+
+`agent.core_evidence.revocation_key_set(document)` folds a declared
+`mumei.key-revocation-list/v1` — a closed two-field shape
+`{schema_version, revoked_keys}` naming producer key ids, supplied over
+a separately trusted channel exactly like the declared pins — into the
+key set both signature folds take as `revoked_keys`. The
+`signature-eval`/`signature-verify` routes expose it as
+`--revocation-list`; when supplied, the fold emits `key_not_revoked`
+(true only when the envelope matched AND its declared
+`producer_key_id` is absent from the list) and removes
+`key_revocation` from `checks_not_performed`. A malformed or foreign
+list fails statically rather than silently revoking nothing or
+everything.
+
+To let the recovery fold bind the revocation observation to the record
+the signature covers, the envelope-evaluation doc now echoes the
+matched envelope's `subject_digest` — the same carrier the
+verification doc already emits — and
+`mumei.signature-envelope-evaluation/v1` joins `_BINDING_CARRIERS`.
+`_CHECK_PERFORMERS["key_revocation"]` names both fold docs'
+`key_not_revoked` bound through `subject_digest`, so
+`recovery-eval` reports `recovered` only when every bound fold doc
+for the record agrees `key_not_revoked: true` (a revoked-key
+evaluation beside a clean one for the same record stays
+`evidence_failed` — a conflicting bound observation never recovers).
+`binding-eval` only checks the carrier's digest equality — it
+reports `bound: true` for a bound doc regardless of the outcome
+field; the outcome judgement lives in `recovery-eval` alone.
+
+This is a declared list, not a revocation system: who maintains the
+list, how it is distributed and authenticated (`key_authenticity`
+still stays in the folds' unperformed lists), signing or freshness of
+the list itself, and the Core producer side are separate later slices;
+C11/C02 stay partial.
+
 ### C11 declared unperformed-check recovery
 
 `agent.core_evidence.evaluate_unperformed_check_recovery(record,

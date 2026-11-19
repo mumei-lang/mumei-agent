@@ -730,3 +730,144 @@ def test_route_static_failures(tmp_path):
     assert main_eval(
         _args(parser, record, [evidence], output=evidence)
     ) == 1
+
+
+def test_key_revocation_recovers_through_bound_fold_docs():
+    digest = "a" * 64
+    record = _record("key_revocation")
+    for schema in (
+        "mumei.signature-envelope-evaluation/v1",
+        "mumei.signature-verification/v1",
+    ):
+        doc = _doc(
+            schema,
+            envelope_match=True,
+            key_not_revoked=True,
+            subject_digest=digest,
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert evaluation["checks"]["key_revocation"] == "recovered"
+
+
+def test_key_revocation_needs_binding_and_outcome():
+    digest = "a" * 64
+    record = _record("key_revocation")
+
+    # A revoked key reports evidence_failed, not recovered.
+    doc = _doc(
+        "mumei.signature-verification/v1",
+        envelope_match=True,
+        key_not_revoked=False,
+        subject_digest=digest,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [doc], record_digest=digest,
+    )
+    assert evaluation["checks"]["key_revocation"] == "evidence_failed"
+
+    # A doc bound to other bytes never performs this record's check.
+    doc = _doc(
+        "mumei.signature-verification/v1",
+        envelope_match=True,
+        key_not_revoked=True,
+        subject_digest="b" * 64,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [doc], record_digest=digest,
+    )
+    assert evaluation["checks"]["key_revocation"] == "evidence_failed"
+
+    # The record-agnostic freshness convention does NOT apply — a
+    # bound doc is required even when the record declares its checks.
+    doc = _doc(
+        "mumei.signature-envelope-evaluation/v1",
+        envelope_match=True,
+        key_not_revoked=True,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [doc], record_digest=digest,
+    )
+    assert evaluation["checks"]["key_revocation"] == "evidence_failed"
+
+
+def test_conflicting_bound_revocation_docs_stay_evidence_failed():
+    # Two envelopes sign the same record — one by a revoked key, one
+    # by a clean key. Both eval docs bind the record's subject digest;
+    # a `key_not_revoked: false` observation must not be masked by a
+    # `true` from a different key.
+    from agent.core_evidence import (
+        evaluate_signature_envelope,
+        evaluate_unperformed_check_recovery,
+        revocation_key_set,
+    )
+
+    revoked_list = revocation_key_set(
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": ["revoked-key"]}
+    )
+    base = {
+        "schema_version": "mumei.producer-signature/v1",
+        "subject_digest": "a" * 64,
+        "algorithm": "ed25519",
+        "signature": "00" * 64,
+        "producer_key_id": "revoked-key",
+    }
+    bad = evaluate_signature_envelope(dict(base), revoked_keys=revoked_list)
+    good = evaluate_signature_envelope(
+        dict(base, producer_key_id="clean-key"), revoked_keys=revoked_list,
+    )
+    record = {
+        "checks_not_performed": ["key_revocation"],
+        "subject_digest": "a" * 64,
+    }
+    assert (
+        evaluate_unperformed_check_recovery(record, [bad, good])[
+            "checks"
+        ]["key_revocation"]
+        == "evidence_failed"
+    )
+    # The clean doc alone recovers; the revoked doc alone fails.
+    assert (
+        evaluate_unperformed_check_recovery(record, [good])["checks"][
+            "key_revocation"
+        ]
+        == "recovered"
+    )
+    assert (
+        evaluate_unperformed_check_recovery(record, [bad])["checks"][
+            "key_revocation"
+        ]
+        == "evidence_failed"
+    )
+
+
+def test_unbound_performer_docs_disagreeing_recover_on_any_true():
+    # Record-agnostic performer docs (bind_path=None) are not scoped
+    # to this record — an eval doc reporting `subject_bound: false`
+    # for a different record's envelope must not veto a `true` doc.
+    from agent.core_evidence import evaluate_unperformed_check_recovery
+
+    record = {
+        "checks_not_performed": ["subject_binding"],
+    }
+    good = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "envelope_match": True,
+        "subject_bound": True,
+        "subject_digest": "a" * 64,
+    }
+    unrelated = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "envelope_match": True,
+        "subject_bound": False,
+        "subject_digest": "b" * 64,
+    }
+    report = evaluate_unperformed_check_recovery(
+        record, [good, unrelated]
+    )
+    assert report["checks"]["subject_binding"] == "recovered"
+    # Only the unrelated doc still fails.
+    report = evaluate_unperformed_check_recovery(record, [unrelated])
+    assert report["checks"]["subject_binding"] == "evidence_failed"

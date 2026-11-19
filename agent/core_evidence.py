@@ -437,6 +437,131 @@ _PRODUCER_SIGNATURE_ALGORITHM = "ed25519"
 # ed25519 signatures are 64 bytes.
 _PRODUCER_SIGNATURE_HEX_LEN = 128
 
+SIGNATURE_ENVELOPE_EVALUATION_SCHEMA = (
+    "mumei.signature-envelope-evaluation/v1"
+)
+
+# A caller-supplied revocation list: a closed-shape declared document
+# naming the producer key ids the caller considers revoked — trusted as
+# declared, exactly like every other supporting document.
+KEY_REVOCATION_LIST_SCHEMA = "mumei.key-revocation-list/v1"
+
+_KEY_REVOCATION_LIST_REQUIRED_FIELDS = frozenset(
+    {"schema_version", "revoked_keys"}
+)
+
+
+def revocation_key_set(document: dict) -> frozenset:
+    """Fold a declared ``mumei.key-revocation-list/v1`` into a key set.
+
+    The list is a closed shape: `schema_version` names the schema and
+    `revoked_keys` is a list of non-empty strings — producer key ids in
+    the same label space `producer_key_id`/`--expected-producer-key`
+    pin. A malformed or foreign document raises ValueError rather than
+    silently revoking nothing or everything: the caller supplied it as
+    input, so a wrong shape is a caller error like a malformed
+    ``--record``.
+    """
+    if type(document) is not dict:
+        raise ValueError("invalid key-revocation list document")
+    revoked = document.get("revoked_keys")
+    if (
+        frozenset(document) != _KEY_REVOCATION_LIST_REQUIRED_FIELDS
+        or document["schema_version"] != KEY_REVOCATION_LIST_SCHEMA
+        or type(revoked) is not list
+        or any(
+            type(key) is not str or key == "" for key in revoked
+        )
+    ):
+        raise ValueError("invalid key-revocation list document")
+    return frozenset(revoked)
+
+
+# A caller-supplied producer-key registry: a closed-shape declared
+# document binding producer key ids to principals over a validity
+# window — the trust anchor `key_authenticity` needs. Trusted as
+# declared, exactly like the pins and the revocation list.
+PRODUCER_KEY_REGISTRY_SCHEMA = "mumei.producer-key-registry/v1"
+
+_PRODUCER_KEY_REGISTRY_REQUIRED_FIELDS = frozenset(
+    {"schema_version", "registry"}
+)
+
+_REGISTRY_ENTRY_REQUIRED_FIELDS = frozenset(
+    {"principal", "not_before", "not_after"}
+)
+
+
+def producer_key_registry(document: dict) -> dict:
+    """Fold a declared ``mumei.producer-key-registry/v1`` into a map.
+
+    The registry is a closed shape: `schema_version` names the schema
+    and `registry` maps each producer key id (the same label space
+    `producer_key_id`/`--expected-producer-key` pin) to a closed entry
+    `{principal, not_before, not_after}` — a non-empty principal label
+    plus two strict RFC 3339 timestamps bracketing the window the key
+    is authorized for. Returns ``key_id → {principal, not_before,
+    not_after}`` with the timestamps kept as parsed (low, high) bound
+    pairs so callers compare conservatively against a declared
+    ``reference_time`` — the same convention `evaluate_freshness`
+    uses, never the wall clock.
+
+    A malformed or foreign document raises ValueError rather than
+    silently trusting nothing or everything — including a window that
+    is definitely inverted (``not_before`` above ``not_after`` under
+    the conservative bounds) or a duplicate key id, which the routes
+    reject at parse time via a duplicate-rejecting pairs hook.
+    """
+    if type(document) is not dict:
+        raise ValueError("invalid producer-key registry document")
+    registry = document.get("registry")
+    if (
+        frozenset(document) != _PRODUCER_KEY_REGISTRY_REQUIRED_FIELDS
+        or document["schema_version"] != PRODUCER_KEY_REGISTRY_SCHEMA
+        or type(registry) is not dict
+        or not registry
+    ):
+        raise ValueError("invalid producer-key registry document")
+    parsed = {}
+    for key_id, entry in registry.items():
+        if type(key_id) is not str or key_id == "":
+            raise ValueError("invalid producer-key registry document")
+        if (
+            type(entry) is not dict
+            or frozenset(entry) != _REGISTRY_ENTRY_REQUIRED_FIELDS
+            or type(entry["principal"]) is not str
+            or entry["principal"] == ""
+        ):
+            raise ValueError("invalid producer-key registry document")
+        not_before = _parse_rfc3339(entry["not_before"])
+        not_after = _parse_rfc3339(entry["not_after"])
+        if not_before is None or not_after is None:
+            raise ValueError("invalid producer-key registry document")
+        if not_before[0] > not_after[1]:
+            # Definitely inverted even under the conservative bounds —
+            # a caller error like any other malformed field.
+            raise ValueError("invalid producer-key registry document")
+        parsed[key_id] = {
+            "principal": entry["principal"],
+            "not_before": not_before,
+            "not_after": not_after,
+        }
+    return parsed
+
+
+def _registry_entry_current(entry: dict, reference: tuple) -> bool:
+    """Whether a parsed registry entry's window covers a declared time.
+
+    Conservative both ways, the `within_window` convention: the
+    entry's `not_before` (worst-case latest) must not postdate the
+    reference's earliest bound, and its `not_after` (worst-case
+    earliest) must not precede the reference's latest bound — so a
+    sub-microsecond fraction can never widen a window into a pass."""
+    return (
+        entry["not_before"][1] <= reference[0]
+        and entry["not_after"][0] >= reference[1]
+    )
+
 
 def _is_hex(value: object, length: int) -> bool:
     return (
@@ -450,6 +575,7 @@ def evaluate_signature_envelope(
     envelope: dict,
     expected_subject: str | None = None,
     expected_key: str | None = None,
+    revoked_keys: frozenset | None = None,
 ) -> dict:
     """Fold a declared producer-signature envelope into an evaluation.
 
@@ -500,7 +626,7 @@ def evaluate_signature_envelope(
         and envelope["producer_key_id"] != ""
     )
     evaluation = {
-        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "schema_version": SIGNATURE_ENVELOPE_EVALUATION_SCHEMA,
         "envelope_match": match,
         "checks_not_performed": [
             "subject_binding",
@@ -511,6 +637,11 @@ def evaluate_signature_envelope(
             "key_revocation",
         ],
     }
+    if match:
+        # The envelope's declared digest echoes so a consumer can bind
+        # this document to the record the signature covers — the same
+        # carrier convention the verification fold emits.
+        evaluation["subject_digest"] = envelope["subject_digest"]
     if expected_subject is not None:
         evaluation["subject_bound"] = (
             match and envelope["subject_digest"] == expected_subject
@@ -521,6 +652,17 @@ def evaluate_signature_envelope(
             match and envelope["producer_key_id"] == expected_key
         )
         evaluation["checks_not_performed"].remove("key_binding")
+    if revoked_keys is not None:
+        # A declared revocation list performs `key_revocation` on the
+        # matched envelope's key id: `key_not_revoked` is true only
+        # when the envelope matched AND its producer key id is absent
+        # from the caller's list. The list itself is trusted as
+        # declared — an authentic list needs the directory/trust-anchor
+        # story (`key_authenticity` still stays).
+        evaluation["key_not_revoked"] = (
+            match and envelope["producer_key_id"] not in revoked_keys
+        )
+        evaluation["checks_not_performed"].remove("key_revocation")
     return evaluation
 
 
@@ -535,6 +677,7 @@ def verify_signature_envelope(
     producer_key: str,
     expected_subject: str | None = None,
     expected_key: str | None = None,
+    revoked_keys: frozenset | None = None,
 ) -> dict:
     """Verify a declared producer-signature envelope's ed25519 signature.
 
@@ -631,6 +774,14 @@ def verify_signature_envelope(
             match and envelope["producer_key_id"] == expected_key
         )
         verification["checks_not_performed"].remove("key_binding")
+    if revoked_keys is not None:
+        # Same declared revocation list as the evaluation fold:
+        # `key_not_revoked` holds only when the envelope matched AND
+        # its producer key id is absent from the caller's list.
+        verification["key_not_revoked"] = (
+            match and envelope["producer_key_id"] not in revoked_keys
+        )
+        verification["checks_not_performed"].remove("key_revocation")
     return verification
 
 
@@ -713,6 +864,10 @@ _BINDING_CARRIERS: dict = {
     # record digest the signature covers — so it binds to the record
     # bytes like the envelope itself.
     SIGNATURE_VERIFICATION_SCHEMA: "subject_digest",
+    # The evaluation doc echoes the same digest — a bound
+    # `key_not_revoked` observation names the record the signature
+    # covers, not just an unscoped envelope.
+    SIGNATURE_ENVELOPE_EVALUATION_SCHEMA: "subject_digest",
 }
 
 
@@ -787,6 +942,24 @@ _CHECK_PERFORMERS: dict = {
     ],
     "signature_verification": [
         ("mumei.signature-verification/v1", "signature_valid", True, None),
+    ],
+    # A declared revocation list performs `key_revocation` through
+    # either signature fold's `key_not_revoked` — bound to the record
+    # via the fold doc's echoed `subject_digest` carrier, so the
+    # observation names the key that signed *this* record.
+    "key_revocation": [
+        (
+            "mumei.signature-envelope-evaluation/v1",
+            "key_not_revoked",
+            True,
+            "subject_digest",
+        ),
+        (
+            "mumei.signature-verification/v1",
+            "key_not_revoked",
+            True,
+            "subject_digest",
+        ),
     ],
     "envelope_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
@@ -1103,16 +1276,40 @@ def evaluate_unperformed_check_recovery(
             if status == "no_evidence":
                 status = "evidence_failed"
             fields = field if type(field) is tuple else (field,)
-            if any(
-                all(
-                    _outcome_matches(_dotted(doc, path), expected)
-                    for path in fields
-                )
-                and _performer_document_applies(
+            applies = [
+                doc
+                for doc in schema_to_docs[schema]
+                if _performer_document_applies(
                     bind_path, doc, comparison_digest
                 )
-                for doc in schema_to_docs[schema]
-            ):
+            ]
+            if bind_path is None:
+                # Record-agnostic documents make no claim about this
+                # record, so disagreement between them is expected —
+                # they evaluate different artifacts, not conflicting
+                # observations of one. Any true outcome recovers.
+                agreed = any(
+                    all(
+                        _outcome_matches(_dotted(doc, path), expected)
+                        for path in fields
+                    )
+                    for doc in applies
+                )
+            else:
+                # Bound documents all scope to this record, so they
+                # must agree on the outcome — a conflicting
+                # observation (a revoked-key evaluation beside a
+                # clean one for the same record) stays
+                # evidence_failed rather than letting any true mask
+                # it.
+                agreed = bool(applies) and all(
+                    all(
+                        _outcome_matches(_dotted(doc, path), expected)
+                        for path in fields
+                    )
+                    for doc in applies
+                )
+            if agreed:
                 status = "recovered"
                 break
         checks[name] = status

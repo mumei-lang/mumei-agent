@@ -13,10 +13,13 @@ its `producer_key_id` equals the pinned producer key (`key_pinned`).
 Representation-level evaluation only: the route performs no signature
 verification, no key lookup and no fresh check — `checks_not_performed`
 names what the fold leaves unassessed, including
-`signature_verification`, `key_authenticity`, `envelope_freshness` and
-`key_revocation`. A malformed or foreign document fails statically
-rather than matching nothing; a matched envelope whose declared pins
-disagree reports `false` observations, never an error.
+`signature_verification`, `key_authenticity` and `envelope_freshness`
+(`key_revocation` too, unless the caller supplies a declared
+`mumei.key-revocation-list/v1` document with `--revocation-list`, which
+performs it and emits `key_not_revoked`). A malformed or foreign
+document fails statically rather than matching nothing; a matched
+envelope whose declared pins disagree reports `false` observations,
+never an error.
 """
 
 from __future__ import annotations
@@ -26,7 +29,10 @@ import json
 import sys
 from pathlib import Path
 
-from agent.core_evidence import evaluate_signature_envelope
+from agent.core_evidence import (
+    evaluate_signature_envelope,
+    revocation_key_set,
+)
 
 MAX_ENVELOPE_BYTES = 1024 * 1024
 
@@ -54,6 +60,15 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         "arriving over a separately trusted channel. When supplied the "
         "evaluation emits key_pinned comparing it to the envelope's "
         "producer_key_id.",
+    )
+    parser.add_argument(
+        "--revocation-list",
+        metavar="PATH",
+        help="Declared revocation list JSON "
+        "(mumei.key-revocation-list/v1) supplied over a separately "
+        "trusted channel. When supplied the evaluation emits "
+        "key_not_revoked checking the envelope's producer_key_id "
+        "against the list's revoked_keys.",
     )
     parser.add_argument(
         "--output",
@@ -84,17 +99,31 @@ def main_eval(args: argparse.Namespace | None = None) -> int:
         output_path = getattr(args, "output", None)
         if output_path is not None:
             out_path = Path(output_path)
-            try:
-                if Path(args.envelope).samefile(out_path):
-                    raise ValueError(
-                        "--output may not overwrite a declared input document"
-                    )
-            except FileNotFoundError:
-                pass
+            for declared_input in (
+                args.envelope,
+                getattr(args, "revocation_list", None),
+            ):
+                if declared_input is None:
+                    continue
+                try:
+                    if Path(declared_input).samefile(out_path):
+                        raise ValueError(
+                            "--output may not overwrite a declared"
+                            " input document"
+                        )
+                except FileNotFoundError:
+                    pass
+        revoked_keys = None
+        revocation_path = getattr(args, "revocation_list", None)
+        if revocation_path is not None:
+            revoked_keys = revocation_key_set(
+                _read_declared(revocation_path)
+            )
         evaluation = evaluate_signature_envelope(
             envelope,
             getattr(args, "expected_subject", None),
             getattr(args, "expected_producer_key", None),
+            revoked_keys,
         )
         text = json.dumps(evaluation, indent=2) + "\n"
         if output_path is None:
