@@ -42,7 +42,11 @@ def test_recovery_statuses():
     assert evaluation["checks_declared"] is True
     assert evaluation["checks"] == {
         "signature_verification": "recovered",
-        "key_authenticity": "no_evidence",
+        # A signature-verification doc is now a `key_authenticity`
+        # performer (it may carry `key_authentic`); supplied without
+        # the field it is ambiguous evidence — the established
+        # evidence_failed convention, not no_evidence.
+        "key_authenticity": "evidence_failed",
         "freshness": "evidence_failed",
     }
     assert evaluation["recovered"] == ["signature_verification"]
@@ -871,3 +875,52 @@ def test_unbound_performer_docs_disagreeing_recover_on_any_true():
     # Only the unrelated doc still fails.
     report = evaluate_unperformed_check_recovery(record, [unrelated])
     assert report["checks"]["subject_binding"] == "evidence_failed"
+
+
+def test_key_authenticity_recovers_via_bound_registry_eval():
+    # A bound envelope-eval doc carrying `key_authentic: true`
+    # performs `key_authenticity` on the record it covers — the same
+    # subject_digest carrier convention as `key_revocation`.
+    from agent.core_evidence import (
+        evaluate_unperformed_check_recovery,
+        producer_key_registry,
+        evaluate_signature_envelope,
+    )
+
+    registry = producer_key_registry({
+        "schema_version": "mumei.producer-key-registry/v1",
+        "registry": {
+            "key-1": {
+                "principal": "release-producer",
+                "not_before": "2025-01-01T00:00:00Z",
+                "not_after": "2027-01-01T00:00:00Z",
+            }
+        },
+    })
+    doc = evaluate_signature_envelope(
+        {
+            "schema_version": "mumei.producer-signature/v1",
+            "subject_digest": "a" * 64,
+            "algorithm": "ed25519",
+            "signature": "00" * 64,
+            "producer_key_id": "key-1",
+        },
+        key_registry=registry,
+        reference_time="2026-01-01T00:00:00Z",
+    )
+    assert doc["key_authentic"] is True
+    record = {
+        "checks_not_performed": ["key_authenticity"],
+        "subject_digest": "a" * 64,
+    }
+    report = evaluate_unperformed_check_recovery(record, [doc])
+    assert report["checks"]["key_authenticity"] == "recovered"
+    # A doc for different bytes does not recover this record.
+    report = evaluate_unperformed_check_recovery(
+        {
+            "checks_not_performed": ["key_authenticity"],
+            "subject_digest": "c" * 64,
+        },
+        [doc],
+    )
+    assert report["checks"]["key_authenticity"] == "evidence_failed"

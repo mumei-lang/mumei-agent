@@ -5599,10 +5599,35 @@ reports `bound: true` for a bound doc regardless of the outcome
 field; the outcome judgement lives in `recovery-eval` alone.
 
 This is a declared list, not a revocation system: who maintains the
-list, how it is distributed and authenticated (`key_authenticity`
-still stays in the folds' unperformed lists), signing or freshness of
+list, how it is distributed and authenticated, signing or freshness of
 the list itself, and the Core producer side are separate later slices;
 C11/C02 stay partial.
+
+`key_authenticity` — the trust anchor the memo left open — is
+performed by a second declared input (`agent.core_evidence`):
+`mumei.producer-key-registry/v1` is a closed shape
+`{schema_version, registry: {key_id → {principal, not_before,
+not_after}}}` binding producer key ids to principals over a validity
+window, supplied over a separately trusted channel exactly like the
+pins and the revocation list. Both signature routes accept
+`--key-registry PATH` with `--reference-time RFC3339` — the declared
+clock, never the wall clock, the same convention `freshness-eval`
+fixes; each is required by the other. With both supplied the folds
+emit `key_authentic`: true only when the envelope matched AND its
+`producer_key_id` names an entry whose window covers the declared
+reference (conservative (low, high) bounds, like `within_window`).
+The document is statically strict: duplicate `key_id`s are rejected
+at parse time, every entry is the closed three-field shape, and a
+definitely-inverted window is a caller error. `_CHECK_PERFORMERS`
+names both folds' `key_authentic` bound through `subject_digest`, so
+`recovery-eval` recovers `key_authenticity` from a bound eval/verify
+doc and `binding-eval` binds it on the same carrier.
+
+This is a declared registry, not a key directory: who signs,
+distributes and revokes the registry itself (out-of-band attestation
+is the memo's deferred Option D), and `envelope_freshness` — which
+needs `produced_at` on the envelope's closed five-field shape — stay
+separate later slices; C11/C02 stay partial.
 
 ### C11 declared unperformed-check recovery
 

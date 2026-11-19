@@ -361,3 +361,152 @@ def test_route_refuses_output_over_revocation_list(tmp_path):
         == 1
     )
     assert json.loads(revoked.read_text())["revoked_keys"] == []
+
+
+_REFERENCE = "2026-01-01T00:00:00Z"
+
+
+def _registry_doc(key_id=_KEY_ID, **entry):
+    entry = entry or {
+        "principal": "release-producer",
+        "not_before": "2025-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+    }
+    return {
+        "schema_version": "mumei.producer-key-registry/v1",
+        "registry": {key_id: entry},
+    }
+
+
+def test_key_registry_performs_key_authenticity():
+    # A declared registry performs `key_authenticity` on the matched
+    # envelope's key id, orthogonal to `signature_valid` and to any
+    # `key_pinned` declaration.
+    from agent.core_evidence import producer_key_registry
+
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        key_registry=producer_key_registry(_registry_doc()),
+        reference_time=_REFERENCE,
+    )
+    assert verification["signature_valid"] is True
+    assert verification["key_authentic"] is True
+    assert "key_authenticity" not in verification[
+        "checks_not_performed"
+    ]
+
+
+def test_key_registry_unknown_key_reports_false():
+    from agent.core_evidence import producer_key_registry
+
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        key_registry=producer_key_registry(
+            _registry_doc(key_id="other-key")
+        ),
+        reference_time=_REFERENCE,
+    )
+    assert verification["key_authentic"] is False
+
+
+def test_route_key_registry(tmp_path, capsys):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    out = tmp_path / "out.json"
+    assert (
+        main_verify(
+            _args(
+                parser,
+                envelope,
+                _PUBLIC_KEY_HEX,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--output",
+                str(out),
+            )
+        )
+        == 0
+    )
+    doc = json.loads(out.read_text())
+    assert doc["key_authentic"] is True
+    assert "key_authenticity" not in doc["checks_not_performed"]
+
+
+def test_route_key_registry_requires_reference_time(tmp_path):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    assert (
+        main_verify(
+            _args(
+                parser, envelope, _PUBLIC_KEY_HEX,
+                "--key-registry", str(registry),
+            )
+        )
+        == 1
+    )
+    assert (
+        main_verify(
+            _args(
+                parser, envelope, _PUBLIC_KEY_HEX,
+                "--reference-time", _REFERENCE,
+            )
+        )
+        == 1
+    )
+
+
+def test_route_refuses_output_over_key_registry(tmp_path):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    assert (
+        main_verify(
+            _args(
+                parser,
+                envelope,
+                _PUBLIC_KEY_HEX,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--output",
+                str(registry),
+            )
+        )
+        == 1
+    )
+    assert json.loads(registry.read_text())["registry"] != {}
+
+
+def test_key_registry_unhashable_key_id_reports_false():
+    from agent.core_evidence import producer_key_registry
+
+    for bad_id in (["k"], {"k": 1}):
+        verification = verify_signature_envelope(
+            _envelope(producer_key_id=bad_id),
+            _PUBLIC_KEY_HEX,
+            key_registry=producer_key_registry(_registry_doc()),
+            reference_time=_REFERENCE,
+        )
+        assert verification["key_authentic"] is False

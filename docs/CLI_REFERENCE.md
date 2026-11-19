@@ -51,8 +51,8 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-check-consistency` | 6 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
-| `signature-eval` | 5 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
-| `signature-verify` | 6 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
+| `signature-eval` | 7 | Evaluate a declared producer-signature envelope and emit the representation-level evaluation. |
+| `signature-verify` | 8 | Verify a declared producer-signature envelope's ed25519 signature under a declared public key and emit the verification descriptor. |
 | `signature-sign` | 4 | Sign a declared record's digest into a detached mumei.producer-signature/v1 envelope under a declared ed25519 secret key. |
 | `recovery-eval` | 3 | Fold a declared record's checks_not_performed over supporting evaluation documents and emit the recovery descriptor. |
 | `freshness-eval` | 4 | Evaluate a declared record's produced_at freshness claim against a declared reference time and emit the evaluation descriptor. |
@@ -780,6 +780,8 @@ Evaluate a declared producer-signature envelope and emit the representation-leve
 | `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex, e.g. an accepted descriptor's evidence_fingerprint). When supplied the evaluation emits subject_bound comparing it to the envelope's subject_digest. |
 | `--expected-producer-key` | `<ID>` | no | — | Declared producer key fingerprint the caller trusts, arriving over a separately trusted channel. When supplied the evaluation emits key_pinned comparing it to the envelope's producer_key_id. |
 | `--revocation-list` | `<PATH>` | no | — | Declared revocation list JSON (mumei.key-revocation-list/v1) supplied over a separately trusted channel. When supplied the evaluation emits key_not_revoked checking the envelope's producer_key_id against the list's revoked_keys. |
+| `--key-registry` | `<PATH>` | no | — | Declared producer-key registry JSON (mumei.producer-key-registry/v1) supplied over a separately trusted channel. Requires --reference-time. When supplied the evaluation emits key_authentic checking the envelope's producer_key_id against the registry's declared windows. |
+| `--reference-time` | `<RFC3339>` | no | — | The caller's declared reference time (RFC 3339 with timezone, e.g. 2026-11-18T00:00:00Z) the registry windows are compared against. The fold never reads the system clock. Required with --key-registry. |
 | `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
 
 
@@ -796,6 +798,8 @@ Verify a declared producer-signature envelope's ed25519 signature under a declar
 | `--expected-subject` | `<HEX>` | no | — | Declared record digest the signature should cover (64-char lowercase SHA-256 hex). When supplied the verification emits subject_bound comparing it to the envelope's subject_digest. |
 | `--expected-producer-key` | `<ID>` | no | — | Declared producer key id the caller trusts, arriving over a separately trusted channel. When supplied the verification emits key_pinned comparing it to the envelope's producer_key_id. |
 | `--revocation-list` | `<PATH>` | no | — | Declared revocation list JSON (mumei.key-revocation-list/v1) supplied over a separately trusted channel. When supplied the verification emits key_not_revoked checking the envelope's producer_key_id against the list's revoked_keys. |
+| `--key-registry` | `<PATH>` | no | — | Declared producer-key registry JSON (mumei.producer-key-registry/v1) supplied over a separately trusted channel. Requires --reference-time. When supplied the verification emits key_authentic checking the envelope's producer_key_id against the registry's declared windows. |
+| `--reference-time` | `<RFC3339>` | no | — | The caller's declared reference time (RFC 3339 with timezone, e.g. 2026-11-18T00:00:00Z) the registry windows are compared against. The fold never reads the system clock. Required with --key-registry. |
 | `--output` | `<PATH>` | no | — | Write the verification descriptor to PATH instead of stdout. |
 
 

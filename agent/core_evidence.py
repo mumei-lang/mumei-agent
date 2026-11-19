@@ -576,6 +576,8 @@ def evaluate_signature_envelope(
     expected_subject: str | None = None,
     expected_key: str | None = None,
     revoked_keys: frozenset | None = None,
+    key_registry: dict | None = None,
+    reference_time: str | None = None,
 ) -> dict:
     """Fold a declared producer-signature envelope into an evaluation.
 
@@ -596,13 +598,21 @@ def evaluate_signature_envelope(
     key. Either pin left out stays declared-unperformed — the key is
     absent and the check remains in `checks_not_performed`.
 
+    With `key_registry` (the parsed
+    ``mumei.producer-key-registry/v1`` map) and a declared
+    `reference_time` (the caller's clock, never the wall clock — the
+    freshness convention) the fold emits `key_authentic`: true only
+    when the envelope matched AND its `producer_key_id` names a
+    registry entry whose `not_before`/`not_after` window covers the
+    reference time. A registry without a reference time performs
+    nothing — the window needs a declared clock — and a reference
+    time without a registry is a caller error.
+
     This is representation-level only: the fold checks the envelope's
-    shape and declared pins, never the ed25519 signature bytes
-    (`signature_verification` stays), never the key's own authenticity
-    (the declared pin is trusted as supplied — `key_authenticity`
-    stays), and never freshness or revocation. A matched envelope whose
-    declared pins disagree reports `false` observations, never an
-    error."""
+    shape, declared pins and declared registry, never the ed25519
+    signature bytes (`signature_verification` stays) and never
+    freshness. A matched envelope whose declared inputs disagree
+    reports `false` observations, never an error."""
     if type(envelope) is not dict:
         raise ValueError("unsupported signature envelope evaluation request")
     if expected_subject is not None and not _is_fingerprint(
@@ -613,6 +623,16 @@ def evaluate_signature_envelope(
         type(expected_key) is not str or expected_key == ""
     ):
         raise ValueError("invalid expected producer key")
+    reference = None
+    if reference_time is not None:
+        reference = _parse_rfc3339(reference_time)
+        if reference is None:
+            raise ValueError("invalid reference time")
+    if key_registry is not None:
+        if reference is None:
+            raise ValueError("key registry requires a reference time")
+    elif reference is not None:
+        raise ValueError("reference time requires a key registry")
     fields = frozenset(envelope)
     match = (
         fields == _PRODUCER_SIGNATURE_REQUIRED_FIELDS
@@ -663,6 +683,27 @@ def evaluate_signature_envelope(
             match and envelope["producer_key_id"] not in revoked_keys
         )
         evaluation["checks_not_performed"].remove("key_revocation")
+    if key_registry is not None:
+        # A declared registry performs `key_authenticity` on the
+        # matched envelope's key id: `key_authentic` is true only
+        # when the envelope matched AND its producer key id names an
+        # entry whose declared window covers the declared reference
+        # time. The registry itself is trusted as declared — an
+        # authentic registry needs the distribution/attestation story
+        # (the route emits no claim about where the document came
+        # from).
+        key_id = envelope.get("producer_key_id")
+        # A non-string producer key id already fails `match`'s shape
+        # check; an unhashable one (list/dict) would raise TypeError
+        # inside `get`, so guard the lookup instead of crashing on a
+        # malformed envelope.
+        entry = key_registry.get(key_id) if type(key_id) is str else None
+        evaluation["key_authentic"] = (
+            match
+            and entry is not None
+            and _registry_entry_current(entry, reference)
+        )
+        evaluation["checks_not_performed"].remove("key_authenticity")
     return evaluation
 
 
@@ -678,6 +719,8 @@ def verify_signature_envelope(
     expected_subject: str | None = None,
     expected_key: str | None = None,
     revoked_keys: frozenset | None = None,
+    key_registry: dict | None = None,
+    reference_time: str | None = None,
 ) -> dict:
     """Verify a declared producer-signature envelope's ed25519 signature.
 
@@ -697,13 +740,15 @@ def verify_signature_envelope(
     under the same rules. A matched document also echoes the envelope's
     `subject_digest` so a consumer can bind the verification to the
     record bytes it covers — the same carrier convention the envelope
-    itself pins. `signature_valid` says only that the
+    itself pins. With `key_registry` and a declared `reference_time`
+    the fold emits `key_authentic` under the same registry-window rule
+    as the evaluation fold. `signature_valid` says only that the
     signature cryptographically binds the declared key to the declared
-    digest — the key's own authenticity stays unassessed
-    (`key_authenticity` stays in `checks_not_performed`, as do
-    `envelope_freshness` and `key_revocation`), and an unmatched
-    envelope or a failed verify reports `false` observations, never an
-    error."""
+    digest — without the declared registry the key's own authenticity
+    stays unassessed (`key_authenticity` stays in
+    `checks_not_performed`, as does `envelope_freshness`), and an
+    unmatched envelope or a failed verify reports `false`
+    observations, never an error."""
     if type(envelope) is not dict:
         raise ValueError("unsupported signature verification request")
     if not _is_hex(producer_key, _PRODUCER_KEY_HEX_LEN):
@@ -716,6 +761,16 @@ def verify_signature_envelope(
         type(expected_key) is not str or expected_key == ""
     ):
         raise ValueError("invalid expected producer key")
+    reference = None
+    if reference_time is not None:
+        reference = _parse_rfc3339(reference_time)
+        if reference is None:
+            raise ValueError("invalid reference time")
+    if key_registry is not None:
+        if reference is None:
+            raise ValueError("key registry requires a reference time")
+    elif reference is not None:
+        raise ValueError("reference time requires a key registry")
     fields = frozenset(envelope)
     match = (
         fields == _PRODUCER_SIGNATURE_REQUIRED_FIELDS
@@ -782,6 +837,19 @@ def verify_signature_envelope(
             match and envelope["producer_key_id"] not in revoked_keys
         )
         verification["checks_not_performed"].remove("key_revocation")
+    if key_registry is not None:
+        # Same declared registry as the evaluation fold:
+        # `key_authentic` holds only when the envelope matched AND
+        # its producer key id names an entry whose declared window
+        # covers the declared reference time.
+        key_id = envelope.get("producer_key_id")
+        entry = key_registry.get(key_id) if type(key_id) is str else None
+        verification["key_authentic"] = (
+            match
+            and entry is not None
+            and _registry_entry_current(entry, reference)
+        )
+        verification["checks_not_performed"].remove("key_authenticity")
     return verification
 
 
@@ -957,6 +1025,24 @@ _CHECK_PERFORMERS: dict = {
         (
             "mumei.signature-verification/v1",
             "key_not_revoked",
+            True,
+            "subject_digest",
+        ),
+    ],
+    # A declared producer-key registry performs `key_authenticity`
+    # through either signature fold's `key_authentic` — bound to the
+    # record via the fold doc's echoed `subject_digest` carrier, like
+    # `key_revocation`.
+    "key_authenticity": [
+        (
+            "mumei.signature-envelope-evaluation/v1",
+            "key_authentic",
+            True,
+            "subject_digest",
+        ),
+        (
+            "mumei.signature-verification/v1",
+            "key_authentic",
             True,
             "subject_digest",
         ),
