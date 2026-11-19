@@ -2656,9 +2656,51 @@ call `h(args)` admits with deps(captured) ∪ deps(args) ∪
 indirect writes, and a literal that captures a pointer-typed
 enclosing binding records an imported transfer on the bound
 name's identity (effects unknown — the captured pointer may aim
-at caller memory). Calls or writes inside the literal,
-selector/computed callees, function-typed parameters and
-package-level `var Alias = Id` callables stay closed),
+at caller memory). A package-level `var Alias = Id` call
+admits as an opaque external call — the callee is
+reassignable by any caller, so `Alias(args)` is dep-free
+for the callee, unions the args and indirect writes, and
+always records an imported transfer on the var's real
+binding identity (effects unknown). A function-typed
+parameter `f func(int64) int64` calls the same way —
+`f(args)` is an opaque external call, since the caller
+chooses the callee — and it stays external even when a
+branch binds a literal under it (`if b { f = func()... }`),
+because the untaken path still runs the caller's callback.
+For any such external callee (package function var or
+func-typed parameter) the callee name reads its current
+deps — `f = g` reseats `f` to g's set — the call unions the
+escaped bindings' deps like a `*p` read (the opaque callee
+may read caller memory through a pointer argument), and the
+argument deps together with the callee's own read set fold
+into every escaped binding and into indirect writes — the
+opaque callee may write `*p = y` through a pointer argument
+or send `y` on a channel argument — and the callee's
+declared type identity pins alongside the var's/parameter's
+binding identity so a named `type MyFn func(...)`
+regenerating in another file flags the caller stale. A
+func-typed binding's signature (`f func(N) int64`, `var f
+MyFn`, `type MyFn func(N) int64`) declares its inner
+named/alias type identities on the binding's
+`signature_type_ids` — the func type fact itself carries
+none — and they pin at the declaring function's own
+signature, at resolved local callees and at external calls
+alike. A function name bound in a store's RHS position —
+`h := G`, `h = G`, `var h = G`, including copies through
+tuple binds (`h2 := h`) — records a function-name alias, and
+`h(args)` resolves through G's own summary exactly like a
+`direct_local` call (argument evaluation, folded
+`return_dependencies`, signature pinning, the callee's
+effect opacity and its transfer on G's identity). A
+maybe-skipped rebind that could leave the name's value
+path-dependent — a different function, a literal, or a
+param still carrying the caller's callback — drops the
+alias so the call falls back to the opaque external model;
+a package-level `var Alias = Id` keeps the opaque external
+model since any caller may reassign it. Calls or writes
+inside the literal, selector/computed callees and a
+function name read in any non-store position (argument,
+return, operand) stay closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies
