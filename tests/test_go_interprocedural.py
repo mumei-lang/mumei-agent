@@ -18125,6 +18125,49 @@ def test_func_name_alias_assignment_and_param(go_types_helper):
     assert [c.target for c in result.calls] == [g_id, g_id]
 
 
+def test_func_name_argument_admitted(go_types_helper):
+    # `H(G, x)` — a declared function name in a call's argument list
+    # reads dep-free (it is a declaration, not data) while G's own
+    # binding and signature identities pin, so a redeclare of `G`
+    # stales the caller. The invocation itself is H's business: its
+    # summary already folds the func-typed parameter's external call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func H(g func(int64) int64, x int64) int64 { return g(x) }; "
+        "func F(x int64) int64 { return H(G, x) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert named(source, snapshot, summaries, "G").binding_id in result.pinned
+
+
+def test_func_name_argument_through_external_call(go_types_helper):
+    # `f(G)` — the same read admits through an opaque external call
+    # (a func-typed parameter): the callee may invoke G at an unknown
+    # time, but that is exactly what the external transfer reports.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func F(f func(func(int64) int64) int64) int64 { return f(G) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert named(source, snapshot, summaries, "G").binding_id in result.pinned
+
+
+def test_func_name_non_argument_positions_stay_closed(go_types_helper):
+    # A function name outside store-RHS and argument positions —
+    # here the operand of a comparison — still names no readable
+    # value and stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func F() bool { return G == nil }",
+    )
+    assert not named(source, snapshot, summaries).available
+
+
 def test_conditional_func_alias_on_param_stays_external(go_types_helper):
     result = named(
         *unit(

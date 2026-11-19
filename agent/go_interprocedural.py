@@ -10996,14 +10996,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
 
     def _func_alias_bind(self, node: Any) -> frozenset[int]:
         """`h := G` / `h = G` / `var h = G` — a declared function
-        name read as a store value.
+        name read as a store value, or `H(G, args)` — a function
+        name read as a call argument.
 
-        Only a function-name identifier sitting in the value
-        position of a name binding admits; the store's identifier-RHS
+        A function-name identifier sitting in the value position of
+        a name binding admits dep-free; the store's identifier-RHS
         propagation records `func_aliases[bound] = G` so `h(...)`
-        resolves through G's own summary like a `direct_local` call.
-        Any other use of a function name as a value — an argument,
-        a return, a computed operand — stays closed.
+        resolves through G's own summary like a `direct_local`
+        call. A function name in a call's argument list also admits
+        dep-free — the callee may invoke it at an unknown time, but
+        the call's own record already carries the invocation's
+        effects (a resolved callee folds its summary's transfers,
+        an opaque one records them external); what the record cannot
+        carry is G's identity, so the binding and its signature
+        identities pin — redeclaring `G` stales the caller like any
+        pinned identity. A name in any other position — a `return`,
+        a computed operand, a comparison — stays closed.
         """
         parent = node.parent
         while parent is not None and parent.type == "expression_list":
@@ -11038,8 +11046,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if index is not None and index < len(names):
                 name_node = names[index]
-        if name_node is None or name_node.type != "identifier":
+        if name_node is not None and name_node.type == "identifier":
+            return frozenset()
+        # `H(G, args)` — the name sits in a call's argument list.
+        # The call record's span is the `call_expression` parent of
+        # the argument list, so the record itself proves the
+        # position; its own dep/effect fold handles what the
+        # invocation does with the value, and G's binding plus its
+        # signature identities pin for staleness.
+        parent = node.parent
+        call_node = (
+            parent.parent if parent is not None else None
+        )
+        call = (
+            self.calls.get(self.node_key(call_node))
+            if parent is not None
+            and parent.type == "argument_list"
+            and call_node is not None
+            and call_node.type == "call_expression"
+            else None
+        )
+        if call is None:
             raise _Unsupported("non_parameter_reference", _span(node))
+        ref = self.references.get(self.node_key(node))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None
+            else None
+        )
+        if binding is not None:
+            self.pinned.add(binding.id)
+            if binding.type is not None:
+                self._pin_fact_identities(binding.type)
+            self.pinned.update(binding.signature_type_ids)
         return frozenset()
 
     def _func_literal_capture(

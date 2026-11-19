@@ -2736,7 +2736,15 @@ path-dependent — a different function, a literal, or a
 param still carrying the caller's callback — drops the
 alias so the call falls back to the opaque external model;
 a package-level `var Alias = Id` keeps the opaque external
-model since any caller may reassign it. An in-place
+model since any caller may reassign it. A function name in a
+call's argument list — `H(G, args)` — reads dep-free: it is a
+declaration, not data, and the call's own record already
+carries what the invocation may do with it (a resolved callee
+folds its summary's effects, an opaque one records them
+external), so the read pins G's binding and signature
+identities for staleness and contributes nothing else. Other
+non-store positions — a `return`, a comparison operand — stay
+closed. An in-place
 literal call — `func(...) T { ... }(args)` — admits like
 a bound-literal call whose captures resolve at the call
 site: the result unions the captured bindings' current
