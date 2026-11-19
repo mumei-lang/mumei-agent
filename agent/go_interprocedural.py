@@ -6835,6 +6835,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._adopt_container_element_records(
                             rights[i], binding.id
                         )
+                    elif (
+                        append_cont := self._func_elem_append_target(
+                            rights[i], locals_
+                        )
+                    ) is not None and self._func_elem_collection(
+                        binding.type
+                    ):
+                        # `fs2 := append(fs, f)` — the result may
+                        # reuse the argument's array: the fresh
+                        # name shares that backing and sees the
+                        # container's elements (including the one
+                        # this append added).
+                        self._func_elem_share(
+                            binding.id, append_cont
+                        )
+                        self._adopt_element_records(
+                            append_cont, binding.id
+                        )
                     else:
                         # Any other RHS clears every func-value record
                         # an earlier bind left on the reused name — a
@@ -7432,6 +7450,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # and adopt identifier elements'.
                             self._adopt_container_element_records(
                                 value_nodes[i], binding.id
+                            )
+                        elif (
+                            (
+                                append_cont
+                                := self._func_elem_append_target(
+                                    value_nodes[i], locals_
+                                )
+                            )
+                            is not None
+                            and self._func_elem_collection(
+                                binding.type
+                            )
+                        ):
+                            # `var fs2 = append(fs, f)` — shares
+                            # the argument's backing and sees its
+                            # elements like `fs2 := append(fs, f)`.
+                            self._func_elem_share(
+                                binding.id, append_cont
+                            )
+                            self._adopt_element_records(
+                                append_cont, binding.id
                             )
                         else:
                             self._drop_func_value_records(binding.id)
@@ -12749,6 +12788,102 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                     return frozenset()
+                if name == b"append":
+                    # `append(fs, f)` / `append(fs, fs2...)` on a
+                    # bound func-element container — the result
+                    # unions the container's deps and every appended
+                    # element's, and each element's func-value
+                    # records adopt onto the container binding like
+                    # composite literal elements do (literals
+                    # recorded themselves during this eval; the
+                    # identifier/selector cases adopt here). The
+                    # store loop then shares the result name into
+                    # the argument's backing group. Any other
+                    # append stays opaque.
+                    append_cont = self._func_elem_append_target(
+                        node, locals_
+                    )
+                    if append_cont is None:
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    deps = self.expression(
+                        arguments[0], fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+                    for extra in arguments[1:]:
+                        element = extra
+                        variadic = element.type == "variadic_argument"
+                        if variadic:
+                            element = next(
+                                iter(element.named_children), None
+                            )
+                        element_id: str | None = None
+                        if element is not None and element.type == (
+                            "identifier"
+                        ):
+                            e_ref = self.references.get(
+                                self.node_key(element)
+                            )
+                            if e_ref is not None:
+                                element_id = e_ref.binding_id
+                                if variadic:
+                                    spread = self.bindings.get(
+                                        element_id
+                                    )
+                                    if spread is None or not (
+                                        self._func_elem_collection(
+                                            spread.type
+                                        )
+                                    ):
+                                        # `append(fs, v...)` — the
+                                        # spread must name a bound
+                                        # func-element container or
+                                        # the appended elements'
+                                        # records cannot resolve.
+                                        raise _Unsupported(
+                                            "unresolved_or_opaque_call",
+                                            _span(node),
+                                        )
+                        elif (
+                            element is not None
+                            and element.type == "selector_expression"
+                        ):
+                            e_field = element.child_by_field_name(
+                                "field"
+                            )
+                            e_fref = (
+                                self.references.get(
+                                    self.node_key(e_field)
+                                )
+                                if e_field is not None
+                                else None
+                            )
+                            e_member = self._field_identity(e_fref)
+                            if e_member is not None:
+                                element_id = e_member.id
+                        if (
+                            element_id is not None
+                            and element_id != append_cont
+                        ):
+                            self._adopt_element_records(
+                                element_id, append_cont
+                            )
+                        deps |= self.expression(
+                            extra, fn, params, locals_, transfers,
+                            count, depth + 1,
+                        )
+                    # Element stores reach every name sharing the
+                    # backing — the container's (new) element
+                    # records union into each sharer like a store
+                    # through it would.
+                    for holder_id in self._func_elem_groups.get(
+                        append_cont, set()
+                    ):
+                        self._adopt_element_records(
+                            append_cont, holder_id
+                        )
+                    return deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
                 if not arguments:
@@ -13974,7 +14109,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # in a `[]func`/`[N]func` composite (`fs := []func(){…}`)
         # binds through the container name — climb past the literal
         # wrappers too, so the element's captures record under the
-        # container binding the `fs[k]()` call reads.
+        # container binding the `fs[k]()` call reads. A literal in
+        # an `append(fs, func(){…})` argument climbs through the
+        # argument list the same way — it stores an element into the
+        # container the call extends.
         parent = node.parent
         in_composite = False
         while parent is not None and parent.type in {
@@ -13983,6 +14121,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             "literal_element",
             "keyed_element",
             "composite_literal",
+            "argument_list",
         }:
             if parent.type == "composite_literal":
                 in_composite = True
@@ -14101,6 +14240,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 container.type
             ):
                 bound_id = container.id
+                in_composite = True
+        elif parent is not None and parent.type == "call_expression":
+            # `append(fs, func(){…})` — the literal is an appended
+            # element of the argument container; record under its
+            # binding like a composite element.
+            bound_id = self._func_elem_append_target(parent, locals_)
+            if bound_id is not None:
                 in_composite = True
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
