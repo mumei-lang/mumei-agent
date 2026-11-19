@@ -4871,6 +4871,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 return None
             return member
+        if call.kind == "indirect_or_selector":
+            # `ch := g(x)` — `g` is a func-typed parameter or bound
+            # func value. go-types resolves `ch`'s declared `chan`
+            # type from `g`'s signature, so the LHS gate
+            # (`_scalar_chan_binding` / `_chan_chan_fact`) already
+            # carries the result fact `pred` would check on a known
+            # callee. Only a plain identifier callee admits —
+            # `mk(x)()` and `fs[i]()` stay closed. The opaque body
+            # may hand a caller queue back, so the bound name joins
+            # the external model like an imported result.
+            function_node = inner.child_by_field_name("function")
+            if (
+                function_node is None
+                or function_node.type != "identifier"
+            ):
+                return None
+            ref = self.references.get(self.node_key(function_node))
+            if ref is None:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            if binding is None or binding.type.kind != "function":
+                return None
+            return binding
         return None
 
     def _func_iterator_result(self, node: Any) -> bool:
@@ -4926,15 +4949,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if inner is None or inner.type != "call_expression":
             return ()
         call = self.calls.get(self.node_key(inner))
-        if call is None or call.kind != "direct_import":
-            return ()
-        member = self.members.get(call.target)
-        if (
-            member is None
-            or index >= len(member.result_types)
-            or not self._scalar_chan_fact(member.result_types[index])
+        if call is None or call.kind not in (
+            "direct_import",
+            "indirect_or_selector",
         ):
             return ()
+        if call.kind == "direct_import":
+            member = self.members.get(call.target)
+            if (
+                member is None
+                or index >= len(member.result_types)
+                or not self._scalar_chan_fact(
+                    member.result_types[index]
+                )
+            ):
+                return ()
+        else:
+            # `ch := g(q)` — `g` is a func value whose opaque body
+            # may `return q`, so each `chan` argument promotes like
+            # the imported case. `_chan_result_call` already gated
+            # the call to an identifier callee bound to a
+            # `function` type, and the LHS declared `chan` type
+            # carries the result fact the member check verifies on
+            # an imported call.
+            function_node = inner.child_by_field_name("function")
+            if (
+                function_node is None
+                or function_node.type != "identifier"
+            ):
+                return ()
+            ref = self.references.get(self.node_key(function_node))
+            if ref is None:
+                return ()
+            fb = self.bindings.get(ref.binding_id)
+            if fb is None or fb.type.kind != "function":
+                return ()
         arg_list = next(
             (
                 c

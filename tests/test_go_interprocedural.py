@@ -24506,3 +24506,171 @@ def test_call_result_index_read_transfer_records_args(go_types_helper):
     assert any(
         frozenset({0}) in t.arguments for t in transfers
     ), transfers
+
+def test_func_value_chan_result_param_admitted(go_types_helper):
+    # `ch := g(x)` — `g` is a func-typed parameter declaring a scalar
+    # `chan` result; go-types resolves `ch`'s declared `chan` type
+    # from `g`'s signature, so the name binds an external queue like
+    # `ch := lib.G()` does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) chan int64) int64 {\n"
+        "    ch := g(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_rebind_admitted(go_types_helper):
+    # `ch = g(x)` reseats a `chan` parameter to the queue the
+    # func-value callee produces — the same reseat `ch = G()`
+    # admits for a declared callee.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, ch chan int64, g func(int64) chan int64) int64 {\n"
+        "    ch = g(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_value_chan_result_conditional_rebind(go_types_helper):
+    # A conditional `ch = g(x)` keeps the name external on both
+    # paths — sends afterward reach the may-reseated queue.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, ch chan int64, g func(int64) chan int64) int64 {\n"
+        "    if x > 0 {\n"
+        "        ch = g(x)\n"
+        "    }\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_value_chan_result_bound_callee(go_types_helper):
+    # `f := mk(x)` binds an opaque func value; `ch := f(x)` admits
+    # through the same identifier-callee arm.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, mk func(int64) func(int64) chan int64) int64 {\n"
+        "    f := mk(x)\n"
+        "    ch := f(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_chan_arg_promoted(go_types_helper):
+    # `ch := g(q)` — the opaque body may `return q`, so `q` joins
+    # the external model and its contents seed `ch`'s slot.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(q chan int64, g func(chan int64) chan int64, y int64) int64 {\n"
+        "    q <- y\n"
+        "    ch := g(q)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_value_chan_result_chan_chan_admitted(go_types_helper):
+    # `cc := g(x)` — a func value declaring `chan chan int64`
+    # admits through the `chan chan` arm on the declared LHS type.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) chan chan int64) int64 {\n"
+        "    cc := g(x)\n"
+        "    c := <-cc\n"
+        "    c <- x\n"
+        "    return <-c\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_var_decl_admitted(go_types_helper):
+    # `var ch = g(x)` — the var-decl form admits through the same
+    # `_chan_result_call` gate.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) chan int64) int64 {\n"
+        "    var ch = g(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_index_callee_stays_closed(
+    go_types_helper,
+):
+    # `ch := fs[0](x)` — an index-expression callee is not an
+    # identifier bound to a func value; the declared-`chan` LHS
+    # still requires a resolvable callee arm, so it stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, fs []func(int64) chan int64) int64 {\n"
+        "    ch := fs[0](x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_value_chan_result_multi_slot_stays_closed(
+    go_types_helper,
+):
+    # `ch, n := g(x)` — a multi-result func-value callee cannot
+    # verify per-slot `chan` facts (`_chan_result_call_at` has no
+    # signature record), so the unpack stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) (chan int64, int64)) int64 {\n"
+        "    ch, n := g(x)\n"
+        "    ch <- n\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_value_non_chan_result_unaffected(go_types_helper):
+    # `n := g(x)` — a scalar func-value result binds through the
+    # ordinary opaque-call path; the chan arm does not disturb it.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) int64) int64 {\n"
+        "    n := g(x)\n"
+        "    return n\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
