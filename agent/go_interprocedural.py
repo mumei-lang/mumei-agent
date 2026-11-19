@@ -3345,6 +3345,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 roots.append(self._chan_root(chan.id))
         return tuple(roots)
 
+    def _chan_result_call_at(self, node: Any, index: int) -> Any:
+        """`node` calls a local callee declaring a scalar `chan` in
+        result slot `index` — a multi-result callee's `ch` position
+        (`ch, n := g()` where `g` returns `(chan T, int64)`).
+        Returns the callee's Function record or None. Each slot's
+        LHS resolves against the same call node, so only the
+        per-position result type decides admission."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_local":
+            return None
+        target = self.functions.get(call.target)
+        if (
+            target is None
+            or index >= len(target.results)
+            or not self._scalar_chan_fact(target.results[index].type)
+        ):
+            return None
+        return target
+
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
         """The DIRECT field names a `struct{...}` literal declares —
         identifiers of each `field_declaration`'s `name`, plus the
@@ -3533,14 +3563,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
+        index: int = 0,
     ) -> Any | None:
         """`c := g(q)` where `g`'s whole body is `return <param>` —
         the bound name aliases the argument's queue (the callee hands
         the same queue back), so it binds through `chan_aliases`
-        rather than the external-local model. Returns the alias
-        source binding, or None when the callee is not a pure
-        passthrough or the passed-through argument is not a channel
-        identifier."""
+        rather than the external-local model. `index` picks the
+        result slot for a multi-result callee (`c, n := g(q)` checks
+        `return q, 0` at slot 0). Returns the alias source binding,
+        or None when the callee is not a pure passthrough or the
+        passed-through argument is not a channel identifier."""
         inner = node
         while (
             inner is not None
@@ -3587,13 +3619,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             items = [
                 c for c in expr.named_children if c.type != "comment"
             ]
-            expr = items[0] if len(items) == 1 else None
+            expr = items[index] if index < len(items) else None
+        elif index != 0:
+            return None
         if expr is None or expr.type != "identifier":
             return None
         ref = self.references.get(self.node_key(expr))
         if ref is None:
             return None
-        index = next(
+        param_index = next(
             (
                 i
                 for i, p in enumerate(target.parameters)
@@ -3601,7 +3635,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ),
             None,
         )
-        if index is None:
+        if param_index is None:
             return None
         args = inner.child_by_field_name("arguments")
         arg_nodes = (
@@ -3615,11 +3649,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         if call.method_expr:
             # `S.Pick(s, a, b)` — argument 0 is the receiver, so the
-            # callee's declared parameter `index` sits one slot later.
-            index += 1
-        if index >= len(arg_nodes):
+            # callee's declared parameter `param_index` sits one slot
+            # later.
+            param_index += 1
+        if param_index >= len(arg_nodes):
             return None
-        return self._chan_alias_target(arg_nodes[index], locals_, params)
+        return self._chan_alias_target(
+            arg_nodes[param_index], locals_, params
+        )
 
     def _is_make_chan_call(self, node: Any) -> bool:
         """`make(chan T[, cap])` — the one in-fragment channel
@@ -5193,6 +5230,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if src_ref is not None
                     else None
                 )
+            # Channel alias/passthrough binds resolve the pre-state
+            # too — `a, c := g(a, b)` where `g` returns `q, p` hands
+            # `c` the queue `a` named BEFORE slot 0 reseated `a` to
+            # `b`'s (and an equal-width `a, b := b, a` swaps the
+            # queues the same way).
+            pre_chan_targets: list = [
+                (
+                    self._chan_alias_target(
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        ),
+                        locals_,
+                        params,
+                    )
+                    or self._chan_result_passthrough(
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        ),
+                        locals_,
+                        params,
+                        i if len(rights) == 1 else 0,
+                    )
+                )
+                for i in range(len(lefts))
+            ]
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -5228,19 +5294,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
                     self._scalar_chan_binding(binding.id)
-                    # A multi-valued call's slot has no per-result RHS
-                    # node — `_, ch := G(q)`'s ch names a channel the
-                    # conflated dep set cannot model, so it stays
-                    # closed rather than guessing at rights[i].
-                    and len(lefts) == len(rights)
                     and (
-                        self._is_make_chan_call(rights[i])
-                        or self._chan_alias_target(
-                            rights[i], locals_, params
+                        (
+                            len(lefts) == len(rights)
+                            and (
+                                self._is_make_chan_call(rights[i])
+                                or self._chan_alias_target(
+                                    rights[i], locals_, params
+                                )
+                                is not None
+                                or self._chan_result_call(rights[i])
+                                is not None
+                            )
                         )
-                        is not None
-                        or self._chan_result_call(rights[i])
-                        is not None
+                        # A multi-valued call's slot has no per-result
+                        # RHS node — `ch, n := g()` admits when the
+                        # callee declares a scalar `chan` in slot i;
+                        # the name binds an external queue like
+                        # `ch := g()` does.
+                        or (
+                            len(rights) == 1
+                            and self._chan_result_call_at(rights[0], i)
+                            is not None
+                        )
                     )
                 ):
                     # `ch2 := ch` aliases one queue under a second
@@ -5255,46 +5331,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # over, and only a scalar element keeps queue
                     # contents inside the dep model.
                     raise _Unsupported("binding_unavailable", _span(node))
-                if binding.type.kind == "chan" and not self._is_make_chan_call(
+                chan_rhs = (
                     rights[i]
+                    if len(lefts) == len(rights)
+                    # A multi-valued call's chan slot shares the single
+                    # RHS node — make/alias/passthrough all resolve to
+                    # None on it, so the name takes the external model.
+                    else rights[0]
+                )
+                if binding.type.kind == "chan" and not self._is_make_chan_call(
+                    chan_rhs
                 ):
-                    chan_alias = self._chan_alias_target(
-                        rights[i], locals_, params
-                    )
-                    if chan_alias is not None:
-                        self.chan_aliases[binding.id] = chan_alias.id
+                    # `c := g(q)` with `g`'s body `return ch` —
+                    # c names q's queue, not a fresh external one.
+                    # Both the alias and the passthrough resolved
+                    # against the pre-state above.
+                    pre_target = pre_chan_targets[i]
+                    if pre_target is not None:
+                        self.chan_aliases[binding.id] = pre_target.id
                     else:
-                        passthrough = self._chan_result_passthrough(
-                            rights[i], locals_, params
-                        )
-                        if passthrough is not None:
-                            # `c := g(q)` with `g`'s body `return ch`
-                            # — c names q's queue, not a fresh
-                            # external one.
-                            self.chan_aliases[binding.id] = (
-                                passthrough.id
+                        self.external_chan_locals.add(binding.id)
+                        # `ch := lib.G(q)` — the imported callee
+                        # may hand `q`'s queue back, so every
+                        # `chan` argument joins the external
+                        # model and its current contents seed
+                        # the bound name's slot.
+                        for arg_root in (
+                            self._imported_chan_result_args(
+                                rights[i], locals_, params
                             )
-                        else:
-                            self.external_chan_locals.add(binding.id)
-                            # `ch := lib.G(q)` — the imported callee
-                            # may hand `q`'s queue back, so every
-                            # `chan` argument joins the external
-                            # model and its current contents seed
-                            # the bound name's slot.
-                            for arg_root in (
-                                self._imported_chan_result_args(
-                                    rights[i], locals_, params
-                                )
-                            ):
-                                self.external_chan_locals.add(arg_root)
-                                value = value | locals_.get(
-                                    arg_root,
-                                    (
-                                        frozenset({params[arg_root]})
-                                        if arg_root in params
-                                        else frozenset()
-                                    ),
-                                )
+                        ):
+                            self.external_chan_locals.add(arg_root)
+                            value = value | locals_.get(
+                                arg_root,
+                                (
+                                    frozenset({params[arg_root]})
+                                    if arg_root in params
+                                    else frozenset()
+                                ),
+                            )
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]

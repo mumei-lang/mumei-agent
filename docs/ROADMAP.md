@@ -2642,7 +2642,16 @@ queue it could still mean is promoted external —
 sends broadcast through `indirect_writes` and
 receives union it, so a third name still holding
 the old queue's identity (`z := t` before `ch = q`)
-sees writes the untaken path delivered. A fresh
+sees writes the untaken path delivered. A
+multi-result callee admits per slot: `ch, n := g()`
+binds an external queue when the (local) callee
+declares a scalar `chan` at the name's position —
+the tuple shares one RHS node, so make/alias/
+passthrough all resolve to None and only the
+per-position result type decides admission (a
+`chan` name at a non-`chan` or non-scalar slot
+stays closed, as does the `var _, ch = G(q)` form
+whose slot gate is not wired). A fresh
 `make` on an unaliased name keeps the old conflated
 admission since every name resolving to it already
 converges on the same slot. Still closed:
