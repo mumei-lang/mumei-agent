@@ -10664,6 +10664,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             for arg in args
                         )
                         computed_call = call
+                        if call.method:
+                            # A method's receiver reads like an
+                            # argument: `Items` may hand `r`'s value
+                            # to a callback `h`, so its deps join
+                            # the fold the argument reads queued.
+                            call_key = self.node_key(call_node)
+                            self._call_arg_deps[call_key] = (
+                                self._call_arg_deps.get(
+                                    call_key, frozenset()
+                                )
+                                | range_receiver_deps
+                            )
                         # `for range lib.G(h, x)` — a func-typed
                         # argument may run inside the opaque callee:
                         # drain the invocations the argument reads
