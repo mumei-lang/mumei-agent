@@ -2693,13 +2693,24 @@ channel's queue external, `c := <-cc` binds the
 received channel as an external name (dep-free like
 any external receive), and `close(cc)` records the
 same imported effect as on a scalar `chan`
-parameter. Deeper nesting (`chan chan chan T`), a
+parameter. The follow-on forms admit identically:
+`cc = G()` reseats a `chan chan` name to the
+callee-produced external queue (conditional or not
+— the unioned slot covers either meaning), `var cc
+= G()` and `var cc, n = G()` bind like the
+short-decl forms, `for c := range cc` (and `for c =
+range cc` over an existing scalar-`chan` name)
+binds each element as an external channel like `c
+:= <-cc`, and the comma-ok receives `c, ok :=
+<-cc`, `var c, ok = <-cc` and `c, _ = <-cc` reseat
+or bind the value slot to the received external
+queue. Deeper nesting (`chan chan chan T`), a
 local `make(chan chan T)` or `var cc chan chan T`,
-`range` over the outer queue, a tuple receive `c2, _
-= <-cc`, and `cc = G()` rebinding all stay closed —
-a channel value flowing between two local queues or
-through an unmodelled rebind would alias queues the
-conflated dep set cannot track. Still
+a `chan chan` alias reseat (`cc = q`), and a
+`make(chan chan T)` rebind all stay closed — a
+channel value flowing between two local queues
+would alias queues the conflated dep set cannot
+track. Still
 closed: non-scalar elements — while `select` now
 admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
