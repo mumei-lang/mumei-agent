@@ -847,7 +847,6 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
 @pytest.mark.parametrize(
     "declarations",
     [
-        "func G(v int64) { _ = v }\nfunc F(x int64) int64 { switch G(x); x { case 1: return x }; return x }",
         # select is unmodelled concurrency.
         "func F(x int64) int64 { select {}; return x }",
         # A switch with an unsupported statement inside a clause is a gap.
@@ -1353,7 +1352,7 @@ def test_callee_summary_is_not_polluted_by_caller_exit_state(
         # An unsupported if initializer propagates the gap.
         "func F(x int64) int64 { if y:=1.5; y>0 {return x}; return 0 }",
         # An unsummarizable callee in an initializer stays a gap.
-        "func G(v int64) { _ = v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
+        "func G(v int64) int64 { y := 1.5; _ = y; return v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
         # A branch with an unsupported statement blocks the summary.
     ],
 )
@@ -17534,21 +17533,23 @@ def test_method_summary_reports_receiver_as_parameter_zero(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_void_method_call_stays_closed(go_types_helper):
-    # A result-less callee stays outside the single-result frontier —
-    # `s.W()` fails closed like a plain result-less `G()` does.
+def test_void_method_call_admitted(go_types_helper):
+    # A void method summarizes and its call folds the receiver's
+    # field writes — `s.W(); return s.V` admits with unknown effects
+    # and the receiver's dep set.
     files = {
         "a.go": "package p\n"
         "type St struct { V int64 }\n"
         "func (st *St) W() { st.V = 1 }\n"
-        "func F(a int64) int64 {\n"
-        "\ts := St{V: a}\n"
-        "\ts.W()\n"
-        "\treturn s.V\n}\n"
+        "func F(s *St) int64 { s.W(); return s.V }\n"
     }
     _, snapshot, summaries = _method_unit(go_types_helper, files)
+    w = named_package(files, snapshot, summaries, "W")
+    assert w.available
     result = named_package(files, snapshot, summaries, "F")
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
 
 
 def test_generic_method_call_stays_closed(go_types_helper):
@@ -19476,3 +19477,55 @@ def test_imported_chan_result_named_elem_pins_identity(
     )
     assert result.available
     assert set(member.signature_type_ids) <= set(result.pinned)
+
+
+def test_void_callee_summarizes(go_types_helper):
+    # A void callee is summarizable: no results means no result
+    # deps, but its calls and effects still land on the summary.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func s(x int64) { q <- x }; "
+        "func F(x int64) int64 { return x }",
+    )
+    s = named(source, snapshot, summaries, "s")
+    assert s.available and s.return_dependencies == frozenset()
+    assert s.effects == "unknown" and s.calls
+
+
+def test_void_callee_statement_call_admitted(go_types_helper):
+    # `s(x)` as a statement: the dominant Go call shape — effects
+    # fold exactly like a result-typed callee's.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func s(x int64) { q <- x }; "
+        "func F(x int64) int64 { s(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_void_callee_bare_return_admitted(go_types_helper):
+    # Bare `return` inside a void body carries nothing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func s(x int64) { if x > 0 { q <- x; return }; q <- x }; "
+        "func F(x int64) int64 { s(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_void_callee_pure_effects_none(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func s(x int64) { }; "
+        "func F(x int64) int64 { return x }",
+    )
+    s = named(source, snapshot, summaries, "s")
+    # An empty void body has no statements — the unsupported_body
+    # gate keeps it closed rather than claiming effects none.
+    assert not s.available

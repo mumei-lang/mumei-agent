@@ -3012,8 +3012,12 @@ calls (or receives, which can never appear in-fragment), so the shape
 evaluates the inner expression for its recorded transfer and discards
 the result. `G(x); return y` records the `G` transfer exactly like a
 bound call would; a callee without a summary keeps its
-`callee_unsupported` gap — a `func G(){}` void callee is still not
-summarizable. Because initializers dispatch through the same statement
+`callee_unsupported` gap. A void callee (`func s(x) { ... }`) now
+summarizes — the signature gate no longer requires a result, a bare
+`return` or falling off the end carries nothing, and a statement call
+folds the callee's calls and effects with an empty result-dep set
+(effects land; no value flows back). An empty-body `func v(){}` still
+stays `unsupported_body`. Because initializers dispatch through the same statement
 path, `if G(x); cond` / `switch G(x); tag` initializers admit the same
 form.
 

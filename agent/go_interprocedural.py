@@ -4892,7 +4892,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             fn.body is None
             or fn.generic
             or fn.variadic
-            or not fn.results
             # A method's receiver is a leading signature slot like any
             # parameter: its declared fact must sit inside the admitted
             # kinds — a concrete named type's fact is `struct`/`pointer`
@@ -5081,7 +5080,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
             self.current_file = previous_file
-        if not saw_return[0]:
+        if not saw_return[0] and fn.results:
+            # A void callee may fall off the end of its body — Go
+            # treats that as an implicit bare `return`, which the
+            # dep model already carries as nothing.
             raise _Unsupported("unsupported_body", fn.body)
         return self.result(
             fn,
@@ -5224,6 +5226,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
             if len(expressions) == 0:
+                if not fn.results:
+                    # A bare `return` in a void callee carries
+                    # nothing — the same implicit return a
+                    # fall-off-the-end body gets.
+                    saw_return[0] = True
+                    return
                 # A bare `return` is only legal with a named result — it
                 # yields the result binding's current dependencies. With
                 # several named results the conflated dep set unions
