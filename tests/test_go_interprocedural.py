@@ -19596,3 +19596,27 @@ def test_defer_pure_callee_does_not_touch_result(go_types_helper):
     )
     result = named(source, snapshot, summaries)
     assert result.available and result.return_dependencies == frozenset()
+
+
+def test_defer_argument_calls_record_once(go_types_helper):
+    # `defer G(Id(x))` evaluates the argument exactly once — Id's
+    # transfer appears once in the caller's call list, not twice.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func Id(v int64) int64 { return v }; "
+        "func G(v int64) int64 { return v }; "
+        "func F(x int64) int64 { defer G(Id(x)); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    id_fn = next(
+        f for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "Id"
+    )
+    g_fn = next(
+        f for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "G"
+    )
+    assert sorted(c.target for c in result.calls) == sorted(
+        [id_fn.binding_id, g_fn.binding_id]
+    )

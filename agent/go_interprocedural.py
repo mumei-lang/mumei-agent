@@ -8885,27 +8885,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             inner = _children(node)
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
-            defer_arg_deps = frozenset()
+            mark = len(transfers)
+            self.expression(
+                inner[0], fn, params, locals_, transfers, count, 0
+            )
             if kind == "defer_statement":
                 # A deferred call runs at EVERY later `return` — after
                 # the result expressions evaluate — so a callee that
                 # can write may still change a named result:
-                # `defer set(&r,x); return 0` returns x, not 0.
-                # Capture what it could write with: its arguments,
-                # evaluated at this statement per Go semantics.
-                arg_list = inner[0].child_by_field_name("arguments")
-                if arg_list is not None:
-                    for arg in _children(arg_list):
-                        r = self.expression(
-                            arg, fn, params, locals_, transfers,
-                            count, 0,
-                        )
-                        if isinstance(r, frozenset):
-                            defer_arg_deps |= r
-            self.expression(
-                inner[0], fn, params, locals_, transfers, count, 0
-            )
-            if kind == "defer_statement" and defer_arg_deps:
+                # `defer set(&r,x); return 0` returns x, not 0. What it
+                # could write with is bounded by the call's arguments,
+                # already recorded on its transfer — reusing them keeps
+                # the arguments (and any calls inside them, like
+                # `defer G(Id(x))`) evaluated exactly once.
+                outer = transfers[-1] if len(transfers) > mark else None
+                if outer is None or not outer.arguments:
+                    return
+                defer_arg_deps = frozenset().union(*outer.arguments)
                 call = self.calls.get(self.node_key(inner[0]))
                 callee = (
                     self.summarize(call.target)
