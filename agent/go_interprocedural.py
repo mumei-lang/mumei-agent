@@ -7018,11 +7018,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # An oscillating resolution (`f, g = g, f`
                             # swapping capture records) never converges
                             # — the entries alternate between states
-                            # already seen. Drop the entries that moved
-                            # this pass: the calls they fed resolve
-                            # through the opaque external model, an
-                            # over-approximation that joins back
-                            # identically on the next pass.
+                            # already seen. Break the cycle
+                            # conservatively: function-alias targets are
+                            # identities, not sets, so drop the moved
+                            # aliases (the calls they fed resolve
+                            # through the opaque external model), but
+                            # UNION the moved capture records —
+                            # deleting a capture list makes the call
+                            # fall back to the name's literal-time dep
+                            # set, which under-approximates a captured
+                            # local re-seated inside the loop
+                            # (`x = a` before `f()`). The union keeps
+                            # every binding either state captured, so
+                            # the call site resolves each one's
+                            # CURRENT deps; convergence holds because
+                            # the swap's `h = k` copy then writes the
+                            # same union back. `pointee_closures`
+                            # membership joins the same way — a name
+                            # marked pointee-capturing in either state
+                            # keeps the pointer-write model.
                             prev_a, prev_c, prev_p = resolution_before
                             cur_a, cur_c, cur_p = resolution_after
                             for key in cur_a.keys() | prev_a.keys():
@@ -7030,9 +7044,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self.func_aliases.pop(key, None)
                             for key in cur_c.keys() | prev_c.keys():
                                 if cur_c.get(key) != prev_c.get(key):
-                                    self.closure_captures.pop(key, None)
+                                    merged = (prev_c.get(key) or frozenset()) | (
+                                        cur_c.get(key) or frozenset()
+                                    )
+                                    if merged:
+                                        self.closure_captures[key] = merged
+                                    else:
+                                        self.closure_captures.pop(key, None)
                             for key in cur_p ^ prev_p:
-                                self.pointee_closures.discard(key)
+                                self.pointee_closures.add(key)
                         else:
                             seen_resolutions.add(snapshot)
                     changed = (

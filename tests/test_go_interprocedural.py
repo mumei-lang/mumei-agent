@@ -16602,9 +16602,10 @@ def test_loop_keeps_effects_from_alias_resolved_pass(go_types_helper):
 def test_loop_closure_swap_terminates(go_types_helper):
     # `f, g = g, f` alternates the capture records every pass — the
     # resolution tables never converge under plain comparison. The
-    # join must detect the repeated snapshot, drop the oscillating
-    # entries, and settle on the external model rather than hit
-    # analysis_limit.
+    # join detects the repeated snapshot and unions the oscillating
+    # capture records instead of dropping them: each call resolves
+    # both candidate literals' captures (deps {0, 1}), a conservative
+    # join that still terminates rather than hitting analysis_limit.
     files = {
         "a.go": "package p\n"
         "func F(a, b int64) int64 {\n"
@@ -16620,5 +16621,33 @@ def test_loop_closure_swap_terminates(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.effects == "unknown"
+    # Both candidate literals are pure — the unioned capture records
+    # model the calls precisely instead of the opaque external model.
+    assert result.effects == "none_in_supported_fragment"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_loop_closure_swap_keeps_reseated_capture_deps(go_types_helper):
+    # The swap's capture records oscillate (`f, g = g, f`), so the
+    # cycle-break joins them instead of dropping them: `f()` must
+    # still see that its captured local `x` was re-seated to `a`
+    # inside the loop — dropping the record would fall back to the
+    # name's literal-time dep set and lose the `a` dependency.
+    files = {
+        "a.go": "package p\n"
+        "func F(a, b int64) int64 {\n"
+        "\tx := int64(0)\n"
+        "\tf := func() int64 { return x }\n"
+        "\tg := func() int64 { return b }\n"
+        "\tfor i := int64(0); i < 2; i = i + 1 {\n"
+        "\t\tf, g = g, f\n"
+        "\t\tx = a\n"
+        "\t}\n"
+        "\treturn f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
     assert result.return_dependencies == frozenset({0, 1})
