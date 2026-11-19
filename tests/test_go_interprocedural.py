@@ -18497,6 +18497,95 @@ def test_range_over_method_result_reads_receiver(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_range_method_result_callback_write_carries_receiver(
+    go_types_helper,
+):
+    # `for range s.Items(h)` — the receiver reads like an argument,
+    # so a callback's writes carry `s`'s deps like `s.M(h)`'s do.
+    files = {
+        "a.go": "package p\n"
+        "type T struct{}\n"
+        "func (t T) Items(h func()) []int64 { return nil }\n"
+        "func F(s T, x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\th := func() { y = 1 }\n"
+        "\tfor range s.Items(h) {\n"
+        "\t}\n"
+        "\treturn y + x\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_imported_map_result_key_carries_deps(
+    go_types_helper,
+):
+    # `for k, _ := range lib.M(x)` — a map's key is stored data like
+    # the element: a callee-produced container's key carries the
+    # call's own dep set.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor k := range lib.M(x) {\n"
+        "\t\tr = k\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(a int64) map[int64]int64 {\n"
+            "\treturn map[int64]int64{a: 0}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_range_over_slice_result_index_stays_dep_free(
+    go_types_helper,
+):
+    # `for i, _ := range lib.G(x)` — a slice's index position is not
+    # stored data: it stays dep-free like a literal index does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor i, v := range lib.G(x) {\n"
+        "\t\tr = int64(i) + v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(a int64) []int64 { return []int64{a} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # `v` carries the call dep {0}; `i` stays dep-free.
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_method_expr_chan_result_passthrough_skips_receiver(
     go_types_helper,
 ):
