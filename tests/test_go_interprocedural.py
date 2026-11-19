@@ -15646,6 +15646,32 @@ def test_chan_result_len_records_transfer(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_multi_result_chan_slots_resolve_passthrough_prestate(
+    go_types_helper,
+):
+    # `a, c := g(a, b)` where `g` returns `q, p` — slot 1's
+    # passthrough must resolve `a`'s queue as it stood BEFORE
+    # slot 0 reseated `a` to `b`'s queue: a send on the original
+    # `a` still reaches `c`'s receive.
+    files = {
+        "a.go": "package p\n"
+        "func g(p chan int64, q chan int64) (chan int64, chan int64) {\n"
+        "\treturn q, p\n}\n"
+        "func F(a chan int64, b chan int64, x int64) int64 {\n"
+        "\ta, c := g(a, b)\n"
+        "\tc <- x\n"
+        "\treturn <-a + <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # `a` reseated to b's queue ({1} ∪ broadcast x); `c` still
+    # names the OLD a queue ({0} ∪ its own send x) — reads union.
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
 def test_multi_result_chan_slot_send_recv_admitted(go_types_helper):
     # `ch, n := g()` where `g` declares a scalar `chan` in slot 0 —
     # the multi-valued call shares one RHS node, so the chan name

@@ -5230,6 +5230,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if src_ref is not None
                     else None
                 )
+            # Channel alias/passthrough binds resolve the pre-state
+            # too — `a, c := g(a, b)` where `g` returns `q, p` hands
+            # `c` the queue `a` named BEFORE slot 0 reseated `a` to
+            # `b`'s (and an equal-width `a, b := b, a` swaps the
+            # queues the same way).
+            pre_chan_targets: list = [
+                (
+                    self._chan_alias_target(
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        ),
+                        locals_,
+                        params,
+                    )
+                    or self._chan_result_passthrough(
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        ),
+                        locals_,
+                        params,
+                        i if len(rights) == 1 else 0,
+                    )
+                )
+                for i in range(len(lefts))
+            ]
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -5313,46 +5342,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if binding.type.kind == "chan" and not self._is_make_chan_call(
                     chan_rhs
                 ):
-                    chan_alias = self._chan_alias_target(
-                        chan_rhs, locals_, params
-                    )
-                    if chan_alias is not None:
-                        self.chan_aliases[binding.id] = chan_alias.id
+                    # `c := g(q)` with `g`'s body `return ch` —
+                    # c names q's queue, not a fresh external one.
+                    # Both the alias and the passthrough resolved
+                    # against the pre-state above.
+                    pre_target = pre_chan_targets[i]
+                    if pre_target is not None:
+                        self.chan_aliases[binding.id] = pre_target.id
                     else:
-                        passthrough = self._chan_result_passthrough(
-                            chan_rhs,
-                            locals_,
-                            params,
-                            i if len(rights) == 1 else 0,
-                        )
-                        if passthrough is not None:
-                            # `c := g(q)` with `g`'s body `return ch`
-                            # — c names q's queue, not a fresh
-                            # external one.
-                            self.chan_aliases[binding.id] = (
-                                passthrough.id
+                        self.external_chan_locals.add(binding.id)
+                        # `ch := lib.G(q)` — the imported callee
+                        # may hand `q`'s queue back, so every
+                        # `chan` argument joins the external
+                        # model and its current contents seed
+                        # the bound name's slot.
+                        for arg_root in (
+                            self._imported_chan_result_args(
+                                rights[i], locals_, params
                             )
-                        else:
-                            self.external_chan_locals.add(binding.id)
-                            # `ch := lib.G(q)` — the imported callee
-                            # may hand `q`'s queue back, so every
-                            # `chan` argument joins the external
-                            # model and its current contents seed
-                            # the bound name's slot.
-                            for arg_root in (
-                                self._imported_chan_result_args(
-                                    rights[i], locals_, params
-                                )
-                            ):
-                                self.external_chan_locals.add(arg_root)
-                                value = value | locals_.get(
-                                    arg_root,
-                                    (
-                                        frozenset({params[arg_root]})
-                                        if arg_root in params
-                                        else frozenset()
-                                    ),
-                                )
+                        ):
+                            self.external_chan_locals.add(arg_root)
+                            value = value | locals_.get(
+                                arg_root,
+                                (
+                                    frozenset({params[arg_root]})
+                                    if arg_root in params
+                                    else frozenset()
+                                ),
+                            )
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]
