@@ -23868,3 +23868,79 @@ def test_func_elem_nested_write_non_panicking(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_index_store_records_on_old_group(go_types_helper):
+    # `a, a, a[0] = newlit, b, func(){x}` — the `a[0]` destination
+    # resolves `a` against pre-state, so the literal lands in the
+    # OLD backing `a2` still shares, not `b`'s that `a` now names.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{func() int64 { return 0 }}\n"
+        "    newlit := []func() int64{func() int64 { return 0 }}\n"
+        "    a, a, a[0] = newlit, b, func() int64 { return x }\n"
+        "    _ = newlit\n"
+        "    return a2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_array_element_copies(go_types_helper):
+    # `fm := [][1]func{fs}` — Go copies the array, so an element
+    # store through `fm[0][i]` must NOT reach `fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := [1]func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][1]func() int64{fs}\n"
+        "    fm[0][0] = func() int64 { return x }\n"
+        "    _ = fm\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_nested_fresh_slot_isolated(go_types_helper):
+    # `fm := [][]func{fs}` — only slot 0 aliases `fs`'s backing;
+    # `fm[1]` is a fresh nil inner slice, so a store through
+    # `fm[1][i]` must not reach `fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs, nil}\n"
+        "    fm[1][0] = func() int64 { return x }\n"
+        "    _ = fm\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_nested_donated_slot_aliased(go_types_helper):
+    # `fm := [][]func{fs}` — `fm[0]` aliases `fs`'s backing, so a
+    # store through `fm[0][i]` DOES reach `fs`'s element records.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fm[0][0] = func() int64 { return x }\n"
+        "    _ = fm\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})

@@ -945,6 +945,11 @@ class _Builder:
         # — `c` and `d` never share).
         self._func_elem_tokens: dict[str, frozenset[str]] = {}
         self._func_elem_token_seq = 0
+        # `fm := [][]func{fs}` — only the slot initialized from
+        # `fs` aliases its backing, so the donor set is keyed by
+        # the composite element's position (or literal map key):
+        # binding_id -> slot key -> donor bindings.
+        self._func_elem_inner_donors: dict[str, dict[str, set[str]]] = {}
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -1433,9 +1438,22 @@ class _Builder:
         body = rhs_node.child_by_field_name("body")
         if body is None:
             return
-        stack = [body]
+        stack = []
+        for position, element in enumerate(body.named_children):
+            slot = str(position)
+            if element.type == "keyed_element":
+                key_node = element.child_by_field_name("key")
+                value_node = element.child_by_field_name("value")
+                if key_node is not None:
+                    slot = key_node.text.decode(
+                        "utf-8", errors="replace"
+                    )
+                if value_node is not None:
+                    stack.append((value_node, slot))
+            else:
+                stack.append((element, slot))
         while stack:
-            el = stack.pop()
+            el, slot_key = stack.pop()
             if el.type == "func_literal":
                 # A literal element records under the container
                 # itself during eval — its inner identifiers are
@@ -1451,16 +1469,31 @@ class _Builder:
                         el.type == "identifier"
                         and src_bound is not None
                         and self._func_elem_collection(src_bound.type)
+                        and src_bound.type.kind in {"slice", "map"}
                     ):
                         # `fm := [][]func{fs}` — the inner slot shares
-                        # `fs`'s backing, so element stores through
-                        # either name union into both record sets and
-                        # an inner reseat detaches like `fm2 := fm`.
-                        self._func_elem_share(src, bound_id)
+                        # `fs`'s backing. Slices and maps are the only
+                        # aliasing element carriers: a Go array
+                        # literal copies (`fm := [][1]func{fs}`
+                        # embeds a copy), so sharing it would
+                        # propagate `fm[i][j]` writes back into `fs`.
+                        # Only the slot the element initialized
+                        # aliases it — `fm := [][]func{fs}` leaves
+                        # `fm[1]` a fresh inner slice — so the donor
+                        # is recorded per slot, not shared wholesale.
+                        if slot_key is not None:
+                            self._func_elem_inner_donors.setdefault(
+                                bound_id, {}
+                            ).setdefault(slot_key, set()).add(src)
+                        else:
+                            self._func_elem_share(src, bound_id)
                 # A selector's operand (`st` in `st.M`) names no
                 # element — skip its children like an identifier's.
                 continue
-            stack.extend(el.children)
+            child_slot = (
+                slot_key if el.type == "literal_element" else None
+            )
+            stack.extend((c, child_slot) for c in el.children)
 
     def _adopt_element_records(self, src: str, bound_id: str) -> None:
         """Union one func value's captures and write targets into a
@@ -1622,6 +1655,36 @@ class _Builder:
             if member_toks & toks
         } | {binding_id}
 
+    def _func_elem_slot_donors(
+        self, binding_id: str, inner_index: Any
+    ) -> set[str]:
+        """`fm[k]` — the bindings whose slice/map backing the inner
+        slot aliases, recorded per composite element position
+        (`fm := [][]func{fs}` -> slot "0" holds {fs}). A literal
+        index resolves its own slot; a computed index may hit any
+        element so every donor unions in. Donors resolve live
+        through each container's current share group, so `fm2 := fm`
+        sees `fm`'s donors without copying the table."""
+        members = self._func_elem_sharers(binding_id)
+        literal_key = (
+            inner_index.text.decode("utf-8", errors="replace")
+            if inner_index is not None
+            and inner_index.type in _INDEX_LITERALS
+            else None
+        )
+        donors: set[str] = set()
+        for member_id in members:
+            slots = self._func_elem_inner_donors.get(member_id)
+            if not slots:
+                continue
+            if literal_key is None:
+                for slot_donors in slots.values():
+                    donors |= slot_donors
+            else:
+                donors |= slots.get(literal_key, set())
+        donors.discard(binding_id)
+        return donors
+
     def _func_elem_reseat(
         self, binding_id: str, prestate: tuple | None = None
     ) -> None:
@@ -1633,6 +1696,7 @@ class _Builder:
         caller passes the pre-RHS-eval snapshot (`prestate`), the
         sharers receive only the OLD records — a literal the RHS
         just recorded under this name belongs to the NEW backing."""
+        surviving = set(self._func_elem_groups.get(binding_id, ()))
         if prestate is not None:
             captured = prestate[0].get(binding_id)
             writes = prestate[1].get(binding_id)
@@ -1670,6 +1734,17 @@ class _Builder:
         self._func_elem_tokens[binding_id] = frozenset(
             {f"{binding_id}#{self._func_elem_token_seq}"}
         )
+        # The name leaves its container backing — donor sets naming
+        # it (`fm := [][]func{fs}` slot 0) still alias the OLD
+        # backing, so swap the name for the group members that keep
+        # sharing it; the container's own donor table drops with it.
+        self._func_elem_inner_donors.pop(binding_id, None)
+        surviving.discard(binding_id)
+        for slots in self._func_elem_inner_donors.values():
+            for donor_set in slots.values():
+                if binding_id in donor_set:
+                    donor_set.discard(binding_id)
+                    donor_set |= surviving
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
@@ -8367,8 +8442,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                     refs.append((ref, True, False))
                     func_elem_targets.add(len(refs) - 1)
+                    elem_holder_ids = self._func_elem_sharers(
+                        ref.binding_id
+                    )
+                    if inner_index is not None:
+                        # `fm[k][i] = …` — only the slot `k`
+                        # initialized from a donor aliases it
+                        # (`fm := [][]func{fs}`: slot 0 does, a
+                        # fresh `fm[1]` does not), so the write
+                        # reaches the matching donors' groups, not
+                        # every name the root ever shared.
+                        for donor_id in self._func_elem_slot_donors(
+                            ref.binding_id, inner_index
+                        ):
+                            elem_holder_ids |= {
+                                donor_id
+                            } | self._func_elem_sharers(donor_id)
                     func_elem_holders[len(refs) - 1] = frozenset(
-                        self._func_elem_sharers(ref.binding_id)
+                        elem_holder_ids
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
@@ -14857,6 +14948,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # container the call extends.
         parent = node.parent
         in_composite = False
+        # A literal stored through an index or `append` lands in the
+        # container's CURRENT backing, which the share group still
+        # reads — a composite-literal element instead initializes
+        # the NEW backing the name is about to receive, so its
+        # records must not reach the old backing's sharers.
+        into_backing = False
         while parent is not None and parent.type in {
             "expression_list",
             "literal_value",
@@ -14983,6 +15080,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 bound_id = container.id
                 in_composite = True
+                into_backing = True
             elif operand is not None:
                 # `fm[k][i] = func(){…}` — the nested store's
                 # elements conflate under the root binding, so the
@@ -14991,6 +15089,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if nested is not None:
                     bound_id = nested[0]
                     in_composite = True
+                    into_backing = True
         elif parent is not None and parent.type == "call_expression":
             # `append(fs, func(){…})` — the literal is an appended
             # element of the argument container; record under its
@@ -14998,6 +15097,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             bound_id = self._func_elem_append_target(parent, locals_)
             if bound_id is not None:
                 in_composite = True
+                into_backing = True
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
             if in_composite:
@@ -15007,18 +15107,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # container's element set is never cleared either:
                 # `fs[k]()` resolves through the opaque index call
                 # and reads this unioned record.
-                self.closure_captures[bound_id] = (
-                    self.closure_captures.get(bound_id, frozenset())
-                    | frozenset(captured)
+                # The store lands in the container's CURRENT backing,
+                # so every eval-time sharer gets the record too —
+                # `a, a[0] = b, lit` stores `lit` into `a`'s old
+                # backing, and a later `a = b` reseat clearing `a`'s
+                # records must not drop it from the sharers (`a2`)
+                # that still read that backing.
+                composite_targets = {bound_id} | (
+                    self._func_elem_groups.get(bound_id, set())
+                    if into_backing
+                    else set()
                 )
-                self.closure_writes[bound_id] = (
-                    self.closure_writes.get(bound_id, frozenset())
-                    | frozenset(writes)
-                )
+                for target_id in composite_targets:
+                    self.closure_captures[target_id] = (
+                        self.closure_captures.get(
+                            target_id, frozenset()
+                        )
+                        | frozenset(captured)
+                    )
+                    self.closure_writes[target_id] = (
+                        self.closure_writes.get(
+                            target_id, frozenset()
+                        )
+                        | frozenset(writes)
+                    )
                 if star_write:
-                    self.closure_star_writes.add(bound_id)
+                    self.closure_star_writes.update(composite_targets)
                 if has_call:
-                    self.closure_inner_calls.add(bound_id)
+                    self.closure_inner_calls.update(composite_targets)
             elif may_skip and bound_id in self.func_aliases:
                 # A literal on a maybe-taken path over a
                 # function-name alias leaves the callee's value
@@ -15432,6 +15548,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         the container's root binding for `m[k]`; an operand that
         resolves to neither stays closed."""
         target_id: str | None = None
+        nested_record_ids: set[str] | None = None
         pin_fact: Any = None
         callee_deps: frozenset[int] = frozenset()
         operand = callee_node.child_by_field_name("operand")
@@ -15575,6 +15692,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 inner_index, fn, params, locals_,
                                 transfers, count, depth + 1,
                             )
+                        # The slot the call reads aliases its
+                        # donors' backings (`fm := [][]func{fs}` —
+                        # `fm[0][i]` aliases `fs`), so the records
+                        # fold the matching donors' groups like a
+                        # nested element store does.
+                        nested_record_ids = (
+                            {root_id}
+                            | self._func_elem_groups.get(
+                                root_id, set()
+                            )
+                        )
+                        for donor_id in self._func_elem_slot_donors(
+                            root_id, inner_index
+                        ):
+                            nested_record_ids |= {
+                                donor_id
+                            } | self._func_elem_groups.get(
+                                donor_id, set()
+                            )
                         operand = None
                     else:
                         root_ref = self._receiver_root_ref(operand)
@@ -15693,7 +15829,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 deps |= locals_[escaped_id]
             elif escaped_id in params:
                 deps |= frozenset({params[escaped_id]})
-        captured = self.closure_captures.get(target_id)
+        if nested_record_ids is not None:
+            captured = frozenset().union(
+                *(
+                    self.closure_captures.get(t, frozenset())
+                    for t in nested_record_ids
+                )
+            )
+        else:
+            captured = self.closure_captures.get(target_id)
         if captured is not None:
             # `s.f = func() { …x… }` stored a literal into this slot
             # — re-resolve each captured binding at the CALL site so
@@ -15766,7 +15910,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # — the target need not be an escaped binding, so fold the
         # call's deps into each recorded write target like the
         # bound-literal call path does.
-        for target in self.closure_writes.get(target_id, ()):
+        if nested_record_ids is not None:
+            nested_writes = frozenset().union(
+                *(
+                    self.closure_writes.get(t, frozenset())
+                    for t in nested_record_ids
+                )
+            )
+        else:
+            nested_writes = self.closure_writes.get(target_id, ())
+        for target in nested_writes:
             self._store(
                 locals_, params, target, write_deps, True
             )
