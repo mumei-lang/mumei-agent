@@ -20275,9 +20275,10 @@ def test_func_result_direct_call_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_func_result_imported_stays_closed(go_types_helper):
-    # `f := lib.Mk()` — the producer classifies a func-result callee
-    # as `external_or_bodyless`, so the call stays closed.
+def test_func_result_imported_admitted(go_types_helper):
+    # `f := lib.Mk()` — the producer now records `direct_import` for
+    # a func-result callee, so the name binds an opaque func value
+    # and `f()` resolves through the func-value path.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { f := lib.Mk(); return f() }\n"
@@ -20295,7 +20296,7 @@ def test_func_result_imported_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset()
 
 
 def test_func_result_capture_updated_before_return(go_types_helper):
@@ -20423,3 +20424,163 @@ def test_imported_func_result_multi_slot(go_types_helper):
     )
     assert result.available
 
+
+
+def test_func_result_rebind_drops_stale_closure(go_types_helper):
+    # `f := func() int64 { return y }; f, n := mk2()` — the
+    # multi-valued RHS rebind must drop f's stale closure records,
+    # not resolve `f()` back through the literal's captures.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    y := x\n"
+        "    f := func() int64 { return y }\n"
+        "    f, n := lib.Mk2()\n"
+        "    _ = n\n"
+        "    return f()\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk2() (func() int64, int64) { return nil, 7 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset()
+    )
+
+
+def test_func_result_var_rebind_drops_stale_closure(go_types_helper):
+    # `var f = func() int64 { return y }; f, n = mk2()` — the
+    # multi-valued var RHS drops f's stale closure records the same
+    # way; `f` already declared makes `=` the legal rebind.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    y := x\n"
+        "    var f = func() int64 { return y }\n"
+        "    var n = int64(0)\n"
+        "    f, n = lib.Mk2()\n"
+        "    return f() + n\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk2() (func() int64, int64) { return nil, 7 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset()
+    )
+
+
+def test_func_iterator_range_joins_indirect_writes(go_types_helper):
+    # `for v := range lib.Iter(&a)` — the opaque iterator reads (and
+    # writes through `&a`) caller memory each iteration, so `v`
+    # re-joins every indirect store like an external queue's.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    a := int64(0)\n"
+        "    s := int64(0)\n"
+        "    for v := range lib.Iter(&a) { a = x; s = v }\n"
+        "    return s\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Iter(p *int64) func(func(int64) bool) { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset({0})
+    )
+
+
+def test_func_iterator_range_integer_bound_unaffected(go_types_helper):
+    # `for i := range count(x)` — an integer-result call operand is
+    # an index range, not a func iterator: no indirect_writes join.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    a := int64(0)\n"
+        "    s := int64(0)\n"
+        "    for i := range lib.Count(x) { a = i; s = a }\n"
+        "    return s\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Count(x int64) int64 { return 0 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset({0})
+    )
+
+
+def test_imported_func_result_arg_capture(go_types_helper):
+    # `f := lib.Mk(x)` — the captured argument's deps fold into the
+    # opaque func value the same way a call's arguments do.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(x); return f() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset({0})
+    )
