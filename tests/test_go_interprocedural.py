@@ -22710,10 +22710,10 @@ def test_map_func_bound_container_same_package_declared_deps(go_types_helper):
 def test_map_scalar_result_stays_closed(go_types_helper):
     # `lib.Mk(x)` returning `map[string]int64` — a scalar-element
     # map is no func-element collection: the composite result keeps
-    # the `external_or_bodyless` closure.
+    # the `external_or_bodyless` closure when bound outright.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(x int64) int64 { return int64(len(lib.Mk(x))) }\n"
+        "func F(x int64) int64 { s := lib.Mk(x); _ = s; return x }\n"
     }
     lib = {
         "lib": {
@@ -25160,3 +25160,791 @@ def test_range_over_imported_pointer_result_reads_live_pointee(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+def test_func_value_chan_result_param_admitted(go_types_helper):
+    # `ch := g(x)` — `g` is a func-typed parameter declaring a scalar
+    # `chan` result; go-types resolves `ch`'s declared `chan` type
+    # from `g`'s signature, so the name binds an external queue like
+    # `ch := lib.G()` does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) chan int64) int64 {\n"
+        "    ch := g(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_rebind_admitted(go_types_helper):
+    # `ch = g(x)` reseats a `chan` parameter to the queue the
+    # func-value callee produces — the same reseat `ch = G()`
+    # admits for a declared callee.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, ch chan int64, g func(int64) chan int64) int64 {\n"
+        "    ch = g(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_value_chan_result_conditional_rebind(go_types_helper):
+    # A conditional `ch = g(x)` keeps the name external on both
+    # paths — sends afterward reach the may-reseated queue.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, ch chan int64, g func(int64) chan int64) int64 {\n"
+        "    if x > 0 {\n"
+        "        ch = g(x)\n"
+        "    }\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_value_chan_result_bound_callee(go_types_helper):
+    # `f := mk(x)` binds an opaque func value; `ch := f(x)` admits
+    # through the same identifier-callee arm.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, mk func(int64) func(int64) chan int64) int64 {\n"
+        "    f := mk(x)\n"
+        "    ch := f(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_chan_arg_promoted(go_types_helper):
+    # `ch := g(q)` — the opaque body may `return q`, so `q` joins
+    # the external model and its contents seed `ch`'s slot.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(q chan int64, g func(chan int64) chan int64, y int64) int64 {\n"
+        "    q <- y\n"
+        "    ch := g(q)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_value_chan_result_chan_chan_admitted(go_types_helper):
+    # `cc := g(x)` — a func value declaring `chan chan int64`
+    # admits through the `chan chan` arm on the declared LHS type.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) chan chan int64) int64 {\n"
+        "    cc := g(x)\n"
+        "    c := <-cc\n"
+        "    c <- x\n"
+        "    return <-c\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_var_decl_admitted(go_types_helper):
+    # `var ch = g(x)` — the var-decl form admits through the same
+    # `_chan_result_call` gate.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) chan int64) int64 {\n"
+        "    var ch = g(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_index_multi_slot_stays_closed(
+    go_types_helper,
+):
+    # `ch, n := fs[0](x)` — a multi-result index callee has no
+    # per-slot signature for the element, so it stays closed like
+    # the `g()` multi-result arm does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, fs []func(int64) (chan int64, int64)) int64 {\n"
+        "    ch, n := fs[0](x)\n"
+        "    ch <- x\n"
+        "    return <-ch + n\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_value_chan_result_multi_slot_stays_closed(
+    go_types_helper,
+):
+    # `ch, n := g(x)` — a multi-result func-value callee cannot
+    # verify per-slot `chan` facts (`_chan_result_call_at` has no
+    # signature record), so the unpack stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) (chan int64, int64)) int64 {\n"
+        "    ch, n := g(x)\n"
+        "    ch <- n\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_value_non_chan_result_unaffected(go_types_helper):
+    # `n := g(x)` — a scalar func-value result binds through the
+    # ordinary opaque-call path; the chan arm does not disturb it.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, g func(int64) int64) int64 {\n"
+        "    n := g(x)\n"
+        "    return n\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+
+
+def test_func_value_chan_result_iife_arg_no_crash(go_types_helper):
+    # `func(ch) { <-ch }(g())` — a func-value `g()` argument to an
+    # immediately-invoked literal resolves to the func *binding*
+    # marker, not a Function record: the receive records on `g`'s
+    # binding identity instead of crashing on `.binding_id`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(g func() chan int64, x int64) int64 {\n"
+        "    func(ch chan int64) { <-ch }(g())\n"
+        "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+
+
+def test_func_value_chan_result_captured_queue_promoted(
+    go_types_helper,
+):
+    # `f := func() chan int64 { return q }; ch := f()` — the
+    # literal may hand the *captured* queue `q` back, so `q` joins
+    # the external model and a `ch <- x` send is observed by a
+    # later `<-q` read through `indirect_writes`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    q := make(chan int64)\n"
+        "    f := func() chan int64 { return q }\n"
+        "    ch := f()\n"
+        "    ch <- x\n"
+        "    return <-q\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_value_chan_result_external_operand_arg(go_types_helper):
+    # `ch := g(GC)` — a non-identifier `chan` argument naming an
+    # external queue promotes on its own identity; sends on either
+    # name stay visible to the bound queue's reads.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var GC chan int64\n"
+        "func F(x int64, g func(chan int64) chan int64) int64 {\n"
+        "    ch := g(GC)\n"
+        "    GC <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_value_chan_result_selector_arg(go_types_helper):
+    # `ch := g(lib.GC)` — the imported `chan` member argument is a
+    # non-identifier operand: it promotes through the external
+    # operand arm like `GC`, so `ch` may literally be that queue.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, g func(chan int64) chan int64) int64 {\n"
+        "\tch := g(lib.GC)\n"
+        "\tch <- x\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GC chan int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_call_selector_chan_arg(go_types_helper):
+    # `ch := lib.G(lib.GC)` — an imported callee receives the same
+    # selector argument: the member read evaluates dep-free and the
+    # queue promotes into the external model.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.G(lib.GC)\n"
+        "\tch <- x\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar GC chan int64\n"
+            "func G(q chan int64) chan int64 { return q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_selector_chan_member_alias_source_stays_closed(go_types_helper):
+    # `ch := lib.GC` — a selector is not an identifier alias source;
+    # binding the queue under a local name stays closed like
+    # `ch := GC` on a package-level var.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.GC\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GC chan int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_call_selector_chan_arg_read_side(go_types_helper):
+    # `lib.Read(lib.GC)` — the queue's contents must reach the callee:
+    # a callee that receives from the argument queue observes every
+    # earlier send, like `lib.Read(ch)` does for an identifier.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.GC <- x\n"
+        "\treturn lib.Read(lib.GC)\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar GC chan int64\n"
+            "func Read(q chan int64) int64 { return <-q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_call_selector_chan_arg_write_side(go_types_helper):
+    # `lib.Put(lib.GC, x)` — the callee's send lands in the shared
+    # external queue: a later `<-lib.GC` observes it like the direct
+    # send `lib.GC <- x` does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.Put(lib.GC, x)\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar GC chan int64\n"
+            "func Put(q chan int64, v int64) { q <- v }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_call_pkgvar_chan_arg_read_side(go_types_helper):
+    # `lib.Read(GC)` — a package-level chan var as argument carries the
+    # queue's contents like the selector operand does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar GC chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tGC <- x\n"
+        "\treturn lib.Read(GC)\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func Read(q chan int64) int64 { return <-q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_call_pkgvar_chan_arg_write_side(go_types_helper):
+    # `lib.Put(GC, x)` — the callee's send into the package-level queue
+    # reaches a later `<-GC`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar GC chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.Put(GC, x)\n"
+        "\treturn <-GC\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func Put(q chan int64, v int64) { q <- v }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_chan_result_literal_index(go_types_helper):
+    # `ch := fs[0](x)` — the func-elem collection's element
+    # declares a scalar `chan` result in its signature; the bound
+    # name's declared `chan` type (resolved by go-types) carries
+    # the fact, so `ch` binds an external queue like `ch := g(x)`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, fs []func(int64) chan int64) int64 {\n"
+        "    ch := fs[0](x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_chan_result_computed_index(go_types_helper):
+    # `ch := fs[k](x)` — the index-call shape parses as a
+    # generic-instantiation conversion; go-types records the
+    # semantic call on the span and the `type_identifier` resolves
+    # to the collection binding.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, k int, fs []func(int64) chan int64) int64 {\n"
+        "    ch := fs[k](x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_elem_chan_result_map_key(go_types_helper):
+    # `ch := fm["k"](x)` — a `map[K]func` element callee admits
+    # the same way.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        'func F(x int64, fm map[string]func(int64) chan int64) int64 {\n'
+        '    ch := fm["k"](x)\n'
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_chan_result_arg_promoted(go_types_helper):
+    # `ch := fs[0](q)` — the element's opaque body may return the
+    # queue it received; `q` promotes external like a `g(q)` arg.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(q chan int64, fs []func(chan int64) chan int64, y int64) int64 {\n"
+        "    q <- y\n"
+        "    ch := fs[0](q)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_elem_chan_result_nested_index_closed(go_types_helper):
+    # `ch := fm["k"][0](x)` — a nested index callee's operand is
+    # not an identifier, so the declared-`chan` LHS stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        'func F(x int64, fm map[string][]func(int64) chan int64) int64 {\n'
+        '    ch := fm["k"][0](x)\n'
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_chan_result_call_result_callee_closed(
+    go_types_helper,
+):
+    # `ch := mk(x)(x)` — a call-result callee is not an
+    # identifier; stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, mk func(int64) func(int64) chan int64) int64 {\n"
+        "    ch := mk(x)(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_chan_result_conversion_arg_promotes(go_types_helper):
+    # `ch := fs[k](q)` — the conversion-form element call carries its
+    # argument in the `operand` field, not `argument_list`: the chan
+    # argument must still promote so a queue the element hands back
+    # observes later sends (`q <- x` reaches `<-ch`).
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, fs []func(chan int64) chan int64, k int) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tch := fs[k](q)\n"
+        "\tq <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_len_call_result_imported_slice(go_types_helper):
+    # `len(lib.G(x))` — a call result's length is runtime container
+    # state whose provenance is the call's own dep set, like an
+    # index read on the same result, while the bodyless callee
+    # folds minimally (member transfer recorded).
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert all(t.target for t in result.calls)
+
+
+def test_len_call_result_imported_map(go_types_helper):
+    # `len(lib.M(x))` — a map result admits the same arm.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.M(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(y int64) map[int64]int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_cap_call_result_imported(go_types_helper):
+    # `cap(lib.G(x))` shares the `len` arm.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(cap(lib.G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_len_call_result_scalar_callee(go_types_helper):
+    # `len(lib.S(x))` — an imported callee returning a string is a
+    # `direct_import` call: it evaluates through `expression` and
+    # the length carries the call result's own dependencies.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.S(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "s.go": "package lib\n"
+            "func S(y int64) string { return \"\" }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_len_call_result_dot_import(go_types_helper):
+    # `import . "lib"; len(G(x))` — a dot-imported callee has no
+    # selector, so the member resolves through the identifier's
+    # import reference instead.
+    files = {
+        "a.go": "package p\n"
+        'import . "lib"\n'
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_len_call_result_chan_arg_promotes(go_types_helper):
+    # `len(lib.G(q))` — the opaque callee may send on `q`: the
+    # argument's queue promotes external so a later `<-q` observes
+    # the caller's sends.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tn := int64(len(lib.G(q)))\n"
+        "\tq <- x\n"
+        "\treturn n + <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y chan int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_len_call_result_func_arg_write_back(go_types_helper):
+    # `len(lib.G(h, x))` — the opaque callee may invoke the passed
+    # func value: `h`'s captured write lands on `g` at the call
+    # site even though the call node folds inside `len` rather than
+    # routing through `expression` directly.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar g int64\n"
+        "\th := func(v int64) { g = v }\n"
+        "\tn := int64(len(lib.G(h, x)))\n"
+        "\treturn n + g\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(h func(int64), x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_len_call_result_local_callee_stays_closed(go_types_helper):
+    # `len(G(x))` on a LOCAL composite-returning callee stays
+    # closed — `G` itself cannot produce a summary (a composite
+    # result has no binding model), so the caller reports
+    # `callee_unsupported` rather than admitting the operand.
+    files = {
+        "a.go": "package p\n"
+        "func G(y int64) []int64 { return []int64{y} }\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_len_call_result_pointer_operand_stays_closed(go_types_helper):
+    # `len(*lib.P(x))` — a dereferenced pointer result is a unary
+    # operand, outside this arm; only a bare call admits.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(*lib.P(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "p.go": "package lib\n"
+            "func P(y int64) *[]int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available

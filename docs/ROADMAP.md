@@ -2750,7 +2750,29 @@ imported method declares the same way: `ch := st.M()`
 or `ch, n := st.M()` admits when `M`'s signature
 carries a scalar-element `chan` at the bound slot
 (the call records `direct_import` marked `method`).
-One level of channel-of-channels admits under the
+A func-typed callee declaring a scalar `chan`
+result admits too: `ch := g(x)` / `var ch = g(x)`
+where `g` is a func-typed parameter or a bound func
+value (`f := mk(x); ch := f(x)`) binds an external
+queue — go-types resolves the bound name's declared
+`chan` type from the callee's signature, so the LHS
+gate already carries the result fact; an
+unconditional `ch = g(x)` rebind reseats the name
+like `ch = G()`, and each `chan` argument promotes
+external since the opaque body may hand it back
+(`ch := g(q)` seeds `ch`'s slot with `q`'s
+contents). A func value declaring `chan chan T`
+admits through the `chan chan` arm on the declared
+LHS type. The callee must resolve to a name bound
+to a func-typed value or a func-element collection:
+`fs[k](x)` / `fm["k"](x)` — which parse as a
+generic-instantiation conversion — run the
+collection's element opaque on its declared-`chan`
+result like `g(x)` does, while a call-result callee
+(`mk(x)()`) and a nested index (`fm["k"][0](x)`)
+stay closed, and a multi-result func-value callee
+stays closed since no signature record verifies the
+per-slot `chan` fact. One level of channel-of-channels admits under the
 external queue model: a `chan chan T` parameter or
 result (local or imported), a package-level `var cc
 chan chan T`, or a `cc := G()` / `cc, n := G()`
@@ -3924,6 +3946,18 @@ call's dep set like the local `for range g(a)` path already did.
 Func-typed arguments still queue their invocations on the call
 node, which this path drains itself, and a chan argument promotes
 onto the shared queue.
+`len`/`cap` on a call result — `len(lib.G(a))`, `cap(lib.M(a))` —
+admits through the same member resolution: the length is runtime
+container state whose provenance is the call's own dep set (a
+callee-produced container, not external state like `len(lib.VA)`),
+while a bodyless callee's call still folds minimally (argument
+deps evaluated, func-arg invocations drained, chan arguments
+promoted onto the external queue, writes stored, and a transfer
+recorded on the member). A resolvable callee — local or
+`direct_import` — evaluates through `expression` for its effects
+only, so `len(lib.S(x))` on a string result admits too. The
+pointer operand (`len(*lib.P(x))`), `len` on a bound local, and
+index/field chains keep the existing closure.
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.
