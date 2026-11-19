@@ -2707,8 +2707,14 @@ path-dependent — a different function, a literal, or a
 param still carrying the caller's callback — drops the
 alias so the call falls back to the opaque external model;
 a package-level `var Alias = Id` keeps the opaque external
-model since any caller may reassign it. Calls or writes
-inside the literal, selector/computed callees and a
+model since any caller may reassign it. An in-place
+literal call — `func(...) T { ... }(args)` — admits like
+a bound-literal call whose captures resolve at the call
+site: the result unions the captured bindings' current
+dep sets, the arguments and indirect writes, and a
+pointer or external-channel capture records an imported
+transfer on that identity. Calls or writes
+inside the literal and a
 function name read in any non-store position (argument,
 return, operand) stay closed),
 per-statement read attribution now
@@ -2983,9 +2989,14 @@ now admit under the detach-to-external model, and
 `select` admits its communication cases as
 switch-like alternatives),
 slice/map `make` constructor
-state, selector/computed callees and function-typed parameters
-all fail closed —
-every one lands as a declared gap (`unsupported_signature`,
+state all fail closed —
+selector/computed callees and function-typed parameters
+now admit as opaque external calls (the callee slot's
+identity is unknowable to the caller), and an in-place
+literal call `func(...) T { ... }(args)` admits like a
+bound-literal call whose captures resolve at the call
+site; every still-closed shape
+lands as a declared gap (`unsupported_signature`,
 `unsupported_operator`, `unsupported_expression`,
 `binding_unavailable`, `non_parameter_reference`,
 `unresolved_or_opaque_call` or `callee_unsupported`) and never as a

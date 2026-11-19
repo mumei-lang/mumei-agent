@@ -10271,26 +10271,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             raise _Unsupported("non_parameter_reference", _span(node))
         return frozenset()
 
-    def _func_literal(
+    def _func_literal_capture(
         self,
         node: Any,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
-    ) -> frozenset[int]:
-        """`func(...) T { ... }` — a deferred body admitted by
-        conservative free-variable capture.
+    ) -> tuple[frozenset[int], set[str], bool]:
+        """Free-variable scan of a `func` literal: (deps, captured
+        binding ids, whether any capture is a pointer).
 
-        The literal's statements never sequence, so the literal's
-        deps are the union of every enclosing-scope binding it
-        references — what `h()`'s result depends on. A call inside
-        the literal defers an effect the sequencing model cannot
-        place, a write targets state the caller can observe out of
-        order, and a reference to anything but the enclosing
-        function's own params/locals (package vars, imported
-        members, fields the literal cannot pin) reads storage the
-        capture cannot describe — all stay closed. Names declared
-        inside the literal (its own params and locals) are not
-        captured: their span sits inside the literal's."""
+        Same gate as `_func_literal` — the literal's statements
+        never sequence, so a call/assignment/send/go/defer inside
+        stays closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -10345,6 +10337,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 "binding_unavailable", _span(cur)
                             )
             stack.extend(_children(cur))
+        return deps, captured, captures_pointer
+
+    def _func_literal(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        """`func(...) T { ... }` — a deferred body admitted by
+        conservative free-variable capture.
+
+        The literal's statements never sequence, so the literal's
+        deps are the union of every enclosing-scope binding it
+        references — what `h()`'s result depends on. A call inside
+        the literal defers an effect the sequencing model cannot
+        place, a write targets state the caller can observe out of
+        order, and a reference to anything but the enclosing
+        function's own params/locals (package vars, imported
+        members, fields the literal cannot pin) reads storage the
+        capture cannot describe — all stay closed. Names declared
+        inside the literal (its own params and locals) are not
+        captured: their span sits inside the literal's."""
+        deps, captured, captures_pointer = self._func_literal_capture(
+            node, params, locals_
+        )
         # Find the name this literal binds (`h := func()...`,
         # `var h = func()...`, `h = func()...`) and record which
         # enclosing bindings it captured, so `h()` can resolve
@@ -10500,6 +10517,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if c.type != "comment"
                 ),
                 None,
+            )
+        if callee is not None and callee.type == "func_literal":
+            # `func(...) T { ... }(args)` — the literal IS the
+            # callee, known at this point like a bound literal's.
+            return self._immediate_literal_call(
+                node, callee, arguments, fn, params, locals_,
+                transfers, count, depth,
             )
         if callee is not None and callee.type != "identifier":
             # `s.f(args)` / `m[k](args)` — the callee is read through
@@ -11160,6 +11184,90 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 self.indirect_writes |= stored
         return result
+
+    def _immediate_literal_call(
+        self,
+        node: Any,
+        literal: Any,
+        arguments: list[Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[Any],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """`func(...) T { ... }(args)` — a literal invoked in place.
+
+        The callee is this very literal, so the call models like a
+        bound-literal `h()` whose captures are the literal's own
+        free variables resolved right here: the result unions their
+        CURRENT dep sets, the arguments, and `indirect_writes` (a
+        captured pointer may read caller memory the capture cannot
+        name). A literal that captures a pointer unions the escaped
+        bindings and records an imported transfer on the captured
+        pointer, and one capturing a parameter or external channel
+        may receive on it inside — the same receive-side effect a
+        bound literal records. The literal's own gate still applies:
+        an internal call, assignment, send, go or defer stays
+        closed, so no write-back runs here."""
+        deps, captured, captures_pointer = self._func_literal_capture(
+            literal, params, locals_
+        )
+        deps |= self.indirect_writes
+        pointer_capture = next(
+            (
+                cbid
+                for cbid in captured
+                if (
+                    (binding := self.bindings.get(cbid)) is not None
+                    and binding.type.kind == "pointer"
+                )
+            ),
+            None,
+        )
+        chan_external = next(
+            (
+                cbid
+                for cbid in captured
+                if self._scalar_chan_binding(cbid)
+                and (
+                    self._chan_root(cbid) in params
+                    or self._chan_root(cbid)
+                    in self.external_chan_locals
+                )
+            ),
+            None,
+        )
+        if captures_pointer:
+            for escaped_id in self.escaped:
+                if escaped_id in locals_:
+                    deps |= locals_[escaped_id]
+                elif escaped_id in params:
+                    deps |= frozenset({params[escaped_id]})
+        if captures_pointer or chan_external is not None:
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file,
+                        node.start_byte,
+                        node.end_byte,
+                    ),
+                    (
+                        self._chan_root(chan_external)
+                        if chan_external is not None
+                        else pointer_capture
+                    ),
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+        for arg in arguments:
+            deps |= self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+        return deps
 
     def _direct_import_call(
         self,
