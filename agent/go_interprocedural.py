@@ -1423,6 +1423,17 @@ class _Builder:
         container's binding id, or None for any other call shape. A
         param container stays closed like an element store does: its
         elements live in caller memory."""
+        while (
+            node is not None and node.type == "parenthesized_expression"
+        ):
+            node = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
         if node is None or node.type != "call_expression":
             return None
         call = self.calls.get(self.node_key(node))
