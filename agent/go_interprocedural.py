@@ -1771,6 +1771,17 @@ class _Builder:
         (a value copy)."""
         if rhs is None:
             return None
+        while rhs.type == "parenthesized_expression":
+            rhs = next(
+                (
+                    c
+                    for c in rhs.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+            if rhs is None:
+                return None
         if rhs.type == "call_expression":
             call = self.calls.get(self.node_key(rhs))
             if call is None or call.kind != "external_or_bodyless":
@@ -1782,7 +1793,36 @@ class _Builder:
                 "map",
             }:
                 return None
-            return frozenset({self.node_key(rhs)})
+            toks = {self.node_key(rhs)}
+            # `t := lib.Id(s)` — an opaque callee may hand back a
+            # slice aliasing a container argument, so the result's
+            # backing may-set unions every container arg's tokens
+            # like the dep set unions their deps.
+            arguments_node = rhs.child_by_field_name("arguments")
+            for arg in (
+                _children(arguments_node)
+                if arguments_node is not None
+                else ()
+            ):
+                while (
+                    arg is not None
+                    and arg.type == "parenthesized_expression"
+                ):
+                    arg = next(
+                        (
+                            c
+                            for c in arg.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if arg is not None and arg.type == "identifier":
+                    arg_ref = self.references.get(self.node_key(arg))
+                    if arg_ref is not None:
+                        toks |= self._opaque_container_tokens.get(
+                            arg_ref.binding_id, frozenset()
+                        )
+            return frozenset(toks)
         if rhs.type == "identifier":
             ref = self.references.get(self.node_key(rhs))
             if ref is None or ref.binding_id is None:
