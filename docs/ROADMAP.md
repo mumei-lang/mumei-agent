@@ -2579,8 +2579,12 @@ carry the same conflated dep set as a named composite (declaration,
 struct{...}` at package scope under the external-state model; the
 direct-field window enumerates the literal's fields by source
 order, so a field promoted through an embedded `*Q` still closes.
-Struct-typed parameters and results stay outside the scalar
-signature fragment, and `st.P`/`*st.P` on a pointer-typed field
+Struct-typed parameters and results now admit too — a `struct`
+fact on a signature slot (named or anonymous) seeds the binding's
+conflated dep set in `locals_` like a composite local, so
+`s.V = x`/`s.A.W = x` fold in and `s.V`/`s.A.W`/`p := G(x)`
+reads carry the caller's provenance — while `st.P`/`*st.P` on a
+pointer-typed field
 stays closed like `st.A.N` on `A *P2`,
 the remaining
 resource-state semantics (channels — local `make(chan T)`

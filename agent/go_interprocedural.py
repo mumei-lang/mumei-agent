@@ -4247,7 +4247,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # named/alias identity arrives on `type_id` and pins like
             # any other signature type.
             or any(
-                p.type.kind not in {"integer", "boolean", "pointer"}
+                p.type.kind
+                not in {"integer", "boolean", "pointer", "struct"}
                 and not (
                     # A `chan T` parameter admits under the
                     # external sync-resource model: the queue is
@@ -4262,8 +4263,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for p in fn.parameters
             )
+            # A `struct` parameter/result (named or anonymous)
+            # admits like a composite local: the binding carries
+            # one conflated dep set for every field — `s.V = x`
+            # folds into it, `s.V` reads it whole. The named
+            # type's identity pins like any other signature type.
             or any(
-                r.type.kind not in {"integer", "boolean", "pointer"}
+                r.type.kind
+                not in {"integer", "boolean", "pointer", "struct"}
                 and not (
                     # A scalar-element `chan T` result admits under
                     # the same external sync-resource model a `chan`
@@ -4313,6 +4320,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         result_binding = fn.results[0].binding_id
         if result_binding:
             locals_[result_binding] = frozenset()
+        # A `struct` parameter's conflated dep set lives in `locals_`
+        # like a composite local's (`s.V = x` folds in, `s.V` reads
+        # it) — seed it with the parameter's own index so reads
+        # carry the caller's provenance.
+        for p in fn.parameters:
+            if p.binding_id and p.type.kind == "struct":
+                locals_[p.binding_id] = frozenset(
+                    {params[p.binding_id]}
+                )
         deps: list[frozenset[int]] = [frozenset()]
         saw_return = [False]
         # The frame stack and the pinned set belong to this function

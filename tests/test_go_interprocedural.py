@@ -15405,3 +15405,107 @@ def test_chan_result_passthrough_capture_marks_effects(go_types_helper):
     assert result.effects == "unknown"
     assert result.return_dependencies == frozenset({0})
     assert any(t.imported for t in result.calls)
+
+
+def test_struct_parameter_field_store_and_read(go_types_helper):
+    # `s.V = x; return s.V` — a `struct` parameter carries one
+    # conflated dep set like a composite local.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct{ V int64 }\n"
+            "func F(s P, x int64) int64 {\n"
+            "\ts.V = x\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_struct_parameter_anonymous(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(s struct{ V int64 }, x int64) int64 {\n"
+            "\ts.V = x\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_struct_parameter_nested_field(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Q struct{ W int64 }\n"
+            "type P struct{ A Q }\n"
+            "func F(s P, x int64) int64 {\n"
+            "\ts.A.W = x\n"
+            "\treturn s.A.W\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_struct_result_binds_as_composite(go_types_helper):
+    # `p := G(x)` where G returns a struct — the bound name is a
+    # composite local; field reads carry the callee's deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct{ V int64 }\n"
+            "func G(x int64) P {\n"
+            "\treturn P{V: x}\n}\n"
+            "func F(x int64) int64 {\n"
+            "\tp := G(x)\n"
+            "\treturn p.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_parameter_argument_carries_deps(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct{ V int64 }\n"
+            "func G(s P) int64 {\n"
+            "\treturn s.V\n}\n"
+            "func F(s P) int64 {\n"
+            "\treturn G(s)\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_parameter_boundaries_stay_closed(go_types_helper):
+    # Pointer-intermediate field traversal, embedded-pointer
+    # promotion, and map/slice field mutation stay closed.
+    for decls in (
+        "type Q struct{ W int64 }\ntype P struct{ A *Q }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\ts.A.W = x\n"
+        "\treturn s.A.W\n}\n",
+        "type Q struct{ W int64 }\ntype P struct{ *Q }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\treturn s.W\n}\n",
+        "type P struct{ M map[string]int64 }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\ts.M[\"k\"] = x\n"
+        "\treturn s.M[\"k\"]\n}\n",
+        "type P struct{ A []int64 }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\ts.A[0] = x\n"
+        "\treturn s.A[0]\n}\n",
+        "type I interface{ M() }\n"
+        "func F(s I, x int64) int64 {\n"
+        "\treturn x\n}\n",
+    ):
+        result = named(*unit(go_types_helper, decls))
+        assert not result.available
