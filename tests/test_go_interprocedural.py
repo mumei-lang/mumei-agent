@@ -24934,3 +24934,108 @@ def test_call_result_index_read_comma_ok_parens_callee(go_types_helper):
     assert 0 in result.return_dependencies
     member = next(m for m in snapshot.imported_members if m.name == "M")
     assert any(t.target == member.id for t in result.calls)
+
+def test_range_over_pointer_to_array_pair_rejoins_writes(
+    go_types_helper,
+):
+    # `for _, v := range p` over a `*[N]T` reads the pointee's live
+    # elements each pass — a mid-iteration store through the same
+    # pointer surfaces in the element the next pass reads.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range p {\n"
+        "\t\t(*p)[0] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_element_body_rebind_does_not_carry_over(
+    go_types_helper,
+):
+    # Each iteration reassigns `v` — a body store into `v` is
+    # clobbered by the next element, so `v = x` inside the loop
+    # must not leak `x`'s deps into later passes' reads.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\tr += v\n"
+        "\t\tv = x\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_map_key_write_deps_apply_after_rhs_reads(
+    go_types_helper,
+):
+    # `(*p)[k], r = 1, (*p)[0]` — the RHS reads the pre-state
+    # before any store lands, so `r` reads `(*p)[0]` without the
+    # key's deps the same statement is about to store.
+    files = {
+        "a.go": "package p\n"
+        "func F(k int64, p *map[int64]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\t(*p)[k], r = 1, (*p)[0]\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_nested_map_write_outer_index_is_not_stored_key(
+    go_types_helper,
+):
+    # `(*p)[i][b] = 1` on a slice of maps stores `b` as the key —
+    # `i` only selects which map receives it, so a later read
+    # through a DIFFERENT pointer sees `b`'s deps, not `i`'s.
+    files = {
+        "a.go": "package p\n"
+        "func F(i, b int64, p, q *[]map[int64]int64) int64 {\n"
+        "\t(*p)[i][b] = 1\n"
+        "\treturn (*q)[0][0]\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 3})
+
