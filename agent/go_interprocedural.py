@@ -875,6 +875,24 @@ class _Builder:
         # whose RHS is not a known function clears it and the call
         # falls back to the opaque external callee model.
         self.func_aliases: dict[str, str] = {}
+        # Function names read in a call's argument list — `H(G, x)`
+        # — pending fold until the call's own deps are known: the
+        # callee may invoke G, so the possible invocation records a
+        # transfer on G's identity and, when G's own effects are
+        # unbounded, the call's deps broadcast into
+        # `indirect_writes` like any other opaque write. Keyed by
+        # the enclosing call node; drained by `expression` once the
+        # call finishes evaluating every argument.
+        self._func_arg_invocations: dict[
+            tuple[str, int, int], list[tuple[Any, str]]
+        ] = {}
+        # Each call's evaluated-argument deps, accumulated as every
+        # argument returns through `expression` — the set a passed
+        # function value may be invoked WITH. Drained beside
+        # `_func_arg_invocations` when the call finishes.
+        self._call_arg_deps: dict[
+            tuple[str, int, int], frozenset[int]
+        ] = {}
         # Channel aliases — `ch2 := ch` / `var ch2 = ch` / `ch2 = x`
         # copies one queue's name, not its contents, so sends through
         # the alias must land in the SOURCE binding's dep set. The
@@ -5029,6 +5047,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_chan_aliases = self.chan_aliases
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
+        saved_func_args = self._func_arg_invocations
+        saved_call_arg_deps = self._call_arg_deps
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -5039,6 +5059,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self.chan_aliases = {}
         self.field_chan_queues = {}
         self.external_chan_locals = set()
+        self._func_arg_invocations = {}
+        self._call_arg_deps = {}
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -5080,6 +5102,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.chan_aliases = saved_chan_aliases
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
+            self._func_arg_invocations = saved_func_args
+            self._call_arg_deps = saved_call_arg_deps
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -9226,7 +9250,90 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if isinstance(result, frozenset):
             for frame in self._read_stack:
                 frame.append(result)
+        parent = node.parent if node is not None else None
+        call_node = parent.parent if parent is not None else None
+        if (
+            isinstance(result, frozenset)
+            and parent is not None
+            and parent.type == "argument_list"
+            and call_node is not None
+            and call_node.type == "call_expression"
+        ):
+            key = self.node_key(call_node)
+            self._call_arg_deps[key] = (
+                self._call_arg_deps.get(key, frozenset()) | result
+            )
+        if node is not None and node.type == "call_expression":
+            key = self.node_key(node)
+            if self._func_arg_invocations:
+                self._fold_func_arg_invocations(node, transfers)
+            # The fold already popped this call's entry when a
+            # callback was pending; for a plain call the accumulated
+            # argument deps are dropped here instead of lingering
+            # for the rest of the body.
+            self._call_arg_deps.pop(key, None)
         return result
+
+    def _fold_func_arg_invocations(
+        self,
+        node: Any,
+        transfers: list[CallTransfer],
+    ) -> None:
+        """Fold `H(G, x)`-shaped argument reads once the call's deps
+        are known.
+
+        A function value handed to a call may be invoked by the
+        callee — `H(g, x)` calling `g(x)` — so each argument-position
+        function name records a possible invocation as a transfer on
+        its own identity: `imported` exactly like a resolved callee's
+        transfer (an unbounded or unresolvable callee marks effects
+        unknown). When G's own effects are unbounded or touch an
+        external channel, the values it writes or sends are bounded
+        only by the call's arguments, so the call's deps broadcast
+        into `indirect_writes` for a later `<-q` to observe."""
+        pending = self._func_arg_invocations.pop(
+            self.node_key(node), ()
+        )
+        # What the callee may invoke the passed functions WITH: every
+        # argument the call evaluated, not the call's result — a
+        # `g(x); return 0` callee still hands `x` to the invoked
+        # function even though its own result depends on nothing.
+        arg_deps = self._call_arg_deps.pop(
+            self.node_key(node), frozenset()
+        )
+        for arg_node, binding_id in pending:
+            callee = (
+                self.summarize(binding_id)
+                if binding_id in self.functions
+                else None
+            )
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file,
+                        arg_node.start_byte,
+                        arg_node.end_byte,
+                    ),
+                    binding_id,
+                    (),
+                    frozenset(),
+                    imported=(
+                        callee is None
+                        or not callee.available
+                        or callee.effects == "unknown"
+                    ),
+                )
+            )
+            if (
+                callee is None
+                or not callee.available
+                or callee.effects == "unknown"
+                or any(
+                    self._external_chan_id(c.target)
+                    for c in callee.calls
+                )
+            ):
+                self.indirect_writes |= arg_deps
 
     def _record_read(self, deps: frozenset[int]) -> None:
         """Attribute an implicit read to every open statement
@@ -9488,11 +9595,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if binding.kind == "constant":
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.kind == "function":
-                    # A declared function name reads as a value only
-                    # in a store's RHS position (`h := G`, `h = G`,
+                    # A declared function name reads as a value in a
+                    # store's RHS position (`h := G`, `h = G`,
                     # `var h = G`) — the store records the alias and
-                    # `h()` resolves through G's summary. Any other
-                    # use (argument, return, operand) stays closed.
+                    # `h()` resolves through G's summary — or in a
+                    # call's argument list (`H(G, x)`), which queues
+                    # the possible invocation for the call's own
+                    # fold. Any other use (return, operand) stays
+                    # closed.
                     return self._func_alias_bind(node)
                 if (
                     binding.kind == "variable"
@@ -10734,6 +10844,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # memory, and a `*p = x` store broadcasts
                     # into `indirect_writes`, not `p`'s own set.
                     receiver_deps |= self.indirect_writes
+            if isinstance(receiver_deps, frozenset):
+                # A receiver's value can reach an argument-position
+                # callback too — `st.M(G)` calling `g(st.V)` — so
+                # it joins the call's argument deps alongside the
+                # syntactic arguments.
+                key = self.node_key(node)
+                self._call_arg_deps[key] = (
+                    self._call_arg_deps.get(key, frozenset())
+                    | receiver_deps
+                )
             arity = len(target.parameters)
         elif call is not None and call.method_expr:
             # `T.M(st, args)` — the leading argument already IS the
@@ -11029,14 +11149,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
 
     def _func_alias_bind(self, node: Any) -> frozenset[int]:
         """`h := G` / `h = G` / `var h = G` — a declared function
-        name read as a store value.
+        name read as a store value, or `H(G, args)` — a function
+        name read as a call argument.
 
-        Only a function-name identifier sitting in the value
-        position of a name binding admits; the store's identifier-RHS
+        A function-name identifier sitting in the value position of
+        a name binding admits dep-free; the store's identifier-RHS
         propagation records `func_aliases[bound] = G` so `h(...)`
-        resolves through G's own summary like a `direct_local` call.
-        Any other use of a function name as a value — an argument,
-        a return, a computed operand — stays closed.
+        resolves through G's own summary like a `direct_local`
+        call. A function name in a call's argument list also admits
+        dep-free — the callee may invoke it at an unknown time, so
+        the read queues a pending invocation keyed by the enclosing
+        call: `expression` folds it once the call's deps are known,
+        recording a transfer on G's identity and, when G's own
+        effects are unbounded or touch an external channel,
+        broadcasting the call's deps into `indirect_writes` for a
+        later receive to observe. The binding and its signature
+        identities pin too — redeclaring `G` stales the caller like
+        any pinned identity. A name in any other position — a
+        `return`, a computed operand, a comparison — stays closed.
         """
         parent = node.parent
         while parent is not None and parent.type == "expression_list":
@@ -11071,8 +11201,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if index is not None and index < len(names):
                 name_node = names[index]
-        if name_node is None or name_node.type != "identifier":
+        if name_node is not None and name_node.type == "identifier":
+            return frozenset()
+        # `H(G, args)` — the name sits in a call's argument list.
+        # The call record's span is the `call_expression` parent of
+        # the argument list, so the record itself proves the
+        # position. The possible invocation is queued for the call's
+        # own fold (the call's dep set is still being built here —
+        # later arguments have not evaluated yet), and G's binding
+        # plus its signature identities pin for staleness.
+        parent = node.parent
+        call_node = (
+            parent.parent if parent is not None else None
+        )
+        call = (
+            self.calls.get(self.node_key(call_node))
+            if parent is not None
+            and parent.type == "argument_list"
+            and call_node is not None
+            and call_node.type == "call_expression"
+            else None
+        )
+        if call is None:
             raise _Unsupported("non_parameter_reference", _span(node))
+        ref = self.references.get(self.node_key(node))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None
+            else None
+        )
+        if binding is not None:
+            self.pinned.add(binding.id)
+            if binding.type is not None:
+                self._pin_fact_identities(binding.type)
+            self.pinned.update(binding.signature_type_ids)
+            self._func_arg_invocations.setdefault(
+                self.node_key(call_node), []
+            ).append((node, binding.id))
         return frozenset()
 
     def _func_literal_capture(
