@@ -917,6 +917,22 @@ class _Builder:
         # `indirect_writes`, reads union it) rather than the
         # conflated-set model a `make(chan)` local uses.
         self.external_chan_locals: set[str] = set()
+        # Bindings that died at a scope join — a branch-local `t`
+        # captured by a stored literal (`fs[0] = func() { return t }`)
+        # still names the value its last write gave it. `_join`
+        # freezes each dying binding's deps here so a call after the
+        # merge re-resolves the captured name's last value instead of
+        # losing the dep.
+        self._dead_local_deps: dict[str, frozenset[int]] = {}
+        # Func-element containers sharing one backing — `fs2 := fs`
+        # copies a slice/map's name, not its elements, so an element
+        # store through either name reaches the other. Each binding
+        # maps to the names it shares with; a non-append reseat
+        # (`fs = mk()`, `fs = []func(){…}`, `fs = nil`) hands the old
+        # element records to the aliases and detaches, while
+        # `fs = append(fs, …)` keeps the share — the grown slice may
+        # reuse the same array.
+        self._func_elem_groups: dict[str, set[str]] = {}
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -4033,6 +4049,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     resolved |= self.indirect_writes
             elif root in params:
                 resolved |= frozenset({params[root]})
+            elif root in self._dead_local_deps:
+                # A captured branch-local died at the merge — its
+                # frozen deps are the value the stored closure sees.
+                resolved |= self._dead_local_deps[root]
         return resolved
 
     def _return_expr_deps(
@@ -10873,8 +10893,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 return call
         return None
 
-    @staticmethod
     def _join(
+        self,
         outer: dict[str, frozenset[int]],
         inner: dict[str, frozenset[int]],
         params: dict[str, int],
@@ -10883,7 +10903,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
 
         Bindings created inside the inner scope never escape — only names
         that existed outside (lets or parameters) merge, and their
-        dependencies union because the inner code path may not run.
+        dependencies union because the inner code path may not run. A
+        dying binding's deps freeze into `_dead_local_deps`: a stored
+        closure that captured it (`fs[0] = func() { return t }`) still
+        reads the value it held at the merge.
         """
         for binding_id, deps in inner.items():
             if binding_id in outer:
@@ -10892,6 +10915,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # A reassigned parameter keeps its own dependency — the
                 # branch may not run.
                 outer[binding_id] = frozenset({params[binding_id]}) | deps
+            else:
+                self._dead_local_deps[binding_id] = (
+                    self._dead_local_deps.get(
+                        binding_id, frozenset()
+                    )
+                    | deps
+                )
 
     def expression(
         self,
@@ -14442,6 +14472,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         deps |= self.indirect_writes
                 elif root in params:
                     deps |= frozenset({params[root]})
+                elif root in self._dead_local_deps:
+                    # A captured branch-local died at the merge —
+                    # the stored element still reads its last value.
+                    deps |= self._dead_local_deps[root]
         if pin_fact is not None:
             self._pin_fact_identities(pin_fact)
             member_or_binding = self.members.get(
