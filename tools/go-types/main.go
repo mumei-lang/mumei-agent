@@ -97,8 +97,12 @@ type binding struct {
 	// embedded fields, so the consumer's promotion-path search
 	// skips named fields — `S.P` reaches `Q.P` only via `*Q` —
 	// and a named field whose name happens to match its type
-	// (`Q Q`) must not masquerade as an embed.
-	Embedded bool `json:"embedded,omitempty"`
+	// (`Q Q`) must not masquerade as an embed. The key is emitted
+	// on every binding (not omitempty) so a consumer can tell a
+	// named field (`"embedded": false`) from a report predating
+	// the marker (key absent), which falls back to searching all
+	// fields like the pre-marker consumer did.
+	Embedded bool `json:"embedded"`
 }
 
 type reference struct {

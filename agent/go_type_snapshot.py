@@ -103,7 +103,11 @@ class Binding:
     # Selector promotion traverses embedded fields only, so the
     # promotion-path search keys off this marker; named fields
     # never carry it (key absent on every other binding).
-    embedded: bool = False
+    # `None` means the report predates the marker — such a report
+    # cannot tell named from embedded fields, so promotion-path
+    # searches treat every field as embedded there, matching the
+    # search-all behavior the report was consumed with before.
+    embedded: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -280,8 +284,9 @@ class PackageBinding:
     # `var f MyFn`, `type MyFn func(N)`).
     signature_type_ids: tuple[str, ...] = ()
     # Same as Binding.embedded — anonymous (embedded) struct
-    # member marker for promotion-path searches.
-    embedded: bool = False
+    # member marker for promotion-path searches; `None` when the
+    # report predates the marker.
+    embedded: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -646,7 +651,11 @@ def load_go_snapshot(
                         _string(s)
                         for s in _list(b.get("signature_type_ids", []))
                     ),
-                    _boolean(b.get("embedded", False)),
+                    (
+                        _boolean(b["embedded"])
+                        if "embedded" in b
+                        else None
+                    ),
                 )
             )
         by_id = {b.id: b for b in bindings}
@@ -955,7 +964,11 @@ def load_go_package_snapshot(
                         _string(s)
                         for s in _list(b.get("signature_type_ids", []))
                     ),
-                    _boolean(b.get("embedded", False)),
+                    (
+                        _boolean(b["embedded"])
+                        if "embedded" in b
+                        else None
+                    ),
                 )
             )
         by_id = {b.id: b for b in bindings}

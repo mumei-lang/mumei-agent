@@ -1034,7 +1034,7 @@ class _Builder:
         frontier: list[tuple[Any, Any | None]] = [
             (f, ftype if ftype.kind == "pointer" else None)
             for f in fields
-            if getattr(f, "embedded", False)
+            if getattr(f, "embedded", None) is not False
             and (ftype := getattr(f, "type", None)) is not None
         ]
         while frontier:
@@ -1075,7 +1075,7 @@ class _Builder:
                         ),
                     )
                     for g in inner
-                    if getattr(g, "embedded", False)
+                    if getattr(g, "embedded", None) is not False
                     and (gtype := getattr(g, "type", None)) is not None
                 )
             if unenumerable is not None:

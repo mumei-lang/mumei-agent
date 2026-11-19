@@ -20206,6 +20206,54 @@ def test_call_result_named_field_sharing_type_name_not_embedded(
     assert any(t.imported for t in result.calls)
 
 
+def _strip_embedded_keys(node):
+    if isinstance(node, dict):
+        return {
+            k: _strip_embedded_keys(v)
+            for k, v in node.items()
+            if k != "embedded"
+        }
+    if isinstance(node, list):
+        return [_strip_embedded_keys(v) for v in node]
+    return node
+
+
+def test_call_result_promotion_old_report_without_embedded_marker(
+    go_types_helper,
+):
+    # A report predating the `embedded` marker cannot tell named
+    # from embedded fields — the promotion search must keep the
+    # pre-marker search-all behavior for it instead of treating
+    # every field as named (which would drop `g().P`'s external
+    # read on `type S struct{ *Q }`).
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ *Q }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    payload = json.loads(package_report(go_types_helper, files))
+    old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+    snapshot = load_go_package_snapshot(
+        old_payload,
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
 def test_call_result_anon_struct_embedded_pointer_reads_external(
     go_types_helper,
 ):
