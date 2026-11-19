@@ -3034,6 +3034,95 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return target
 
+    def _chan_result_passthrough(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> Any | None:
+        """`c := g(q)` where `g`'s whole body is `return <param>` —
+        the bound name aliases the argument's queue (the callee hands
+        the same queue back), so it binds through `chan_aliases`
+        rather than the external-local model. Returns the alias
+        source binding, or None when the callee is not a pure
+        passthrough or the passed-through argument is not a channel
+        identifier."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_local":
+            return None
+        target = self.functions.get(call.target)
+        if target is None:
+            return None
+        fn_binding = self.bindings.get(target.binding_id)
+        block = (
+            self.blocks.get(_key3(fn_binding.span))
+            if fn_binding is not None
+            else None
+        )
+        if block is None:
+            return None
+        stmts = [c for c in block.named_children if c.type != "comment"]
+        while len(stmts) == 1 and stmts[0].type == "statement_list":
+            stmts = [
+                c
+                for c in stmts[0].named_children
+                if c.type != "comment"
+            ]
+        if len(stmts) != 1 or stmts[0].type != "return_statement":
+            return None
+        expr = next(
+            (
+                c
+                for c in stmts[0].named_children
+                if c.type != "comment"
+            ),
+            None,
+        )
+        if expr is not None and expr.type == "expression_list":
+            items = [
+                c for c in expr.named_children if c.type != "comment"
+            ]
+            expr = items[0] if len(items) == 1 else None
+        if expr is None or expr.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(expr))
+        if ref is None:
+            return None
+        index = next(
+            (
+                i
+                for i, p in enumerate(target.parameters)
+                if p.binding_id == ref.binding_id
+            ),
+            None,
+        )
+        if index is None:
+            return None
+        args = inner.child_by_field_name("arguments")
+        arg_nodes = (
+            [
+                c
+                for c in args.named_children
+                if c.type != "comment"
+            ]
+            if args is not None
+            else []
+        )
+        if index >= len(arg_nodes):
+            return None
+        return self._chan_alias_target(arg_nodes[index], locals_, params)
+
     def _is_make_chan_call(self, node: Any) -> bool:
         """`make(chan T[, cap])` — the one in-fragment channel
         constructor. Anything else on the RHS of a channel binding
@@ -4436,7 +4525,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if not result_id:
                     raise _Unsupported("unsupported_return", _span(node))
-                result_deps = locals_.get(result_id, frozenset())
+                # A `r = q` store on a `chan` named result goes
+                # through `chan_aliases` (no dep set lands in
+                # `locals_[r]`) — resolve the queue root like an
+                # identifier read does so `return` carries q's deps.
+                result_root = self._chan_root(result_id)
+                if result_root in params:
+                    result_deps = frozenset(
+                        {params[result_root]}
+                    ) | self.indirect_writes
+                elif result_root in self.external_chan_locals:
+                    result_deps = (
+                        locals_.get(result_root, frozenset())
+                        | self.indirect_writes
+                    )
+                else:
+                    result_deps = locals_.get(
+                        result_root, frozenset()
+                    )
                 deps[0] |= result_deps
                 self._record_read(result_deps)
             elif len(expressions) == 1:
@@ -4573,7 +4679,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if chan_alias is not None:
                         self.chan_aliases[binding.id] = chan_alias.id
                     else:
-                        self.external_chan_locals.add(binding.id)
+                        passthrough = self._chan_result_passthrough(
+                            rights[i], locals_, params
+                        )
+                        if passthrough is not None:
+                            # `c := g(q)` with `g`'s body `return ch`
+                            # — c names q's queue, not a fresh
+                            # external one.
+                            self.chan_aliases[binding.id] = (
+                                passthrough.id
+                            )
+                        else:
+                            self.external_chan_locals.add(binding.id)
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]
@@ -4794,7 +4911,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if chan_alias is not None:
                             self.chan_aliases[binding.id] = chan_alias.id
                         elif self._chan_result_call(value_nodes[i]) is not None:
-                            self.external_chan_locals.add(binding.id)
+                            passthrough = self._chan_result_passthrough(
+                                value_nodes[i], locals_, params
+                            )
+                            if passthrough is not None:
+                                self.chan_aliases[binding.id] = (
+                                    passthrough.id
+                                )
+                            else:
+                                self.external_chan_locals.add(
+                                    binding.id
+                                )
                     if not conditional:
                         self._ptr_deps[binding.id] = (
                             rhs_ptrs[i]
@@ -8942,13 +9069,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # a channel parameter's live in external state,
                     # so they broadcast into `indirect_writes` where
                     # a later `<-ch` observes them.
-                    if binding.id in locals_:
+                    if binding.id in params or (
+                        binding.id in self.external_chan_locals
+                    ):
+                        self.indirect_writes |= stored
+                    elif binding.id in locals_:
                         locals_[binding.id] = (
                             locals_.get(binding.id, frozenset())
                             | stored
                         )
-                    elif binding.id in params:
-                        self.indirect_writes |= stored
 
 
 def _declared_key(binding_id: str) -> tuple[str, int] | None:

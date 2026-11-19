@@ -15301,3 +15301,85 @@ def test_chan_result_imported_function_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_chan_result_passthrough_aliases_argument_queue(
+    go_types_helper,
+):
+    # `c := g(q)` where `g`'s body is `return ch` — c names q's
+    # queue, so a send through c is a send into q's dep set.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func g(ch chan int64) chan int64 {\n"
+            "\treturn ch\n}\n"
+            "func F(x int64) int64 {\n"
+            "\tq := make(chan int64)\n"
+            "\tc := g(q)\n"
+            "\tc <- x\n"
+            "\treturn <-q\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_passthrough_parameter_argument(go_types_helper):
+    # The same passthrough with a `chan` parameter argument — ops on
+    # the bound name follow the parameter's external model.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func g(ch chan int64) chan int64 {\n"
+            "\treturn ch\n}\n"
+            "func F(q chan int64, x int64) int64 {\n"
+            "\tc := g(q)\n"
+            "\tc <- x\n"
+            "\treturn <-q\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_chan_result_named_result_bare_return(go_types_helper):
+    # `(r chan T)` assigned `r = q` then a bare `return` — the
+    # result carries q's deps through the alias, not the empty
+    # local slot.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func g(q chan int64) (r chan int64) {\n"
+            "\tr = q\n"
+            "\treturn\n}\n",
+        ),
+        "g",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_callee_send_broadcasts_to_peer_locals(
+    go_types_helper,
+):
+    # `Send(c, x)` writes into c's callee-produced queue — external
+    # state like a `chan` parameter's — so the write broadcasts into
+    # `indirect_writes` and a receive on a peer result-bound name
+    # observes it (two `g()` calls may hand back the same queue).
+    result = named(
+        *unit(
+            go_types_helper,
+            "func g() chan int64 {\n"
+            "\treturn make(chan int64)\n}\n"
+            "func Send(ch chan int64, x int64) int64 {\n"
+            "\tch <- x\n"
+            "\treturn 0\n}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := g()\n"
+            "\td := g()\n"
+            "\t_ = Send(c, x)\n"
+            "\treturn <-d\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
