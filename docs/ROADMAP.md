@@ -3723,6 +3723,13 @@ parens/selectors/indexes), and a chain through a *pointer-typed*
 intermediate field (`st.A.N` where `A *P2`) stays closed — the
 deref reads caller memory the conflated set cannot represent.
 Composite-typed package globals, `st[i]` and `*st.V` stay closed.
+A field read of a call result — `g(a).V`, `g(a).A.B` — admits the
+same conflation: the call's result dep set covers whichever field
+the read selects, so the operand evaluates like a value (only a
+call at the selector chain's base takes this path — an identifier
+base keeps the local composite path and its promoted-field gate,
+and an index on a call result like `g(a)[0]` stays closed with
+the callee's unsupported signature).
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.

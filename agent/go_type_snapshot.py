@@ -98,6 +98,16 @@ class Binding:
     # func type fact carries no inner facts, so callers pin these
     # for staleness exactly like a member's signature_type_ids.
     signature_type_ids: tuple[str, ...] = ()
+    # An anonymous (embedded) struct member field —
+    # `type S struct{ *Q; R Q }` embeds `*Q` but not `R`.
+    # Selector promotion traverses embedded fields only, so the
+    # promotion-path search keys off this marker; named fields
+    # never carry it (key absent on every other binding).
+    # `None` means the report predates the marker — such a report
+    # cannot tell named from embedded fields, so promotion-path
+    # searches treat every field as embedded there, matching the
+    # search-all behavior the report was consumed with before.
+    embedded: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -273,6 +283,10 @@ class PackageBinding:
     # declared named/alias signature identities (`f func(N) int64`,
     # `var f MyFn`, `type MyFn func(N)`).
     signature_type_ids: tuple[str, ...] = ()
+    # Same as Binding.embedded — anonymous (embedded) struct
+    # member marker for promotion-path searches; `None` when the
+    # report predates the marker.
+    embedded: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -609,6 +623,7 @@ def load_go_snapshot(
                     "scope",
                     "type",
                     "signature_type_ids",
+                    "embedded",
                 }
             )
             b = item
@@ -635,6 +650,11 @@ def load_go_snapshot(
                     tuple(
                         _string(s)
                         for s in _list(b.get("signature_type_ids", []))
+                    ),
+                    (
+                        _boolean(b["embedded"])
+                        if "embedded" in b
+                        else None
                     ),
                 )
             )
@@ -912,6 +932,7 @@ def load_go_package_snapshot(
                     "scope",
                     "type",
                     "signature_type_ids",
+                    "embedded",
                 }
             )
             b = item
@@ -942,6 +963,11 @@ def load_go_package_snapshot(
                     tuple(
                         _string(s)
                         for s in _list(b.get("signature_type_ids", []))
+                    ),
+                    (
+                        _boolean(b["embedded"])
+                        if "embedded" in b
+                        else None
                     ),
                 )
             )
