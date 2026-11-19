@@ -842,7 +842,9 @@ class _Builder:
         # Bound method values — `f := s.M` records `(method binding,
         # receiver binding)` under `f`'s id so a later `f(args)`
         # resolves through the method's summary like `s.M(args)` does.
-        self.bound_method_values: dict[str, tuple[str, str]] = {}
+        self.bound_method_values: dict[
+            str, tuple[str, str | None, str | None]
+        ] = {}
         # A method value COPIES the receiver at bind time — freeze
         # the receiver's dep set then, so a `s = …` reseat before
         # `f(args)` still resolves the ORIGINAL receiver's deps.
@@ -1029,11 +1031,13 @@ class _Builder:
 
     def _method_value_parts(
         self, node: Any
-    ) -> tuple[str, str] | None:
-        """`(method binding id, receiver binding id | None)` of a
-        method value — `s.M` binds the receiver identifier, `St.M`
-        (a type-name operand, a method *expression*) carries None —
-        or None when the selector isn't one.
+    ) -> tuple[str, str | None, str | None] | None:
+        """`(method binding id, receiver binding id | None, type
+        operand type_id | None)` of a method value — `s.M` binds the
+        receiver identifier, `St.M` (a type-name operand, a method
+        *expression*) carries no receiver but keeps the operand's
+        type identity so the call can pin it — or None when the
+        selector isn't one.
 
         The field must resolve to a same-package method record
         (receiver non-null) and the operand — parens unwrapped —
@@ -1076,9 +1080,16 @@ class _Builder:
         ):
             # `St.M` — a method *expression* value: no receiver
             # binding exists at the bind site; the caller passes it
-            # as argument 0 like `St.M(st, args)` does.
-            return method_fn.binding_id, None
-        return method_fn.binding_id, operand_ref.binding_id
+            # as argument 0 like `St.M(st, args)` does. The operand's
+            # type identity rides along so a call through the value
+            # pins the type whose method set resolved the callee —
+            # `f := Alias.M` stays a dependent of `Alias`.
+            return (
+                method_fn.binding_id,
+                None,
+                operand_binding.type.type_id,
+            )
+        return method_fn.binding_id, operand_ref.binding_id, None
 
     def _local_composite_base(
         self, node: Any, locals_: dict[str, frozenset[int]]
@@ -10434,7 +10445,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self,
         node: Any,
         arguments: list[Any],
-        bound_mv: tuple[str, str | None],
+        bound_mv: tuple[str, str | None, str | None],
         fn: Function,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
@@ -10455,7 +10466,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         binding — argument 0 IS the receiver, exactly like the
         direct `St.M(st, args)` call.
         """
-        method_id, recv_id = bound_mv
+        method_id, recv_id, operand_type_id = bound_mv
         target = self.functions.get(method_id)
         if (
             target is None
@@ -10539,6 +10550,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             for parameter in callee.return_dependencies
             for i in actual[parameter]
         )
+        if operand_type_id is not None:
+            # A method expression's method-set lookup names the
+            # OPERAND type (`f := Outer.Get` resolves through
+            # `Outer`'s set — possibly promoted from an embedded
+            # field), which the callee's `*Inner` receiver does not
+            # pin. Dependents of `Outer` must still flag this
+            # summary when that set changes.
+            self.pinned.add(operand_type_id)
         for p in (
             *((target.receiver,) if target.receiver is not None else ()),
             *target.parameters,
@@ -10578,7 +10597,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `st.M()`'s auto-ref fold. A pointer receiver
                 # binding (`f := p.M`) writes through the pointer —
                 # broadcast like `*p = v`.
-                if (
+                if method_expr:
+                    # `f := P.M; f(arg0, …)` on a `*T` method — the
+                    # receiver is argument 0 and Go only admits a
+                    # pointer-typed (or promoted-through-pointer)
+                    # operand there, so the callee's writes always
+                    # land in pointee memory: an explicit pointer
+                    # (`f(p, v)`), a field argument (`f(box.P, v)`),
+                    # or a promoted receiver (`f := Outer.M` where
+                    # `Outer` embeds `*Inner` and the write goes
+                    # through `outer.Inner`, NOT `outer`'s fields —
+                    # folding onto the argument's binding would lose
+                    # it). Broadcast like `*p = v`.
+                    self.indirect_writes |= stored
+                    for escaped_id in self.escaped:
+                        if escaped_id in locals_:
+                            locals_[escaped_id] |= stored
+                        elif escaped_id in params:
+                            locals_[escaped_id] = (
+                                frozenset({params[escaped_id]})
+                                | stored
+                            )
+                elif (
                     recv_binding is not None
                     and recv_binding.type.kind == "pointer"
                 ):
