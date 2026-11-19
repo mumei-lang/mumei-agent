@@ -9065,14 +9065,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 src_id
                             ]
                     else:
+                        # A func-element container that stayed on
+                        # its backing (a self-backing copy like
+                        # `a, a[0] = b, f`) keeps the element
+                        # records RHS eval just stored under it —
+                        # replacing would drop the literal `f`
+                        # before the `a[0]` write adopts it, and
+                        # popping would erase the array's elements
+                        # the name still shares.
+                        elem_keep = (
+                            tgt_bound is not None
+                            and self._func_elem_collection(
+                                tgt_bound.type
+                            )
+                            and ref.binding_id
+                            not in func_elem_reseated
+                        )
                         if (
                             src_id is not None
                             and src_id in captures_before
                         ):
-                            self.closure_captures[ref.binding_id] = (
-                                captures_before[src_id]
-                            )
-                        else:
+                            if elem_keep:
+                                self.closure_captures[
+                                    ref.binding_id
+                                ] = self.closure_captures.get(
+                                    ref.binding_id, frozenset()
+                                ) | captures_before[
+                                    src_id
+                                ]
+                            else:
+                                self.closure_captures[
+                                    ref.binding_id
+                                ] = captures_before[src_id]
+                        elif not elem_keep:
                             self.closure_captures.pop(
                                 ref.binding_id, None
                             )
@@ -9113,10 +9138,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             src_id is not None
                             and src_id in writes_before
                         ):
-                            self.closure_writes[ref.binding_id] = (
-                                writes_before[src_id]
-                            )
-                        else:
+                            if elem_keep:
+                                self.closure_writes[
+                                    ref.binding_id
+                                ] = self.closure_writes.get(
+                                    ref.binding_id, frozenset()
+                                ) | writes_before[
+                                    src_id
+                                ]
+                            else:
+                                self.closure_writes[
+                                    ref.binding_id
+                                ] = writes_before[src_id]
+                        elif not elem_keep:
                             self.closure_writes.pop(
                                 ref.binding_id, None
                             )
@@ -9127,7 +9161,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.closure_star_writes.add(
                                 ref.binding_id
                             )
-                        else:
+                        elif not elem_keep:
                             self.closure_star_writes.discard(
                                 ref.binding_id
                             )
@@ -9138,7 +9172,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.closure_inner_calls.add(
                                 ref.binding_id
                             )
-                        else:
+                        elif not elem_keep:
                             self.closure_inner_calls.discard(
                                 ref.binding_id
                             )

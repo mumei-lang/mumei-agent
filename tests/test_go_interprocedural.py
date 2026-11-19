@@ -23366,3 +23366,52 @@ def test_func_elem_conditional_reseat_maybe_sharer_sees_write(
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_copy_preserves_eval_literal_records(
+    go_types_helper,
+):
+    # `a, a[0] = b, f` — `a` stays on the shared backing, so the
+    # literal's captures recorded under `a` during RHS eval survive
+    # the `a = b` record copy. After `y = z` the element call must
+    # resolve `f`'s capture live, like the sequential `a[0] = f`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(y int64, z int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    a, a[0] = b, func() int64 { return y }\n"
+        "    y = z\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_eval_class_drops_reseated_default_token(
+    go_types_helper,
+):
+    # `a = e` reseats `a` onto a fresh backing; a later parallel
+    # `x, c = z, a` copies `a`'s CURRENT array only — the name's
+    # default backing token must not pull `b`'s old array back
+    # into `c`'s share class.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(y int64, z int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    e := []func() int64{func() int64 { return 0 }}\n"
+        "    a = e\n"
+        "    var c []func() int64\n"
+        "    var x int64\n"
+        "    x, c = z, a\n"
+        "    _ = x\n"
+        "    b[0] = func() int64 { return y }\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
