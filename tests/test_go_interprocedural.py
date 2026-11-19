@@ -172,7 +172,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x []int64) int64 {return x[0]}",
         "func F(x map[int64]int64) int64 {return x[0]}",
         "type I interface{Get()int64}; func F(x I) int64 {return x.Get()}",
-        "type T int64; func(t T)Get()int64{return int64(t)}; func F(x T)int64{return x.Get()}",
         "func G[T ~int64](x T)T{return x}; func F(x int64)int64{return G(x)}",
         "func G(x ...int64)int64{return x[0]}; func F(x int64)int64{return G(x)}",
     ],
@@ -5127,7 +5126,10 @@ def test_imported_multi_result_method_unpacks(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
-def test_local_method_stays_closed(go_types_helper):
+def test_local_method_classifies_direct_local(go_types_helper):
+    # A same-package method call is `direct_local` like a plain local
+    # call, plus `method` so the consumer knows the selector operand
+    # binds the callee's leading receiver parameter.
     files = {
         "a.go": "package p\n"
         "type L int64\n"
@@ -5137,7 +5139,8 @@ def test_local_method_stays_closed(go_types_helper):
     report = json.loads(package_report(go_types_helper, files))
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "direct_local"
+    assert call["method"] is True
 
 
 def test_method_receiver_type_pin_flags_stale_dependents(go_types_helper):
@@ -6508,20 +6511,16 @@ def test_local_struct_value_pointer_leaf_field(
 def test_local_struct_value_boundaries(
     go_types_helper,
 ):
-    # Named slices, method values and method calls all stay
-    # closed (anonymous `struct{...}` values admit — covered by
-    # the dedicated anonymous-struct tests below).
+    # Named slices and bound method VALUES stay closed (a direct
+    # `st.M()` call admits through the method-call slice — covered
+    # below; anonymous `struct{...}` values admit — covered by
+    # the dedicated anonymous-struct tests).
     for decl, body in [
         ("type S []int64", "sl := S{x}; return sl[0]"),
         (
             "type P struct{ V int64 }\n"
             "func (P) M() int64 { return 0 }",
             "st := P{V: x}; f := st.M; return f()",
-        ),
-        (
-            "type P struct{ V int64 }\n"
-            "func (p P) M2() int64 { return p.V }",
-            "st := P{V: x}; return st.M2()",
         ),
     ]:
         files = {
@@ -16053,3 +16052,86 @@ def test_select_pointer_store_does_not_leak_into_later_clause(
     )
     assert store_read.deps == frozenset({0})
     assert result.return_dependencies == frozenset({0})
+
+
+def _method_unit(go_types_helper, files):
+    return package_unit(go_types_helper, files)
+
+
+def test_method_value_call_resolves_through_callee_summary(go_types_helper):
+    # `s.M(2)` — the receiver operand binds the callee's leading
+    # receiver parameter, so `st.V + x` reports the deps the caller
+    # seeded `s` with: {0} for `a`, not arg 2's empty set.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\treturn s.M(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_method_expression_call_counts_receiver_argument(go_types_helper):
+    # `St.M(s, 3)` — the leading argument IS the receiver: arity is
+    # parameters+1 and index 0 carries the receiver's deps.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\treturn St.M(s, 3)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_method_summary_reports_receiver_as_parameter_zero(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "M")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_void_method_call_stays_closed(go_types_helper):
+    # A result-less callee stays outside the single-result frontier —
+    # `s.W()` fails closed like a plain result-less `G()` does.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st *St) W() { st.V = 1 }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\ts.W()\n"
+        "\treturn s.V\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+
+
+def test_generic_method_call_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "type St[T any] struct { V T }\n"
+        "func (st St[T]) M() int64 { return 1 }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St[int64]{V: a}\n"
+        "\treturn s.M()\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available

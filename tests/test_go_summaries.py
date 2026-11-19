@@ -208,6 +208,7 @@ def _package_fixture(files: dict[str, str]) -> dict:
                 "method": False,
                 "generic": False,
                 "variadic": False,
+                "receiver": None,
             }
         )
     return {

@@ -2181,7 +2181,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         return FunctionSummary(
             fn.binding_id,
             key,
-            tuple(p.type for p in fn.parameters),
+            tuple(
+                p.type
+                for p in (
+                    (fn.receiver, *fn.parameters)
+                    if fn.receiver is not None
+                    else fn.parameters
+                )
+            ),
             fn.results[0].type if len(fn.results) == 1 else None,
             dependencies,
             calls,
@@ -4561,10 +4568,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
     def body(self, fn: Function) -> FunctionSummary:
         if (
             fn.body is None
-            or fn.method
             or fn.generic
             or fn.variadic
             or len(fn.results) != 1
+            # A method's receiver is a leading signature slot like any
+            # parameter: its declared fact must sit inside the admitted
+            # kinds — a concrete named type's fact is `struct`/`pointer`
+            # (scalar-named receivers arrive as `integer`/`boolean`).
+            or (
+                fn.receiver is not None
+                and fn.receiver.type.kind
+                not in {"integer", "boolean", "pointer", "struct"}
+                and not (
+                    fn.receiver.type.kind == "chan"
+                    and fn.receiver.type.elem is not None
+                    and fn.receiver.type.elem.kind in {"integer", "boolean"}
+                )
+            )
             # Pointer-typed parameters/results are admitted too: the
             # dep model tracks the *binding's* index, not the pointee,
             # and every use still passes the expression gates — so a
@@ -4637,7 +4657,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             statements = _children(statements[0])
         if not statements:
             raise _Unsupported("unsupported_body", fn.body)
-        params = {p.binding_id: i for i, p in enumerate(fn.parameters) if p.binding_id}
+        # A method's receiver is the leading signature slot: it binds
+        # like parameter index 0, so a `st.M(args)` call's actuals are
+        # (receiver_deps, *arg_deps) and the callee summary's index 0
+        # is the receiver.
+        sig_params = (
+            (fn.receiver, *fn.parameters)
+            if fn.receiver is not None
+            else fn.parameters
+        )
+        params = {p.binding_id: i for i, p in enumerate(sig_params) if p.binding_id}
         transfers: list[CallTransfer] = []
         count = [0]
         locals_: dict[str, frozenset[int]] = {}
@@ -4650,7 +4679,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # like a composite local's (`s.V = x` folds in, `s.V` reads
         # it) — seed it with the parameter's own index so reads
         # carry the caller's provenance.
-        for p in fn.parameters:
+        for p in sig_params:
             if p.binding_id and p.type.kind == "struct":
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
@@ -4692,7 +4721,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # recorded facts stale even when its binding identity is
         # unchanged. Callers pin the same identities again at each
         # admitted call site.
-        for p in (*fn.parameters, *fn.results):
+        for p in (*sig_params, *fn.results):
             # Walk the whole fact tree — a `chan MyInt` parameter
             # carries its element's identity on `elem`, not the top
             # fact, so redeclaring the element type still flags
@@ -6580,6 +6609,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         target_fn = self.functions.get(call.target)
                         if target_fn is not None:
                             for signature_param in (
+                                *(
+                                    (target_fn.receiver,)
+                                    if target_fn.receiver is not None
+                                    else ()
+                                ),
                                 *target_fn.parameters,
                                 *target_fn.results,
                             ):
@@ -8907,7 +8941,51 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     count, depth, receiver=receiver,
                 )
             target = self.functions.get(call.target)
-            if target is None or len(arguments) != len(target.parameters):
+            if target is None:
+                raise _Unsupported("callee_unavailable", _span(node), call.target)
+            receiver_deps: frozenset[int] | None = None
+            receiver_node = None
+            if call.method:
+                # `st.M(args)` — the receiver operand sits on the
+                # selector's `operand` field and is evaluated like an
+                # argument (first, per Go's call order); its deps bind
+                # the callee's leading receiver parameter.
+                function_node = node.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        iter(function_node.named_children), None
+                    )
+                if (
+                    function_node is None
+                    or function_node.type != "selector_expression"
+                ):
+                    raise _Unsupported(
+                        "call_mapping_unavailable",
+                        _span(node),
+                        call.target,
+                    )
+                receiver_node = function_node.child_by_field_name("operand")
+                if receiver_node is None:
+                    raise _Unsupported(
+                        "call_mapping_unavailable",
+                        _span(node),
+                        call.target,
+                    )
+                receiver_deps = self.expression(
+                    receiver_node, fn, params, locals_,
+                    transfers, count, depth + 1,
+                )
+                arity = len(target.parameters)
+            elif call.method_expr:
+                # `T.M(st, args)` — the leading argument already IS the
+                # receiver, so arity counts it.
+                arity = len(target.parameters) + 1
+            else:
+                arity = len(target.parameters)
+            if len(arguments) != arity:
                 raise _Unsupported("callee_unavailable", _span(node), call.target)
             # Even unused arguments are evaluated and must have supported effects.
             actual = tuple(
@@ -8916,6 +8994,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for arg in arguments
             )
+            if receiver_deps is not None:
+                actual = (receiver_deps, *actual)
             callee = self.summarize(call.target)
             if not callee.available:
                 reason = (
@@ -8933,7 +9013,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # already churns with its declaring file, while an imported one
             # (a local `func G(y lib.T)` parameter) would otherwise leave
             # this summary looking current after `T` is redeclared.
-            for p in (*target.parameters, *target.results):
+            for p in (
+                *((target.receiver,) if target.receiver is not None else ()),
+                *target.parameters,
+                *target.results,
+            ):
                 if p.type.type_id:
                     self.pinned.add(p.type.type_id)
                     # `p PP` on `type PP *T` — PP's member carries the
@@ -8965,9 +9049,73 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if actual
                     else frozenset()
                 )
+                write_args = list(arguments)
+                if receiver_node is not None:
+                    # `st.M()` hands the callee `&st` under a `*T`
+                    # receiver — stores inside `M` land in the
+                    # caller's `st` like an `&x` argument's do.
+                    write_args.append(receiver_node)
                 self._store_call_writes(
-                    arguments, stored, locals_, params
+                    write_args, stored, locals_, params
                 )
+                # `st.M()` on a VALUE var auto-takes `&st`, so the
+                # operand node isn't `&st`-shaped for
+                # `_store_call_writes` to find — fold the write deps
+                # into the receiver binding directly when the callee's
+                # receiver is a pointer. `T.M(st, args)` auto-refs the
+                # same way through argument 0.
+                receiver_operand = (
+                    receiver_node
+                    if receiver_node is not None
+                    else (
+                        arguments[0]
+                        if call.method_expr and arguments
+                        else None
+                    )
+                )
+                if (
+                    receiver_operand is not None
+                    and target.receiver is not None
+                    and target.receiver.type.kind == "pointer"
+                ):
+                    rop = receiver_operand
+                    while (
+                        rop is not None
+                        and rop.type == "parenthesized_expression"
+                    ):
+                        rop = next(
+                            (
+                                c
+                                for c in rop.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    rref = (
+                        self.references.get(self.node_key(rop))
+                        if rop is not None and rop.type == "identifier"
+                        else None
+                    )
+                    rbinding = (
+                        self.bindings.get(rref.binding_id)
+                        if rref is not None
+                        else None
+                    )
+                    if (
+                        rref is not None
+                        and rbinding is not None
+                        and rbinding.type.kind != "pointer"
+                        and (
+                            rref.binding_id in locals_
+                            or rref.binding_id in params
+                        )
+                    ):
+                        base = (
+                            locals_.get(rref.binding_id)
+                            if rref.binding_id in locals_
+                            else frozenset({params[rref.binding_id]})
+                        )
+                        locals_[rref.binding_id] = base | stored
                 # A callee's ops on an external channel — `GC <- x`,
                 # `<-lib.VC` — mutate a queue the caller shares:
                 # `G(ch)`'s sends already broadcast through the arg
