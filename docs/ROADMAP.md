@@ -2626,13 +2626,23 @@ alias to that name
 root binding, a bare read or argument surfaces the
 queue's widened set, and a function literal that
 captures the name records the same external effect a
-captured `chan` parameter does. Still closed:
+captured `chan` parameter does. A channel rebound under a branch or
+loop (`if c { ch = q }`, `ch = g(q)`, `ch = g()`,
+or `ch = make(chan)` over an aliased name) could
+mean EITHER queue after the join, so the name
+detaches to an external queue: its dep slot unions
+the old queue's contents with the RHS deps and every
+queue it could still mean is promoted external —
+sends broadcast through `indirect_writes` and
+receives union it, so a third name still holding
+the old queue's identity (`z := t` before `ch = q`)
+sees writes the untaken path delivered. A fresh
+`make` on an unaliased name keeps the old conflated
+admission since every name resolving to it already
+converges on the same slot. Still closed:
 non-scalar elements, an imported `lib.G()` channel
-result (the signature carries no element kind), a
-multi-result callee, and rebinding a
-channel under a branch or loop (a conditional
-`ch2 = ch3` could mean either queue) stay closed,
-while `select` now admits: each communication case's
+result (the signature carries no element kind), and
+a multi-result callee — while `select` now admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
 a bare `<-ch`) or send (`ch <- v`) runs in a fresh
 alternative scope and every alternative joins back by
@@ -2966,10 +2976,12 @@ parameters and `&x` aliases, slice/map/channel resource state
 the external-state transfer model, local `make(chan T)` channels
 admit under the conflated dep-set model, and scalar-element `chan`
 parameters admit under the external sync-resource model; the
-still-closed shapes are non-scalar elements,
-conditionally-changed channel bindings, channel operands in
-external state, `chan` results from imported or multi-result
-callees, and `select`),
+still-closed shapes are non-scalar elements and
+`chan` results from imported or multi-result
+callees — conditionally-changed channel bindings
+now admit under the detach-to-external model, and
+`select` admits its communication cases as
+switch-like alternatives),
 slice/map `make` constructor
 state, selector/computed callees and function-typed parameters
 all fail closed —
