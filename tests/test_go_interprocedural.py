@@ -16135,3 +16135,89 @@ def test_generic_method_call_stays_closed(go_types_helper):
     _, snapshot, summaries = _method_unit(go_types_helper, files)
     result = named_package(files, snapshot, summaries, "F")
     assert not result.available
+
+
+def test_method_call_on_field_receiver_writes_back_to_root(
+    go_types_helper,
+):
+    # `s.A.Set(x)` on a `*A` receiver — stores land in the root `s`'s
+    # conflated set like `s.A = …` would, so a later `s.A.V` read
+    # observes the stored arg's deps.
+    files = {
+        "a.go": "package p\n"
+        "type A struct { V int64 }\n"
+        "func (a *A) Set(x int64) int64 { a.V = x; return a.V }\n"
+        "type S struct { A A }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{}\n"
+        "\ts.A.Set(x)\n"
+        "\treturn s.A.V\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_method_call_pointer_operand_value_receiver_reads_pointee(
+    go_types_helper,
+):
+    # `p.V()` on a value receiver auto-derefs: a `*p = x` store
+    # broadcasts into `indirect_writes`, so the result carries the
+    # stored deps, not just `p`'s own.
+    files = {
+        "a.go": "package p\n"
+        "type I int64\n"
+        "func (i I) V() I { return i }\n"
+        "func F(p *I, x I) I {\n"
+        "\t*p = x\n"
+        "\treturn p.V()\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_method_result_reads_receiver(go_types_helper):
+    # `for range s.Items()` — the receiver operand evaluates like the
+    # `s.M()` call path, so the elements inherit `s`'s deps.
+    files = {
+        "a.go": "package p\n"
+        "type T struct{}\n"
+        "func (t T) Items() []int64 { return nil }\n"
+        "func F(s T, x int64) int64 {\n"
+        "\tr := x\n"
+        "\tfor _, v := range s.Items() {\n"
+        "\t\tr = v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    # `r = v` is a may-write inside the loop — the join unions the
+    # receiver's {0} with the initial `r := x` {1}.
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_expr_chan_result_passthrough_skips_receiver(
+    go_types_helper,
+):
+    # `c := S.Pick(sv, ch1, ch2)` — declared param index 1 is `b`,
+    # which sits at call argument 2 (the receiver takes slot 0): `c`
+    # aliases `ch2`, not `ch1`.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{}\n"
+        "func (s S) Pick(a chan int64, b chan int64) chan int64 {\n"
+        "\treturn b\n}\n"
+        "func F(sv S, ch1 chan int64, ch2 chan int64, x int64) int64 {\n"
+        "\tc := S.Pick(sv, ch1, ch2)\n"
+        "\tc <- x\n"
+        "\treturn <-ch2\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({2, 3})
