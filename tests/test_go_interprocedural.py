@@ -20255,6 +20255,78 @@ def test_call_result_promotion_old_report_without_embedded_marker(
     assert any(t.imported for t in result.calls)
 
 
+def test_call_result_promotion_old_report_named_pointer_stays_named(
+    go_types_helper,
+):
+    # A pre-`embedded` report cannot mark `R *Q` named, but a
+    # field whose name is not its type's name can never promote:
+    # `g(x).P` reads the embedded `Q` value field, so the read
+    # stays a call dep with no external effect.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ Q; R *Q }\n"
+        "func g(q int64) S { return S{Q: Q{P: q}} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    payload = json.loads(package_report(go_types_helper, files))
+    old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+    snapshot = load_go_package_snapshot(
+        old_payload,
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_call_result_promotion_value_match_beats_unenumerable_embed(
+    go_types_helper,
+):
+    # `S{ Q; lib.X }` — the embedded `lib.X` type cannot be
+    # enumerated (its declaration is not in the unit), but the
+    # embedded `Q` already resolves `P`: in a valid program only
+    # one field can promote `P`, so the unenumerable type cannot
+    # carry the read and no external effect is recorded.
+    files = {
+        "a.go": "package p\n"
+        'import "lib"\n'
+        "type Q struct{ P int64 }\n"
+        "type S struct{ Q; lib.X }\n"
+        "func g(q int64) S { return S{Q: Q{P: q}} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(
+            go_types_helper,
+            files,
+            {"lib": {"x.go": "package lib\ntype X struct{ Z int64 }\n"}},
+        ),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
 def test_call_result_anon_struct_embedded_pointer_reads_external(
     go_types_helper,
 ):

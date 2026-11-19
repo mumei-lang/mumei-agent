@@ -1056,6 +1056,16 @@ class _Builder:
                     if unenumerable is None:
                         unenumerable = f
                     continue
+                if (
+                    getattr(f, "embedded", None) is None
+                    and f.name != tb.name
+                ):
+                    # A pre-`embedded` report cannot mark the field
+                    # either way, but a field whose name is not its
+                    # type's name (`R *Q`, `R Q`) is definitely
+                    # named — embedded fields always carry the
+                    # type's own name — so it never promotes.
+                    continue
                 inner = self._struct_fields(tb)
                 if ident.id in {x.id for x in inner}:
                     # Keep scanning the level: a pointer-typed
@@ -1083,10 +1093,15 @@ class _Builder:
                     if getattr(g, "embedded", None) is not False
                     and (gtype := getattr(g, "type", None)) is not None
                 )
+            if found_value:
+                # A known value read beats an unknown path: when
+                # `lib.X` could *also* declare `ident`, the
+                # compiler would have rejected the promotion as
+                # ambiguous, so the unenumerable type cannot carry
+                # this read in a valid program.
+                return ("value", None)
             if unenumerable is not None:
                 return ("ptr", unenumerable.type)
-            if found_value:
-                return ("value", None)
             frontier = nxt
         return None
 
