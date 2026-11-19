@@ -4871,6 +4871,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 return None
             return member
+        if call.kind == "indirect_or_selector":
+            # `ch := g(x)` — `g` is a func-typed parameter or bound
+            # func value. go-types resolves `ch`'s declared `chan`
+            # type from `g`'s signature, so the LHS gate
+            # (`_scalar_chan_binding` / `_chan_chan_fact`) already
+            # carries the result fact `pred` would check on a known
+            # callee. Only a plain identifier callee admits —
+            # `mk(x)()` and `fs[i]()` stay closed. The opaque body
+            # may hand a caller queue back, so the bound name joins
+            # the external model like an imported result.
+            function_node = inner.child_by_field_name("function")
+            if (
+                function_node is None
+                or function_node.type != "identifier"
+            ):
+                return None
+            ref = self.references.get(self.node_key(function_node))
+            if ref is None:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            if binding is None or binding.type.kind != "function":
+                return None
+            return binding
         return None
 
     def _func_iterator_result(self, node: Any) -> bool:
@@ -4926,15 +4949,53 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if inner is None or inner.type != "call_expression":
             return ()
         call = self.calls.get(self.node_key(inner))
-        if call is None or call.kind != "direct_import":
-            return ()
-        member = self.members.get(call.target)
-        if (
-            member is None
-            or index >= len(member.result_types)
-            or not self._scalar_chan_fact(member.result_types[index])
+        if call is None or call.kind not in (
+            "direct_import",
+            "indirect_or_selector",
         ):
             return ()
+        capture_roots = ()
+        if call.kind == "direct_import":
+            member = self.members.get(call.target)
+            if (
+                member is None
+                or index >= len(member.result_types)
+                or not self._scalar_chan_fact(
+                    member.result_types[index]
+                )
+            ):
+                return ()
+        else:
+            # `ch := g(q)` — `g` is a func value whose opaque body
+            # may `return q`, so each `chan` argument promotes like
+            # the imported case. `_chan_result_call` already gated
+            # the call to an identifier callee bound to a
+            # `function` type, and the LHS declared `chan` type
+            # carries the result fact the member check verifies on
+            # an imported call.
+            function_node = inner.child_by_field_name("function")
+            if (
+                function_node is None
+                or function_node.type != "identifier"
+            ):
+                return ()
+            ref = self.references.get(self.node_key(function_node))
+            if ref is None:
+                return ()
+            fb = self.bindings.get(ref.binding_id)
+            if fb is None or fb.type.kind != "function":
+                return ()
+            capture_roots = ()
+            # `f := func() chan T { return q }; ch := f()` — the
+            # literal may hand a *captured* queue back instead of an
+            # argument, so each `chan` capture promotes external and
+            # seeds the bound name's slot like a `chan` argument.
+            capture_roots = tuple(
+                self._chan_root(cid)
+                for cid in self.closure_captures.get(fb.id, ())
+                if self.bindings.get(cid) is not None
+                and self.bindings[cid].type.kind == "chan"
+            )
         arg_list = next(
             (
                 c
@@ -4944,7 +5005,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             None,
         )
         if arg_list is None:
-            return ()
+            return capture_roots
         roots = []
         for arg in arg_list.named_children:
             if arg.type == "comment":
@@ -4960,11 +5021,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if arg is None:
                     break
-            if arg is None or arg.type != "identifier":
+            if arg is None:
                 continue
-            chan = self._chan_binding(arg, locals_, params)
-            if chan is not None:
-                roots.append(self._chan_root(chan.id))
+            if arg.type == "identifier":
+                chan = self._chan_binding(arg, locals_, params)
+                if chan is not None:
+                    roots.append(self._chan_root(chan.id))
+            else:
+                # `ch := g(GC)` — a non-identifier chan argument
+                # naming an external queue (package var, imported
+                # member, `chan chan` local) promotes on its own
+                # identity like an identifier argument does.
+                ext = self._external_chan_operand(arg, params)
+                if ext is not None:
+                    roots.append(ext[0])
         if call.method:
             # `q.M()` — the receiver sits outside the argument
             # list, and the opaque body may hand it straight back
@@ -4988,7 +5058,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     root = self._chan_root(chan.id)
                     if root not in roots:
                         roots.append(root)
-        return tuple(roots)
+        return tuple(roots) + tuple(
+            r for r in capture_roots if r not in roots
+        )
 
     def _chan_result_call_at(
         self, node: Any, index: int, fact_pred: Any = None
@@ -12861,6 +12933,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
+                    if (
+                        binding.type.kind == "chan"
+                        and self._external_chan_operand(node, params)
+                        is not None
+                    ):
+                        # `G(GC)` names a queue in external state —
+                        # the callee may observe its contents: the
+                        # same union `<-GC` reads.
+                        return (
+                            locals_.get(ref.binding_id, frozenset())
+                            | self.indirect_writes
+                        )
                     return frozenset()
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
@@ -12876,8 +12960,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # without a matching declaration stay closed.
             member = self._package_member(node)
             if member is not None and member.kind == "var":
-                if member.type.kind not in {"integer", "boolean", "pointer"}:
+                ext_operand = self._external_chan_operand(node, params)
+                if member.type.kind not in {
+                    "integer",
+                    "boolean",
+                    "pointer",
+                } and ext_operand is None:
                     raise _Unsupported("non_parameter_reference", _span(node))
+                # A `chan` member (`lib.GC`) names a queue in
+                # external state — the same dep-free imported read a
+                # package-level `var GC chan T` identifier already
+                # takes. Admitting it here lets `g(lib.GC)` and
+                # `lib.G(lib.GC)` promote the queue like a `chan`
+                # parameter argument instead of closing the call.
                 self._pin_member_type(member)
                 transfers.append(
                     CallTransfer(
@@ -12892,6 +12987,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         imported=True,
                     )
                 )
+                if ext_operand is not None:
+                    # Naming the queue surfaces what it may hold —
+                    # `G(lib.GC)` must carry the sends a callee could
+                    # observe, exactly like `<-lib.GC` reads
+                    # `indirect_writes | base_deps`.
+                    return (
+                        locals_.get(member.id, frozenset())
+                        | self.indirect_writes
+                    )
                 return frozenset()
             if member is None:
                 # `s.M` / `St.M` — a bound method value: the
@@ -16892,7 +16996,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # identity.
             target = self._chan_result_call(arg)
             if target is not None:
-                external_chans.add(target.binding_id)
+                # A declared callee resolves to its Function record
+                # (`binding_id`); a func-value callee resolves to the
+                # func binding itself (`id`) — `g` in `f(g())`.
+                external_chans.add(
+                    getattr(target, "binding_id", None) or target.id
+                )
         if captures_pointer:
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
@@ -17330,6 +17439,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_.get(binding.id, frozenset())
                             | stored
                         )
+                    elif (
+                        self._external_chan_operand(arg_node, params)
+                        is not None
+                    ):
+                        # `G(GC)` — a package-level chan var handed to
+                        # an effectful callee: its sends land in the
+                        # external queue, broadcast like `GC <- x`.
+                        self.indirect_writes |= stored
                 elif (
                     binding is not None
                     and binding.type.kind == "struct"
@@ -17345,6 +17462,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # reseat `s` or its fields — so `locals_[s]`
                     # correctly keeps its pre-call set.
                     self.indirect_writes |= stored
+            elif self._external_chan_operand(arg_node, params) is not None:
+                # `G(lib.GC)` — a chan operand in external state
+                # (imported member): the callee may send into the
+                # shared queue — the same broadcast `lib.GC <- x`
+                # makes, observed by a later `<-lib.GC`.
+                self.indirect_writes |= stored
 
 
 def _declared_key(binding_id: str) -> tuple[str, int] | None:

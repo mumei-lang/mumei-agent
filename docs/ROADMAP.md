@@ -2750,7 +2750,24 @@ imported method declares the same way: `ch := st.M()`
 or `ch, n := st.M()` admits when `M`'s signature
 carries a scalar-element `chan` at the bound slot
 (the call records `direct_import` marked `method`).
-One level of channel-of-channels admits under the
+A func-typed callee declaring a scalar `chan`
+result admits too: `ch := g(x)` / `var ch = g(x)`
+where `g` is a func-typed parameter or a bound func
+value (`f := mk(x); ch := f(x)`) binds an external
+queue — go-types resolves the bound name's declared
+`chan` type from the callee's signature, so the LHS
+gate already carries the result fact; an
+unconditional `ch = g(x)` rebind reseats the name
+like `ch = G()`, and each `chan` argument promotes
+external since the opaque body may hand it back
+(`ch := g(q)` seeds `ch`'s slot with `q`'s
+contents). A func value declaring `chan chan T`
+admits through the `chan chan` arm on the declared
+LHS type. Only a plain-identifier callee resolves —
+`mk(x)()` and `fs[i]()` stay closed — and a
+multi-result func-value callee stays closed since
+no signature record verifies the per-slot `chan`
+fact. One level of channel-of-channels admits under the
 external queue model: a `chan chan T` parameter or
 result (local or imported), a package-level `var cc
 chan chan T`, or a `cc := G()` / `cc, n := G()`
