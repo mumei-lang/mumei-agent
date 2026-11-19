@@ -6951,13 +6951,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # bound method value — keep the resolved pair
                         # only when both candidates name the SAME
                         # (method, receiver); otherwise drop to the
-                        # opaque external callee model.
+                        # opaque external callee model. The same
+                        # (method, receiver) pair can still freeze
+                        # different dep sets when the receiver was
+                        # reseated between the two binds, so the kept
+                        # pair unions both dep records.
                         if mv_before.get(src_id) != (
                             self.bound_method_values.get(ref.binding_id)
                         ):
                             self._drop_bound_method(
                                 ref.binding_id, True
                             )
+                        elif (
+                            src_id is not None
+                            and src_id in mv_deps_before
+                        ):
+                            self.bound_method_receiver_deps[
+                                ref.binding_id
+                            ] = self.bound_method_receiver_deps.get(
+                                ref.binding_id, frozenset()
+                            ) | mv_deps_before[
+                                src_id
+                            ]
                     else:
                         if (
                             src_id is not None

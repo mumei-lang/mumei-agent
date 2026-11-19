@@ -17084,6 +17084,30 @@ def test_bound_method_value_receiver_freezes_at_bind(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_bound_method_value_conditional_copy_unions_reseated_deps(
+    go_types_helper,
+):
+    # `h = g` maybe-skipped where both bind (M, s) but s was
+    # reseated between the binds — the kept pair must UNION both
+    # frozen dep sets, not keep only h's older one.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(c bool, a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\th := s.M\n"
+        "\ts = St{V: b}\n"
+        "\tg := s.M\n"
+        "\tif c { h = g }\n"
+        "\treturn h(0)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
 def test_bound_method_value_copy_propagates(go_types_helper):
     # `g := f` where f is a bound method value copies the
     # (method, receiver) pair — `g(2)` resolves through M's summary.
