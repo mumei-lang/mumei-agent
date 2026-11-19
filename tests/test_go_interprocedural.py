@@ -13065,9 +13065,12 @@ def test_immediate_func_literal_internal_call_opaque_effect(
     assert result.effects == "unknown"
 
 
-def test_nested_call_callee_stays_closed(go_types_helper):
+def test_nested_call_callee_runs_opaque(go_types_helper):
     # `h()()` — the outer call's callee is itself a call
-    # expression, which no callee identity resolves: closed.
+    # expression: the inner `h()` evaluates first (its bound
+    # literal's captured `x` rides the result deps), then the
+    # outer call runs opaque on the anonymous func value — an
+    # imported transfer on `h()`'s span.
     data = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
@@ -13077,7 +13080,11 @@ def test_nested_call_callee_stays_closed(go_types_helper):
         "\treturn h()()\n}",
     )
     result = named(*data)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    imports = [c for c in result.calls if c.imported]
+    assert len(imports) == 1
 
 
 def test_bound_closure_var_declaration(go_types_helper):
@@ -20536,6 +20543,612 @@ def test_defer_indirect_callee_arg_deps_reach_named_result(
 
 
 
+def test_call_result_field_read_admitted(go_types_helper):
+    # `g(a).V` — a field of a call result carries the call's
+    # conflated result deps.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\n"
+        "func g(x int64) P { return P{V: x} }\n"
+        "func F(a int64) int64 { return g(a).V }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_call_result_nested_field_read_admitted(go_types_helper):
+    # `g(a).A.B` — a nested field of a call result conflates the
+    # same way.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ B int64 }\n"
+        "type P struct{ A Q }\n"
+        "func g(x int64) P { return P{A: Q{B: x}} }\n"
+        "func F(a int64) int64 { return g(a).A.B }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_call_result_nested_field_read_pins_field_types(
+    go_types_helper,
+):
+    # `g(a).A.B` where `A`'s type `Q` is declared in another file —
+    # every level's declared field type pins, so redeclaring `Q`
+    # flags this summary via `stale_dependents`.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ A Q }\n"
+        "func g(x int64) P { return P{A: Q{B: x}} }\n"
+        "func F(a int64) int64 { return g(a).A.B }\n",
+        "b.go": "package p\n"
+        "type Q struct{ B int64 }\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    q = next(b for b in snapshot.bindings if b.name == "Q")
+    assert q.id in result.pinned
+
+
+def test_call_result_field_read_pointer_result_joins_escaped(
+    go_types_helper,
+):
+    # `lib.G(x).V` where `G` returns `*S` — the read dereferences
+    # memory an escaped alias may have written, so the escaped
+    # binding's current deps union into the result like a `*p` read.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, y int64) int64 {\n"
+        "    b := y\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return lib.G(x).V\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type S struct{ V int64 }\n"
+            "func G(a int64) *S { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert {0, 1}.issubset(result.return_dependencies)
+
+
+def test_call_result_terminal_pointer_field_is_not_a_deref(
+    go_types_helper,
+):
+    # `g(x).P` with `P *Q` terminal reads the pointer VALUE — nothing
+    # dereferences, so no escaped/indirect union and no external
+    # transfer beyond the call's own.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "type S struct{ P *Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    _ = g(x).P\n"
+        "    return 0\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "none_in_supported_fragment"
+    (transfer,) = result.calls
+    assert not transfer.imported
+
+
+def test_call_result_intermediate_pointer_field_dereferences(
+    go_types_helper,
+):
+    # `g(x).P.V` crosses the `*Q` in field `P` — the read
+    # dereferences memory aliases may have written, so the escaped
+    # binding's deps union in like a `*p` read.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "type S struct{ P *Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P.V\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_call_result_promoted_field_through_pointer_reads_external(
+    go_types_helper,
+):
+    # `g(q).P` on `type S struct{ *Q }` — `P` promotes through the
+    # embedded pointer: the syntactic chain names no `*`, but the
+    # read dereferences caller memory, so it records an external
+    # effect and joins escaped deps like `g().P.V` does. `P` is a
+    # scalar field read directly into the return, so the external
+    # effect comes from the selector alone — no later dereference
+    # produces it.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ *Q }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_promoted_through_value_embed_stays_local(
+    go_types_helper,
+):
+    # `g(x).P` on `type S struct{ R *R; Q }` — `P` promotes through
+    # the VALUE-embedded `Q`, not the unrelated pointer `R *R`:
+    # the read stays a call-result dep — no external effect.
+    files = {
+        "a.go": "package p\n"
+        "type R struct{ V int64 }\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ R *R; Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+    assert not [c for c in result.calls if c.imported]
+
+
+def test_call_result_named_field_does_not_carry_promotion(
+    go_types_helper,
+):
+    # `g(x).P` on `type S struct{ R Q; *Q }` — the named field
+    # `R Q` never carries a selector promotion; `P` resolves only
+    # through the embedded `*Q`, so the read crosses the pointer
+    # and records the external effect.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ R Q; *Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_shallow_value_embed_wins_over_deep_pointer(
+    go_types_helper,
+):
+    # `g(x).P` on `type R struct{ *Q }; type S struct{ R; Q }` —
+    # Go resolves the promotion at the shallowest depth: the
+    # direct value embed `Q` wins over the deeper `R.*Q`, so the
+    # read stays local — no external effect.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type R struct{ *Q }\n"
+        "type S struct{ R; Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+    assert not [c for c in result.calls if c.imported]
+
+
+def test_call_result_named_field_sharing_type_name_not_embedded(
+    go_types_helper,
+):
+    # `g(x).P` on `type S struct{ Q Q; *W }` — the named field
+    # `Q Q` shares its name with its type but is NOT embedded, so
+    # `P` (declared on both Q and W) promotes only through `*W`:
+    # the read crosses the pointer.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type W struct{ P int64 }\n"
+        "type S struct{ Q Q; *W }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def _strip_embedded_keys(node):
+    if isinstance(node, dict):
+        return {
+            k: _strip_embedded_keys(v)
+            for k, v in node.items()
+            if k != "embedded"
+        }
+    if isinstance(node, list):
+        return [_strip_embedded_keys(v) for v in node]
+    return node
+
+
+def test_call_result_promotion_old_report_without_embedded_marker(
+    go_types_helper,
+):
+    # A report predating the `embedded` marker cannot tell named
+    # from embedded fields — the promotion search must keep the
+    # pre-marker search-all behavior for it instead of treating
+    # every field as named (which would drop `g().P`'s external
+    # read), and a same-depth pointer sibling still wins over a
+    # named-field lookalike's value match (`R Q` vs `*Q`).
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ R Q; *Q }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    payload = json.loads(package_report(go_types_helper, files))
+    old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+    snapshot = load_go_package_snapshot(
+        old_payload,
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_promotion_old_report_named_pointer_stays_named(
+    go_types_helper,
+):
+    # A pre-`embedded` report cannot mark `R *Q` named, but a
+    # field whose name is not its type's name can never promote:
+    # `g(x).P` reads the embedded `Q` value field, so the read
+    # stays a call dep with no external effect.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ Q; R *Q }\n"
+        "func g(q int64) S { return S{Q: Q{P: q}} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    payload = json.loads(package_report(go_types_helper, files))
+    old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+    snapshot = load_go_package_snapshot(
+        old_payload,
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_call_result_promotion_value_match_beats_unenumerable_embed(
+    go_types_helper,
+):
+    # `S{ Q; lib.X }` — the embedded `lib.X` type cannot be
+    # enumerated (its declaration is not in the unit), but the
+    # embedded `Q` already resolves `P`: in a valid program only
+    # one field can promote `P`, so the unenumerable type cannot
+    # carry the read and no external effect is recorded.
+    files = {
+        "a.go": "package p\n"
+        'import "lib"\n'
+        "type Q struct{ P int64 }\n"
+        "type S struct{ Q; lib.X }\n"
+        "func g(q int64) S { return S{Q: Q{P: q}} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(
+            go_types_helper,
+            files,
+            {"lib": {"x.go": "package lib\ntype X struct{ Z int64 }\n"}},
+        ),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_call_result_promotion_old_report_embedded_alias_pointer(
+    go_types_helper,
+):
+    # `type A = *Q` embedded as `A` in a pre-`embedded` report:
+    # the field name does not match the resolved pointee's name
+    # (A vs Q), but a bare-identifier declaration IS embed-
+    # compatible, so the `*Q` crossing still reads external.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type A = *Q\n"
+        "type S struct{ A }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    payload = json.loads(package_report(go_types_helper, files))
+    old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+    snapshot = load_go_package_snapshot(
+        old_payload,
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_promotion_old_report_embedded_tag_and_crlf(
+    go_types_helper,
+):
+    # An embedded field may carry a struct tag or sit in a CRLF
+    # file — the declaration-form scan must still see it as
+    # embed-compatible in a pre-`embedded` report.
+    for fields in (
+        'package p\ntype Q struct{ P int64 }\ntype S struct{ *Q `json:"q"` }\n',
+        'package p\ntype Q struct{ P int64 }\ntype S struct{\r\n\t*Q\r\n}\r\n',
+        'package p\ntype Q struct{ P int64 }\ntype S struct{ *Q // c\n}\n',
+    ):
+        files = {
+            "a.go": fields
+            + "func g(q int64) S { return S{} }\n"
+            "func F(q int64) int64 {\n"
+            "\tb := q\n"
+            "\tp := &b\n"
+            "\t_ = p\n"
+            "\treturn g(q).P\n"
+            "}\n"
+        }
+        payload = json.loads(package_report(go_types_helper, files))
+        old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+        snapshot = load_go_package_snapshot(
+            old_payload,
+            files,
+            target_arch="amd64",
+        )
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "unknown"
+        assert any(t.imported for t in result.calls)
+
+
+def test_call_result_anon_struct_embedded_pointer_reads_external(
+    go_types_helper,
+):
+    # `g(x).P` on `func g() struct{ *Q }` — the anonymous result's
+    # embedded `*Q` is dereferenced by the promoted read: same
+    # external effect as the named `type S struct{ *Q }` form.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "func g(x int64) struct{ *Q } { return struct{ *Q }{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_promoted_field_through_value_stays_local(
+    go_types_helper,
+):
+    # `g(q).P` on `type S struct{ Q }` — promotion through VALUE
+    # embedding reads copied data, not caller memory: no external
+    # record beyond the call's own.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ Q }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    _ = g(q).P\n"
+        "    return 0\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_call_result_index_stays_closed(go_types_helper):
+    # `g(a)[0]` — the callee's array result is already closed at
+    # the signature gate, so the caller fails closed too.
+    files = {
+        "a.go": "package p\n"
+        "func g(x int64) [2]int64 { return [2]int64{x, 0} }\n"
+        "func F(a int64) int64 { return g(a)[0] }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
 def test_func_result_return_named_admitted(go_types_helper):
     # `func mk() func() int64 { return G }` — a func-typed result
     # carries no scalar deps; the name reads dep-free.
@@ -20659,13 +21272,91 @@ def test_nil_collection_result_admitted(go_types_helper):
     assert result.available
 
 
-def test_func_result_direct_call_stays_closed(go_types_helper):
-    # `mk()()` — a call result as the callee operand is a computed
-    # base the func-value path cannot bind; stays closed.
+def test_func_result_direct_call_runs_opaque(go_types_helper):
+    # `mk(x)()` — the callee operand is a call result: the inner
+    # call evaluates first (its transfer lands on mk's binding),
+    # then the outer call runs opaque on the anonymous func value
+    # — an imported transfer on the inner call's span, the
+    # external effect, and the inner call's dep set.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { return G }; "
+        "func mk(x int64) func() int64 { return func() int64 { return x } }; "
+        "func F(x int64) int64 { return mk(x)() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    imports = [c for c in result.calls if c.imported]
+    assert len(imports) == 1
+
+
+def test_func_result_direct_call_dep_free_result_stays_empty(
+    go_types_helper,
+):
+    # `mk(x)()` where `mk` returns `G` — the func value is opaque
+    # but `mk`'s result carries no `x` dep, so the outer call's
+    # result is parameter-independent. Not empty-as-in-`{}`
+    # opaque: the result genuinely ignores `x`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() int64 { return G }; "
         "func G() int64 { return 1 }; "
+        "func F(x int64) int64 { return mk(x)() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_func_result_direct_call_chain_runs_opaque(go_types_helper):
+    # `mk()()()` — each nesting level re-enters the
+    # call-expression callee branch: the innermost `mk(x)`
+    # transfer lands on mk's binding, the anonymous results each
+    # record a span-identity imported transfer.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() func() int64 {\n"
+        "    return func() func() int64 {\n"
+        "        return func() int64 { return x }\n"
+        "    }\n"
+        "}\n"
+        "func F(x int64) int64 { return mk(x)()() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    imports = [c for c in result.calls if c.imported]
+    assert len(imports) == 2
+
+
+def test_func_result_direct_call_parenthesized_runs_opaque(
+    go_types_helper,
+):
+    # `(mk(x))()` — a parenthesized call-result callee unwraps to
+    # the same opaque call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() int64 { return func() int64 { return x } }; "
+        "func F(x int64) int64 { return (mk(x))() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_func_result_direct_call_inner_closed_stays_closed(
+    go_types_helper,
+):
+    # `mk()()` where `mk`'s result is `nil` — the inner call
+    # cannot produce a func value, so the outer call fails
+    # closed through the inner evaluation.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() func() int64 { return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
@@ -20892,10 +21583,35 @@ def test_func_element_map_container_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_call_result_callee_chan_arg_joins_external_queue(
+    go_types_helper,
+):
+    # `mk(ch)(x)` — the returned func may capture `ch` and send
+    # `x` into it, so the inner call's `chan` argument joins the
+    # external model like `f := mk(ch)` does: `<-ch` afterwards
+    # observes `x` through `indirect_writes`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func snd(c chan int64, v int64) { c <- v }\n"
+        "func mk(ch chan int64) func(int64) {\n"
+        "    return func(x int64) { snd(ch, x) }\n"
+        "}\n"
+        "func F(x int64) int64 {\n"
+        "    ch := make(chan int64)\n"
+        "    mk(ch)(x)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_func_result_imported_admitted(go_types_helper):
     # `f := lib.Mk()` — the producer now records `direct_import` for
     # a func-result callee, so the name binds an opaque func value
     # and `f()` resolves through the func-value path.
+
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { f := lib.Mk(); return f() }\n"
@@ -21334,3 +22050,4 @@ def test_func_arg_opaque_callback_writes_back_escaped(
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
+
