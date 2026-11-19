@@ -8828,6 +8828,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     src_id = (
                         src_ref.binding_id if src_ref is not None else None
                     )
+                    tgt_bound = self.bindings.get(ref.binding_id)
+                    if (
+                        not conditional
+                        and self._may_skip == 0
+                        and ref.binding_id != src_id
+                        and tgt_bound is not None
+                        and self._func_elem_collection(tgt_bound.type)
+                    ):
+                        # A definite reseat leaves the backing the
+                        # name used to share — hand its element
+                        # records to the remaining sharers BEFORE
+                        # the copy below replaces this name's
+                        # records. `a, a[0] = b, f` recorded the
+                        # literal under `a` during RHS eval: that
+                        # record belongs to the OLD array `a`'s
+                        # sharers keep, not to `a`'s new backing.
+                        self._func_elem_reseat(ref.binding_id)
                     # A maybe-skipped copy leaves the name holding
                     # EITHER function value. When the source carries
                     # a resolvable record the union covers both
@@ -9017,7 +9034,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if src_id is not None
                         else None
                     )
-                    tgt_bound = self.bindings.get(ref.binding_id)
                     if (
                         src_bound is not None
                         and tgt_bound is not None
@@ -9030,15 +9046,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ):
                         # `fs2 = fs` — the copy shares the
                         # backing like `fs2 := fs`; a definite
-                        # rebind first leaves the backing it used
-                        # to share (group membership is a single
+                        # rebind first left the backing it used to
+                        # share (group membership is a single
                         # backing).
-                        if (
-                            not conditional
-                            and self._may_skip == 0
-                            and ref.binding_id != src_id
-                        ):
-                            self._func_elem_reseat(ref.binding_id)
                         self._func_elem_share(
                             ref.binding_id, src_id
                         )
