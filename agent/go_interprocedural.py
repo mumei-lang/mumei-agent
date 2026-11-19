@@ -875,6 +875,17 @@ class _Builder:
         # whose RHS is not a known function clears it and the call
         # falls back to the opaque external callee model.
         self.func_aliases: dict[str, str] = {}
+        # Bound names whose call must fold BOTH a literal's capture/
+        # write records AND a non-literal callee a maybe-skipped rebind
+        # left live on the untaken path (`f := cb; if b { f =
+        # func()... }` — either the parameter callback or the literal
+        # may run). The name KEEPS its closure records so the call
+        # resolves the literal alternatives' captures and write
+        # targets with CURRENT deps, and the marker makes the call
+        # apply the external model (name's own dep set, escaped
+        # bindings, indirect writes) for everything else. A fresh
+        # unconditional bind clears the marker.
+        self.opaque_callees: set[str] = set()
         # Function names read in a call's argument list — `H(G, x)`
         # — pending fold until the call's own deps are known: the
         # callee may invoke G, so the possible invocation records a
@@ -5828,6 +5839,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
             aliases_before = dict(self.func_aliases)
+            opaque_before = set(self.opaque_callees)
             mv_before = dict(self.bound_method_values)
             mv_deps_before = dict(self.bound_method_receiver_deps)
             writes_before = dict(self.closure_writes)
@@ -6118,6 +6130,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.closure_inner_calls.add(binding.id)
                     else:
                         self.closure_inner_calls.discard(binding.id)
+                    # `h2 := h` inherits h's opaque mark too — the
+                    # copy resolves the same mixed alternatives.
+                    if (
+                        src_id is not None
+                        and src_id in opaque_before
+                    ):
+                        self.opaque_callees.add(binding.id)
+                    else:
+                        self.opaque_callees.discard(binding.id)
                     # `h := G` binds a declared function name; `h2 :=
                     # h` inherits the alias h recorded.
                     self._propagate_func_alias(
@@ -6147,6 +6168,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # A selector RHS stores a value the alias model
                     # cannot resolve — any earlier alias drops.
                     self.func_aliases.pop(binding.id, None)
+                    self.opaque_callees.discard(binding.id)
                 elif len(lefts) == len(rights):
                     if rights[i].type == "func_literal":
                         # `f := func()...` — the literal just wrote
@@ -6311,6 +6333,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 captures_before = dict(self.closure_captures)
                 pointee_before = set(self.pointee_closures)
                 aliases_before = dict(self.func_aliases)
+                opaque_before = set(self.opaque_callees)
                 mv_before = dict(self.bound_method_values)
                 mv_deps_before = dict(self.bound_method_receiver_deps)
                 writes_before = dict(self.closure_writes)
@@ -6594,6 +6617,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.closure_inner_calls.discard(
                                 binding.id
                             )
+                        if (
+                            src_id is not None
+                            and src_id in opaque_before
+                        ):
+                            self.opaque_callees.add(binding.id)
+                        else:
+                            self.opaque_callees.discard(binding.id)
                         self._propagate_func_alias(
                             binding.id, src_id, aliases_before,
                             params, conditional,
@@ -7285,6 +7315,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
             aliases_before = dict(self.func_aliases)
+            opaque_before = set(self.opaque_callees)
             mv_before = dict(self.bound_method_values)
             mv_deps_before = dict(self.bound_method_receiver_deps)
             writes_before = dict(self.closure_writes)
@@ -7773,6 +7804,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 or src_id in star_before
                                 or src_id in calls_before
                                 or src_id in aliases_before
+                                or src_id in opaque_before
                             )
                         )
                         if src_known:
@@ -7806,22 +7838,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.closure_inner_calls.add(
                                     ref.binding_id
                                 )
+                            if (
+                                src_id is not None
+                                and src_id in opaque_before
+                            ):
+                                self.opaque_callees.add(
+                                    ref.binding_id
+                                )
                         else:
-                            self.closure_captures.pop(
-                                ref.binding_id, None
-                            )
-                            self.closure_writes.pop(
-                                ref.binding_id, None
-                            )
-                            self.pointee_closures.discard(
-                                ref.binding_id
-                            )
-                            self.closure_star_writes.discard(
-                                ref.binding_id
-                            )
-                            self.closure_inner_calls.discard(
-                                ref.binding_id
-                            )
+                            # src carries NO resolvable record — the
+                            # taken path hands the name an opaque
+                            # value. Keep whatever the untaken path's
+                            # own alternatives described and mark the
+                            # name so the external model covers both.
+                            self.opaque_callees.add(ref.binding_id)
                         # A maybe-skipped `h = g` may also hand h a
                         # bound method value — keep the resolved pair
                         # only when both candidates name the SAME
@@ -7926,6 +7956,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.closure_inner_calls.discard(
                                 ref.binding_id
                             )
+                        if (
+                            src_id is not None
+                            and src_id in opaque_before
+                        ):
+                            self.opaque_callees.add(ref.binding_id)
+                        else:
+                            self.opaque_callees.discard(
+                                ref.binding_id
+                            )
                     # `h = G` binds a declared function name; `h2 =
                     # h` inherits the alias h recorded.
                     self._propagate_func_alias(
@@ -7975,30 +8014,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         or rights[i].type != "func_literal"
                     ):
                         # A non-literal RHS leaves only stale records
-                        # behind; a literal's fresh records stand —
-                        # but under a conditional rebind the literal
-                        # eval already dropped the name to the opaque
-                        # model when the old value could not merge.
+                        # behind; a literal's fresh records stand.
+                        # Under a conditional rebind the untaken path
+                        # keeps the old value — mark the name opaque
+                        # and keep its records so the call folds that
+                        # alternative with CURRENT deps; an
+                        # unconditional store loses the alternative
+                        # outright, so the records drop with the mark.
                         if conditional or self._may_skip > 0:
-                            for wid in self.closure_writes.get(
-                                ref.binding_id, ()
-                            ):
-                                self.escaped.add(wid)
-                            for cid in self.closure_captures.get(
-                                ref.binding_id, ()
-                            ):
-                                self.escaped.add(cid)
-                        self.closure_captures.pop(
-                            ref.binding_id, None
-                        )
-                        self.pointee_closures.discard(ref.binding_id)
-                        self.closure_writes.pop(ref.binding_id, None)
-                        self.closure_star_writes.discard(
-                            ref.binding_id
-                        )
-                        self.closure_inner_calls.discard(
-                            ref.binding_id
-                        )
+                            self.opaque_callees.add(ref.binding_id)
+                        else:
+                            self.opaque_callees.discard(
+                                ref.binding_id
+                            )
+                            self.closure_captures.pop(
+                                ref.binding_id, None
+                            )
+                            self.pointee_closures.discard(
+                                ref.binding_id
+                            )
+                            self.closure_writes.pop(
+                                ref.binding_id, None
+                            )
+                            self.closure_star_writes.discard(
+                                ref.binding_id
+                            )
+                            self.closure_inner_calls.discard(
+                                ref.binding_id
+                            )
                 else:
                     # `h = (f)` / `h = f()` — a non-identifier RHS
                     # leaves the name holding a value the alias
@@ -9021,83 +9064,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         # state means the name also
                                         # binds a NON-literal callee
                                         # (`g := cb` for a param
-                                        # callback): unioning the
-                                        # record in would model the
-                                        # call as a resolved closure
-                                        # call and hide the external
-                                        # callee's deps and effects —
-                                        # drop it so the call keeps
-                                        # the opaque external model.
-                                        # The dropped list's captured
-                                        # bindings join the name's own
-                                        # dep set resolved NOW: the
-                                        # literal possibility still
-                                        # reads them, and the external
-                                        # fallback's name deps carry
-                                        # the update (`x = a` in the
-                                        # body) the record tracked.
-                                        popped = (
-                                            prev_c.get(key) or frozenset()
-                                        ) | (
-                                            cur_c.get(key) or frozenset()
+                                        # callback): keep the unioned
+                                        # record for the literal
+                                        # alternative and mark the
+                                        # name opaque so the call
+                                        # still folds the external
+                                        # callee's deps and effects.
+                                        self.opaque_callees.add(key)
+                                        self.closure_captures[key] = (
+                                            cur_c.get(
+                                                key, frozenset()
+                                            )
+                                            | prev_c.get(
+                                                key, frozenset()
+                                            )
                                         )
-                                        extra: frozenset = frozenset()
-                                        for cbid in popped:
-                                            root = (
-                                                self._chan_root(cbid)
-                                                if self._is_chan_binding(
-                                                    cbid
-                                                )
-                                                else cbid
+                                        self.closure_writes[key] = (
+                                            cur_w.get(
+                                                key, frozenset()
                                             )
-                                            if root in inner:
-                                                extra |= inner[root]
-                                                if (
-                                                    root
-                                                    in self.external_chan_locals
-                                                ):
-                                                    extra |= (
-                                                        self.indirect_writes
-                                                    )
-                                            elif root in params:
-                                                extra |= frozenset(
-                                                    {params[root]}
-                                                )
-                                        if extra:
-                                            inner[key] = (
-                                                inner.get(key, frozenset())
-                                                | extra
+                                            | prev_w.get(
+                                                key, frozenset()
                                             )
-                                        self.closure_captures.pop(key, None)
-                                        # The dropped literal may
-                                        # still write its targets —
-                                        # the values it stores are
-                                        # built from what it reads,
-                                        # so the same `extra` lands
-                                        # on each write target.
-                                        for w in (
-                                            prev_w.get(key)
-                                            or frozenset()
-                                        ) | (
-                                            cur_w.get(key)
-                                            or frozenset()
+                                        )
+                                        if (
+                                            key in cur_s
+                                            or key in prev_s
                                         ):
-                                            if extra:
-                                                inner[w] = (
-                                                    inner.get(
-                                                        w, frozenset()
-                                                    )
-                                                    | extra
-                                                )
-                                        self.closure_writes.pop(
-                                            key, None
-                                        )
-                                        self.closure_star_writes.discard(
-                                            key
-                                        )
-                                        self.closure_inner_calls.discard(
-                                            key
-                                        )
+                                            self.closure_star_writes.add(
+                                                key
+                                            )
+                                        if (
+                                            key in cur_i
+                                            or key in prev_i
+                                        ):
+                                            self.closure_inner_calls.add(
+                                                key
+                                            )
                                     else:
                                         # Present in both states —
                                         # union keeps every binding
@@ -10979,8 +10982,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `&h` hands the callee a writable alias — after
                     # `mutate(&h)` the name may hold a function the
                     # alias record never saw, so `h(x)` can no
-                    # longer resolve through it.
+                    # longer resolve through it. The literal's own
+                    # records stay as a (conservative) alternative —
+                    # the marker keeps the external model on top.
                     self.func_aliases.pop(ref.binding_id, None)
+                    self.opaque_callees.add(ref.binding_id)
             deps: frozenset[int] = frozenset()
             for child in children:
                 deps |= self.expression(
@@ -11881,17 +11887,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or dest_id in self.closure_writes
             or dest_id in self.closure_star_writes
             or dest_id in self.closure_inner_calls
+            or dest_id in self.opaque_callees
             or dest_id in params
         )
         if ambiguous:
+            # Either the old or the new callee may run — the name
+            # resolves opaquely: keep every closure record so the call
+            # folds the literal alternatives' captures and write
+            # targets, and mark the name so the external model still
+            # applies to the rest.
             self.func_aliases.pop(dest_id, None)
-            self.closure_captures.pop(dest_id, None)
-            self.pointee_closures.discard(dest_id)
-            self.closure_writes.pop(dest_id, None)
-            self.closure_star_writes.discard(dest_id)
-            self.closure_inner_calls.discard(dest_id)
+            self.opaque_callees.add(dest_id)
         else:
             self.func_aliases[dest_id] = target
+            self.opaque_callees.discard(dest_id)
             self.closure_captures.pop(dest_id, None)
             self.pointee_closures.discard(dest_id)
             self.closure_writes.pop(dest_id, None)
@@ -11946,18 +11955,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
         the NEW value instead of a stale literal or method pair.
 
         A conditional drop leaves the untaken path's OLD value live:
-        the name then resolves as an opaque external callee, and the
-        bindings the old literal could write or capture escape so a
-        later opaque call folds the old alternative's reads and
-        writes back into their dep sets."""
+        the name becomes opaque (the external model folds its own dep
+        set, the escaped bindings and indirect writes) but KEEPS its
+        literal records — the call then resolves the untaken literal's
+        captures and write targets with CURRENT deps instead of the
+        rebind-time ones, and a captured binding read-only by the old
+        literal never becomes a write candidate."""
         if conditional:
-            for wid in self.closure_writes.get(bid, ()):
-                self.escaped.add(wid)
-            for cid in self.closure_captures.get(bid, ()):
-                self.escaped.add(cid)
+            self.opaque_callees.add(bid)
             self._drop_bound_method(bid, True)
-        else:
-            self._drop_bound_method(bid)
+            self.func_aliases.pop(bid, None)
+            return
+        self.opaque_callees.discard(bid)
+        self._drop_bound_method(bid)
         self.closure_captures.pop(bid, None)
         self.pointee_closures.discard(bid)
         self.closure_writes.pop(bid, None)
@@ -12554,20 +12564,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if may_skip and bound_id in self.func_aliases:
                 # A literal on a maybe-taken path over a
                 # function-name alias leaves the callee's value
-                # path-dependent — the literal's captures
-                # describe only the literal, so drop BOTH
-                # records and let `h()` fall back to the opaque
-                # external callee model. The literal's own write
-                # targets still land on the taken path — escape
-                # them so the opaque call folds those writes in.
-                for wid in frozenset(writes):
-                    self.escaped.add(wid)
+                # path-dependent — union the literal's records so
+                # the call folds this alternative's captures and
+                # write targets, and mark the name opaque so the
+                # untaken alias's callee still resolves through
+                # the external model.
+                self.closure_captures[bound_id] = (
+                    self.closure_captures.get(bound_id, frozenset())
+                    | frozenset(captured)
+                )
+                self.closure_writes[bound_id] = (
+                    self.closure_writes.get(bound_id, frozenset())
+                    | frozenset(writes)
+                )
+                if star_write:
+                    self.closure_star_writes.add(bound_id)
+                if has_call:
+                    self.closure_inner_calls.add(bound_id)
                 self.func_aliases.pop(bound_id, None)
-                self.closure_captures.pop(bound_id, None)
-                self.pointee_closures.discard(bound_id)
-                self.closure_writes.pop(bound_id, None)
-                self.closure_star_writes.discard(bound_id)
-                self.closure_inner_calls.discard(bound_id)
+                self.opaque_callees.add(bound_id)
             elif may_skip and bound_id in self.closure_captures:
                 # A maybe-skipped rebind keeps the old literal's
                 # captures on the path that does not run it —
@@ -12593,28 +12608,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # a parameter callback (`f := cb`), a call result
                 # (`f := mk()`), a declared zero value or a bound
                 # method — leaves the old callee live on the untaken
-                # path, and the record sets cannot express a may-set
-                # of two callee KINDS. Resolve the name opaquely:
-                # its dep set already unions both alternatives, and
-                # escaping the bindings either side could write keeps
-                # their effects in the model.
-                for wid in (
-                    self.closure_writes.get(bound_id, frozenset())
-                    | frozenset(writes)
-                ):
-                    self.escaped.add(wid)
-                for cid in (
+                # path. Union the literal's records with whatever the
+                # name already described and mark it opaque: the call
+                # then folds the literal alternatives' captures and
+                # write targets resolved at CALL time, while the
+                # external model covers the non-literal alternative.
+                self.closure_captures[bound_id] = (
                     self.closure_captures.get(bound_id, frozenset())
                     | frozenset(captured)
-                ):
-                    self.escaped.add(cid)
+                )
+                self.closure_writes[bound_id] = (
+                    self.closure_writes.get(bound_id, frozenset())
+                    | frozenset(writes)
+                )
+                if star_write:
+                    self.closure_star_writes.add(bound_id)
+                if has_call:
+                    self.closure_inner_calls.add(bound_id)
                 self._drop_bound_method(bound_id, True)
-                self.closure_captures.pop(bound_id, None)
-                self.pointee_closures.discard(bound_id)
-                self.closure_writes.pop(bound_id, None)
-                self.closure_star_writes.discard(bound_id)
-                self.closure_inner_calls.discard(bound_id)
                 self.func_aliases.pop(bound_id, None)
+                self.opaque_callees.add(bound_id)
             else:
                 self.closure_captures[bound_id] = frozenset(captured)
                 self.closure_writes[bound_id] = frozenset(writes)
@@ -12627,9 +12640,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 else:
                     self.closure_inner_calls.discard(bound_id)
                 # An unconditional literal bind resolves the name
-                # to this literal — a function alias an earlier
-                # `h = G` left behind no longer applies.
+                # to this literal — a function alias or opaque mark
+                # an earlier rebind left behind no longer applies.
                 self.func_aliases.pop(bound_id, None)
+                self.opaque_callees.discard(bound_id)
             if captures_pointer:
                 self.pointee_closures.add(bound_id)
             elif not may_skip:
@@ -12761,8 +12775,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # it is a parameter: a branch-bound literal under a param
         # (`if b { f = func()... }`) still leaves the caller's own
         # callback on the untaken path, so a param callee is always
-        # external-capable.
-        external = captured is None or ref.binding_id in params
+        # external-capable. A name marked by a maybe-skipped rebind
+        # (`f := cb; if b { f = func()... }`) is opaque the same way —
+        # its records still describe the literal alternatives the call
+        # folds in.
+        external = (
+            captured is None
+            or ref.binding_id in params
+            or ref.binding_id in self.opaque_callees
+        )
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
             # reassignments between the literal and the call move
@@ -12876,11 +12897,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # through the fresh deps the store just folded in
                 # (the opaque external callee model).
                 self.func_aliases.pop(target, None)
-                self.closure_captures.pop(target, None)
-                self.pointee_closures.discard(target)
-                self.closure_writes.pop(target, None)
-                self.closure_star_writes.discard(target)
-                self.closure_inner_calls.discard(target)
+                # The may-write leaves the name holding EITHER the
+                # old literal or the fresh opaque value — keep its
+                # records for the literal alternative and mark it so
+                # the external model covers the rest.
+                self.opaque_callees.add(target)
             if star_write or inner_calls:
                 self.indirect_writes |= write_deps
                 for escaped_id in self.escaped:
@@ -13757,11 +13778,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # Same stale-resolution drop as the bound-literal
                 # call: `g = func(){...}` in place rebinds `g`.
                 self.func_aliases.pop(target, None)
-                self.closure_captures.pop(target, None)
-                self.pointee_closures.discard(target)
-                self.closure_writes.pop(target, None)
-                self.closure_star_writes.discard(target)
-                self.closure_inner_calls.discard(target)
+                # The may-write leaves the name holding EITHER the
+                # old literal or the fresh opaque value — keep its
+                # records for the literal alternative and mark it so
+                # the external model covers the rest.
+                self.opaque_callees.add(target)
             if star_write or has_call:
                 self.indirect_writes |= write_deps
                 for escaped_id in self.escaped:

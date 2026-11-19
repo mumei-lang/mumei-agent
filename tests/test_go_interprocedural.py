@@ -13207,6 +13207,92 @@ def test_bound_closure_conditional_rebind_unions_captures(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_conditional_rebind_literal_write_sees_new_deps(
+    go_types_helper,
+):
+    # `if b { f = func() { w = z } }` may keep the OLD literal — its
+    # write to `w` still lands, resolving the captured `x` at call
+    # time. Popping the record on the rebind would report `w` with
+    # only its initialization deps and lose {1, 2} entirely.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, x, z int64) int64 {\n"
+        "\tw := int64(0)\n"
+        "\tf := func() { w = x }\n"
+        "\tif b { f = func() { w = z } }\n"
+        "\tf()\n"
+        "\treturn w\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_conditional_rebind_return_expr_sees_captured_deps(
+    go_types_helper,
+):
+    # `return f` after a conditional literal rebind resolves each
+    # alternative's captures at the return site — both `y` (→x) and
+    # `z` appear in the result's dep set.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, x, z int64) func() int64 {\n"
+        "\ty := x\n"
+        "\tf := func() int64 { return y }\n"
+        "\tif b { f = func() int64 { return z } }\n"
+        "\treturn f\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_conditional_rebind_local_chan_alias_capture(
+    go_types_helper,
+):
+    # `c2 := ch` captured by the old literal — the conditional
+    # rebind keeps the record, so `f()` still resolves the queue
+    # root's deps (the `ch <- x` send) instead of the alias's own
+    # empty set.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, x int64) int64 {\n"
+        "\tch := make(chan int64, 2)\n"
+        "\tc2 := ch\n"
+        "\tf := func() { <-c2 }\n"
+        "\tch <- x\n"
+        "\tif b { f = func() {} }\n"
+        "\tf()\n"
+        "\treturn <-ch\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_conditional_rebind_does_not_escape_read_only_captures(
+    go_types_helper,
+):
+    # `a` is only READ by the old literal — escaping it on the
+    # conditional rebind would let a later opaque call (`cb(x)`)
+    # fold `x`'s deps into `a` though no path writes it. `return a`
+    # must report only `a0`'s dep.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, cb func(int64), a0, x int64) int64 {\n"
+        "\ta := a0\n"
+        "\tf := func() int64 { return a }\n"
+        "\tif b { f = func() int64 { return 0 } }\n"
+        "\tcb(x)\n"
+        "\tf()\n"
+        "\treturn a\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({2})
+    assert result.effects == "unknown"
+
+
 def test_bound_closure_param_reassign_resolves_at_call(
     go_types_helper,
 ):
