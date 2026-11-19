@@ -15653,3 +15653,114 @@ def test_anonymous_struct_embedded_name_admitted(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_rebind_admitted(go_types_helper):
+    # `ch = g()` reseats the name to the callee-produced queue —
+    # the same hand-off `ch := g()` admits, on an existing name.
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar ch chan int64\n"
+        "\tch = g()\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_rebind_drops_prior_alias(go_types_helper):
+    # `ch2 = g()` after `ch2 := ch` reseats ch2 to a callee-produced
+    # queue — the alias to `ch` drops, so a later send through ch2
+    # lands in the new external queue, not ch's.
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\tch2 := ch\n"
+        "\tch2 = g()\n"
+        "\tch2 <- x\n"
+        "\treturn <-ch2\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # The conflated slot keeps the old alias's history — deps(ch)
+    # — beside the reseated queue's observed sends, the same
+    # conflation the alias model accepts for `ch2 = ch3`.
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_rebind_passthrough_aliasing(go_types_helper):
+    # `ch = g(q)` where `g`'s body is `return q` — ch names q's
+    # queue after the reseat, so a send through ch lands in q's
+    # dep set like `ch = q`.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) chan int64 { return q }\n"
+        "func F(ch chan int64, q chan int64, x int64) int64 {\n"
+        "\tch = g(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_rebind_in_tuple_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar ch chan int64\n"
+        "\tx2 := int64(0)\n"
+        "\tx2, ch = x, g()\n"
+        "\tch <- x2\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_rebind_under_branch_stays_closed(
+    go_types_helper,
+):
+    # A conditional `ch = g()` could mean either queue — like a
+    # conditional alias reseat, it stays closed.
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(c bool, x int64) int64 {\n"
+        "\tvar ch chan int64\n"
+        "\tif c {\n"
+        "\t\tch = g()\n"
+        "\t}\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+

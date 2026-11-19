@@ -2617,7 +2617,11 @@ the same way a `chan` parameter does: `ch := g()` and
 (local) callee declares a single scalar `chan` result —
 ops on the bound name broadcast sends into indirect
 writes and observe the caller's queue through them,
-exactly like a parameter. An alias to that name
+exactly like a parameter — and an unconditional
+`ch = g()` rebind reseats the name to the callee's
+queue the same way (a passthrough callee makes `ch`
+name the argument's queue; any prior alias drops). An
+alias to that name
 (`ch2 := ch`) follows the external queue through the
 root binding, a bare read or argument surfaces the
 queue's widened set, and a function literal that
@@ -2625,7 +2629,7 @@ captures the name records the same external effect a
 captured `chan` parameter does. Still closed:
 non-scalar elements, an imported `lib.G()` channel
 result (the signature carries no element kind), a
-multi-result callee, a `ch = g()` rebind, rebinding a
+multi-result callee, and rebinding a
 channel under a branch or loop (a conditional
 `ch2 = ch3` could mean either queue), and `select`
 stay closed, while `len(ch)`/`cap(ch)` now admit as

@@ -5978,10 +5978,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     value = old | value
                 if not compound and self._is_chan_binding(ref.binding_id):
                     # `ch2 = ch` redirects the alias — sends through
-                    # ch2 now land in the new source's dep set, and a
+                    # ch2 now land in the new source's dep set, a
                     # `ch2 = make(chan)` RHS re-creates the queue so
-                    # the alias drops. A tuple-of-different-width
-                    # (`ch2, _ = <-q`), a receive, a call result or a
+                    # the alias drops, and `ch = g()` where `g`
+                    # declares a single scalar `chan` result reseats
+                    # the name to the callee-produced queue (the same
+                    # hand-off `ch := g()` admits). A
+                    # tuple-of-different-width (`ch2, _ = <-q`), a
+                    # receive, a non-`chan` call result or a
                     # non-scalar element produce a queue the
                     # conflated dep set cannot model — all stay
                     # closed.
@@ -5990,8 +5994,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         len(lefts) == len(rights)
                         and self._is_make_chan_call(rights[i])
                     )
+                    call_result = (
+                        len(lefts) == len(rights)
+                        and self._chan_result_call(rights[i])
+                        is not None
+                    )
                     if not self._scalar_chan_binding(ref.binding_id) or (
-                        not fresh_make and chan_alias is None
+                        not fresh_make
+                        and chan_alias is None
+                        and not call_result
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
@@ -6003,6 +6014,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # admits — the dep union covers both queues.
                         if (
                             chan_alias is not None
+                            or call_result
                             or ref.binding_id in self.chan_aliases
                         ):
                             raise _Unsupported(
@@ -6016,6 +6028,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # IS the old queue's contents, now owned by
                         # whoever aliases it (`a <- x; a, b = b, a`
                         # must keep x reachable through `b`).
+                        continue
+                    elif call_result:
+                        # `ch = g()` reseats the name: a passthrough
+                        # callee hands the argument's queue back so
+                        # `ch` aliases it like `ch = q`, otherwise
+                        # the name keeps an external queue of its
+                        # own and drops any prior alias. Either way
+                        # the locals_ slot stays the old queue's
+                        # contents, as with the alias reseat above.
+                        passthrough = self._chan_result_passthrough(
+                            rights[i], locals_, params
+                        )
+                        if passthrough is not None:
+                            self.chan_aliases[ref.binding_id] = (
+                                passthrough.id
+                            )
+                        else:
+                            self.chan_aliases.pop(
+                                ref.binding_id, None
+                            )
+                            self.external_chan_locals.add(
+                                ref.binding_id
+                            )
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
