@@ -9697,6 +9697,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if sent is not None:
                         self.external_chan_locals.add(sent.id)
+                    else:
+                        # `cc <- G(q)` — a non-identifier send value
+                        # may still hand one of its chan arguments'
+                        # queues to the outer queue (`G` returning
+                        # `q`), so the argument roots promote like
+                        # an imported result's args.
+                        self._promote_chan_call_args(
+                            value, "", locals_, params
+                        )
                 if field_chan is not None:
                     # The send's destination read — like `(*p)[i]` —
                     # observes the pointer's deps and every earlier
