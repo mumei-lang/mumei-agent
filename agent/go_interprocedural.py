@@ -68,6 +68,7 @@ No processes, imports, persistent caches or existing audit routes are invoked.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -143,6 +144,63 @@ _INDEX_LITERALS = frozenset(
         "raw_string_literal",
     }
 )
+
+
+def _go_int_literal(text: str) -> int | None:
+    """Value of a Go integer literal — decimal, `0x`/`0X` hex,
+    `0o`/`0O` and leading-zero octal, `0b`/`0B` binary, with `_`
+    digit separators. None when the text does not parse."""
+    t = text.replace("_", "")
+    try:
+        if t[:2].lower() in {"0x", "0o", "0b"}:
+            return int(t, 0)
+        if len(t) > 1 and t[0] == "0":
+            return int(t, 8)
+        return int(t, 10)
+    except ValueError:
+        return None
+
+
+def _go_rune_literal(text: str) -> int | None:
+    """Ordinal of the character a Go rune literal names — `'a'`,
+    `'\\x41'`, `'\\u1234'`, `'\\101'`, `'\\n'`. None when it does not
+    parse."""
+    inner = text[1:-1] if len(text) >= 2 else text
+    if len(inner) == 1 and inner != "\\":
+        return ord(inner)
+    if not inner.startswith("\\"):
+        return None
+    esc = inner[1:]
+    single = {
+        "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9,
+        "v": 11, "\\": 92, "'": 39, '"': 34, "0": 0,
+    }
+    if esc in single:
+        return single[esc]
+    try:
+        if esc[:1] == "x" and len(esc) == 3:
+            return int(esc[1:], 16)
+        if esc[:1] == "u" and len(esc) == 5:
+            return int(esc[1:], 16)
+        if esc[:1] == "U" and len(esc) == 9:
+            return int(esc[1:], 16)
+        if esc and esc[0].isdigit():
+            return int(esc, 8)
+    except ValueError:
+        return None
+    return None
+
+
+def _go_interpreted_string(text: str) -> str:
+    """Content of a Go interpreted string literal with escapes
+    resolved; the unquoted raw text when parsing fails."""
+    try:
+        value = ast.literal_eval(text)
+        if isinstance(value, str):
+            return value
+    except (SyntaxError, ValueError):
+        pass
+    return text[1:-1] if len(text) >= 2 else text
 
 
 def _scalar_const_type(t: Any) -> bool:
@@ -945,6 +1003,12 @@ class _Builder:
         # — `c` and `d` never share).
         self._func_elem_tokens: dict[str, frozenset[str]] = {}
         self._func_elem_token_seq = 0
+        # `fm := [][]func{fs}` — only the slot initialized from
+        # `fs` aliases its backing, so the donor set is keyed by
+        # the composite element's position (or literal map key):
+        # binding_id -> slot key -> donor bindings.
+        self._func_elem_inner_donors: dict[str, dict[str, set[str]]] = {}
+        self._func_elem_surrogate_seq = 0
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -1349,6 +1413,63 @@ class _Builder:
             self._pin_fact_identities(fact)
         return collection
 
+    def _func_elem_nested_collection(self, fact: Any) -> bool:
+        """A collection of func-element collections —
+        `map[K][]func`, `[][]func`, `[N]map[K]func`. One extra
+        nesting level only: `fm[k]` yields a container whose slots
+        conflate under the root binding like `fm[k]`'s own elements
+        do. Deeper nesting stays closed."""
+        collection = (
+            fact is not None
+            and fact.kind in {"slice", "array", "map"}
+            and getattr(fact, "elem", None) is not None
+            and self._func_elem_collection(fact.elem)
+        )
+        if collection:
+            # Pin the WHOLE type tree like the single-level admit —
+            # the outer named container and outer map key otherwise
+            # escape `stale_dependents` when their declarations change.
+            self._pin_fact_identities(fact)
+        return collection
+
+    def _func_elem_nested_operand(
+        self, operand: Any
+    ) -> tuple[str, Any, Any | None] | None:
+        """`fm[k]` as the operand of a further index — the inner
+        operand must name a bound collection of collections.
+        Returns (root binding id, inner identifier node, inner
+        index node) for `fm[k]`, or None otherwise."""
+        if operand is None or operand.type != "index_expression":
+            return None
+        inner = operand.child_by_field_name("operand")
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (
+                    c
+                    for c in inner.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if inner is None or inner.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(inner))
+        if ref is None or not ref.binding_id:
+            return None
+        bound = self.bindings.get(ref.binding_id)
+        if bound is None or not self._func_elem_nested_collection(
+            bound.type
+        ):
+            return None
+        return (
+            ref.binding_id,
+            inner,
+            operand.child_by_field_name("index"),
+        )
+
     def _is_func_elem_composite(self, rhs_node: Any, binding_id: str) -> bool:
         """`fs := []func(){…}` — a composite literal binding to a
         func-element container. Its element literals record captures
@@ -1359,7 +1480,10 @@ class _Builder:
             rhs_node is not None
             and rhs_node.type == "composite_literal"
             and bound is not None
-            and self._func_elem_collection(bound.type)
+            and (
+                self._func_elem_collection(bound.type)
+                or self._func_elem_nested_collection(bound.type)
+            )
         )
 
     def _adopt_container_element_records(
@@ -1373,9 +1497,38 @@ class _Builder:
         body = rhs_node.child_by_field_name("body")
         if body is None:
             return
-        stack = [body]
+        stack = []
+        # Go continues the implicit index after each keyed element —
+        # `[]func{1: a, b}` puts `b` at index 2, not 1 — so the slot
+        # counter follows the running index, not the position.
+        next_index = 0
+        for element in body.named_children:
+            slot = f"i:{next_index}"
+            next_index += 1
+            if element.type == "keyed_element":
+                key_node = element.child_by_field_name("key")
+                value_node = element.child_by_field_name("value")
+                if key_node is not None:
+                    key_slot = self._func_elem_slot_key(key_node)
+                    slot = (
+                        key_slot
+                        if key_slot is not None
+                        else "r:" + key_node.text.decode(
+                            "utf-8", errors="replace"
+                        )
+                    )
+                    if key_slot is not None and key_slot.startswith(
+                        "i:"
+                    ):
+                        # A keyed element reseats the implicit index —
+                        # `[]func{1: a, b}` puts `b` at index 2.
+                        next_index = int(key_slot[2:]) + 1
+                if value_node is not None:
+                    stack.append((value_node, slot))
+            else:
+                stack.append((element, slot))
         while stack:
-            el = stack.pop()
+            el, slot_key = stack.pop()
             if el.type == "func_literal":
                 # A literal element records under the container
                 # itself during eval — its inner identifiers are
@@ -1386,10 +1539,36 @@ class _Builder:
                 src = ref.binding_id if ref is not None else None
                 if src and src != bound_id:
                     self._adopt_element_records(src, bound_id)
+                    src_bound = self.bindings.get(src)
+                    if (
+                        el.type == "identifier"
+                        and src_bound is not None
+                        and self._func_elem_collection(src_bound.type)
+                        and src_bound.type.kind in {"slice", "map"}
+                    ):
+                        # `fm := [][]func{fs}` — the inner slot shares
+                        # `fs`'s backing. Slices and maps are the only
+                        # aliasing element carriers: a Go array
+                        # literal copies (`fm := [][1]func{fs}`
+                        # embeds a copy), so sharing it would
+                        # propagate `fm[i][j]` writes back into `fs`.
+                        # Only the slot the element initialized
+                        # aliases it — `fm := [][]func{fs}` leaves
+                        # `fm[1]` a fresh inner slice — so the donor
+                        # is recorded per slot, not shared wholesale.
+                        if slot_key is not None:
+                            self._func_elem_inner_donors.setdefault(
+                                bound_id, {}
+                            ).setdefault(slot_key, set()).add(src)
+                        else:
+                            self._func_elem_share(src, bound_id)
                 # A selector's operand (`st` in `st.M`) names no
                 # element — skip its children like an identifier's.
                 continue
-            stack.extend(el.children)
+            child_slot = (
+                slot_key if el.type == "literal_element" else None
+            )
+            stack.extend((c, child_slot) for c in el.children)
 
     def _adopt_element_records(self, src: str, bound_id: str) -> None:
         """Union one func value's captures and write targets into a
@@ -1413,13 +1592,15 @@ class _Builder:
 
     def _func_elem_index_target(
         self, lhs: Any, locals_: dict[str, frozenset[int]]
-    ) -> tuple[Any, Any | None] | None:
+    ) -> tuple[Any, Any | None, Any | None] | None:
         """`fs[i]` — an index store whose operand names a bound
-        func-element container local. Returns (ref, index_node), or
-        None when the operand is not a local `[]func`/`[N]func`/
-        `map[K]func` binding. A param container stays closed: its
-        elements live in caller memory, which is an external
-        mutation the local model cannot track."""
+        func-element container local. Returns (ref, index_node,
+        inner_index_node), or None when the operand is not a local
+        `[]func`/`[N]func`/`map[K]func` binding — nor one level of
+        nesting (`fm[k][i]`, whose elements conflate under the root
+        `fm` binding; inner_index_node is `k` then). A param
+        container stays closed: its elements live in caller memory,
+        which is an external mutation the local model cannot track."""
         if lhs is None or lhs.type != "index_expression":
             return None
         operand = lhs.child_by_field_name("operand")
@@ -1428,15 +1609,28 @@ class _Builder:
             and operand.type == "parenthesized_expression"
         ):
             operand = operand.child_by_field_name("operand")
-        if operand is None or operand.type != "identifier":
+        if operand is None:
             return None
-        ref = self.references.get(self.node_key(operand))
-        if ref is None or ref.binding_id not in locals_:
+        if operand.type == "identifier":
+            ref = self.references.get(self.node_key(operand))
+            if ref is None or ref.binding_id not in locals_:
+                return None
+            bound = self.bindings.get(ref.binding_id)
+            if bound is None or not self._func_elem_collection(
+                bound.type
+            ):
+                return None
+            return ref, lhs.child_by_field_name("index"), None
+        nested = self._func_elem_nested_operand(operand)
+        if nested is None:
             return None
-        bound = self.bindings.get(ref.binding_id)
-        if bound is None or not self._func_elem_collection(bound.type):
+        root_id, _inner_id, inner_index = nested
+        if root_id not in locals_:
             return None
-        return ref, lhs.child_by_field_name("index")
+        ref = self.references.get(self.node_key(_inner_id))
+        if ref is None:
+            return None
+        return ref, lhs.child_by_field_name("index"), inner_index
 
     def _func_elem_append_target(
         self, node: Any, locals_: dict[str, frozenset[int]]
@@ -1536,19 +1730,101 @@ class _Builder:
             if member_toks & toks
         } | {binding_id}
 
-    def _func_elem_reseat(self, binding_id: str) -> None:
+    def _func_elem_slot_key(self, node: Any) -> str | None:
+        """Canonical slot key for a literal index/key node —
+        `1`, `0x1` and `'\\x01'` name the same Go element, `"a"`
+        and `` `a` `` the same map key. Integer-kind keys carry an
+        `i:` tag, string-kind an `s:` tag, anything else `r:` with
+        the raw text. None for a non-literal (computed) node."""
+        while node.type == "literal_element" and node.named_children:
+            node = node.named_children[0]
+        text = node.text.decode("utf-8", errors="replace")
+        if node.type == "int_literal":
+            value = _go_int_literal(text)
+            return f"i:{value}" if value is not None else f"r:{text}"
+        if node.type == "rune_literal":
+            value = _go_rune_literal(text)
+            return f"i:{value}" if value is not None else f"r:{text}"
+        if node.type == "interpreted_string_literal":
+            return f"s:{_go_interpreted_string(text)}"
+        if node.type == "raw_string_literal":
+            return f"s:{text[1:-1]}"
+        if node.type in {"float_literal", "imaginary_literal"}:
+            return f"r:{text}"
+        return None
+
+    def _func_elem_slot_donors(
+        self, binding_id: str, inner_index: Any
+    ) -> set[str]:
+        """`fm[k]` — the bindings whose slice/map backing the inner
+        slot aliases, recorded per composite element position
+        (`fm := [][]func{fs}` -> slot "0" holds {fs}). A literal
+        index resolves its own slot; a computed index may hit any
+        element so every donor unions in. Donors resolve live
+        through each container's current share group, so `fm2 := fm`
+        sees `fm`'s donors without copying the table."""
+        members = self._func_elem_sharers(binding_id)
+        literal_key = (
+            self._func_elem_slot_key(inner_index)
+            if inner_index is not None
+            and inner_index.type in _INDEX_LITERALS
+            else None
+        )
+        donors: set[str] = set()
+        for member_id in members:
+            slots = self._func_elem_inner_donors.get(member_id)
+            if not slots:
+                continue
+            if literal_key is None:
+                for slot_donors in slots.values():
+                    donors |= slot_donors
+            else:
+                donors |= slots.get(literal_key, set())
+        donors.discard(binding_id)
+        return donors
+
+    def _func_elem_reseat(
+        self, binding_id: str, prestate: tuple | None = None
+    ) -> None:
         """A non-append reseat (`fs = mk()`, `fs = []func(){…}`,
         `fs = nil`) hands the name a fresh backing — the OLD
         elements stay reachable through names that shared it, so
         the binding's element records union onto each alias before
-        the records clear; then the name leaves the group."""
+        the records clear; then the name leaves the group. When the
+        caller passes the pre-RHS-eval snapshot (`prestate`), the
+        sharers receive only the OLD records — a literal the RHS
+        just recorded under this name belongs to the NEW backing."""
+        surviving = set(self._func_elem_groups.get(binding_id, ()))
+        if prestate is not None:
+            captured = prestate[0].get(binding_id)
+            writes = prestate[1].get(binding_id)
+            starred = binding_id in prestate[2]
+            called = binding_id in prestate[3]
+        else:
+            captured = self.closure_captures.get(binding_id)
+            writes = self.closure_writes.get(binding_id)
+            starred = binding_id in self.closure_star_writes
+            called = binding_id in self.closure_inner_calls
         for member_id in self._func_elem_groups.pop(binding_id, set()):
             members = self._func_elem_groups.get(member_id)
             if members is not None:
                 members.discard(binding_id)
                 if not members:
                     self._func_elem_groups.pop(member_id, None)
-            self._adopt_element_records(binding_id, member_id)
+            if captured:
+                self.closure_captures[member_id] = (
+                    self.closure_captures.get(member_id, frozenset())
+                    | captured
+                )
+            if writes:
+                self.closure_writes[member_id] = (
+                    self.closure_writes.get(member_id, frozenset())
+                    | writes
+                )
+            if starred:
+                self.closure_star_writes.add(member_id)
+            if called:
+                self.closure_inner_calls.add(member_id)
         # The name leaves its old backing for a fresh one — hand it
         # a brand-new token so a default `binding_id` token cannot
         # collide with the backing the name just detached from.
@@ -1556,6 +1832,48 @@ class _Builder:
         self._func_elem_tokens[binding_id] = frozenset(
             {f"{binding_id}#{self._func_elem_token_seq}"}
         )
+        # The name leaves its container backing — donor sets naming
+        # it (`fm := [][]func{fs}` slot 0) still alias the OLD
+        # backing, so swap the name for the group members that keep
+        # sharing it; the container's own donor table drops with it.
+        inner_donors = self._func_elem_inner_donors.pop(
+            binding_id, None
+        )
+        surviving.discard(binding_id)
+        replacement = surviving
+        if not surviving:
+            # No live name shares the old backing — park its element
+            # records under a surrogate id the donor sets can still
+            # resolve, or `fm[0][i]` loses every element the old
+            # slice carried.
+            # Unique per reseat: the same variable can detach
+            # twice (`fs = mk(); fs = mk2()`) and each abandoned
+            # backing parks under its own surrogate, so a nested
+            # container aliasing the FIRST backing does not see
+            # the second's elements.
+            self._func_elem_surrogate_seq += 1
+            surrogate = (
+                binding_id + "/func_elem/"
+                + str(self._func_elem_surrogate_seq)
+            )
+            replacement = {surrogate}
+            if captured:
+                self.closure_captures[surrogate] = captured
+            if writes:
+                self.closure_writes[surrogate] = writes
+            if starred:
+                self.closure_star_writes.add(surrogate)
+            if called:
+                self.closure_inner_calls.add(surrogate)
+            if inner_donors:
+                self._func_elem_inner_donors[surrogate] = inner_donors
+            if binding_id in self.opaque_callees:
+                self.opaque_callees.add(surrogate)
+        for slots in self._func_elem_inner_donors.values():
+            for donor_set in slots.values():
+                if binding_id in donor_set:
+                    donor_set.discard(binding_id)
+                    donor_set |= replacement
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
@@ -4892,11 +5210,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if type_arg is None:
             return False
         if type_arg.type in {"slice_type", "array_type"}:
-            elem = type_arg.child_by_field_name("element")
-            return elem is not None and elem.type == "function_type"
+            return self._func_elem_type_node(
+                type_arg.child_by_field_name("element")
+            )
         if type_arg.type == "map_type":
-            value = type_arg.child_by_field_name("value")
-            return value is not None and value.type == "function_type"
+            return self._func_elem_type_node(
+                type_arg.child_by_field_name("value")
+            )
         if type_arg.type == "type_identifier":
             ref = self.references.get(self.node_key(type_arg))
             binding = (
@@ -4907,7 +5227,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return (
                 binding is not None
                 and binding.kind == "type"
-                and self._func_elem_collection(binding.type)
+                and (
+                    self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
+                )
+            )
+        return False
+
+    def _func_elem_type_node(
+        self, node: Any, depth: int = 0
+    ) -> bool:
+        """A type expression whose element resolves to a function
+        type at one level — the `func` type itself, or a
+        slice/array/map whose element (or map value) is a func
+        element type. One extra collection level is the deepest the
+        model conflates, so `[][][]func` stays closed. A named
+        element type resolves through its declared fact."""
+        while (
+            node is not None and node.type == "parenthesized_type"
+        ):
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "function_type":
+            return True
+        if depth >= 1:
+            return False
+        if node.type in {"slice_type", "array_type"}:
+            return self._func_elem_type_node(
+                node.child_by_field_name("element"), depth + 1
+            )
+        if node.type == "map_type":
+            return self._func_elem_type_node(
+                node.child_by_field_name("value"), depth + 1
+            )
+        if node.type == "type_identifier":
+            ref = self.references.get(self.node_key(node))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            return (
+                binding is not None
+                and binding.kind == "type"
+                and (
+                    self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
+                )
             )
         return False
 
@@ -4925,18 +5292,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return False
         if node.type == "type_identifier":
             return self._pin_type_node(node)
-        if node.type == "slice_type":
-            elem = node.child_by_field_name("element")
-            return self._pin_signature_type(elem)
-        if node.type == "array_type":
-            elem = node.child_by_field_name("element")
-            return self._pin_signature_type(elem)
+        if node.type in {"slice_type", "array_type"}:
+            return self._pin_func_elem_type_node(
+                node.child_by_field_name("element")
+            )
         if node.type == "map_type":
             key = node.child_by_field_name("key")
             value = node.child_by_field_name("value")
             return self._pin_type_node(
                 key
-            ) and self._pin_signature_type(value)
+            ) and self._pin_func_elem_type_node(value)
+        return False
+
+    def _pin_func_elem_type_node(
+        self, node: Any, depth: int = 0
+    ) -> bool:
+        """Pin the named identities under a func-element `make`
+        type, mirroring `_func_elem_type_node`'s one-extra-level
+        walk: a func element's signature names pin through
+        `_pin_signature_type`; a named element pins through its
+        `type` binding; a map's key pins as a plain type."""
+        while (
+            node is not None and node.type == "parenthesized_type"
+        ):
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "function_type":
+            return self._pin_signature_type(node)
+        if depth >= 1:
+            return False
+        if node.type == "type_identifier":
+            return self._pin_type_node(node)
+        if node.type in {"slice_type", "array_type"}:
+            return self._pin_func_elem_type_node(
+                node.child_by_field_name("element"), depth + 1
+            )
+        if node.type == "map_type":
+            key = node.child_by_field_name("key")
+            value = node.child_by_field_name("value")
+            return self._pin_type_node(key) and (
+                self._pin_func_elem_type_node(value, depth + 1)
+            )
         return False
 
     def _pin_signature_type(self, node: Any) -> bool:
@@ -6634,6 +7031,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # whose `fs[k]()` calls opaque on it.
                     and not self._is_local_composite(binding)
                     and not self._func_elem_collection(binding.type)
+                    and not self._func_elem_nested_collection(
+                        binding.type
+                    )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
@@ -6769,6 +7169,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                 if binding.type.kind == "function" or (
                     self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
                 ):
                     # `f := mk(ch)` — the returned closure may
                     # capture the queue it received, so the call's
@@ -6887,11 +7288,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if (
                         src_bound is not None
-                        and self._func_elem_collection(
-                            src_bound.type
+                        and (
+                            self._func_elem_collection(
+                                src_bound.type
+                            )
+                            or self._func_elem_nested_collection(
+                                src_bound.type
+                            )
                         )
-                        and self._func_elem_collection(
-                            binding.type
+                        and (
+                            self._func_elem_collection(
+                                binding.type
+                            )
+                            or self._func_elem_nested_collection(
+                                binding.type
+                            )
                         )
                     ):
                         # `fs2 := fs` — the copy shares the
@@ -7167,6 +7578,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # short-decl form.
                         and not self._is_local_composite(binding)
                         and not self._func_elem_collection(binding.type)
+                        and not self._func_elem_nested_collection(
+                            binding.type
+                        )
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
@@ -7340,6 +7754,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         binding.type.kind == "function"
                         or self._func_elem_collection(binding.type)
+                        or self._func_elem_nested_collection(
+                            binding.type
+                        )
                     ) and value_nodes:
                         # `var f = mk(ch)` — like the short-decl
                         # form, a returned closure may capture the
@@ -7469,11 +7886,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if (
                             src_bound is not None
-                            and self._func_elem_collection(
-                                src_bound.type
+                            and (
+                                self._func_elem_collection(
+                                    src_bound.type
+                                )
+                                or self._func_elem_nested_collection(
+                                    src_bound.type
+                                )
                             )
-                            and self._func_elem_collection(
-                                binding.type
+                            and (
+                                self._func_elem_collection(
+                                    binding.type
+                                )
+                                or self._func_elem_nested_collection(
+                                    binding.type
+                                )
                             )
                         ):
                             # `var fs2 = fs` — shares the backing
@@ -8128,20 +8555,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_
                 )
                 if func_elem_lhs is not None:
-                    ref, index = func_elem_lhs
-                    if index is not None and index.type not in (
-                        _INDEX_LITERALS
-                    ):
-                        self._record_read(
-                            self.expression(
-                                index, fn, params, locals_,
-                                transfers, count, 0,
+                    ref, index, inner_index = func_elem_lhs
+                    # Go evaluates `fm[k()][i()]` outer index first —
+                    # `inner_index` names `k()`, `index` names `i()`.
+                    for idx_node in (inner_index, index):
+                        if (
+                            idx_node is not None
+                            and idx_node.type not in (_INDEX_LITERALS)
+                        ):
+                            self._record_read(
+                                self.expression(
+                                    idx_node, fn, params, locals_,
+                                    transfers, count, 0,
+                                )
                             )
-                        )
                     refs.append((ref, True, False))
                     func_elem_targets.add(len(refs) - 1)
+                    elem_holder_ids = self._func_elem_sharers(
+                        ref.binding_id
+                    )
+                    if inner_index is not None:
+                        # `fm[k][i] = …` — only the slot `k`
+                        # initialized from a donor aliases it
+                        # (`fm := [][]func{fs}`: slot 0 does, a
+                        # fresh `fm[1]` does not), so the write
+                        # reaches the matching donors' groups, not
+                        # every name the root ever shared.
+                        for donor_id in self._func_elem_slot_donors(
+                            ref.binding_id, inner_index
+                        ):
+                            elem_holder_ids |= {
+                                donor_id
+                            } | self._func_elem_sharers(donor_id)
                     func_elem_holders[len(refs) - 1] = frozenset(
-                        self._func_elem_sharers(ref.binding_id)
+                        elem_holder_ids
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
@@ -8794,6 +9241,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if bound is not None and (
                         bound.type.kind == "function"
                         or self._func_elem_collection(bound.type)
+                        or self._func_elem_nested_collection(bound.type)
                     ):
                         # `f = mk(ch)` — like the declaration
                         # forms, the returned closure may capture
@@ -8975,7 +9423,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         not conditional
                         and self._may_skip == 0
                         and tgt_bound is not None
-                        and self._func_elem_collection(tgt_bound.type)
+                        and (
+                            self._func_elem_collection(tgt_bound.type)
+                            or self._func_elem_nested_collection(
+                                tgt_bound.type
+                            )
+                        )
                         and (
                             src_id is None
                             or self._func_elem_eval_tokens(src_id)
@@ -9246,11 +9699,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         src_bound is not None
                         and tgt_bound is not None
-                        and self._func_elem_collection(
-                            src_bound.type
+                        and (
+                            self._func_elem_collection(
+                                src_bound.type
+                            )
+                            or self._func_elem_nested_collection(
+                                src_bound.type
+                            )
                         )
-                        and self._func_elem_collection(
-                            tgt_bound.type
+                        and (
+                            self._func_elem_collection(
+                                tgt_bound.type
+                            )
+                            or self._func_elem_nested_collection(
+                                tgt_bound.type
+                            )
                         )
                     ):
                         # `fs2 = fs` — the copy shares the
@@ -9538,7 +10001,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # backing first so its elements reach the
                         # names still sharing it, not the name.
                         if not conditional and self._may_skip == 0:
-                            self._func_elem_reseat(ref.binding_id)
+                            self._func_elem_reseat(
+                                ref.binding_id,
+                                (
+                                    captures_before,
+                                    writes_before,
+                                    star_before,
+                                    calls_before,
+                                ),
+                            )
                             func_elem_reseated.add(ref.binding_id)
                             func_elem_reseat_backings[
                                 ref.binding_id
@@ -14606,6 +15077,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # container the call extends.
         parent = node.parent
         in_composite = False
+        # A literal stored through an index or `append` lands in the
+        # container's CURRENT backing, which the share group still
+        # reads — a composite-literal element instead initializes
+        # the NEW backing the name is about to receive, so its
+        # records must not reach the old backing's sharers.
+        into_backing = False
         while parent is not None and parent.type in {
             "expression_list",
             "literal_value",
@@ -14732,6 +15209,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 bound_id = container.id
                 in_composite = True
+                into_backing = True
+            elif operand is not None:
+                # `fm[k][i] = func(){…}` — the nested store's
+                # elements conflate under the root binding, so the
+                # literal records there like `fm[k] = lit` does.
+                nested = self._func_elem_nested_operand(operand)
+                if nested is not None:
+                    bound_id = nested[0]
+                    in_composite = True
+                    into_backing = True
         elif parent is not None and parent.type == "call_expression":
             # `append(fs, func(){…})` — the literal is an appended
             # element of the argument container; record under its
@@ -14739,6 +15226,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             bound_id = self._func_elem_append_target(parent, locals_)
             if bound_id is not None:
                 in_composite = True
+                into_backing = True
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
             if in_composite:
@@ -14748,18 +15236,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # container's element set is never cleared either:
                 # `fs[k]()` resolves through the opaque index call
                 # and reads this unioned record.
-                self.closure_captures[bound_id] = (
-                    self.closure_captures.get(bound_id, frozenset())
-                    | frozenset(captured)
+                # The store lands in the container's CURRENT backing,
+                # so every eval-time sharer gets the record too —
+                # `a, a[0] = b, lit` stores `lit` into `a`'s old
+                # backing, and a later `a = b` reseat clearing `a`'s
+                # records must not drop it from the sharers (`a2`)
+                # that still read that backing.
+                composite_targets = {bound_id} | (
+                    self._func_elem_groups.get(bound_id, set())
+                    if into_backing
+                    else set()
                 )
-                self.closure_writes[bound_id] = (
-                    self.closure_writes.get(bound_id, frozenset())
-                    | frozenset(writes)
-                )
+                for target_id in composite_targets:
+                    self.closure_captures[target_id] = (
+                        self.closure_captures.get(
+                            target_id, frozenset()
+                        )
+                        | frozenset(captured)
+                    )
+                    self.closure_writes[target_id] = (
+                        self.closure_writes.get(
+                            target_id, frozenset()
+                        )
+                        | frozenset(writes)
+                    )
                 if star_write:
-                    self.closure_star_writes.add(bound_id)
+                    self.closure_star_writes.update(composite_targets)
                 if has_call:
-                    self.closure_inner_calls.add(bound_id)
+                    self.closure_inner_calls.update(composite_targets)
             elif may_skip and bound_id in self.func_aliases:
                 # A literal on a maybe-taken path over a
                 # function-name alias leaves the callee's value
@@ -15173,6 +15677,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         the container's root binding for `m[k]`; an operand that
         resolves to neither stays closed."""
         target_id: str | None = None
+        nested_record_ids: set[str] | None = None
         pin_fact: Any = None
         callee_deps: frozenset[int] = frozenset()
         operand = callee_node.child_by_field_name("operand")
@@ -15288,9 +15793,61 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         index_operand, locals_, params
                     )
                 else:
-                    root_ref = self._receiver_root_ref(operand)
-                    if root_ref is not None and root_ref.binding_id:
-                        target_id = root_ref.binding_id
+                    # `fm[k][i]()` — the operand is itself an index
+                    # into a bound collection of func-element
+                    # collections: elements conflate under the root
+                    # `fm` binding like `fm[k]()` resolves. `fm[k]`
+                    # as a nested expression eval stays closed, so
+                    # the pieces evaluate separately here.
+                    nested = self._func_elem_nested_operand(operand)
+                    if nested is not None:
+                        root_id, inner_id, inner_index = nested
+                        target_id = root_id
+                        callee_deps |= self.expression(
+                            inner_id, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                        if (
+                            inner_index is not None
+                            and inner_index.type
+                            not in {
+                                "int_literal",
+                                "rune_literal",
+                                "interpreted_string_literal",
+                                "raw_string_literal",
+                            }
+                        ):
+                            callee_deps |= self.expression(
+                                inner_index, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
+                        # The slot the call reads aliases its
+                        # donors' backings (`fm := [][]func{fs}` —
+                        # `fm[0][i]` aliases `fs`), so the records
+                        # fold the matching donors' groups like a
+                        # nested element store does.
+                        nested_record_ids = (
+                            {root_id}
+                            | self._func_elem_groups.get(
+                                root_id, set()
+                            )
+                        )
+                        for donor_id in self._func_elem_slot_donors(
+                            root_id, inner_index
+                        ):
+                            nested_record_ids |= {
+                                donor_id
+                            } | self._func_elem_groups.get(
+                                donor_id, set()
+                            )
+                        operand = None
+                    else:
+                        root_ref = self._receiver_root_ref(operand)
+                        if (
+                            root_ref is not None
+                            and root_ref.binding_id
+                        ):
+                            target_id = root_ref.binding_id
                 if operand is not None:
                     callee_deps |= self.expression(
                         operand, fn, params, locals_, transfers,
@@ -15401,7 +15958,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 deps |= locals_[escaped_id]
             elif escaped_id in params:
                 deps |= frozenset({params[escaped_id]})
-        captured = self.closure_captures.get(target_id)
+        if nested_record_ids is not None:
+            captured = frozenset().union(
+                *(
+                    self.closure_captures.get(t, frozenset())
+                    for t in nested_record_ids
+                )
+            )
+            # An element store folds the stored value's deps into the
+            # donor's set (`fs[0] = cb` gives `fs` cb's deps) — the
+            # nested call resolves that same slot, so it reads each
+            # aliased backing's set too, not just the records.
+            for did in nested_record_ids:
+                if did == target_id:
+                    continue
+                if did in locals_:
+                    deps |= locals_[did]
+                elif did in params:
+                    deps |= frozenset({params[did]})
+                elif did in self._dead_local_deps:
+                    deps |= self._dead_local_deps[did]
+        else:
+            captured = self.closure_captures.get(target_id)
         if captured is not None:
             # `s.f = func() { …x… }` stored a literal into this slot
             # — re-resolve each captured binding at the CALL site so
@@ -15474,7 +16052,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # — the target need not be an escaped binding, so fold the
         # call's deps into each recorded write target like the
         # bound-literal call path does.
-        for target in self.closure_writes.get(target_id, ()):
+        if nested_record_ids is not None:
+            nested_writes = frozenset().union(
+                *(
+                    self.closure_writes.get(t, frozenset())
+                    for t in nested_record_ids
+                )
+            )
+        else:
+            nested_writes = self.closure_writes.get(target_id, ())
+        for target in nested_writes:
             self._store(
                 locals_, params, target, write_deps, True
             )

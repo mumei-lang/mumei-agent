@@ -22829,14 +22829,166 @@ def test_func_elem_index_write_stays_closed(go_types_helper):
     result = named(source, snapshot, summaries)
     assert not result.available
 
+    # A third index level stays closed — `fm[k][i][j]` nests deeper
+    # than the one extra level the slot model conflates.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
-        "    fm := map[string][]func() int64{}\n"
+        "    fm := make(map[int64][][]func() int64)\n"
         "    var y int64\n"
         "    f := func() int64 { return y }\n"
-        "    fm[\"k\"][0] = f\n"
+        "    fm[0][0][0] = f\n"
         "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_nested_index_call(go_types_helper):
+    # `fm[k][i]()` — one level of collection-of-collection conflates
+    # elements under the root binding like `fm[k]()` does: the inner
+    # element's captured reads re-resolve at call time.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := [][]func() int64{{func() int64 { return y }}}\n"
+        "    y = x\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    # Computed indices at both levels evaluate into the call's dep
+    # set like the single-level `fs[k]()` does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(k int64, i int64, x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := [][]func() int64{{func() int64 { return y }}}\n"
+        "    y = x\n"
+        "    return fm[k][i]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_elem_nested_index_write(go_types_helper):
+    # `fm[k][i] = f` — a nested element store lands in the root
+    # container's slot like `fm[k] = f` does, through `make`, a
+    # literal RHS, an identifier RHS, and a named container type.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := make(map[int64][]func() int64)\n"
+        "    fm[0][0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    f := func() int64 { return y }\n"
+        "    fm := make([][]func() int64, 2)\n"
+        "    fm[0][0] = f\n"
+        "    y = x\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type FMM map[int64][]func() int64\n"
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := make(FMM)\n"
+        "    fm[0][0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_alias_share(go_types_helper):
+    # `fm2 := fm` shares the nested backing — a store through one
+    # name lands in the other's element records like `fs2 := fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := [][]func() int64{{func() int64 { return y }}}\n"
+        "    fm2 := fm\n"
+        "    fm2[0][1] = func() int64 { return x }\n"
+        "    y = x\n"
+        "    return fm[0][0]() + fm[0][1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_stays_closed(go_types_helper):
+    # Nested containers stay closed where the single-level model is
+    # closed too: a param container (caller memory), an element read
+    # `v := fm[k][i]`, an `append` into the inner collection, and a
+    # store of a whole inner collection `fm[k] = sub`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fm [][]func() int64, x int64) int64 {\n"
+        "    return fm[0][0]() + x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fm := [][]func() int64{{func() int64 { return 0 }}}\n"
+        "    v := fm[0][0]\n"
+        "    _ = v\n"
+        "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fm := [][]func() int64{nil}\n"
+        "    fm[0] = append(fm[0], func() int64 { return x })\n"
+        "    return 0\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fm := make(map[int64][]func() int64)\n"
+        "    fm[0] = []func() int64{func() int64 { return x }}\n"
+        "    return 0\n"
         "}",
     )
     result = named(source, snapshot, summaries)
@@ -23605,3 +23757,305 @@ def test_func_elem_conversion_result_chan_arg_promoted(
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_nested_inner_share_propagates(go_types_helper):
+    # `fm := [][]func{fs}` — the inner slot shares `fs`'s backing, so
+    # a store through `fs` lands in `fm`'s record set and vice versa.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fs[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fm[0][0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_inner_reseat_keeps_old_records(go_types_helper):
+    # `fs = []func{newlit}` after `fm := [][]func{fs}` — `fm` keeps
+    # the OLD inner array; the new literal's captures must not leak
+    # into `fm`'s call resolution (same fix as the single-level case).
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, y0 int64) int64 {\n"
+        "    var y int64\n"
+        "    y = x\n"
+        "    fs := []func() int64{func() int64 { return y0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fs = []func() int64{func() int64 { return y }}\n"
+        "    _ = fs\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+    # Single-level regression for the same root cause — `fs2` still
+    # shares the OLD backing, so it sees `{1}`, not the new `{0}`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, y0 int64) int64 {\n"
+        "    var y int64\n"
+        "    y = x\n"
+        "    fs := []func() int64{func() int64 { return y0 }}\n"
+        "    fs2 := fs\n"
+        "    fs = []func() int64{func() int64 { return y }}\n"
+        "    _ = fs\n"
+        "    return fs2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_func_elem_nested_index_eval_order(go_types_helper):
+    # `fm[k()][i()] = f` — Go evaluates `k()` before `i()`; `i()`'s
+    # store of `y` must see the value `k(x)` just wrote.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y, z int64\n"
+        "    k := func(v int64) int64 { y = v; return 0 }\n"
+        "    i := func() int64 { z = y; return 0 }\n"
+        "    fm := [][]func() int64{{nil}}\n"
+        "    fm[k(x)][i()] = nil\n"
+        "    return z\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_write_non_panicking(go_types_helper):
+    # A nested element write that actually completes at runtime:
+    # inner slice has length 2, `fm[0][1] = lit` lands, the call
+    # resolves the new literal's capture.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fm := [][]func() int64{{nil, nil}}\n"
+        "    fm[0][1] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fm[0][1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_index_store_records_on_old_group(go_types_helper):
+    # `a, a, a[0] = newlit, b, func(){x}` — the `a[0]` destination
+    # resolves `a` against pre-state, so the literal lands in the
+    # OLD backing `a2` still shares, not `b`'s that `a` now names.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{func() int64 { return 0 }}\n"
+        "    newlit := []func() int64{func() int64 { return 0 }}\n"
+        "    a, a, a[0] = newlit, b, func() int64 { return x }\n"
+        "    _ = newlit\n"
+        "    return a2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_array_element_copies(go_types_helper):
+    # `fm := [][1]func{fs}` — Go copies the array, so an element
+    # store through `fm[0][i]` must NOT reach `fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := [1]func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][1]func() int64{fs}\n"
+        "    fm[0][0] = func() int64 { return x }\n"
+        "    _ = fm\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_nested_fresh_slot_isolated(go_types_helper):
+    # `fm := [][]func{fs, []func{…}}` — only slot 0 aliases `fs`'s
+    # backing; `fm[1]` is a fresh inner slice the store writes for
+    # real, so `fm[1][i]` must not reach `fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{\n"
+        "        fs,\n"
+        "        []func() int64{func() int64 { return 0 }},\n"
+        "    }\n"
+        "    fm[1][0] = func() int64 { return x }\n"
+        "    _ = fm\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_nested_donated_slot_aliased(go_types_helper):
+    # `fm := [][]func{fs}` — `fm[0]` aliases `fs`'s backing, so a
+    # store through `fm[0][i]` DOES reach `fs`'s element records.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fm[0][0] = func() int64 { return x }\n"
+        "    _ = fm\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_donor_reseat_surrogate(go_types_helper):
+    # `fs = []func(){…}` reseats `fs` with no surviving sharer — the
+    # old backing `fm[0]` still aliases keeps its elements under a
+    # surrogate donor id, so `fm[0][0]()` still reaches the stored
+    # literal's captures.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fs[0] = func() int64 { return x }\n"
+        "    fs = []func() int64{func() int64 { return 0 }}\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_reseat_surrogate_unique(go_types_helper):
+    # Two successive abandons park under DIFFERENT surrogates: the
+    # `fm[0]` slot still resolves only the FIRST backing's elements —
+    # the second reseat's literal ({return x}) must not leak in.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fs = []func() int64{func() int64 { return 0 }}\n"
+        "    fs = []func() int64{func() int64 { return x }}\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_nested_store_reads_donor_deps(go_types_helper):
+    # `fs[0] = cb` folds the param func value's deps into `fs`'s own
+    # set — `fm[0]` aliases that backing, so the nested call reads
+    # the donor's dep set and reports the callback's index too.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(cb func(int64) int64, x int64) int64 {\n"
+        "    fs := []func(int64) int64{\n"
+        "        func(y int64) int64 { return 0 },\n"
+        "    }\n"
+        "    fm := [][]func(int64) int64{fs}\n"
+        "    fs[0] = cb\n"
+        "    return fm[0][0](x)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_nested_keyed_continues_index(go_types_helper):
+    # `[][]func{1: du, fs}` — Go continues the implicit index after
+    # a keyed element, so `fs` lands at index 2; `fm[2][i]` writes
+    # reach its backing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    du := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{1: du, fs}\n"
+        "    fm[2][0] = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_keyed_notation_equiv(go_types_helper):
+    # `0x1` and `1` name the same Go element — the canonical slot
+    # key unifies spellings so `fm[1][i]` reaches the donor.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{0x1: fs}\n"
+        "    fm[1][0] = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_nested_keyed_rune_int(go_types_helper):
+    # `'\\x01'` and `1` name the same element — rune keys resolve to
+    # the rune's ordinal.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{'\\x01': fs}\n"
+        "    fm[1][0] = func() int64 { return x }\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
