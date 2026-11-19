@@ -1013,35 +1013,74 @@ class _Builder:
     ) -> tuple[str, Any | None] | None:
         """`ident`'s promotion path through `fields`, if found.
 
-        Returns `("ptr", ftype)` when some hop on the path is a
-        pointer-typed embedded field (the read dereferences it),
+        Selectors promote only through EMBEDDED (anonymous) fields
+        and resolve at the shallowest depth — `type S struct{ R Q;
+        *Q }` reaches `P` via `*Q` alone (the named `R Q` never
+        carries a promotion), and `type S struct{ R; Q }` picks
+        `Q` over the deeper `R.*Q`. A breadth-first walk over
+        embedded fields matches both rules; a same-depth
+        ambiguity does not compile, so the first hit at a level
+        is the program's real path.
+
+        Returns `("ptr", ftype)` with the shallowest pointer-typed
+        embedded field's type fact when the path crosses one,
         `("value", None)` when `ident` is reached through value
-        fields only, or None when no direct field's type declares
-        `ident` (its declaring type is unreachable from the
-        container's field list)."""
-        for f in fields:
-            ftype = getattr(f, "type", None)
-            if ftype is None:
-                continue
-            pointee = ftype.elem if ftype.kind == "pointer" else ftype
-            tid = getattr(pointee, "type_id", "")
-            tb = self._pointee_type(tid) if tid else None
-            if tb is None or tb.id in seen:
-                continue
-            inner = self._struct_fields(tb)
-            if ident.id in {x.id for x in inner}:
-                return (
-                    ("ptr", ftype)
-                    if ftype.kind == "pointer"
-                    else ("value", None)
+        fields only, `("ptr", f.type)` when an embedded field's
+        type is unenumerable (imported or anonymous) so `ident`
+        may hide behind an invisible pointer, or None when no
+        embedded field's type declares `ident` (its declaring
+        type is unreachable from the container's field list)."""
+        # (embedded field, the path's first pointer-typed field)
+        frontier: list[tuple[Any, Any | None]] = [
+            (f, ftype if ftype.kind == "pointer" else None)
+            for f in fields
+            if getattr(f, "embedded", False)
+            and (ftype := getattr(f, "type", None)) is not None
+        ]
+        while frontier:
+            nxt: list[tuple[Any, Any | None]] = []
+            unenumerable: Any | None = None
+            for f, ptr_field in frontier:
+                ftype = f.type
+                pointee = (
+                    ftype.elem if ftype.kind == "pointer" else ftype
                 )
-            sub = self._promotion_path(inner, ident, seen | {tb.id})
-            if sub is not None:
-                return (
-                    ("ptr", ftype)
-                    if ftype.kind == "pointer"
-                    else sub
+                tid = getattr(pointee, "type_id", "")
+                tb = self._pointee_type(tid) if tid else None
+                if tb is not None and tb.id in seen:
+                    continue
+                if tb is None or getattr(tb, "span", None) is None:
+                    # `type S struct{ lib.Q }` — an imported or
+                    # otherwise unenumerable embedded type: `ident`
+                    # may sit inside it behind a pointer the
+                    # report cannot see.
+                    if unenumerable is None:
+                        unenumerable = f
+                    continue
+                seen = seen | {tb.id}
+                inner = self._struct_fields(tb)
+                if ident.id in {x.id for x in inner}:
+                    return (
+                        ("ptr", ptr_field)
+                        if ptr_field is not None
+                        else ("value", None)
+                    )
+                nxt.extend(
+                    (
+                        g,
+                        ptr_field
+                        if ptr_field is not None
+                        else (
+                            gtype if gtype.kind == "pointer" else None
+                        ),
+                    )
+                    for g in inner
+                    if getattr(g, "embedded", False)
+                    and (gtype := getattr(g, "type", None)) is not None
                 )
+            if unenumerable is not None:
+                return ("ptr", unenumerable.type)
+            frontier = nxt
         return None
 
     def _promoted_field_pointer(

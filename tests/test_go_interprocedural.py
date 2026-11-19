@@ -20106,6 +20106,106 @@ def test_call_result_promoted_through_value_embed_stays_local(
     assert not [c for c in result.calls if c.imported]
 
 
+def test_call_result_named_field_does_not_carry_promotion(
+    go_types_helper,
+):
+    # `g(x).P` on `type S struct{ R Q; *Q }` — the named field
+    # `R Q` never carries a selector promotion; `P` resolves only
+    # through the embedded `*Q`, so the read crosses the pointer
+    # and records the external effect.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ R Q; *Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_shallow_value_embed_wins_over_deep_pointer(
+    go_types_helper,
+):
+    # `g(x).P` on `type R struct{ *Q }; type S struct{ R; Q }` —
+    # Go resolves the promotion at the shallowest depth: the
+    # direct value embed `Q` wins over the deeper `R.*Q`, so the
+    # read stays local — no external effect.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type R struct{ *Q }\n"
+        "type S struct{ R; Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+    assert not [c for c in result.calls if c.imported]
+
+
+def test_call_result_named_field_sharing_type_name_not_embedded(
+    go_types_helper,
+):
+    # `g(x).P` on `type S struct{ Q Q; *W }` — the named field
+    # `Q Q` shares its name with its type but is NOT embedded, so
+    # `P` (declared on both Q and W) promotes only through `*W`:
+    # the read crosses the pointer.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type W struct{ P int64 }\n"
+        "type S struct{ Q Q; *W }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
 def test_call_result_anon_struct_embedded_pointer_reads_external(
     go_types_helper,
 ):

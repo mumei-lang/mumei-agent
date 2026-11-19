@@ -91,6 +91,14 @@ type binding struct {
 	// relies on this record to flag its own summary stale when N
 	// regenerates.
 	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
+	// Embedded marks a field binding declared as an anonymous
+	// (embedded) struct member — `type S struct{ *Q; R Q }`
+	// embeds `*Q` but not `R`. Selectors promote only through
+	// embedded fields, so the consumer's promotion-path search
+	// skips named fields — `S.P` reaches `Q.P` only via `*Q` —
+	// and a named field whose name happens to match its type
+	// (`Q Q`) must not masquerade as an embed.
+	Embedded bool `json:"embedded,omitempty"`
 }
 
 type reference struct {
@@ -1162,7 +1170,10 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 		sp = fileSpan(f, start, start+len(obj.Name()))
 	}
 	bnd := binding{
-		id, obj.Name(), kind, sp, ix.scope(obj), tf, nil,
+		id, obj.Name(), kind, sp, ix.scope(obj), tf, nil, false,
+	}
+	if v, ok := obj.(*types.Var); ok && v.Embedded() {
+		bnd.Embedded = true
 	}
 	// `obj.Type()` is nil for label bindings (`goto L; L: ...`) —
 	// guard before Underlying or the whole report becomes an
