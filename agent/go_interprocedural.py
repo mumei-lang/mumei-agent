@@ -7945,23 +7945,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if mv is not None and not (
                         conditional or self._may_skip > 0
                     ):
+                        # A non-identifier RHS replaces whatever
+                        # callee the name held — stale captures
+                        # would resolve the call to only the old
+                        # alternative. Clear first, then record the
+                        # new (method, receiver) pair.
+                        self._drop_func_value_records(ref.binding_id)
                         self._record_bound_method(
                             ref.binding_id, mv, params, locals_,
                         )
                     else:
-                        self._drop_bound_method(
+                        # A conditional rebind keeps the untaken
+                        # path's old callee live — the name resolves
+                        # opaquely, with the old value's write
+                        # targets and captures escaped so the call
+                        # still folds their deps back in.
+                        self._drop_func_value_records(
                             ref.binding_id,
                             conditional or self._may_skip > 0,
                         )
-                    # A non-identifier RHS replaces whatever callee
-                    # the name held — stale captures would resolve
-                    # the call to only the old alternative.
-                    self.func_aliases.pop(ref.binding_id, None)
-                    self.closure_captures.pop(ref.binding_id, None)
-                    self.pointee_closures.discard(ref.binding_id)
-                    self.closure_writes.pop(ref.binding_id, None)
-                    self.closure_star_writes.discard(ref.binding_id)
-                    self.closure_inner_calls.discard(ref.binding_id)
                 elif not compound and ref is not None:
                     self._drop_bound_method(
                         ref.binding_id,
@@ -7973,7 +7975,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         or rights[i].type != "func_literal"
                     ):
                         # A non-literal RHS leaves only stale records
-                        # behind; a literal's fresh records stand.
+                        # behind; a literal's fresh records stand —
+                        # but under a conditional rebind the literal
+                        # eval already dropped the name to the opaque
+                        # model when the old value could not merge.
+                        if conditional or self._may_skip > 0:
+                            for wid in self.closure_writes.get(
+                                ref.binding_id, ()
+                            ):
+                                self.escaped.add(wid)
+                            for cid in self.closure_captures.get(
+                                ref.binding_id, ()
+                            ):
+                                self.escaped.add(cid)
                         self.closure_captures.pop(
                             ref.binding_id, None
                         )
@@ -7990,15 +8004,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # leaves the name holding a value the alias
                     # cannot resolve; an unconditional store loses
                     # the target outright and a maybe-skipped one
-                    # leaves it path-dependent, so the alias drops
-                    # either way.
-                    self.func_aliases.pop(ref.binding_id, None)
-                    self.closure_captures.pop(ref.binding_id, None)
-                    self.pointee_closures.discard(ref.binding_id)
-                    self.closure_writes.pop(ref.binding_id, None)
-                    self.closure_star_writes.discard(ref.binding_id)
-                    self.closure_inner_calls.discard(ref.binding_id)
-                    self._drop_bound_method(
+                    # leaves it path-dependent, so the records drop
+                    # either way — conditionally escaping the old
+                    # value's write targets and captures first.
+                    self._drop_func_value_records(
                         ref.binding_id,
                         conditional or self._may_skip > 0,
                     )
@@ -11928,14 +11937,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if conditional and old is not None and old[1] is not None:
             self.escaped.add(old[1])
 
-    def _drop_func_value_records(self, bid: str) -> None:
+    def _drop_func_value_records(
+        self, bid: str, conditional: bool = False
+    ) -> None:
         """Clear every func-value record a reused name carried —
         captured bindings, pointee/write marks, bound method values
         and the function alias — so a call through the name resolves
-        the NEW value instead of a stale literal or method pair."""
+        the NEW value instead of a stale literal or method pair.
+
+        A conditional drop leaves the untaken path's OLD value live:
+        the name then resolves as an opaque external callee, and the
+        bindings the old literal could write or capture escape so a
+        later opaque call folds the old alternative's reads and
+        writes back into their dep sets."""
+        if conditional:
+            for wid in self.closure_writes.get(bid, ()):
+                self.escaped.add(wid)
+            for cid in self.closure_captures.get(bid, ()):
+                self.escaped.add(cid)
+            self._drop_bound_method(bid, True)
+        else:
+            self._drop_bound_method(bid)
         self.closure_captures.pop(bid, None)
         self.pointee_closures.discard(bid)
-        self._drop_bound_method(bid)
         self.closure_writes.pop(bid, None)
         self.closure_star_writes.discard(bid)
         self.closure_inner_calls.discard(bid)
@@ -12533,7 +12557,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # path-dependent — the literal's captures
                 # describe only the literal, so drop BOTH
                 # records and let `h()` fall back to the opaque
-                # external callee model.
+                # external callee model. The literal's own write
+                # targets still land on the taken path — escape
+                # them so the opaque call folds those writes in.
+                for wid in frozenset(writes):
+                    self.escaped.add(wid)
                 self.func_aliases.pop(bound_id, None)
                 self.closure_captures.pop(bound_id, None)
                 self.pointee_closures.discard(bound_id)
@@ -12556,6 +12584,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self.closure_star_writes.add(bound_id)
                 if has_call:
                     self.closure_inner_calls.add(bound_id)
+            elif may_skip and (
+                bound_id in self.bound_method_values
+                or bound_id in locals_
+                or bound_id in params
+            ):
+                # A maybe-skipped literal over a NON-literal value —
+                # a parameter callback (`f := cb`), a call result
+                # (`f := mk()`), a declared zero value or a bound
+                # method — leaves the old callee live on the untaken
+                # path, and the record sets cannot express a may-set
+                # of two callee KINDS. Resolve the name opaquely:
+                # its dep set already unions both alternatives, and
+                # escaping the bindings either side could write keeps
+                # their effects in the model.
+                for wid in (
+                    self.closure_writes.get(bound_id, frozenset())
+                    | frozenset(writes)
+                ):
+                    self.escaped.add(wid)
+                for cid in (
+                    self.closure_captures.get(bound_id, frozenset())
+                    | frozenset(captured)
+                ):
+                    self.escaped.add(cid)
+                self._drop_bound_method(bound_id, True)
+                self.closure_captures.pop(bound_id, None)
+                self.pointee_closures.discard(bound_id)
+                self.closure_writes.pop(bound_id, None)
+                self.closure_star_writes.discard(bound_id)
+                self.closure_inner_calls.discard(bound_id)
+                self.func_aliases.pop(bound_id, None)
             else:
                 self.closure_captures[bound_id] = frozenset(captured)
                 self.closure_writes[bound_id] = frozenset(writes)

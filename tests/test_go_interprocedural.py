@@ -20530,12 +20530,18 @@ def test_func_iterator_range_joins_indirect_writes(go_types_helper):
 def test_func_iterator_range_integer_bound_unaffected(go_types_helper):
     # `for i := range count(x)` — an integer-result call operand is
     # an index range, not a func iterator: no indirect_writes join.
+    # A misclassified integer range would union the escaped `a`'s
+    # current deps into the element, so the body writes `a = x`
+    # through an escaped binding and `s` reads only `i`: a false
+    # func-iterator verdict would leak {x} into the result.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
         "    a := int64(0)\n"
+        "    p := &a\n"
+        "    _ = p\n"
         "    s := int64(0)\n"
-        "    for i := range lib.Count(x) { a = i; s = a }\n"
+        "    for i := range lib.Count(1) { a = x; s = i }\n"
         "    return s\n"
         "}\n"
     }
@@ -20555,8 +20561,67 @@ def test_func_iterator_range_integer_bound_unaffected(go_types_helper):
     )
     assert (
         result.available
-        and result.return_dependencies == frozenset({0})
+        and result.return_dependencies == frozenset()
     )
+
+
+def test_func_result_conditional_literal_rebind_keeps_param(
+    go_types_helper,
+):
+    # `f := cb` then `if c { f = func(){...} }` — the untaken path
+    # still calls `cb`, so `f()` must keep the parameter's dep: the
+    # name resolves as an opaque may-either callee, not the literal
+    # alone.
+    files = {
+        "a.go": "package p\n"
+        "func F(cb func() int64, b int64, c bool) int64 {\n"
+        "    f := cb\n"
+        "    if c { f = func() int64 { return b } }\n"
+        "    return f()\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert {0, 1}.issubset(result.return_dependencies)
+
+
+def test_func_result_conditional_rebind_escapes_old_writes(
+    go_types_helper,
+):
+    # `f := func() { b = x; return b }` then `if c { f = mk(x) }` —
+    # the untaken path still runs the writing literal, so the write
+    # target `b` escapes and `f()` folds the write dep back into
+    # `return b`.
+    files = {
+        "a.go": "package p\n"
+        "func mk(x int64) func() int64 {\n"
+        "    return func() int64 { return x }\n"
+        "}\n"
+        "func F(x int64, c bool) int64 {\n"
+        "    var b int64\n"
+        "    f := func() int64 { b = x; return b }\n"
+        "    if c { f = mk(x) }\n"
+        "    f()\n"
+        "    return b\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_imported_func_result_arg_capture(go_types_helper):
