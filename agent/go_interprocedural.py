@@ -10683,7 +10683,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         if external is not None:
                             target_id, fact = external
-                            base_deps = frozenset()
+                            if self._chan_chan_fact(fact):
+                                # `<-cc` pulls a channel out of the
+                                # outer queue — the received name
+                                # carries the queue's own deps
+                                # (`cc := G(x)` hands `x` to
+                                # `c := <-cc`; a bare param slot has
+                                # no entry and stays dep-free).
+                                base_deps = locals_.get(
+                                    target_id, frozenset()
+                                )
+                            else:
+                                base_deps = frozenset()
                         else:
                             pointees, member, root_ref = field_chan
                             target_id, fact = member.id, member.type
