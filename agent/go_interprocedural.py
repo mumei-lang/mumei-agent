@@ -7709,6 +7709,51 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._ptr_deps[binding_id] = deps
         return deps
 
+    def _receiver_root_ref(self, operand_node: Any) -> Any:
+        """The root identifier reference of a receiver operand.
+
+        `st.M()` gives `st`; a field receiver `s.A.M()` walks the
+        selector chain to `s`; `(*p).M()` unwraps the paren and the
+        `*` to `p`. A computed operand (`g().M`) names no binding —
+        returns None.
+        """
+        cur = operand_node
+        while True:
+            while (
+                cur is not None
+                and cur.type == "parenthesized_expression"
+            ):
+                cur = next(
+                    (
+                        c
+                        for c in cur.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if (
+                cur is not None
+                and cur.type == "unary_expression"
+                and cur.children
+                and cur.children[0].type == "*"
+            ):
+                cur = next(
+                    (
+                        c
+                        for c in cur.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+                continue
+            if cur is not None and cur.type == "selector_expression":
+                cur = cur.child_by_field_name("operand")
+                continue
+            break
+        if cur is None or cur.type != "identifier":
+            return None
+        return self.references.get(self.node_key(cur))
+
     def _deref_read_deps(
         self,
         binding_id: str,
@@ -8978,6 +9023,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     receiver_node, fn, params, locals_,
                     transfers, count, depth + 1,
                 )
+                if (
+                    target.receiver is not None
+                    and target.receiver.type.kind != "pointer"
+                ):
+                    root = self._receiver_root_ref(receiver_node)
+                    root_binding = (
+                        self.bindings.get(root.binding_id)
+                        if root is not None
+                        else None
+                    )
+                    if (
+                        root_binding is not None
+                        and root_binding.type.kind == "pointer"
+                    ):
+                        # `p.Value()` on a value receiver
+                        # auto-derefs — the callee reads pointee
+                        # memory, and a `*p = x` store broadcasts
+                        # into `indirect_writes`, not `p`'s own set.
+                        receiver_deps |= self.indirect_writes
                 arity = len(target.parameters)
             elif call.method_expr:
                 # `T.M(st, args)` — the leading argument already IS the
@@ -8996,6 +9060,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if receiver_deps is not None:
                 actual = (receiver_deps, *actual)
+            elif (
+                call.method_expr
+                and arguments
+                and target.receiver is not None
+                and target.receiver.type.kind != "pointer"
+            ):
+                # `T.M(p, args)` on a value receiver auto-derefs `p`
+                # like `p.Value()` — the pointee contents broadcast
+                # into `indirect_writes`, not `p`'s own set.
+                root = self._receiver_root_ref(arguments[0])
+                root_binding = (
+                    self.bindings.get(root.binding_id)
+                    if root is not None
+                    else None
+                )
+                if (
+                    root_binding is not None
+                    and root_binding.type.kind == "pointer"
+                ):
+                    actual = (
+                        actual[0] | self.indirect_writes,
+                        *actual[1:],
+                    )
             callee = self.summarize(call.target)
             if not callee.available:
                 reason = (
