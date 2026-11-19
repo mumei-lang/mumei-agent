@@ -10005,7 +10005,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if len(lefts) == len(rights)
                             else None
                         )
-                        if new_toks is not None:
+                        if conditional or self._may_skip > 0:
+                            # `if c { s = t }` — the untaken path
+                            # keeps `s` aimed at its old backing, so
+                            # the reseat unions the new tokens like
+                            # the dep-set join does (a scalar RHS
+                            # likewise leaves the old backing a
+                            # candidate — never pop).
+                            if new_toks:
+                                self._opaque_container_tokens[
+                                    ref.binding_id
+                                ] = (
+                                    self._opaque_container_tokens.get(
+                                        ref.binding_id, frozenset()
+                                    )
+                                    | new_toks
+                                )
+                        elif new_toks is not None:
                             self._opaque_container_tokens[
                                 ref.binding_id
                             ] = new_toks
