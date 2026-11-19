@@ -8242,7 +8242,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for _t in _ts:
                         _by_token.setdefault(_t, set()).add(_n)
                 for _n in set(self._func_elem_tokens) | set(_by_token):
-                    _cls = {_n} | _by_token.get(_n, set())
+                    _cls = {_n}
                     for _t in self._func_elem_eval_tokens(_n):
                         _cls |= _by_token.get(_t, set())
                     func_elem_eval_class[_n] = frozenset(_cls)
