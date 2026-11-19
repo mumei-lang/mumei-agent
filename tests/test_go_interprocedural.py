@@ -12153,6 +12153,23 @@ def test_immediate_func_literal_unused_chan_arg_no_effect(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_immediate_func_literal_chan_arg_through_call_result(
+    go_types_helper,
+):
+    # `func(ch) { <-ch }(Id(q))` — the argument is a callee-produced
+    # queue: receiving on the literal's chan parameter reads an
+    # external queue just like a `ch := g()` binding would.
+    data = unit(
+        go_types_helper,
+        "func Id(q chan int64) chan int64 { return q }\n"
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return <-ch }(Id(q))\n}",
+    )
+    result = named(*data, name="F")
+    assert result.available
+    assert result.effects == "unknown"
+
+
 def test_immediate_func_literal_internal_call_closed(
     go_types_helper,
 ):

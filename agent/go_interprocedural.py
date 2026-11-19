@@ -11301,6 +11301,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ext = self._external_chan_operand(arg)
             if ext is not None:
                 external_chans.add(ext[0])
+                continue
+            # `func(ch) { <-ch }(Id(q))` — the argument is a
+            # callee-produced queue, external like a `ch := g()`
+            # binding is: record the receive against the callee's
+            # identity.
+            target = self._chan_result_call(arg)
+            if target is not None:
+                external_chans.add(target.binding_id)
         if captures_pointer:
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
