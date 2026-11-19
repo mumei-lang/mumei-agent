@@ -12933,6 +12933,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
+                    if (
+                        binding.type.kind == "chan"
+                        and self._external_chan_operand(node, params)
+                        is not None
+                    ):
+                        # `G(GC)` names a queue in external state —
+                        # the callee may observe its contents: the
+                        # same union `<-GC` reads.
+                        return (
+                            locals_.get(ref.binding_id, frozenset())
+                            | self.indirect_writes
+                        )
                     return frozenset()
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
@@ -12948,11 +12960,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # without a matching declaration stay closed.
             member = self._package_member(node)
             if member is not None and member.kind == "var":
+                ext_operand = self._external_chan_operand(node, params)
                 if member.type.kind not in {
                     "integer",
                     "boolean",
                     "pointer",
-                } and self._external_chan_operand(node, params) is None:
+                } and ext_operand is None:
                     raise _Unsupported("non_parameter_reference", _span(node))
                 # A `chan` member (`lib.GC`) names a queue in
                 # external state — the same dep-free imported read a
@@ -12974,6 +12987,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         imported=True,
                     )
                 )
+                if ext_operand is not None:
+                    # Naming the queue surfaces what it may hold —
+                    # `G(lib.GC)` must carry the sends a callee could
+                    # observe, exactly like `<-lib.GC` reads
+                    # `indirect_writes | base_deps`.
+                    return (
+                        locals_.get(member.id, frozenset())
+                        | self.indirect_writes
+                    )
                 return frozenset()
             if member is None:
                 # `s.M` / `St.M` — a bound method value: the
@@ -17417,6 +17439,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_.get(binding.id, frozenset())
                             | stored
                         )
+                    elif (
+                        self._external_chan_operand(arg_node, params)
+                        is not None
+                    ):
+                        # `G(GC)` — a package-level chan var handed to
+                        # an effectful callee: its sends land in the
+                        # external queue, broadcast like `GC <- x`.
+                        self.indirect_writes |= stored
                 elif (
                     binding is not None
                     and binding.type.kind == "struct"
@@ -17432,6 +17462,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # reseat `s` or its fields — so `locals_[s]`
                     # correctly keeps its pre-call set.
                     self.indirect_writes |= stored
+            elif self._external_chan_operand(arg_node, params) is not None:
+                # `G(lib.GC)` — a chan operand in external state
+                # (imported member): the callee may send into the
+                # shared queue — the same broadcast `lib.GC <- x`
+                # makes, observed by a later `<-lib.GC`.
+                self.indirect_writes |= stored
 
 
 def _declared_key(binding_id: str) -> tuple[str, int] | None:

@@ -24806,3 +24806,113 @@ def test_selector_chan_member_alias_source_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_imported_call_selector_chan_arg_read_side(go_types_helper):
+    # `lib.Read(lib.GC)` — the queue's contents must reach the callee:
+    # a callee that receives from the argument queue observes every
+    # earlier send, like `lib.Read(ch)` does for an identifier.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.GC <- x\n"
+        "\treturn lib.Read(lib.GC)\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar GC chan int64\n"
+            "func Read(q chan int64) int64 { return <-q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_call_selector_chan_arg_write_side(go_types_helper):
+    # `lib.Put(lib.GC, x)` — the callee's send lands in the shared
+    # external queue: a later `<-lib.GC` observes it like the direct
+    # send `lib.GC <- x` does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.Put(lib.GC, x)\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nvar GC chan int64\n"
+            "func Put(q chan int64, v int64) { q <- v }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_call_pkgvar_chan_arg_read_side(go_types_helper):
+    # `lib.Read(GC)` — a package-level chan var as argument carries the
+    # queue's contents like the selector operand does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar GC chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tGC <- x\n"
+        "\treturn lib.Read(GC)\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func Read(q chan int64) int64 { return <-q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_call_pkgvar_chan_arg_write_side(go_types_helper):
+    # `lib.Put(GC, x)` — the callee's send into the package-level queue
+    # reaches a later `<-GC`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar GC chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.Put(GC, x)\n"
+        "\treturn <-GC\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func Put(q chan int64, v int64) { q <- v }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
