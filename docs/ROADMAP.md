@@ -2864,9 +2864,12 @@ the container's slot — which value a map key holds is as
 unknowable as a slice index, and map literals never reach the
 fragment, so only call results produce these containers. A
 computed key evaluates like an argument (`lib.Mk(x)[k]()` folds
-the key's deps); binding the map to a local (`fm := lib.Mk(x)`)
-still stays closed because a map-typed local has no dep model
-yet.
+the key's deps). A `map[K]func` local binds the same conflated
+way a `[]func` local does (`fm := lib.Mk(x)`, `var fm =
+lib.Mk(x)`, `fm = lib.Mk(x)`): a keyed slot is as unknowable as
+a numbered index, so `fm["k"]()` calls opaque on the
+container's slot and the producing call's `chan` arguments
+promote through it.
 A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
 inner callee resolves) admits as an opaque indirect call: Go
 evaluates the callee expression before the arguments, so the
