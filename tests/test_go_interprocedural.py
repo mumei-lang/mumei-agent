@@ -188,8 +188,6 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
         # `make` still produces non-scalar resource state.
         "func F(x int64) int64 { var s []int64; _ = s; return x }",
-        # A channel is resource state — `nil` has no binding either.
-        "func G(c chan int64) int64 { return <-c }; func F(x int64) int64 { return G(nil) }",
         # A parenthesized function name is outside the store-RHS
         # position the alias admits — `h := (G)` stays closed.
         "func G(v int64) int64 { return v }; func F(x int64) int64 { h := (G); return h(x) }",
@@ -21237,16 +21235,64 @@ def test_func_result_multi_slot_unpacks(go_types_helper):
     assert result.available
 
 
-def test_func_result_nil_stays_closed(go_types_helper):
-    # `return nil` on a func result — nil is not an admitted value
-    # expression, so the callee stays closed and its callers follow.
+def test_func_result_nil_admitted(go_types_helper):
+    # `return nil` on a func result — nil carries no deps like a
+    # literal, so the callee summarizes and `f()` runs opaque on
+    # the bound name.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk() func() int64 { return nil }; "
         "func F(x int64) int64 { f := mk(); return f() }",
     )
     mk = named(source, snapshot, summaries, "mk")
-    assert not mk.available
+    assert mk.available and mk.return_dependencies == frozenset()
+
+
+def test_nil_channel_argument_admitted(go_types_helper):
+    # `G(nil)` — the nil channel carries no queue deps, so the
+    # call's dep set is empty and the summary still resolves.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(c chan int64) int64 { return <-c }; "
+        "func F(x int64) int64 { return G(nil) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_shadowed_nil_param_resolves(go_types_helper):
+    # `func F(nil int64) { return nil }` — `nil` is a redefinable
+    # identifier, so the read resolves the parameter, not the
+    # dep-free literal.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(nil int64) int64 { return nil }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_shadowed_nil_local_stays_closed(go_types_helper):
+    # `nil := x` — declaring a variable named `nil` stays closed
+    # rather than mis-modeling the shadowing bind.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { nil := x; return nil }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_nil_collection_result_admitted(go_types_helper):
+    # `mk() []func` returning nil — the nil result admits, and the
+    # bound container call `fs[0]()` runs opaque on the slot.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() []func() int64 { return nil }; "
+        "func F(x int64) int64 { fs := mk(); return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
 
 
 def test_func_result_direct_call_runs_opaque(go_types_helper):
@@ -21325,15 +21371,28 @@ def test_func_result_direct_call_parenthesized_runs_opaque(
     assert result.effects == "unknown"
 
 
-def test_func_result_direct_call_inner_closed_stays_closed(
+def test_func_result_direct_call_nil_result_admitted(
     go_types_helper,
 ):
-    # `mk()()` where `mk`'s result is `nil` — the inner call
-    # cannot produce a func value, so the outer call fails
-    # closed through the inner evaluation.
+    # `mk()()` where `mk`'s result is `nil` — nil admits as a
+    # dep-free func value, so the anonymous callee runs opaque.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk() func() int64 { return nil }; "
+        "func F(x int64) int64 { return mk()() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+
+
+def test_func_result_direct_call_inner_closed_stays_closed(
+    go_types_helper,
+):
+    # `mk()()` where `mk`'s body is unsupported — the inner call
+    # cannot evaluate, so the outer call fails closed through it.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() func() int64 { m:=map[int]int{1:2}; _=m; return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
@@ -21437,13 +21496,122 @@ def test_func_element_result_chan_receiver_joins_external_queue(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_func_element_bound_container_call_stays_closed(go_types_helper):
-    # `fs := mk(x); fs[0]()` — binding the func-element container
-    # itself is outside this slice; the indexed call stays closed.
+def test_func_element_bound_container_call_admitted(go_types_helper):
+    # `fs := mk(x); fs[0]()` — a `[]func`/`[N]func` local binds like
+    # a composite: one conflated dep set carries the call result's
+    # deps, and `fs[0]()` calls opaque on the container's slot.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk(x int64) []func() int64 {\n"
         "    return []func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64) int64 { fs := mk(x); return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert any(t.imported for t in result.calls)
+
+
+def test_func_element_bound_container_var_and_assign_forms(
+    go_types_helper,
+):
+    # `var fs = mk(x)` and `var fs []func() T; fs = mk(x)` bind the
+    # container the same way.
+    for decl in (
+        "var fs = mk(x)",
+        "var fs []func() int64; fs = mk(x)",
+        "fs := mk(x); gs := fs; fs = gs",
+    ):
+        source, snapshot, summaries = unit(
+            go_types_helper,
+            "func mk(x int64) []func() int64 {\n"
+            "    return []func() int64{func() int64 { return x }}\n"
+            "}\n"
+            f"func F(x int64) int64 {{ {decl}; return fs[0]() }}",
+        )
+        result = named(source, snapshot, summaries)
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_bound_container_variable_index(go_types_helper):
+    # `fs[k]()` — a computed index evaluates like an argument.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) []func() int64 {\n"
+        "    return []func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64, k int) int64 { fs := mk(x); return fs[k]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_element_bound_container_literal_admitted(go_types_helper):
+    # `fs := []func(){func(){...x...}}; fs[0]()` — a composite
+    # literal binds the same conflated dep set.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return x }}\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_literal_captures_reseat(go_types_helper):
+    # Element literals record captures under the container name —
+    # a `y = x` reseat between the literal and `fs[0]()` resolves
+    # at call time like a bound literal does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { y:=int64(0); "
+        "fs := []func() int64{func() int64 { return y }}; "
+        "y=x; return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_element_literal_captures_union(go_types_helper):
+    # Two elements' captures union under the conflated container.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, z int64) int64 { y:=int64(0); w:=int64(0); "
+        "fs := []func() int64{func() int64 { return y }, func() int64 { return w }}; "
+        "y=x; w=z; return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_element_container_chan_arg_promoted(go_types_helper):
+    # `fs := mk(ch)` — the container's elements may capture the
+    # queue, so the call's chan args join the external model like
+    # they do for a func-typed bind.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(c chan int64) []func() int64 { return nil }; "
+        "func F(x int64) int64 { ch := make(chan int64, 1); "
+        "fs := mk(ch); ch <- x; return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_element_map_container_stays_closed(go_types_helper):
+    # `map[int]func` — a keyed container is not a numbered slot: the
+    # conflated dep set cannot say which slot `fs[k]()` invokes, so
+    # it stays closed like other unmodelled composites.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) map[int]func() int64 {\n"
+        "    return map[int]func() int64{0: func() int64 { return x }}\n"
         "}\n"
         "func F(x int64) int64 { fs := mk(x); return fs[0]() }",
     )

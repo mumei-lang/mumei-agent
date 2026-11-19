@@ -1288,6 +1288,32 @@ class _Builder:
             self.pinned.add(binding.type.type_id)
         return composite
 
+    def _func_elem_collection(self, fact: Any) -> bool:
+        """A `[]func`/`[N]func` container — a slice or array whose
+        elements are function values. It binds like a composite
+        local: one conflated dep set carries every element's
+        captured state, and `fs[k]()` then calls opaque on the
+        container's slot like an imported member's element does."""
+        return (
+            fact is not None
+            and fact.kind in {"slice", "array"}
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind == "function"
+        )
+
+    def _is_func_elem_composite(self, rhs_node: Any, binding_id: str) -> bool:
+        """`fs := []func(){…}` — a composite literal binding to a
+        func-element container. Its element literals record captures
+        under the container's name during RHS evaluation, so the
+        generic func-value record cleanup must not erase them."""
+        bound = self.bindings.get(binding_id)
+        return (
+            rhs_node is not None
+            and rhs_node.type == "composite_literal"
+            and bound is not None
+            and self._func_elem_collection(bound.type)
+        )
+
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
         imported `var` member or a local `variable` binding."""
@@ -6217,8 +6243,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         "chan",
                     }
                     # `st := P{...}` — a named composite local carries
-                    # one conflated dep set for every field.
+                    # one conflated dep set for every field, and
+                    # `fs := mk()` a `[]func`/`[N]func` container
+                    # whose `fs[k]()` calls opaque on it.
                     and not self._is_local_composite(binding)
+                    and not self._func_elem_collection(binding.type)
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
@@ -6352,13 +6381,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     else frozenset()
                                 ),
                             )
-                if binding.type.kind == "function":
+                if binding.type.kind == "function" or (
+                    self._func_elem_collection(binding.type)
+                ):
                     # `f := mk(ch)` — the returned closure may
                     # capture the queue it received, so the call's
                     # `chan` arguments join the external model: a
                     # later `ch <- x` broadcasts into
                     # `indirect_writes`, which the opaque `f()`
-                    # call then observes.
+                    # call then observes. A func-element container
+                    # binds the same way — `fs := mk(ch)` elements
+                    # may receive on `ch`.
                     value = value | self._func_result_chan_args(
                         chan_rhs, locals_, params
                     )
@@ -6498,6 +6531,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # cannot run.
                         self.func_aliases.pop(binding.id, None)
                         self.opaque_callees.discard(binding.id)
+                    elif self._is_func_elem_composite(
+                        rights[i], binding.id
+                    ):
+                        # `fs := []func(){…}` — the element
+                        # literals recorded captures under this
+                        # container during RHS eval; keep them.
+                        pass
                     else:
                         # Any other RHS clears every func-value record
                         # an earlier bind left on the reused name — a
@@ -6696,7 +6736,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # the make(chan) form.
                             "chan",
                         }
+                        # `var fs = mk()` / `var fs []func() T` — a
+                        # `[]func`/`[N]func` container like the
+                        # short-decl form.
                         and not self._is_local_composite(binding)
+                        and not self._func_elem_collection(binding.type)
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
@@ -6869,8 +6913,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     )
                     if (
                         binding.type.kind == "function"
-                        and value_nodes
-                    ):
+                        or self._func_elem_collection(binding.type)
+                    ) and value_nodes:
                         # `var f = mk(ch)` — like the short-decl
                         # form, a returned closure may capture the
                         # call's `chan` arguments.
@@ -7064,6 +7108,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # pair or alias cannot resolve through it.
                             self._drop_bound_method(binding.id)
                             self.func_aliases.pop(binding.id, None)
+                        elif self._is_func_elem_composite(
+                            value_nodes[i], binding.id
+                        ):
+                            # `var fs = []func(){…}` — keep the
+                            # element literals' capture records.
+                            pass
                         else:
                             self._drop_func_value_records(binding.id)
                     else:
@@ -8183,9 +8233,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             ) | (old_queue or frozenset())
                 if not compound and ref is not None:
                     bound = self.bindings.get(ref.binding_id)
-                    if (
-                        bound is not None
-                        and bound.type.kind == "function"
+                    if bound is not None and (
+                        bound.type.kind == "function"
+                        or self._func_elem_collection(bound.type)
                     ):
                         # `f = mk(ch)` — like the declaration
                         # forms, the returned closure may capture
@@ -8482,8 +8532,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     self.func_aliases.pop(ref.binding_id, None)
                     if (
-                        len(lefts) != len(rights)
-                        or rights[i].type != "func_literal"
+                        (
+                            len(lefts) != len(rights)
+                            or rights[i].type != "func_literal"
+                        )
+                        and not self._is_func_elem_composite(
+                            (
+                                rights[i]
+                                if len(lefts) == len(rights)
+                                else rights[0]
+                            ),
+                            ref.binding_id,
+                        )
                     ):
                         # A non-literal RHS leaves only stale records
                         # behind; a literal's fresh records stand.
@@ -10884,6 +10944,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
         children = _children(node)
         if kind in {"int_literal", "rune_literal"}:
             return frozenset()
+        if kind == "nil":
+            ref = self.references.get(self.node_key(node))
+            if ref is not None and ref.binding_id:
+                # `nil` is a redefinable identifier — a shadowed
+                # nil resolves through `locals_`/`params` like
+                # any other name.
+                kind = "identifier"
+            else:
+                # `nil` carries no deps like a literal — a nil
+                # read on a non-nilable type cannot compile anyway.
+                return frozenset()
         if kind in {"identifier", "true", "false", "iota"}:
             ref = self.references.get(self.node_key(node))
             # Reassigned names (including parameters) resolve through
@@ -13320,9 +13391,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # bare identifier call admits, so the value can never be
         # invoked through this summary. `node.parent` is the
         # expression_list wrapper — climb past it (and any further
-        # list nesting) to the declaring statement.
+        # list nesting) to the declaring statement. A literal nested
+        # in a `[]func`/`[N]func` composite (`fs := []func(){…}`)
+        # binds through the container name — climb past the literal
+        # wrappers too, so the element's captures record under the
+        # container binding the `fs[k]()` call reads.
         parent = node.parent
-        while parent is not None and parent.type == "expression_list":
+        in_composite = False
+        while parent is not None and parent.type in {
+            "expression_list",
+            "literal_value",
+            "literal_element",
+            "keyed_element",
+            "composite_literal",
+        }:
+            if parent.type == "composite_literal":
+                in_composite = True
             parent = parent.parent
         name_node = None
         if parent is not None and parent.type in {
@@ -13338,6 +13422,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     (i for i, v in enumerate(values) if v == node),
                     None,
                 )
+                if index is None and in_composite:
+                    # The literal nests inside one composite value —
+                    # `fs := []func(){…}` binds the name whose RHS
+                    # node CONTAINS this literal.
+                    index = next(
+                        (
+                            i
+                            for i, v in enumerate(values)
+                            if v.start_byte <= node.start_byte
+                            and node.end_byte <= v.end_byte
+                        ),
+                        None,
+                    )
                 if index is not None and index < len(names):
                     name_node = names[index]
         elif parent is not None and parent.type == "var_spec":
@@ -13354,6 +13451,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             index = next(
                 (i for i, v in enumerate(values) if v == node), None
             )
+            if index is None and in_composite:
+                index = next(
+                    (
+                        i
+                        for i, v in enumerate(values)
+                        if v.start_byte <= node.start_byte
+                        and node.end_byte <= v.end_byte
+                    ),
+                    None,
+                )
             if index is not None and index < len(names):
                 name_node = names[index]
         bound_id: str | None = None
@@ -13388,7 +13495,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 bound_id = member.id
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
-            if may_skip and bound_id in self.func_aliases:
+            if in_composite:
+                # An element literal inside `fs := []func(){…}` —
+                # the container may hold other elements with their
+                # own captures, so union rather than replace. The
+                # container's element set is never cleared either:
+                # `fs[k]()` resolves through the opaque index call
+                # and reads this unioned record.
+                self.closure_captures[bound_id] = (
+                    self.closure_captures.get(bound_id, frozenset())
+                    | frozenset(captured)
+                )
+                self.closure_writes[bound_id] = (
+                    self.closure_writes.get(bound_id, frozenset())
+                    | frozenset(writes)
+                )
+                if star_write:
+                    self.closure_star_writes.add(bound_id)
+                if has_call:
+                    self.closure_inner_calls.add(bound_id)
+            elif may_skip and bound_id in self.func_aliases:
                 # A literal on a maybe-taken path over a
                 # function-name alias leaves the callee's value
                 # path-dependent — union the literal's records so
@@ -14001,6 +14127,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._store(
                 locals_, params, escaped_id, write_deps, True
             )
+        # An element literal recorded under this container may
+        # write a captured local (`fs := []func(){func(){ y = v }}`)
+        # — the target need not be an escaped binding, so fold the
+        # call's deps into each recorded write target like the
+        # bound-literal call path does.
+        for target in self.closure_writes.get(target_id, ()):
+            self._store(
+                locals_, params, target, write_deps, True
+            )
+            self.func_aliases.pop(target, None)
+            self.opaque_callees.add(target)
         return deps
 
     def _interface_dispatch_call(
