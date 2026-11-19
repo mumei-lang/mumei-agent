@@ -21030,6 +21030,43 @@ def test_call_result_promotion_old_report_embedded_alias_pointer(
     assert any(t.imported for t in result.calls)
 
 
+def test_call_result_promotion_old_report_embedded_tag_and_crlf(
+    go_types_helper,
+):
+    # An embedded field may carry a struct tag or sit in a CRLF
+    # file — the declaration-form scan must still see it as
+    # embed-compatible in a pre-`embedded` report.
+    for fields in (
+        'package p\ntype Q struct{ P int64 }\ntype S struct{ *Q `json:"q"` }\n',
+        'package p\ntype Q struct{ P int64 }\ntype S struct{\r\n\t*Q\r\n}\r\n',
+        'package p\ntype Q struct{ P int64 }\ntype S struct{ *Q // c\n}\n',
+    ):
+        files = {
+            "a.go": fields
+            + "func g(q int64) S { return S{} }\n"
+            "func F(q int64) int64 {\n"
+            "\tb := q\n"
+            "\tp := &b\n"
+            "\t_ = p\n"
+            "\treturn g(q).P\n"
+            "}\n"
+        }
+        payload = json.loads(package_report(go_types_helper, files))
+        old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+        snapshot = load_go_package_snapshot(
+            old_payload,
+            files,
+            target_arch="amd64",
+        )
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "unknown"
+        assert any(t.imported for t in result.calls)
+
+
 def test_call_result_anon_struct_embedded_pointer_reads_external(
     go_types_helper,
 ):

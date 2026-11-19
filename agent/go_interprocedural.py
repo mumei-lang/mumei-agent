@@ -1021,7 +1021,8 @@ class _Builder:
         declaration form is still visible in source: a name followed
         by a type (`R *Q`, `Q Q`) or another name (`A, B *Q`) is
         definitely NAMED — an embedded field is a bare identifier,
-        so only a `\\n` / `;` / `}` (or EOF) may follow it. Comparing
+        so only a `\\n` / `;` / `}` (or EOF, possibly after a
+        tag or a comment) may follow it. Comparing
         the field name to the resolved type's name fails for
         aliases (`type A = *Q` embeds as `A`, not `Q`), so the
         source text after the field's own span decides."""
@@ -1033,7 +1034,7 @@ class _Builder:
             return True
         i, n = span.end, len(raw)
         while True:
-            while i < n and raw[i:i + 1] in (b" ", b"\t"):
+            while i < n and raw[i:i + 1] in (b" ", b"\t", b"\r"):
                 i += 1
             if raw[i:i + 2] == b"//":
                 j = raw.find(b"\n", i)
@@ -1042,6 +1043,12 @@ class _Builder:
             if raw[i:i + 2] == b"/*":
                 j = raw.find(b"*/", i + 2)
                 i = n if j < 0 else j + 2
+                continue
+            if raw[i:i + 1] == b"`":
+                # A struct tag can decorate an embedded field too
+                # (`*Q `json:"q"``) — skip it and keep checking.
+                j = raw.find(b"`", i + 1)
+                i = n if j < 0 else j + 1
                 continue
             break
         if i >= n:
