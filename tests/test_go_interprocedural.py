@@ -16517,3 +16517,24 @@ def test_func_alias_cleared_by_non_identifier_rhs(go_types_helper):
     assert result.available
     assert result.effects == "unknown"
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_alias_dropped_when_address_escapes(go_types_helper):
+    # `p := &h` hands an untracked pointer a writable alias of h —
+    # a later `h(x)` can no longer resolve through G and falls back
+    # to the opaque external model (effects unknown).
+    files = {
+        "a.go": "package p\n"
+        "func G(v int64) int64 { return v }\n"
+        "func F(x int64) int64 {\n"
+        "\th := G\n"
+        "\tp := &h\n"
+        "\t_ = p\n"
+        "\treturn h(x)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"

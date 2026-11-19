@@ -8482,6 +8482,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ref.binding_id in locals_ or ref.binding_id in params
                 ):
                     self.escaped.add(ref.binding_id)
+                    # `&h` hands the callee a writable alias — after
+                    # `mutate(&h)` the name may hold a function the
+                    # alias record never saw, so `h(x)` can no
+                    # longer resolve through it.
+                    self.func_aliases.pop(ref.binding_id, None)
             deps: frozenset[int] = frozenset()
             for child in children:
                 deps |= self.expression(
