@@ -730,3 +730,63 @@ def test_route_static_failures(tmp_path):
     assert main_eval(
         _args(parser, record, [evidence], output=evidence)
     ) == 1
+
+
+def test_key_revocation_recovers_through_bound_fold_docs():
+    digest = "a" * 64
+    record = _record("key_revocation")
+    for schema in (
+        "mumei.signature-envelope-evaluation/v1",
+        "mumei.signature-verification/v1",
+    ):
+        doc = _doc(
+            schema,
+            envelope_match=True,
+            key_not_revoked=True,
+            subject_digest=digest,
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert evaluation["checks"]["key_revocation"] == "recovered"
+
+
+def test_key_revocation_needs_binding_and_outcome():
+    digest = "a" * 64
+    record = _record("key_revocation")
+
+    # A revoked key reports evidence_failed, not recovered.
+    doc = _doc(
+        "mumei.signature-verification/v1",
+        envelope_match=True,
+        key_not_revoked=False,
+        subject_digest=digest,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [doc], record_digest=digest,
+    )
+    assert evaluation["checks"]["key_revocation"] == "evidence_failed"
+
+    # A doc bound to other bytes never performs this record's check.
+    doc = _doc(
+        "mumei.signature-verification/v1",
+        envelope_match=True,
+        key_not_revoked=True,
+        subject_digest="b" * 64,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [doc], record_digest=digest,
+    )
+    assert evaluation["checks"]["key_revocation"] == "evidence_failed"
+
+    # The record-agnostic freshness convention does NOT apply — a
+    # bound doc is required even when the record declares its checks.
+    doc = _doc(
+        "mumei.signature-envelope-evaluation/v1",
+        envelope_match=True,
+        key_not_revoked=True,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [doc], record_digest=digest,
+    )
+    assert evaluation["checks"]["key_revocation"] == "evidence_failed"

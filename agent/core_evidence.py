@@ -437,6 +437,45 @@ _PRODUCER_SIGNATURE_ALGORITHM = "ed25519"
 # ed25519 signatures are 64 bytes.
 _PRODUCER_SIGNATURE_HEX_LEN = 128
 
+SIGNATURE_ENVELOPE_EVALUATION_SCHEMA = (
+    "mumei.signature-envelope-evaluation/v1"
+)
+
+# A caller-supplied revocation list: a closed-shape declared document
+# naming the producer key ids the caller considers revoked — trusted as
+# declared, exactly like every other supporting document.
+KEY_REVOCATION_LIST_SCHEMA = "mumei.key-revocation-list/v1"
+
+_KEY_REVOCATION_LIST_REQUIRED_FIELDS = frozenset(
+    {"schema_version", "revoked_keys"}
+)
+
+
+def revocation_key_set(document: dict) -> frozenset:
+    """Fold a declared ``mumei.key-revocation-list/v1`` into a key set.
+
+    The list is a closed shape: `schema_version` names the schema and
+    `revoked_keys` is a list of non-empty strings — producer key ids in
+    the same label space `producer_key_id`/`--expected-producer-key`
+    pin. A malformed or foreign document raises ValueError rather than
+    silently revoking nothing or everything: the caller supplied it as
+    input, so a wrong shape is a caller error like a malformed
+    ``--record``.
+    """
+    if type(document) is not dict:
+        raise ValueError("invalid key-revocation list document")
+    revoked = document.get("revoked_keys")
+    if (
+        frozenset(document) != _KEY_REVOCATION_LIST_REQUIRED_FIELDS
+        or document["schema_version"] != KEY_REVOCATION_LIST_SCHEMA
+        or type(revoked) is not list
+        or any(
+            type(key) is not str or key == "" for key in revoked
+        )
+    ):
+        raise ValueError("invalid key-revocation list document")
+    return frozenset(revoked)
+
 
 def _is_hex(value: object, length: int) -> bool:
     return (
@@ -450,6 +489,7 @@ def evaluate_signature_envelope(
     envelope: dict,
     expected_subject: str | None = None,
     expected_key: str | None = None,
+    revoked_keys: frozenset | None = None,
 ) -> dict:
     """Fold a declared producer-signature envelope into an evaluation.
 
@@ -500,7 +540,7 @@ def evaluate_signature_envelope(
         and envelope["producer_key_id"] != ""
     )
     evaluation = {
-        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "schema_version": SIGNATURE_ENVELOPE_EVALUATION_SCHEMA,
         "envelope_match": match,
         "checks_not_performed": [
             "subject_binding",
@@ -511,6 +551,11 @@ def evaluate_signature_envelope(
             "key_revocation",
         ],
     }
+    if match:
+        # The envelope's declared digest echoes so a consumer can bind
+        # this document to the record the signature covers — the same
+        # carrier convention the verification fold emits.
+        evaluation["subject_digest"] = envelope["subject_digest"]
     if expected_subject is not None:
         evaluation["subject_bound"] = (
             match and envelope["subject_digest"] == expected_subject
@@ -521,6 +566,17 @@ def evaluate_signature_envelope(
             match and envelope["producer_key_id"] == expected_key
         )
         evaluation["checks_not_performed"].remove("key_binding")
+    if revoked_keys is not None:
+        # A declared revocation list performs `key_revocation` on the
+        # matched envelope's key id: `key_not_revoked` is true only
+        # when the envelope matched AND its producer key id is absent
+        # from the caller's list. The list itself is trusted as
+        # declared — an authentic list needs the directory/trust-anchor
+        # story (`key_authenticity` still stays).
+        evaluation["key_not_revoked"] = (
+            match and envelope["producer_key_id"] not in revoked_keys
+        )
+        evaluation["checks_not_performed"].remove("key_revocation")
     return evaluation
 
 
@@ -535,6 +591,7 @@ def verify_signature_envelope(
     producer_key: str,
     expected_subject: str | None = None,
     expected_key: str | None = None,
+    revoked_keys: frozenset | None = None,
 ) -> dict:
     """Verify a declared producer-signature envelope's ed25519 signature.
 
@@ -631,6 +688,14 @@ def verify_signature_envelope(
             match and envelope["producer_key_id"] == expected_key
         )
         verification["checks_not_performed"].remove("key_binding")
+    if revoked_keys is not None:
+        # Same declared revocation list as the evaluation fold:
+        # `key_not_revoked` holds only when the envelope matched AND
+        # its producer key id is absent from the caller's list.
+        verification["key_not_revoked"] = (
+            match and envelope["producer_key_id"] not in revoked_keys
+        )
+        verification["checks_not_performed"].remove("key_revocation")
     return verification
 
 
@@ -713,6 +778,10 @@ _BINDING_CARRIERS: dict = {
     # record digest the signature covers — so it binds to the record
     # bytes like the envelope itself.
     SIGNATURE_VERIFICATION_SCHEMA: "subject_digest",
+    # The evaluation doc echoes the same digest — a bound
+    # `key_not_revoked` observation names the record the signature
+    # covers, not just an unscoped envelope.
+    SIGNATURE_ENVELOPE_EVALUATION_SCHEMA: "subject_digest",
 }
 
 
@@ -787,6 +856,24 @@ _CHECK_PERFORMERS: dict = {
     ],
     "signature_verification": [
         ("mumei.signature-verification/v1", "signature_valid", True, None),
+    ],
+    # A declared revocation list performs `key_revocation` through
+    # either signature fold's `key_not_revoked` — bound to the record
+    # via the fold doc's echoed `subject_digest` carrier, so the
+    # observation names the key that signed *this* record.
+    "key_revocation": [
+        (
+            "mumei.signature-envelope-evaluation/v1",
+            "key_not_revoked",
+            True,
+            "subject_digest",
+        ),
+        (
+            "mumei.signature-verification/v1",
+            "key_not_revoked",
+            True,
+            "subject_digest",
+        ),
     ],
     "envelope_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),

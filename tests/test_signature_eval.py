@@ -193,3 +193,109 @@ def test_route_refuses_output_over_input(tmp_path):
         main_eval(_args(parser, envelope, "--output", str(envelope)))
         == 1
     )
+
+
+def test_revocation_list_performs_key_revocation():
+    # A declared `mumei.key-revocation-list/v1` performs
+    # `key_revocation` on the matched envelope's key id — the list is
+    # trusted as declared like every other supporting document.
+    revoked = {"schema_version": "mumei.key-revocation-list/v1",
+               "revoked_keys": ["other-key"]}
+    from agent.core_evidence import revocation_key_set
+
+    evaluation = evaluate_signature_envelope(
+        _envelope(), revoked_keys=revocation_key_set(revoked)
+    )
+    assert evaluation["envelope_match"] is True
+    assert evaluation["key_not_revoked"] is True
+    assert "key_revocation" not in evaluation["checks_not_performed"]
+    assert "key_authenticity" in evaluation["checks_not_performed"]
+
+
+def test_revoked_key_reports_false():
+    from agent.core_evidence import revocation_key_set
+
+    evaluation = evaluate_signature_envelope(
+        _envelope(), revoked_keys=revocation_key_set(
+            {"schema_version": "mumei.key-revocation-list/v1",
+             "revoked_keys": [_KEY]}
+        )
+    )
+    assert evaluation["envelope_match"] is True
+    assert evaluation["key_not_revoked"] is False
+
+
+def test_unmatched_envelope_reports_not_revoked_false():
+    from agent.core_evidence import revocation_key_set
+
+    evaluation = evaluate_signature_envelope(
+        _envelope(schema_version="other"),
+        revoked_keys=revocation_key_set(
+            {"schema_version": "mumei.key-revocation-list/v1",
+             "revoked_keys": []}
+        ),
+    )
+    assert evaluation["envelope_match"] is False
+    assert evaluation["key_not_revoked"] is False
+    # An unmatched envelope has no trusted digest to echo.
+    assert "subject_digest" not in evaluation
+
+
+def test_eval_doc_echoes_subject_digest():
+    # The echoed carrier lets the recovery fold bind the document to
+    # the record the signature covers.
+    evaluation = evaluate_signature_envelope(_envelope())
+    assert evaluation["subject_digest"] == _SUBJECT
+
+
+def test_revocation_list_shape_rejects_foreign_documents():
+    from agent.core_evidence import revocation_key_set
+
+    for bad in (
+        {"schema_version": "mumei.key-revocation-list/v1"},
+        {"schema_version": "other", "revoked_keys": [_KEY]},
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": "not-a-list"},
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": [""]},
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": [_KEY], "extra": 1},
+    ):
+        with pytest.raises(ValueError):
+            revocation_key_set(bad)
+
+
+def test_route_revocation_list(tmp_path, capsys):
+    import argparse
+
+    envelope = _write(tmp_path / "env.json", _envelope())
+    revoked = _write(
+        tmp_path / "rev.json",
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": []},
+    )
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    exit_code = main_eval(
+        _args(parser, envelope, "--revocation-list", str(revoked))
+    )
+    assert exit_code == 0
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["key_not_revoked"] is True
+    assert "key_revocation" not in emitted["checks_not_performed"]
+
+
+def test_route_malformed_revocation_list_fails(tmp_path, capsys):
+    import argparse
+
+    envelope = _write(tmp_path / "env.json", _envelope())
+    bad = _write(tmp_path / "bad.json", {"schema_version": "other"})
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(
+            _args(parser, envelope, "--revocation-list", str(bad))
+        )
+        == 1
+    )
+    assert "signature-eval:" in capsys.readouterr().err

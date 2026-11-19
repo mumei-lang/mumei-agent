@@ -15,11 +15,13 @@ declared pins `signature-eval` emits.
 The signed payload convention matches Core's `crypto_verify_signature`
 FFI: the message is `subject_digest`'s ASCII bytes. A signature that
 verifies binds the declared key to the declared digest — nothing more:
-`checks_not_performed` keeps `key_authenticity`, `envelope_freshness`
-and `key_revocation` honest. A malformed or foreign document fails
-statically rather than reporting `envelope_match: false`; a matched
-envelope whose signature fails reports `false` observations, never an
-error.
+`checks_not_performed` keeps `key_authenticity` and
+`envelope_freshness` honest (`key_revocation` too, unless the caller
+supplies a declared `mumei.key-revocation-list/v1` document with
+`--revocation-list`, which performs it and emits `key_not_revoked`). A
+malformed or foreign document fails statically rather than reporting
+`envelope_match: false`; a matched envelope whose signature fails
+reports `false` observations, never an error.
 """
 
 from __future__ import annotations
@@ -29,7 +31,10 @@ import json
 import sys
 from pathlib import Path
 
-from agent.core_evidence import verify_signature_envelope
+from agent.core_evidence import (
+    revocation_key_set,
+    verify_signature_envelope,
+)
 
 MAX_ENVELOPE_BYTES = 1024 * 1024
 
@@ -67,6 +72,15 @@ def build_verify_parser(parser: argparse.ArgumentParser) -> None:
         "producer_key_id.",
     )
     parser.add_argument(
+        "--revocation-list",
+        metavar="PATH",
+        help="Declared revocation list JSON "
+        "(mumei.key-revocation-list/v1) supplied over a separately "
+        "trusted channel. When supplied the verification emits "
+        "key_not_revoked checking the envelope's producer_key_id "
+        "against the list's revoked_keys.",
+    )
+    parser.add_argument(
         "--output",
         metavar="PATH",
         help="Write the verification descriptor to PATH instead of stdout.",
@@ -102,11 +116,18 @@ def main_verify(args: argparse.Namespace | None = None) -> int:
                     )
             except FileNotFoundError:
                 pass
+        revoked_keys = None
+        revocation_path = getattr(args, "revocation_list", None)
+        if revocation_path is not None:
+            revoked_keys = revocation_key_set(
+                _read_declared(revocation_path)
+            )
         verification = verify_signature_envelope(
             envelope,
             args.producer_key,
             getattr(args, "expected_subject", None),
             getattr(args, "expected_producer_key", None),
+            revoked_keys,
         )
         text = json.dumps(verification, indent=2) + "\n"
         if output_path is None:
