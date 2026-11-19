@@ -967,3 +967,48 @@ def test_envelope_freshness_recovers_through_bound_fold_docs():
             evaluation["checks"]["envelope_freshness"]
             == "evidence_failed"
         )
+
+
+def test_anchor_authenticity_recovers_through_bound_verify_docs():
+    # `registry_authentic` / `revocation_list_authentic` on a
+    # signature-verification doc perform the anchor checks through the
+    # same subject_digest carrier convention as `key_authenticity`.
+    digest = "a" * 64
+    for check, field in (
+        ("registry_authenticity", "registry_authentic"),
+        ("revocation_list_authenticity", "revocation_list_authentic"),
+    ):
+        record = _record(check)
+        doc = _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            subject_digest=digest,
+            **{field: True},
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert evaluation["checks"][check] == "recovered"
+
+        # A false outcome or a doc bound to other bytes fails.
+        bad = _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            subject_digest=digest,
+            **{field: False},
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [bad], record_digest=digest,
+        )
+        assert evaluation["checks"][check] == "evidence_failed"
+
+        unbound = _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            subject_digest="b" * 64,
+            **{field: True},
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [unbound], record_digest=digest,
+        )
+        assert evaluation["checks"][check] == "evidence_failed"

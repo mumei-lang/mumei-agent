@@ -18,7 +18,14 @@ verifies binds the declared key to the declared digest — nothing more:
 `checks_not_performed` keeps `key_authenticity` and
 `envelope_freshness` honest (`key_revocation` too, unless the caller
 supplies a declared `mumei.key-revocation-list/v1` document with
-`--revocation-list`, which performs it and emits `key_not_revoked`). A
+`--revocation-list`, which performs it and emits `key_not_revoked`).
+The declared anchors themselves are authenticatable too:
+`--registry-signature`/`--registry-key` and
+`--revocation-signature`/`--revocation-key` each supply a
+`mumei.producer-signature/v1` envelope over the anchor document's
+exact bytes verified under a consumer-pinned root key, emitting
+`registry_authentic`/`revocation_list_authentic` and AND-ing them
+into `key_authentic`/`key_not_revoked`. A
 malformed or foreign document fails statically rather than reporting
 `envelope_match: false`; a matched envelope whose signature fails
 reports `false` observations, never an error.
@@ -27,6 +34,7 @@ reports `false` observations, never an error.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -92,6 +100,41 @@ def build_verify_parser(parser: argparse.ArgumentParser) -> None:
         "windows.",
     )
     parser.add_argument(
+        "--registry-signature",
+        metavar="PATH",
+        help="Declared producer-signature envelope JSON "
+        "(mumei.producer-signature/v1) signing the --key-registry "
+        "document's exact bytes — its subject_digest must be the "
+        "SHA-256 of those bytes. Requires --key-registry and "
+        "--registry-key. When supplied the verification emits "
+        "registry_authentic and ANDs it into key_authentic.",
+    )
+    parser.add_argument(
+        "--registry-key",
+        metavar="HEX",
+        help="Raw ed25519 public key (64-char lowercase hex) of the "
+        "registry's signer — the consumer-pinned root key, supplied "
+        "over a separately trusted channel. Requires "
+        "--registry-signature.",
+    )
+    parser.add_argument(
+        "--revocation-signature",
+        metavar="PATH",
+        help="Declared producer-signature envelope JSON "
+        "(mumei.producer-signature/v1) signing the --revocation-list "
+        "document's exact bytes. Requires --revocation-list and "
+        "--revocation-key. When supplied the verification emits "
+        "revocation_list_authentic and ANDs it into key_not_revoked.",
+    )
+    parser.add_argument(
+        "--revocation-key",
+        metavar="HEX",
+        help="Raw ed25519 public key (64-char lowercase hex) of the "
+        "revocation list's signer — the consumer-pinned root key, "
+        "supplied over a separately trusted channel. Requires "
+        "--revocation-signature.",
+    )
+    parser.add_argument(
         "--reference-time",
         metavar="RFC3339",
         help="The caller's declared reference time (RFC 3339 with "
@@ -116,20 +159,36 @@ def build_verify_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _read_declared(path: str) -> dict:
+def _load_declared(path: str, unique: bool = False) -> tuple:
+    """Read one declared document, returning (raw bytes, parsed dict).
+
+    The raw bytes come back so a caller can pin a signature envelope
+    to the document's own SHA-256 — the trust-anchor signature covers
+    the exact file bytes, not a re-encoded form."""
     with open(path, "rb") as handle:
         data = handle.read(MAX_ENVELOPE_BYTES + 1)
     if len(data) > MAX_ENVELOPE_BYTES:
         raise ValueError("declared document exceeds the bounded read limit")
     try:
-        value = json.loads(data.decode("utf-8"))
+        if unique:
+            value = json.loads(
+                data.decode("utf-8"), object_pairs_hook=_unique_object
+            )
+        else:
+            value = json.loads(data.decode("utf-8"))
+    except _DuplicateKey:
+        raise
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         # ValueError covers a malformed document and the integer-digit
         # conversion limit; RecursionError covers pathological nesting.
         raise ValueError("declared document is not UTF-8 JSON") from exc
     if type(value) is not dict:
         raise ValueError("declared document must be a JSON object")
-    return value
+    return data, value
+
+
+def _read_declared(path: str) -> dict:
+    return _load_declared(path)[1]
 
 
 class _DuplicateKey(ValueError):
@@ -151,21 +210,7 @@ def _unique_object(pairs: list) -> dict:
 
 def _read_declared_unique(path: str) -> dict:
     """Like ``_read_declared`` but rejecting duplicate object keys."""
-    with open(path, "rb") as handle:
-        data = handle.read(MAX_ENVELOPE_BYTES + 1)
-    if len(data) > MAX_ENVELOPE_BYTES:
-        raise ValueError("declared document exceeds the bounded read limit")
-    try:
-        value = json.loads(
-            data.decode("utf-8"), object_pairs_hook=_unique_object
-        )
-    except _DuplicateKey:
-        raise
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise ValueError("declared document is not UTF-8 JSON") from exc
-    if type(value) is not dict:
-        raise ValueError("declared document must be a JSON object")
-    return value
+    return _load_declared(path, unique=True)[1]
 
 
 def main_verify(args: argparse.Namespace | None = None) -> int:
@@ -178,6 +223,8 @@ def main_verify(args: argparse.Namespace | None = None) -> int:
                 args.envelope,
                 getattr(args, "revocation_list", None),
                 getattr(args, "key_registry", None),
+                getattr(args, "registry_signature", None),
+                getattr(args, "revocation_signature", None),
             ):
                 if declared_input is None:
                     continue
@@ -190,16 +237,50 @@ def main_verify(args: argparse.Namespace | None = None) -> int:
                 except FileNotFoundError:
                     pass
         revoked_keys = None
+        revocation_digest = None
         revocation_path = getattr(args, "revocation_list", None)
         if revocation_path is not None:
-            revoked_keys = revocation_key_set(
-                _read_declared(revocation_path)
-            )
+            raw, declared = _load_declared(revocation_path)
+            revoked_keys = revocation_key_set(declared)
+            revocation_digest = hashlib.sha256(raw).hexdigest()
         key_registry = None
+        registry_digest = None
         registry_path = getattr(args, "key_registry", None)
         if registry_path is not None:
-            key_registry = producer_key_registry(
-                _read_declared_unique(registry_path)
+            raw, declared = _load_declared(registry_path, unique=True)
+            key_registry = producer_key_registry(declared)
+            registry_digest = hashlib.sha256(raw).hexdigest()
+        registry_signature = None
+        registry_signature_path = getattr(args, "registry_signature", None)
+        if registry_signature_path is not None:
+            if registry_path is None:
+                raise ValueError(
+                    "--registry-signature requires --key-registry"
+                )
+            registry_signature = _read_declared(registry_signature_path)
+        revocation_signature = None
+        revocation_signature_path = getattr(
+            args, "revocation_signature", None
+        )
+        if revocation_signature_path is not None:
+            if revocation_path is None:
+                raise ValueError(
+                    "--revocation-signature requires --revocation-list"
+                )
+            revocation_signature = _read_declared(
+                revocation_signature_path
+            )
+        if getattr(args, "registry_key", None) is not None and (
+            registry_signature is None
+        ):
+            raise ValueError(
+                "--registry-key requires --registry-signature"
+            )
+        if getattr(args, "revocation_key", None) is not None and (
+            revocation_signature is None
+        ):
+            raise ValueError(
+                "--revocation-key requires --revocation-signature"
             )
         verification = verify_signature_envelope(
             envelope,
@@ -210,6 +291,12 @@ def main_verify(args: argparse.Namespace | None = None) -> int:
             key_registry,
             getattr(args, "reference_time", None),
             getattr(args, "max_age_seconds", None),
+            registry_signature,
+            getattr(args, "registry_key", None),
+            registry_digest,
+            revocation_signature,
+            getattr(args, "revocation_key", None),
+            revocation_digest,
         )
         text = json.dumps(verification, indent=2) + "\n"
         if output_path is None:

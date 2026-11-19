@@ -92,6 +92,8 @@ def test_valid_signature_verifies():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "registry_authenticity",
+        "revocation_list_authenticity",
         "producer_time_authenticity",
         "clock_authenticity",
     }
@@ -576,3 +578,275 @@ def test_max_age_requires_reference_time():
         verify_signature_envelope(
             _envelope(), _PUBLIC_KEY_HEX, reference_time=_REFERENCE
         )
+
+
+_ROOT_PRIVATE_KEY = Ed25519PrivateKey.generate()
+_ROOT_PUBLIC_KEY_HEX = (
+    _ROOT_PRIVATE_KEY.public_key()
+    .public_bytes_raw()
+    .hex()
+)
+
+
+def _anchor_signature(digest: str, key=_ROOT_PRIVATE_KEY) -> dict:
+    """A `mumei.producer-signature/v1` envelope signing the anchor
+    document's digest under the consumer-pinned root key."""
+    return {
+        "schema_version": "mumei.producer-signature/v1",
+        "subject_digest": digest,
+        "algorithm": "ed25519",
+        "signature": key.sign(digest.encode("ascii")).hex(),
+        "producer_key_id": "anchor-root",
+    }
+
+
+def test_registry_signature_performs_registry_authenticity():
+    # A signature over the registry's digest, verified under the
+    # pinned root key, performs `registry_authenticity`; the verified
+    # anchor keeps `key_authentic` relying on the registry.
+    import hashlib
+
+    from agent.core_evidence import producer_key_registry
+
+    registry_doc = _registry_doc()
+    registry_bytes = json.dumps(registry_doc).encode("utf-8")
+    digest = hashlib.sha256(registry_bytes).hexdigest()
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        key_registry=producer_key_registry(registry_doc),
+        reference_time=_REFERENCE,
+        registry_signature=_anchor_signature(digest),
+        registry_key=_ROOT_PUBLIC_KEY_HEX,
+        registry_digest=digest,
+    )
+    assert verification["registry_authentic"] is True
+    assert verification["key_authentic"] is True
+    assert "registry_authenticity" not in verification[
+        "checks_not_performed"
+    ]
+
+
+def test_registry_signature_wrong_digest_and_key_fail():
+    import hashlib
+
+    from agent.core_evidence import producer_key_registry
+
+    registry_doc = _registry_doc()
+    digest = hashlib.sha256(
+        json.dumps(registry_doc).encode("utf-8")
+    ).hexdigest()
+
+    # Signature covers different bytes — not this registry.
+    wrapper = _anchor_signature("c" * 64)
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        key_registry=producer_key_registry(registry_doc),
+        reference_time=_REFERENCE,
+        registry_signature=wrapper,
+        registry_key=_ROOT_PUBLIC_KEY_HEX,
+        registry_digest=digest,
+    )
+    assert verification["registry_authentic"] is False
+    assert verification["key_authentic"] is False
+
+    # Signature verified under a key the caller did not pin.
+    other = Ed25519PrivateKey.generate()
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        key_registry=producer_key_registry(registry_doc),
+        reference_time=_REFERENCE,
+        registry_signature=_anchor_signature(digest, key=other),
+        registry_key=_ROOT_PUBLIC_KEY_HEX,
+        registry_digest=digest,
+    )
+    assert verification["registry_authentic"] is False
+    assert verification["key_authentic"] is False
+
+
+def test_revocation_signature_performs_list_authenticity():
+    import hashlib
+
+    from agent.core_evidence import revocation_key_set
+
+    list_doc = {"schema_version": "mumei.key-revocation-list/v1",
+                "revoked_keys": ["other-key"]}
+    digest = hashlib.sha256(
+        json.dumps(list_doc).encode("utf-8")
+    ).hexdigest()
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        revoked_keys=revocation_key_set(list_doc),
+        revocation_signature=_anchor_signature(digest),
+        revocation_key=_ROOT_PUBLIC_KEY_HEX,
+        revocation_digest=digest,
+    )
+    assert verification["revocation_list_authentic"] is True
+    assert verification["key_not_revoked"] is True
+    assert "revocation_list_authenticity" not in verification[
+        "checks_not_performed"
+    ]
+
+
+def test_revocation_signature_invalid_fails_list():
+    import hashlib
+
+    from agent.core_evidence import revocation_key_set
+
+    list_doc = {"schema_version": "mumei.key-revocation-list/v1",
+                "revoked_keys": []}
+    digest = hashlib.sha256(
+        json.dumps(list_doc).encode("utf-8")
+    ).hexdigest()
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        revoked_keys=revocation_key_set(list_doc),
+        revocation_signature=_anchor_signature("d" * 64),
+        revocation_key=_ROOT_PUBLIC_KEY_HEX,
+        revocation_digest=digest,
+    )
+    assert verification["revocation_list_authentic"] is False
+    # A non-authentic anchor must not let `key_not_revoked` pass.
+    assert verification["key_not_revoked"] is False
+
+
+def test_route_registry_signature(tmp_path, capsys):
+    import hashlib
+
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    digest = hashlib.sha256(registry.read_bytes()).hexdigest()
+    wrapper = tmp_path / "registry.sig.json"
+    wrapper.write_text(json.dumps(_anchor_signature(digest)))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    out = tmp_path / "out.json"
+    assert (
+        main_verify(
+            _args(
+                parser,
+                envelope,
+                _PUBLIC_KEY_HEX,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--registry-signature",
+                str(wrapper),
+                "--registry-key",
+                _ROOT_PUBLIC_KEY_HEX,
+                "--output",
+                str(out),
+            )
+        )
+        == 0
+    )
+    doc = json.loads(out.read_text())
+    assert doc["registry_authentic"] is True
+    assert doc["key_authentic"] is True
+    assert "registry_authenticity" not in doc["checks_not_performed"]
+
+
+def test_route_registry_signature_requires_registry(tmp_path, capsys):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    wrapper = tmp_path / "registry.sig.json"
+    wrapper.write_text(json.dumps(_anchor_signature("a" * 64)))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    assert (
+        main_verify(
+            _args(
+                parser,
+                envelope,
+                _PUBLIC_KEY_HEX,
+                "--registry-signature",
+                str(wrapper),
+                "--registry-key",
+                _ROOT_PUBLIC_KEY_HEX,
+            )
+        )
+        == 1
+    )
+    assert "--registry-signature requires --key-registry" in (
+        capsys.readouterr().err
+    )
+
+
+def test_route_registry_key_requires_signature(tmp_path, capsys):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    assert (
+        main_verify(
+            _args(
+                parser,
+                envelope,
+                _PUBLIC_KEY_HEX,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--registry-key",
+                _ROOT_PUBLIC_KEY_HEX,
+            )
+        )
+        == 1
+    )
+    assert "--registry-key requires --registry-signature" in (
+        capsys.readouterr().err
+    )
+
+
+def test_route_refuses_output_over_registry_signature(tmp_path, capsys):
+    # `--output` colliding with the declared anchor signature is the
+    # same clobber the revocation-list guard rejects.
+    import hashlib
+
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    digest = hashlib.sha256(registry.read_bytes()).hexdigest()
+    wrapper = tmp_path / "registry.sig.json"
+    wrapper.write_text(json.dumps(_anchor_signature(digest)))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    assert (
+        main_verify(
+            _args(
+                parser,
+                envelope,
+                _PUBLIC_KEY_HEX,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--registry-signature",
+                str(wrapper),
+                "--registry-key",
+                _ROOT_PUBLIC_KEY_HEX,
+                "--output",
+                str(wrapper),
+            )
+        )
+        == 1
+    )
+    assert "declared" in capsys.readouterr().err

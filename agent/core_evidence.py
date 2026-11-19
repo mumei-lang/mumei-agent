@@ -577,6 +577,53 @@ def _is_hex(value: object, length: int) -> bool:
     )
 
 
+def _producer_signature_envelope_match(envelope: dict) -> bool:
+    """The closed-shape `mumei.producer-signature/v1` test both folds
+    share — also applied to declared wrapper envelopes signing a
+    trust-anchor document's digest."""
+    fields = frozenset(envelope)
+    return (
+        _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        <= fields
+        <= _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        | _PRODUCER_SIGNATURE_OPTIONAL_FIELDS
+        and (
+            "produced_at" not in envelope
+            or type(envelope["produced_at"]) is str
+        )
+        and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
+        and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
+        and _is_fingerprint(envelope["subject_digest"])
+        and _is_hex(
+            envelope["signature"], _PRODUCER_SIGNATURE_HEX_LEN
+        )
+        and type(envelope["producer_key_id"]) is str
+        and envelope["producer_key_id"] != ""
+    )
+
+
+def _ed25519_signature_valid(
+    public_key_hex: str, signature_hex: str, message: bytes
+) -> bool:
+    """Verify one ed25519 signature under a raw 64-hex public key —
+    the Core `crypto_verify_signature` convention."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey,
+    )
+
+    verifying_key = Ed25519PublicKey.from_public_bytes(
+        bytes.fromhex(public_key_hex)
+    )
+    try:
+        verifying_key.verify(
+            bytes.fromhex(signature_hex), message
+        )
+    except InvalidSignature:
+        return False
+    return True
+
+
 def evaluate_signature_envelope(
     envelope: dict,
     expected_subject: str | None = None,
@@ -585,6 +632,10 @@ def evaluate_signature_envelope(
     key_registry: dict | None = None,
     reference_time: str | None = None,
     max_age_seconds: int | None = None,
+    registry_signature: dict | None = None,
+    registry_digest: str | None = None,
+    revocation_signature: dict | None = None,
+    revocation_digest: str | None = None,
 ) -> dict:
     """Fold a declared producer-signature envelope into an evaluation.
 
@@ -647,25 +698,21 @@ def evaluate_signature_envelope(
         raise ValueError(
             "reference time requires a key registry or max age"
         )
-    fields = frozenset(envelope)
-    match = (
-        _PRODUCER_SIGNATURE_REQUIRED_FIELDS
-        <= fields
-        <= _PRODUCER_SIGNATURE_REQUIRED_FIELDS
-        | _PRODUCER_SIGNATURE_OPTIONAL_FIELDS
-        and (
-            "produced_at" not in envelope
-            or type(envelope["produced_at"]) is str
-        )
-        and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
-        and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
-        and _is_fingerprint(envelope["subject_digest"])
-        and _is_hex(
-            envelope["signature"], _PRODUCER_SIGNATURE_HEX_LEN
-        )
-        and type(envelope["producer_key_id"]) is str
-        and envelope["producer_key_id"] != ""
-    )
+    if registry_signature is not None:
+        if key_registry is None:
+            raise ValueError(
+                "registry signature requires a key registry"
+            )
+        if not _is_fingerprint(registry_digest or ""):
+            raise ValueError("invalid registry digest")
+    if revocation_signature is not None:
+        if revoked_keys is None:
+            raise ValueError(
+                "revocation signature requires a revocation list"
+            )
+        if not _is_fingerprint(revocation_digest or ""):
+            raise ValueError("invalid revocation digest")
+    match = _producer_signature_envelope_match(envelope)
     evaluation = {
         "schema_version": SIGNATURE_ENVELOPE_EVALUATION_SCHEMA,
         "envelope_match": match,
@@ -676,6 +723,12 @@ def evaluate_signature_envelope(
             "key_authenticity",
             "envelope_freshness",
             "key_revocation",
+            # Declared trust anchors are trusted as declared unless a
+            # signature pins them to the document's digest — the eval
+            # fold can bind that signature but not verify it, so the
+            # anchors' authenticity stays unperformed here.
+            "registry_authenticity",
+            "revocation_list_authenticity",
             # The stamp is declared, not signed, and the reference is
             # the caller's trusted clock — neither fold performs the
             # producer's time authenticity nor the clock's, matching
@@ -747,6 +800,21 @@ def evaluate_signature_envelope(
             >= reference[1]
         )
         evaluation["checks_not_performed"].remove("envelope_freshness")
+    if registry_signature is not None:
+        # Representation-level only: the wrapper envelope's declared
+        # `subject_digest` is compared to the registry's digest — the
+        # signature itself is verified on the crypto route, so
+        # `registry_authenticity` stays unperformed here.
+        evaluation["registry_signature_bound"] = (
+            _producer_signature_envelope_match(registry_signature)
+            and registry_signature["subject_digest"] == registry_digest
+        )
+    if revocation_signature is not None:
+        evaluation["revocation_signature_bound"] = (
+            _producer_signature_envelope_match(revocation_signature)
+            and revocation_signature["subject_digest"]
+            == revocation_digest
+        )
     return evaluation
 
 
@@ -765,6 +833,12 @@ def verify_signature_envelope(
     key_registry: dict | None = None,
     reference_time: str | None = None,
     max_age_seconds: int | None = None,
+    registry_signature: dict | None = None,
+    registry_key: str | None = None,
+    registry_digest: str | None = None,
+    revocation_signature: dict | None = None,
+    revocation_key: str | None = None,
+    revocation_digest: str | None = None,
 ) -> dict:
     """Verify a declared producer-signature envelope's ed25519 signature.
 
@@ -822,25 +896,25 @@ def verify_signature_envelope(
         raise ValueError(
             "reference time requires a key registry or max age"
         )
-    fields = frozenset(envelope)
-    match = (
-        _PRODUCER_SIGNATURE_REQUIRED_FIELDS
-        <= fields
-        <= _PRODUCER_SIGNATURE_REQUIRED_FIELDS
-        | _PRODUCER_SIGNATURE_OPTIONAL_FIELDS
-        and (
-            "produced_at" not in envelope
-            or type(envelope["produced_at"]) is str
-        )
-        and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
-        and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
-        and _is_fingerprint(envelope["subject_digest"])
-        and _is_hex(
-            envelope["signature"], _PRODUCER_SIGNATURE_HEX_LEN
-        )
-        and type(envelope["producer_key_id"]) is str
-        and envelope["producer_key_id"] != ""
-    )
+    if registry_signature is not None:
+        if key_registry is None:
+            raise ValueError(
+                "registry signature requires a key registry"
+            )
+        if not _is_hex(registry_key or "", _PRODUCER_KEY_HEX_LEN):
+            raise ValueError("invalid registry key")
+        if not _is_fingerprint(registry_digest or ""):
+            raise ValueError("invalid registry digest")
+    if revocation_signature is not None:
+        if revoked_keys is None:
+            raise ValueError(
+                "revocation signature requires a revocation list"
+            )
+        if not _is_hex(revocation_key or "", _PRODUCER_KEY_HEX_LEN):
+            raise ValueError("invalid revocation key")
+        if not _is_fingerprint(revocation_digest or ""):
+            raise ValueError("invalid revocation digest")
+    match = _producer_signature_envelope_match(envelope)
     signature_valid = False
     if match:
         from cryptography.exceptions import InvalidSignature
@@ -869,6 +943,14 @@ def verify_signature_envelope(
             "key_authenticity",
             "envelope_freshness",
             "key_revocation",
+            # The declared trust anchors are trusted as declared
+            # unless the caller pins each to a
+            # `mumei.producer-signature/v1` envelope over its bytes
+            # verified under a consumer-pinned root key — the checks
+            # drop out of this list only when those signatures are
+            # supplied and assessed.
+            "registry_authenticity",
+            "revocation_list_authenticity",
             # The stamp is declared, not signed, and the reference is
             # the caller's trusted clock — neither fold performs the
             # producer's time authenticity nor the clock's, matching
@@ -926,6 +1008,57 @@ def verify_signature_envelope(
             >= reference[1]
         )
         verification["checks_not_performed"].remove("envelope_freshness")
+    if registry_signature is not None:
+        # The consumer-pinned root key authenticates the declared
+        # registry itself: the wrapper envelope must match the closed
+        # producer-signature shape, verify cryptographically under the
+        # pinned key, and pin the registry's own digest. Only then
+        # does `key_authentic` lean on the registry.
+        wrapper_match = _producer_signature_envelope_match(
+            registry_signature
+        )
+        registry_authentic = (
+            wrapper_match
+            and _ed25519_signature_valid(
+                registry_key,
+                registry_signature["signature"],
+                registry_signature["subject_digest"].encode("ascii"),
+            )
+            and registry_signature["subject_digest"] == registry_digest
+        )
+        verification["registry_authentic"] = registry_authentic
+        verification["checks_not_performed"].remove(
+            "registry_authenticity"
+        )
+        if key_registry is not None:
+            verification["key_authentic"] = (
+                verification["key_authentic"] and registry_authentic
+            )
+    if revocation_signature is not None:
+        wrapper_match = _producer_signature_envelope_match(
+            revocation_signature
+        )
+        revocation_list_authentic = (
+            wrapper_match
+            and _ed25519_signature_valid(
+                revocation_key,
+                revocation_signature["signature"],
+                revocation_signature["subject_digest"].encode("ascii"),
+            )
+            and revocation_signature["subject_digest"]
+            == revocation_digest
+        )
+        verification["revocation_list_authentic"] = (
+            revocation_list_authentic
+        )
+        verification["checks_not_performed"].remove(
+            "revocation_list_authenticity"
+        )
+        if revoked_keys is not None:
+            verification["key_not_revoked"] = (
+                verification["key_not_revoked"]
+                and revocation_list_authentic
+            )
     return verification
 
 
@@ -1119,6 +1252,27 @@ _CHECK_PERFORMERS: dict = {
         (
             "mumei.signature-verification/v1",
             "key_authentic",
+            True,
+            "subject_digest",
+        ),
+    ],
+    # A `mumei.producer-signature/v1` envelope over the declared
+    # anchor document's bytes, verified under a consumer-pinned root
+    # key, performs the anchor's authenticity through the
+    # verification fold — bound via the echoed `subject_digest`
+    # carrier, like `key_authenticity`.
+    "registry_authenticity": [
+        (
+            "mumei.signature-verification/v1",
+            "registry_authentic",
+            True,
+            "subject_digest",
+        ),
+    ],
+    "revocation_list_authenticity": [
+        (
+            "mumei.signature-verification/v1",
+            "revocation_list_authentic",
             True,
             "subject_digest",
         ),
