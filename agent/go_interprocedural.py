@@ -7044,13 +7044,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self.func_aliases.pop(key, None)
                             for key in cur_c.keys() | prev_c.keys():
                                 if cur_c.get(key) != prev_c.get(key):
-                                    merged = (prev_c.get(key) or frozenset()) | (
-                                        cur_c.get(key) or frozenset()
-                                    )
-                                    if merged:
-                                        self.closure_captures[key] = merged
-                                    else:
+                                    if key not in cur_c or key not in prev_c:
+                                        # Absent in one alternating
+                                        # state means the name also
+                                        # binds a NON-literal callee
+                                        # (`g := cb` for a param
+                                        # callback): unioning the
+                                        # record in would model the
+                                        # call as a resolved closure
+                                        # call and hide the external
+                                        # callee's deps and effects —
+                                        # drop it so the call keeps
+                                        # the opaque external model.
                                         self.closure_captures.pop(key, None)
+                                    else:
+                                        # Present in both states —
+                                        # union keeps every binding
+                                        # either literal captured, so
+                                        # the call site resolves each
+                                        # one's CURRENT deps and a
+                                        # name-RHS copy writes the
+                                        # same union back.
+                                        self.closure_captures[key] = (
+                                            cur_c[key] | prev_c[key]
+                                        )
                             for key in cur_p ^ prev_p:
                                 self.pointee_closures.add(key)
                         else:

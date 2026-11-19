@@ -16651,3 +16651,28 @@ def test_loop_closure_swap_keeps_reseated_capture_deps(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_loop_closure_callback_swap_keeps_external_model(go_types_helper):
+    # `f, g = g, f` where `g` can bind the param callback `cb` (a name
+    # with NO capture record): each name's capture record is absent in
+    # one alternating state, so the cycle-break drops both — the call
+    # must keep the external-callee model (deps {0} from the callback
+    # plus the literal's {1}), not resolve to a pure capture call.
+    files = {
+        "a.go": "package p\n"
+        "func F(cb func() int64, a int64) int64 {\n"
+        "\tf := func() int64 { return a }\n"
+        "\tg := cb\n"
+        "\tfor i := int64(0); i < 2; i = i + 1 {\n"
+        "\t\tf, g = g, f\n"
+        "\t}\n"
+        "\treturn f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
