@@ -4954,6 +4954,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             "indirect_or_selector",
         ):
             return ()
+        capture_roots = ()
         if call.kind == "direct_import":
             member = self.members.get(call.target)
             if (
@@ -4984,6 +4985,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             fb = self.bindings.get(ref.binding_id)
             if fb is None or fb.type.kind != "function":
                 return ()
+            capture_roots = ()
+            # `f := func() chan T { return q }; ch := f()` — the
+            # literal may hand a *captured* queue back instead of an
+            # argument, so each `chan` capture promotes external and
+            # seeds the bound name's slot like a `chan` argument.
+            capture_roots = tuple(
+                self._chan_root(cid)
+                for cid in self.closure_captures.get(fb.id, ())
+                if self.bindings.get(cid) is not None
+                and self.bindings[cid].type.kind == "chan"
+            )
         arg_list = next(
             (
                 c
@@ -4993,7 +5005,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             None,
         )
         if arg_list is None:
-            return ()
+            return capture_roots
         roots = []
         for arg in arg_list.named_children:
             if arg.type == "comment":
@@ -5009,11 +5021,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if arg is None:
                     break
-            if arg is None or arg.type != "identifier":
+            if arg is None:
                 continue
-            chan = self._chan_binding(arg, locals_, params)
-            if chan is not None:
-                roots.append(self._chan_root(chan.id))
+            if arg.type == "identifier":
+                chan = self._chan_binding(arg, locals_, params)
+                if chan is not None:
+                    roots.append(self._chan_root(chan.id))
+            else:
+                # `ch := g(GC)` — a non-identifier chan argument
+                # naming an external queue (package var, imported
+                # member, `chan chan` local) promotes on its own
+                # identity like an identifier argument does.
+                ext = self._external_chan_operand(arg, params)
+                if ext is not None:
+                    roots.append(ext[0])
         if call.method:
             # `q.M()` — the receiver sits outside the argument
             # list, and the opaque body may hand it straight back
@@ -5037,7 +5058,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     root = self._chan_root(chan.id)
                     if root not in roots:
                         roots.append(root)
-        return tuple(roots)
+        return tuple(roots) + tuple(
+            r for r in capture_roots if r not in roots
+        )
 
     def _chan_result_call_at(
         self, node: Any, index: int, fact_pred: Any = None
@@ -16941,7 +16964,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # identity.
             target = self._chan_result_call(arg)
             if target is not None:
-                external_chans.add(target.binding_id)
+                # A declared callee resolves to its Function record
+                # (`binding_id`); a func-value callee resolves to the
+                # func binding itself (`id`) — `g` in `f(g())`.
+                external_chans.add(
+                    getattr(target, "binding_id", None) or target.id
+                )
         if captures_pointer:
             for escaped_id in self.escaped:
                 if escaped_id in locals_:

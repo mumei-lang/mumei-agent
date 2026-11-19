@@ -24674,3 +24674,59 @@ def test_func_value_non_chan_result_unaffected(go_types_helper):
     )
     result = named(source, snapshot, summaries)
     assert result.available
+
+
+def test_func_value_chan_result_iife_arg_no_crash(go_types_helper):
+    # `func(ch) { <-ch }(g())` — a func-value `g()` argument to an
+    # immediately-invoked literal resolves to the func *binding*
+    # marker, not a Function record: the receive records on `g`'s
+    # binding identity instead of crashing on `.binding_id`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(g func() chan int64, x int64) int64 {\n"
+        "    func(ch chan int64) { <-ch }(g())\n"
+        "    return x\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+
+
+def test_func_value_chan_result_captured_queue_promoted(
+    go_types_helper,
+):
+    # `f := func() chan int64 { return q }; ch := f()` — the
+    # literal may hand the *captured* queue `q` back, so `q` joins
+    # the external model and a `ch <- x` send is observed by a
+    # later `<-q` read through `indirect_writes`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    q := make(chan int64)\n"
+        "    f := func() chan int64 { return q }\n"
+        "    ch := f()\n"
+        "    ch <- x\n"
+        "    return <-q\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_value_chan_result_external_operand_arg(go_types_helper):
+    # `ch := g(GC)` — a non-identifier `chan` argument naming an
+    # external queue promotes on its own identity; sends on either
+    # name stay visible to the bound queue's reads.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var GC chan int64\n"
+        "func F(x int64, g func(chan int64) chan int64) int64 {\n"
+        "    ch := g(GC)\n"
+        "    GC <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
