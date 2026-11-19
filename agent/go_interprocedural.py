@@ -5989,6 +5989,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if pre_target is not None:
                         self.chan_aliases[binding.id] = pre_target.id
                     else:
+                        # `c, ok := <-cc` reusing an existing `c` —
+                        # `:=` may rebind a name in the same scope
+                        # instead of shadowing it, so a stale
+                        # `c := ch` alias must not keep `<-c`
+                        # resolving to the old queue.
+                        self.chan_aliases.pop(binding.id, None)
                         self.external_chan_locals.add(binding.id)
                         # `ch := lib.G(q)` — the imported callee
                         # may hand `q`'s queue back, so every
@@ -8867,7 +8873,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if chan_elem:
                                 # `for c = range cc` over an existing
                                 # scalar-`chan` name — same external
-                                # element binding as the `:=` form.
+                                # element binding as the `:=` form;
+                                # a stale `c := ch` alias must not
+                                # keep `<-c` resolving to the old
+                                # queue.
+                                self.chan_aliases.pop(
+                                    ref.binding_id, None
+                                )
                                 self.external_chan_locals.add(
                                     ref.binding_id
                                 )
