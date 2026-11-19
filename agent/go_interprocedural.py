@@ -5716,12 +5716,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `var ch, n = G(q)` — the chan-typed slot
                         # binds the callee's passthrough queue when
                         # it returns an argument unchanged, else a
-                        # fresh external one.
+                        # fresh external one (the probe cannot see a
+                        # queue handed back through a callee-local
+                        # alias, so external keeps sends broadcast).
                         target = self._chan_result_passthrough(
                             value_nodes[0], locals_, params, i
                         )
                         if target is not None:
                             self.chan_aliases[binding.id] = target.id
+                        else:
+                            self.external_chan_locals.add(binding.id)
                     elif (
                         binding.type.kind == "chan"
                         and value_nodes

@@ -2975,6 +2975,31 @@ def test_multi_result_chan_slot_var_second_slot_admitted(
 
 
 
+def test_multi_result_chan_slot_var_local_alias_broadcasts(
+    go_types_helper,
+):
+    # `var c, n = g(q)` where g hands q's queue back through a
+    # callee-local alias (`r := q; return r, 0`) — the passthrough
+    # probe cannot see it, so `c` binds an external queue whose
+    # sends broadcast into reads of `q`.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) {\n"
+        "\tr := q\n"
+        "\treturn r, 0\n}\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\tvar c, n = g(q)\n"
+        "\tc <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_multi_result_chan_slot_var_non_scalar_closed(
     go_types_helper,
 ):
