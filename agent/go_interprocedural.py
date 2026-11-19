@@ -4574,7 +4574,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # any other signature type.
             or any(
                 p.type.kind
-                not in {"integer", "boolean", "pointer", "struct"}
+                not in {"integer", "boolean", "pointer", "struct",
+                        "function"}
                 and not (
                     # A `chan T` parameter admits under the
                     # external sync-resource model: the queue is
@@ -9327,7 +9328,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if (
             ref.binding_id in self.pointee_closures
             or chan_captured_external
-            or package_var
+            or captured is None
         ):
             transfers.append(
                 CallTransfer(
@@ -9342,10 +9343,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     imported=True,
                 )
             )
+        if captured is None and binding.type is not None:
+            # An external callee's DECLARED type identity pins like
+            # any signature type: `type MyFn func(...)` in another
+            # file must flag the caller when it regenerates, same
+            # as the var's own binding identity does.
+            self._pin_fact_identities(binding.type)
+        arg_deps: frozenset[int] = frozenset()
         for arg in arguments:
-            deps |= self.expression(
+            arg_deps |= self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
+        deps |= arg_deps
+        if captured is None:
+            # The callee is unknown: it may write `*p = y` through a
+            # pointer argument or send `y` on a channel argument —
+            # fold every argument's deps into the escaped bindings
+            # an opaque write could reach and into indirect writes,
+            # like `_ALIAS_FOLD` does.
+            self.indirect_writes |= arg_deps
+            for escaped_id in self.escaped:
+                self._store(
+                    locals_, params, escaped_id, arg_deps, True
+                )
         return deps
 
     def _direct_import_call(

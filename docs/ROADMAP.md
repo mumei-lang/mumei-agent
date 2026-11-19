@@ -2661,9 +2661,20 @@ admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
 for the callee, unions the args and indirect writes, and
 always records an imported transfer on the var's real
-binding identity (effects unknown). Calls or writes inside
-the literal, selector/computed callees and function-typed
-parameters stay closed),
+binding identity (effects unknown). A function-typed
+parameter `f func(int64) int64` calls the same way —
+`f(args)` is an opaque external call, since the caller
+chooses the callee. For any such external callee (package
+function var or func-typed parameter) the argument deps
+also fold into every escaped binding and into indirect
+writes — the opaque callee may write `*p = y` through a
+pointer argument or send `y` on a channel argument — and
+the callee's declared type identity pins alongside the
+var's/parameter's binding identity so a named `type MyFn
+func(...)` regenerating in another file flags the caller
+stale. Calls or writes inside the literal, selector/computed
+callees and reading a function name as a value (`h := G`)
+stay closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies
