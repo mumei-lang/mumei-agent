@@ -10058,7 +10058,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if node is not None and node.type == "call_expression":
             key = self.node_key(node)
             if self._func_arg_invocations:
-                self._fold_func_arg_invocations(node, transfers)
+                self._fold_func_arg_invocations(
+                    node, params, locals_, transfers
+                )
             # The fold already popped this call's entry when a
             # callback was pending; for a plain call the accumulated
             # argument deps are dropped here instead of lingering
@@ -10066,9 +10068,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._call_arg_deps.pop(key, None)
         return result
 
+    def _queue_func_arg_invocation(
+        self, node: Any, binding_id: str
+    ) -> None:
+        """Record `P(h, x)` — a func-typed local variable or parameter
+        read inside a call's argument list — as a possible invocation
+        the callee may run, so the call's own fold can apply the
+        value's tracked writes and effects. Mirrors the declared-
+        function branch of `_func_alias_bind` (`H(G, x)`)."""
+        binding = self.bindings.get(binding_id)
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "function"
+        ):
+            return
+        parent = node.parent
+        call_node = parent.parent if parent is not None else None
+        if (
+            parent is not None
+            and parent.type == "argument_list"
+            and call_node is not None
+            and call_node.type == "call_expression"
+        ):
+            self._func_arg_invocations.setdefault(
+                self.node_key(call_node), []
+            ).append((node, binding_id))
+
     def _fold_func_arg_invocations(
         self,
         node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
     ) -> None:
         """Fold `H(G, x)`-shaped argument reads once the call's deps
@@ -10099,6 +10130,53 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if binding_id in self.functions
                 else None
             )
+            if binding_id in self.functions:
+                unbounded = (
+                    callee is None
+                    or not callee.available
+                    or callee.effects == "unknown"
+                )
+                external_chan = callee is not None and any(
+                    self._external_chan_id(c.target)
+                    for c in callee.calls
+                )
+            else:
+                # A local func value or parameter: a param binding,
+                # an opaque mark, or the absence of any resolvable
+                # literal record leaves the invoked value unknown; a
+                # tracked literal stays bounded unless it writes,
+                # dereferences, calls out, or captures external state.
+                has_literal = (
+                    binding_id in self.closure_captures
+                    or binding_id in self.closure_writes
+                    or binding_id in self.pointee_closures
+                    or binding_id in self.closure_star_writes
+                    or binding_id in self.closure_inner_calls
+                )
+                effectful = (
+                    bool(self.closure_writes.get(binding_id))
+                    or binding_id in self.closure_star_writes
+                    or binding_id in self.closure_inner_calls
+                    or binding_id in self.pointee_closures
+                    or any(
+                        (
+                            self._chan_root(cbid) in params
+                            or self._chan_root(cbid)
+                            in self.external_chan_locals
+                        )
+                        and self._scalar_chan_binding(cbid)
+                        for cbid in self.closure_captures.get(
+                            binding_id, ()
+                        )
+                    )
+                )
+                unbounded = (
+                    binding_id in params
+                    or binding_id in self.opaque_callees
+                    or not has_literal
+                    or effectful
+                )
+                external_chan = unbounded
             transfers.append(
                 CallTransfer(
                     FileSpan(
@@ -10109,23 +10187,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     binding_id,
                     (),
                     frozenset(),
-                    imported=(
-                        callee is None
-                        or not callee.available
-                        or callee.effects == "unknown"
-                    ),
+                    imported=unbounded,
                 )
             )
+            if unbounded or external_chan:
+                self.indirect_writes |= arg_deps
+            # A passed LOCAL func value keeps its literal records —
+            # `Pass(h, x)` where `h` may still be the literal that
+            # writes `a = v`. If the callee invokes it, those named
+            # write targets land like they do at a direct `h()` call;
+            # the generic `indirect_writes` broadcast alone misses
+            # them because a captured target need not be an escaped
+            # binding.
+            for target in self.closure_writes.get(
+                binding_id, frozenset()
+            ):
+                self._store(locals_, params, target, arg_deps, True)
+                self.func_aliases.pop(target, None)
+                self.opaque_callees.add(target)
             if (
-                callee is None
-                or not callee.available
-                or callee.effects == "unknown"
-                or any(
-                    self._external_chan_id(c.target)
-                    for c in callee.calls
-                )
+                binding_id in self.closure_star_writes
+                or binding_id in self.closure_inner_calls
             ):
                 self.indirect_writes |= arg_deps
+                for escaped_id in self.escaped:
+                    self._store(
+                        locals_, params, escaped_id, arg_deps, True
+                    )
 
     def _record_read(self, deps: frozenset[int]) -> None:
         """Attribute an implicit read to every open statement
@@ -10296,6 +10384,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # contents live in `indirect_writes`, like a
                     # channel parameter's.
                     deps |= self.indirect_writes
+                self._queue_func_arg_invocation(node, ref.binding_id)
                 return deps
             if ref is not None and ref.binding_id in params:
                 chan_root = (
@@ -10320,6 +10409,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     return frozenset()
                 deps = frozenset({params[ref.binding_id]})
                 binding = self.bindings.get(ref.binding_id)
+                if (
+                    binding is not None
+                    and binding.type is not None
+                    and binding.type.kind == "function"
+                ):
+                    self._queue_func_arg_invocation(node, ref.binding_id)
                 if (
                     binding is not None
                     and binding.type is not None
