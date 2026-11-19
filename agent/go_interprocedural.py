@@ -3089,19 +3089,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 names.update(declared)
                 continue
             type_node = child.child_by_field_name("type")
-            identifiers = [
-                c
-                for c in (type_node.named_children if type_node else [])
-            ]
+            # Embedded fields carry TYPE names — `type_identifier`
+            # (`*Q`, `Q`), or a `qualified_type`'s trailing one
+            # (`lib.Q` — `package_identifier` never qualifies).
             pool = [type_node] if type_node is not None else []
             while pool:
                 current = pool.pop()
-                if current.type == "identifier":
-                    identifiers.append(current)
+                if current.type in {"identifier", "type_identifier"}:
+                    names.add(current.text.decode())
                     break
                 pool.extend(reversed(current.named_children))
-            if identifiers:
-                names.add(identifiers[0].text.decode())
         return frozenset(names)
 
     def _call_result_struct_literal(self, node: Any) -> Any | None:
@@ -5312,26 +5309,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `var a, b struct{...}` — the literal follows the
                     # LAST name, so every earlier name's fields anchor
                     # there, not at its own span (whose window closes
-                    # at the next name, a scoped binding).
+                    # at the next name, a scoped binding). Every
+                    # explicit-spec var records the literal's direct
+                    # names: a single-name `var s struct{...}` whose
+                    # field resolves to an earlier identical literal's
+                    # (unified types) needs the same admission check
+                    # without needing an anchor — s's own span already
+                    # precedes its literal.
                     if (
                         binding.type.kind == "struct"
                         and not binding.type.type_id
                         and spec.child_by_field_name("type") is not None
-                        and len(names) > 1
                     ):
-                        last = self.bindings_by_span.get(
-                            self.node_key(names[-1])
-                        )
-                        last_span = getattr(last, "span", None)
-                        if last_span is not None:
-                            self.anon_struct_anchor[binding.id] = (
-                                last_span
-                            )
+                        literal = spec.child_by_field_name("type")
+                        if literal.type == "struct_type":
                             self.anon_struct_field_names[
                                 binding.id
                             ] = self._struct_literal_field_names(
-                                spec.child_by_field_name("type")
+                                literal
                             )
+                        if len(names) > 1:
+                            last = self.bindings_by_span.get(
+                                self.node_key(names[-1])
+                            )
+                            last_span = getattr(last, "span", None)
+                            if last_span is not None:
+                                self.anon_struct_anchor[
+                                    binding.id
+                                ] = last_span
             return
         if kind == "const_declaration":
             # Grouped `const (...)` declarations never reach here — like

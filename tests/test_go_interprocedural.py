@@ -15616,3 +15616,40 @@ def test_anonymous_struct_promoted_name_not_direct(go_types_helper):
         )
     )
     assert not result.available
+
+
+def test_anonymous_struct_var_single_name_unified(go_types_helper):
+    # `var s struct{ V int64 }` after an identical literal — s.V
+    # resolves to the earlier literal's field binding, outside s's
+    # own window; the recorded direct names admit it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tst := struct{ V int64 }{V: x}\n"
+            "\tvar s struct{ V int64 }\n"
+            "\ts.V = x\n"
+            "\treturn s.V + st.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_embedded_name_admitted(go_types_helper):
+    # `struct{ *Q }` declares the embedded field as Q — a
+    # `type_identifier`, not `identifier` — so `s.Q` (the promoted
+    # field's own name) is a direct name of the literal.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Q struct{ W int64 }\n"
+            "func F(x int64, r *Q) int64 {\n"
+            "\tst := struct{ *Q }{Q: r}\n"
+            "\tvar s struct{ *Q }\n"
+            "\ts.Q = st.Q\n"
+            "\treturn x\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
