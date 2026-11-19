@@ -16740,7 +16740,10 @@ def test_imported_func_typed_var_member_loads(go_types_helper):
     member = next(
         m for m in report["imported_members"] if m["name"] == "Callback"
     )
-    assert "signature_type_ids" not in member
+    # A func-typed `var` member publishes its signature's type
+    # identities like a function member does — an opaque `Callback`
+    # call pins them so a redeclared `N` flags `stale_dependents`.
+    assert len(member["signature_type_ids"]) == 1
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
         files,
@@ -17063,3 +17066,36 @@ def test_loop_closure_callback_swap_keeps_updated_capture_deps(
     assert result.available
     assert result.effects == "unknown"
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_func_field_member_pins_signature_type_ids(
+    go_types_helper,
+):
+    # `lib.VS.F(n)` — an imported struct's func-typed field member
+    # publishes its signature's type identities, so the opaque call
+    # pins `N` and a redeclared `N` flags `stale_dependents`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(n lib.N) int64 { return lib.VS.F(n) + 1 }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type N int64\n"
+            "type S struct{ F func(N) int64 }\n"
+            "var VS S\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    n_member = next(
+        m for m in snapshot.imported_members if m.name == "N"
+    )
+    assert n_member.id in result.pinned

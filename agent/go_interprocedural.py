@@ -10239,6 +10239,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
         return deps
 
+    def _field_member(self, node: Any) -> Any | None:
+        """The member/binding a selector expression's FIELD names —
+        the `f` in `s.f`: an imported unit's member for an `import`
+        reference, else the local field record. Both a stored
+        literal (`s.f = func()...`) and an opaque call (`s.f(...)`)
+        key on this identity."""
+        if node is None or node.type != "selector_expression":
+            return None
+        operand = node.child_by_field_name("operand")
+        field = node.child_by_field_name("field")
+        if operand is None or field is None:
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        member = (
+            self.members.get(field_ref.binding_id)
+            if field_ref is not None and field_ref.kind == "import"
+            else self._local_field(field_ref)
+        )
+        if member is not None and member.name.encode(
+            "utf-8"
+        ) == field.text:
+            return member
+        return None
+
     def _opaque_indirect_call(
         self,
         node: Any,
@@ -10267,26 +10291,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
         target_id: str | None = None
         pin_fact: Any = None
         callee_deps: frozenset[int] = frozenset()
-        if callee_node.type == "selector_expression":
-            operand = callee_node.child_by_field_name("operand")
-            field = callee_node.child_by_field_name("field")
-            if operand is not None and field is not None:
-                field_ref = self.references.get(self.node_key(field))
-                member = (
-                    self.members.get(field_ref.binding_id)
-                    if field_ref is not None
-                    and field_ref.kind == "import"
-                    else self._local_field(field_ref)
-                )
+        operand = callee_node.child_by_field_name("operand")
+        operand_member_import = None
+        if operand is not None and operand.type == "selector_expression":
+            operand_field = operand.child_by_field_name("field")
+            operand_field_ref = (
+                self.references.get(self.node_key(operand_field))
+                if operand_field is not None
+                else None
+            )
+            if (
+                operand_field_ref is not None
+                and operand_field_ref.kind == "import"
+            ):
+                candidate = self.members.get(operand_field_ref.binding_id)
                 if (
-                    member is not None
-                    and member.name.encode("utf-8") == field.text
-                    and member.kind in {"var", "variable"}
-                    and member.type is not None
-                    and member.type.kind == "function"
+                    candidate is not None
+                    and candidate.name.encode("utf-8")
+                    == operand_field.text
                 ):
-                    target_id = member.id
-                    pin_fact = member.type
+                    operand_member_import = candidate
+        if callee_node.type == "selector_expression":
+            member = self._field_member(callee_node)
+            if (
+                member is not None
+                and member.kind in {"var", "variable"}
+                and member.type is not None
+                and member.type.kind == "function"
+            ):
+                target_id = member.id
+                pin_fact = member.type
+            if operand_member_import is not None:
+                # `lib.VS.F(...)` — the operand names an imported
+                # member: its read is a dep-free package state-read
+                # like any other imported member read.
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            operand.start_byte,
+                            operand.end_byte,
+                        ),
+                        operand_member_import.id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+            elif operand is not None:
                 # `s.f` reads `s` — the operand's deps are the
                 # callee's own read set (a `func` field itself has
                 # no dep model).
@@ -10295,17 +10347,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     depth + 1,
                 )
         elif callee_node.type == "index_expression":
-            operand = callee_node.child_by_field_name("operand")
             index = callee_node.child_by_field_name("index")
-            root_ref = self._receiver_root_ref(operand)
-            if root_ref is not None and root_ref.binding_id:
-                target_id = root_ref.binding_id
-            for part in (operand, index):
-                if part is not None:
-                    callee_deps |= self.expression(
-                        part, fn, params, locals_, transfers, count,
-                        depth + 1,
+            if operand_member_import is not None:
+                # `lib.VMF[k](x)` — the container is an imported
+                # member: dep-free state-read, external effect on
+                # the member's identity.
+                target_id = operand_member_import.id
+                transfers.append(
+                    CallTransfer(
+                        FileSpan(
+                            self.current_file,
+                            operand.start_byte,
+                            operand.end_byte,
+                        ),
+                        operand_member_import.id,
+                        (),
+                        frozenset(),
+                        imported=True,
                     )
+                )
+            else:
+                root_ref = self._receiver_root_ref(operand)
+                if root_ref is not None and root_ref.binding_id:
+                    target_id = root_ref.binding_id
+                if operand is not None:
+                    callee_deps |= self.expression(
+                        operand, fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+            if index is not None:
+                callee_deps |= self.expression(
+                    index, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
         if target_id is None:
             raise _Unsupported("unsupported_expression", _span(node))
         deps = callee_deps | self.indirect_writes
