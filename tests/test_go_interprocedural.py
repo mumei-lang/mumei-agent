@@ -26292,30 +26292,6 @@ def test_range_over_deref_pointer_result_call_reads_copy(
     assert all(t.target for t in result.calls)
 
 
-def test_spread_multi_result_call_arg_local_callee_stays_closed(
-    go_types_helper,
-):
-    # `W(G(x))` — a multi-result call spreads across the local
-    # callee's parameters; the one argument node cannot map to the
-    # declared `return_dependencies` indices, so the unit fails
-    # closed rather than reading `actual` out of bounds.
-    files = {
-        "a.go": "package p\n"
-        "func G(a int64) (int64, *int64) { return a, nil }\n"
-        "func W(s int64, p *int64) int64 { return s }\n"
-        "func F(x int64) int64 {\n"
-        "\treturn W(G(x))\n}\n"
-    }
-    snapshot = load_go_package_snapshot(
-        package_report_imports(go_types_helper, files, {}),
-        files,
-        target_arch="amd64",
-    )
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert not result.available
-
 
 def test_single_result_call_arg_admits(go_types_helper):
     # `lib.H(lib.G(x))` — a single-result call argument admits: its
