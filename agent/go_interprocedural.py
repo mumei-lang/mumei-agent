@@ -3327,8 +3327,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # chain (`lib.V2[i][j]` on `[][]int64`) descends one `elem`
         # fact per level and admits when the final element is scalar —
         # the result unions every level's index deps. Everything else
-        # stays closed: strings have no container fact and a computed
-        # operand (`f()[i]`) names no member. The comma-ok form
+        # stays closed: strings have no container fact; a call operand
+        # (`g(a)[i]` / `lib.G(a)[i]`) admits only when the declared
+        # single-result type names a container with a scalar
+        # element — its element provenance is the call's own dep
+        # set — and any other computed operand (`f()[i]` without a
+        # declared result type) names no member. The comma-ok form
         # `v, ok := lib.VM[k]` unpacks a map member's pair at the
         # statement level and lands here as the same read, and
         # imported-state writes (`lib.VA[i] = v`) match the
@@ -3364,8 +3368,50 @@ member, or one explicit dereference of one (`(*t).F` — the same
         bound_pointer = None
         bound_operand = None
         package_pointee = None
+        call_operand = None
+        call_fact = None
+        call_member = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)
+        elif inner is not None and inner.type in (
+            "call_expression",
+            "type_conversion_expression",
+        ):
+            # `g(a)[i]` — an index read on a call result: the declared
+            # result type must name a container whose element is
+            # scalar. The element's provenance is the call's own dep
+            # set (evaluated below) plus each index's deps — the
+            # returned container is callee-produced memory, not
+            # external state, so no imported transfer applies beyond
+            # the call's own.
+            call_fact = self._call_result_type(inner)
+            if call_fact is not None:
+                call_operand = inner
+            elif inner.type == "call_expression":
+                # `lib.G(a)[i]` — an imported callee whose COMPOSITE
+                # result stays `external_or_bodyless` (a bare
+                # `x := lib.G(a)` binding stays closed): indexing
+                # reads only a scalar element, and the member's
+                # declared result type still carries the container
+                # fact. The operand evaluates through the minimal
+                # opaque fold below instead of `expression`.
+                callee_node = inner.child_by_field_name("function")
+                candidate = (
+                    self._package_member(callee_node)
+                    if callee_node is not None
+                    and callee_node.type == "selector_expression"
+                    else None
+                )
+                call_node = self.calls.get(self.node_key(inner))
+                if (
+                    candidate is not None
+                    and getattr(candidate, "result_types", None)
+                    and call_node is not None
+                    and call_node.kind == "external_or_bodyless"
+                ):
+                    call_member = candidate
+                    call_fact = candidate.result_types[0]
+                    call_operand = inner
         elif inner is not None and inner.type == "unary_expression":
             # `(*p)[i]` — an index read through a bound pointer whose
             # pointee is a container. The chain root is the `*p`
@@ -3447,7 +3493,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else (
                         package_pointee[1]
                         if package_pointee is not None
-                        else None
+                        else (
+                            call_fact
+                            if call_operand is not None
+                            else None
+                        )
                     )
                 )
             )
@@ -3478,6 +3528,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and package_var is None
                 and bound_pointer is None
                 and package_pointee is None
+                and call_operand is None
             )
             or (member is not None and member.kind != "var")
             or fact is None
@@ -3496,6 +3547,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # identity is never pinnable, and a named pointee's
             # `type_id` already sits inside the fact.
             self._pin_fact_identities(bound_pointer[2])
+        elif call_operand is not None:
+            # `g(a)[i]` — the declared result container/element
+            # identities pin so a signature change flags the caller.
+            self._pin_fact_identities(call_fact)
         else:
             # `(*GP)[i]` — same pins on the pointee container fact;
             # the var's own identity is the transfer target below.
@@ -3510,28 +3565,82 @@ member, or one explicit dereference of one (`(*t).F` — the same
         key = fact.key
         if key is not None and key.type_id:
             self.pinned.add(key.type_id)
-        transfers.append(
-            CallTransfer(
-                FileSpan(self.current_file, node.start_byte, node.end_byte),
-                (
-                    member.id
-                    if member is not None
-                    else (
-                        package_var.id
-                        if package_var is not None
+        if call_operand is None:
+            transfers.append(
+                CallTransfer(
+                    FileSpan(self.current_file, node.start_byte, node.end_byte),
+                    (
+                        member.id
+                        if member is not None
                         else (
-                            bound_pointer[1]
-                            if bound_pointer is not None
-                            else package_pointee[0]
+                            package_var.id
+                            if package_var is not None
+                            else (
+                                bound_pointer[1]
+                                if bound_pointer is not None
+                                else package_pointee[0]
+                            )
                         )
-                    )
-                ),
-                (),
-                frozenset(),
-                imported=True,
+                    ),
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
             )
-        )
         deps = frozenset()
+        if call_operand is not None and call_member is not None:
+            # `lib.G(a)[i]` — the composite result keeps the call
+            # `external_or_bodyless`: the minimal opaque fold a
+            # `direct_import` applies — every argument's deps, the
+            # chan/pointer write broadcast, the imported transfer on
+            # the member's own identity and its signature pins.
+            call_args = next(
+                (
+                    c
+                    for c in call_operand.named_children
+                    if c.type == "argument_list"
+                ),
+                None,
+            )
+            arg_nodes = tuple(
+                c
+                for c in (call_args.named_children if call_args else ())
+                if c.type != "comment"
+            )
+            for arg in arg_nodes:
+                deps |= self.expression(
+                    arg, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file,
+                        call_operand.start_byte,
+                        call_operand.end_byte,
+                    ),
+                    call_member.id,
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+            self._store_call_writes(
+                list(arg_nodes), deps, locals_, params
+            )
+            deps |= self._promote_chan_call_args(
+                call_operand, "", locals_, params
+            )
+            self.pinned.update(
+                getattr(call_member, "signature_type_ids", ()) or ()
+            )
+        elif call_operand is not None:
+            # `g(a)[i]` — the call evaluates first in Go's order; the
+            # element read carries its whole dep set.
+            deps |= self.expression(
+                call_operand, fn, params, locals_, transfers, count,
+                depth + 1,
+            )
         for idx in reversed(indexes):
             if idx is None:
                 raise _Unsupported(
@@ -4878,7 +4987,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
-        if inner is None or inner.type != "call_expression":
+        if inner is None or inner.type not in (
+            "call_expression",
+            # `fs[k](x)` — the index-call shape parses as a
+            # generic-instantiation conversion but records a call.
+            "type_conversion_expression",
+        ):
             return None
         call = self.calls.get(self.node_key(inner))
         if call is None:
