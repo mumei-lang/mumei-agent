@@ -3440,6 +3440,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if args is not None
             else []
         )
+        if call.method_expr:
+            # `S.Pick(s, a, b)` — argument 0 is the receiver, so the
+            # callee's declared parameter `index` sits one slot later.
+            index += 1
         if index >= len(arg_nodes):
             return None
         return self._chan_alias_target(arg_nodes[index], locals_, params)
