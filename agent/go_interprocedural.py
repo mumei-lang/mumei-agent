@@ -6173,8 +6173,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if rights[i].type == "func_literal":
                         # `f := func()...` — the literal just wrote
                         # the name's records; only an earlier alias
-                        # cannot resolve through it.
+                        # cannot resolve through it. The fresh
+                        # declaration binds EXACTLY this literal, so
+                        # an opaque mark a previous loop iteration's
+                        # conditional copy left on the reused name
+                        # must drop too — otherwise the call right
+                        # after redeclaration folds a callback that
+                        # cannot run.
                         self.func_aliases.pop(binding.id, None)
+                        self.opaque_callees.discard(binding.id)
                     else:
                         # Any other RHS clears every func-value record
                         # an earlier bind left on the reused name — a
