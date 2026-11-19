@@ -25660,3 +25660,123 @@ def test_range_over_pointer_to_array_pair_rejoins_writes(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_package_var_bare_write_reaches_element_read(
+    go_types_helper,
+):
+    # `VA = lib.G(b)` — a bare-name store into a package-level var —
+    # is an external write like `VA[i] = v`: the stored value's
+    # deps broadcast so a later `VA[0]` read observes them.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "var VA []int64\n"
+        "func F(b int64) int64 {\n"
+        "\tVA = lib.G(b)\n"
+        "\treturn VA[0]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_dot_imported_member_bare_write_broadcasts(
+    go_types_helper,
+):
+    # `V = b` — a bare-name store into a dot-imported member —
+    # mutates imported package state like `lib.V = v`: the stored
+    # value's deps join the external-write set, so a bound-pointer
+    # read `(*p)[0]` observes them alongside the pointer's own.
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(b int64, p *map[int64]int64) int64 {\n"
+        "\tV = b\n"
+        "\treturn (*p)[0]\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "var V int64\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_deref_pointer_to_array_reads_copy(
+    go_types_helper,
+):
+    # `for _, v := range *p` iterates a start-time COPY of the
+    # pointee (verified `go run`): a mid-iteration store through
+    # the pointer never surfaces in the element the next pass
+    # reads — the sugar `range p` form is the live one.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_range_over_deref_pointer_result_call_reads_copy(
+    go_types_helper,
+):
+    # `for _, v := range *G(p)` — an explicit deref of a *[N]T
+    # result — also iterates a copy (verified `go run`), unlike
+    # the sugar `range G(p)` which reads the live pointee.
+    files = {
+        "a.go": "package p\n"
+        "func G(q *[4]int64) *[4]int64 { return q }\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range *G(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
