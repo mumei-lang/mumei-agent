@@ -21621,6 +21621,115 @@ def test_func_element_map_container_index_call_admitted(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_func_elem_param_container_index_call(go_types_helper):
+    # `func F(fs []func, x int64) { return fs[i](x) }` — a func-
+    # element collection parameter admits like the result form:
+    # the elements live in caller memory, so `fs[i](x)` calls
+    # opaque on the parameter's slot — the callee read carries the
+    # container's own index, the computed index evaluates like an
+    # argument. A non-empty argument list parses the callee as a
+    # `generic_type` instantiation shape — admitted only because
+    # the operand's binding is a func-element collection.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fs []func(int64) int64, i int64, x int64) int64 {\n"
+        "    return fs[i](x)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+    assert any(t.imported for t in result.calls)
+
+
+def test_func_elem_param_container_array_and_map_forms(go_types_helper):
+    # `[N]func` and `map[K]func` parameters admit like the slice.
+    for decl in ("[2]func(int64) int64", "map[int64]func(int64) int64"):
+        source, snapshot, summaries = unit(
+            go_types_helper,
+            f"func F(fs {decl}, i int64) int64 {{\n"
+            "    return fs[i](2)\n"
+            "}",
+        )
+        result = named(source, snapshot, summaries)
+        assert result.available
+        assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_param_named_container_type(go_types_helper):
+    # `type FS []func` as a parameter type admits the same way —
+    # the named identity pins like any other signature type.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type FS []func(int64) int64\n"
+        "func F(fs FS, i int64) int64 {\n"
+        "    return fs[i](2)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_bound_container_generic_type_index(go_types_helper):
+    # `fs := mk(x); fs[i](x)` — the same `generic_type` parse shape
+    # on a bound local container resolves through `locals_`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) []func(int64) int64 { return nil }\n"
+        "func F(x int64, i int64) int64 {\n"
+        "    fs := mk(x)\n"
+        "    return fs[i](x)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_nested_param_container_stays_closed(go_types_helper):
+    # `fm[k][0](x)` on `map[K][]func` — nested containers stay
+    # closed (the signature gate admits exactly one level).
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fm map[int64][]func(int64) int64, k int64) int64 {\n"
+        "    return fm[k][0](2)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+    assert any(g.reason == "unsupported_signature" for g in result.gaps)
+
+
+def test_func_elem_generic_instantiation_stays_closed(go_types_helper):
+    # `G[int64](x)` — the `generic_type` callee that is NOT a
+    # func-element collection keeps the instantiation closed: the
+    # operand's binding is a function, not a container.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G[T any](x T) T { return x }\n"
+        "func F(x int64) int64 {\n"
+        "    return G[int64](x)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_param_element_write_stays_closed(go_types_helper):
+    # `fs[i] = g` — an element write into a parameter container
+    # reaches caller memory the model cannot scope: stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fs []func(int64) int64, g func(int64) int64) int64 {\n"
+        "    fs[0] = g\n"
+        "    return fs[0](1)\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
 def test_call_result_callee_chan_arg_joins_external_queue(
     go_types_helper,
 ):
