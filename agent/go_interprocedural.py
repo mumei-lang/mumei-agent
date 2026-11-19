@@ -933,6 +933,11 @@ class _Builder:
         # a candidate). Reads on `p.C` union every token's queue
         # deps — an over-approx like the escaped-binding fold.
         self.field_chan_queues: dict[str, frozenset[str]] = {}
+        # Argument deps of deferred calls whose callee may write —
+        # a deferred store lands AFTER the return expressions
+        # evaluate, so it can still change a named result: every
+        # later `return` unions this set.
+        self._defer_result_deps: frozenset[int] = frozenset()
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -5029,6 +5034,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_chan_aliases = self.chan_aliases
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
+        saved_defer_result_deps = self._defer_result_deps
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -5039,6 +5045,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self.chan_aliases = {}
         self.field_chan_queues = {}
         self.external_chan_locals = set()
+        self._defer_result_deps = frozenset()
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -5080,6 +5087,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.chan_aliases = saved_chan_aliases
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
+            self._defer_result_deps = saved_defer_result_deps
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -5220,6 +5228,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             return
         if kind == "return_statement":
+            if (
+                self._defer_result_deps
+                and any(r.binding_id for r in fn.results)
+            ):
+                # Named results stay mutable after the result
+                # expressions evaluate — a deferred may-write call
+                # can still change them, bounded by its arguments.
+                deps[0] |= self._defer_result_deps
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
@@ -8869,9 +8885,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
             inner = _children(node)
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
+            defer_arg_deps = frozenset()
+            if kind == "defer_statement":
+                # A deferred call runs at EVERY later `return` — after
+                # the result expressions evaluate — so a callee that
+                # can write may still change a named result:
+                # `defer set(&r,x); return 0` returns x, not 0.
+                # Capture what it could write with: its arguments,
+                # evaluated at this statement per Go semantics.
+                arg_list = inner[0].child_by_field_name("arguments")
+                if arg_list is not None:
+                    for arg in _children(arg_list):
+                        r = self.expression(
+                            arg, fn, params, locals_, transfers,
+                            count, 0,
+                        )
+                        if isinstance(r, frozenset):
+                            defer_arg_deps |= r
             self.expression(
                 inner[0], fn, params, locals_, transfers, count, 0
             )
+            if kind == "defer_statement" and defer_arg_deps:
+                call = self.calls.get(self.node_key(inner[0]))
+                callee = (
+                    self.summarize(call.target)
+                    if call is not None and call.target in self.functions
+                    else None
+                )
+                if (
+                    callee is None
+                    or not callee.available
+                    or callee.effects != "none_in_supported_fragment"
+                ):
+                    # May-write callee — its arguments bound what a
+                    # deferred store can hand a named result.
+                    self._defer_result_deps |= defer_arg_deps
             return
         if kind == "select_statement":
             # A select is a nondeterministic choice: each case's

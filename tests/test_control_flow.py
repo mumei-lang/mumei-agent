@@ -1280,3 +1280,13 @@ def test_select_receive_assignment_counts_in_facts():
     assert [(u.name, u.definite) for u in hints.unassigned] == [
         ("x", False)
     ]
+
+
+def test_unassigned_uses_see_go_and_defer_argument_reads():
+    # `go`/`defer` statements read their call arguments — a name
+    # assigned only on one branch is a possible unassigned read
+    # there, exactly like a plain call would be.
+    cfg, result = uses("if c { y = 1 }\ngo use(y)\nreturn 0")
+    assert "y" in {use.name for use in result}
+    cfg, result = uses("if c { y = 1 }\ndefer use(y)\nreturn 0")
+    assert "y" in {use.name for use in result}

@@ -19570,3 +19570,29 @@ def test_go_statement_imported_callee(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_may_write_reaches_named_result(go_types_helper):
+    # `defer set(&r,x); return 0` — the deferred store lands AFTER
+    # `r = 0` is evaluated, so F actually returns x. The dep model
+    # must carry the deferred call's argument deps into the named
+    # result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func set(p *int64, v int64) int64 { *p = v; return v }; "
+        "func F(x int64) (r int64) { defer set(&r, x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_pure_callee_does_not_touch_result(go_types_helper):
+    # A deferred callee with no write capacity can't change the
+    # named result — `return 0` stays dep-free.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func logv(v int64) int64 { return v }; "
+        "func F(x int64) (r int64) { defer logv(x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()

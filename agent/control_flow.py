@@ -474,7 +474,8 @@ def _use_text(statement: tree_sitter_extract.Statement) -> str:
         return statement.condition
     if statement.kind == "case":
         return " ".join(statement.values)
-    if statement.kind in {"range", "return", "expr", "define", "const", "var"}:
+    if statement.kind in {"range", "return", "expr", "define", "const",
+                          "var", "go", "defer"}:
         return " ".join(statement.values)
     if statement.kind == "assign":
         # Compound targets (x.f, a[i], *p) are reads of every identifier
