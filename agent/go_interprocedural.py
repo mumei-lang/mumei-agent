@@ -3525,18 +3525,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
         return ext is not None and self._chan_chan_fact(ext[1])
 
     def _calls_touch_external_chan(
-        self, calls: Iterable[CallTransfer]
+        self,
+        calls: Iterable[CallTransfer],
+        pred: Any | None = None,
     ) -> bool:
         """A recorded transfer — or a local callee reachable through
         one — operates on a channel outside the caller's bindings.
         `mid(v) { inner(v) }` where `inner` sends on `GC` leaves the
         `GC` transfer inside `inner`'s summary, not `mid`'s, so the
-        check walks the local call graph with a `seen` bound."""
+        check walks the local call graph with a `seen` bound. `pred`
+        overrides the per-target predicate (`_chan_chan_id` narrows
+        the match to `chan chan` operands)."""
+        check = pred or self._external_chan_id
         seen: set[str] = set()
         stack = list(calls)
         while stack:
             c = stack.pop()
-            if self._external_chan_id(c.target):
+            if check(c.target):
                 return True
             if c.target in seen or c.target not in self.functions:
                 continue
@@ -3550,20 +3555,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
         """A transfer target naming an external `chan` operand —
         a package-level chan var's binding, an imported member, or
         a scope-less struct field's `chan` member — so a callee's
-        recorded ops on it mean the caller shares the queue."""
+        recorded ops on it mean the caller shares the queue. A
+        `chan chan` binding is shared at ANY scope: locals cannot
+        declare the type, so the binding is a package var, a
+        parameter, or a callee-produced name — all caller-visible
+        state."""
         binding = self.bindings.get(target_id)
         if (
             binding is not None
             and binding.kind == "variable"
             and (
-                self._package_level(binding)
-                or binding.scope is None
+                self._chan_chan_fact(binding.type)
+                or (
+                    (
+                        self._package_level(binding)
+                        or binding.scope is None
+                    )
+                    and self._scalar_chan_fact(binding.type)
+                )
             )
-            and self._scalar_chan_fact(binding.type)
         ):
             return True
         member = self.members.get(target_id)
-        return member is not None and self._scalar_chan_fact(member.type)
+        return member is not None and (
+            self._scalar_chan_fact(member.type)
+            or self._chan_chan_fact(member.type)
+        )
+
+    def _chan_chan_id(self, target_id: str) -> bool:
+        """A transfer target naming a `chan chan` operand —
+        the outer queue is shared state at any scope (locals
+        cannot declare the type)."""
+        binding = self.bindings.get(target_id)
+        if (
+            binding is not None
+            and binding.kind == "variable"
+            and self._chan_chan_fact(binding.type)
+        ):
+            return True
+        member = self.members.get(target_id)
+        return member is not None and self._chan_chan_fact(member.type)
 
     def _chan_call_args(self, node: Any) -> Any | None:
         """The call's `argument_list` node, unwrapping parens —
@@ -3594,24 +3625,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
         (`r := q; return r`) the passthrough probe cannot see, so
         sends on the result name broadcast into those queues."""
         call_args = self._chan_call_args(call_node)
+        return self._promote_chan_arg_roots(
+            call_args.named_children if call_args is not None else (),
+            exclude_id,
+            locals_,
+            params,
+        )
+
+    def _promote_chan_arg_roots(
+        self,
+        arguments: Iterable[Any],
+        exclude_id: str,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> frozenset[int]:
+        """The argument-list variant of `_promote_chan_call_args`
+        for sites that hold the argument nodes rather than the
+        call node (a bound-method or declared-callee fold)."""
         deps: frozenset[int] = frozenset()
-        if call_args is not None:
-            for arg in call_args.named_children:
-                if arg.type == "comment":
-                    continue
-                arg_root = self._chan_alias_target(arg, locals_, params)
+        for arg in arguments:
+            if arg.type == "comment":
+                continue
+            arg_root = self._chan_alias_target(arg, locals_, params)
+            if (
+                arg_root is not None
+                and arg_root.id != exclude_id
+            ):
+                self.external_chan_locals.add(arg_root.id)
+                arg_slot = locals_.get(arg_root.id)
                 if (
-                    arg_root is not None
-                    and arg_root.id != exclude_id
+                    arg_slot is None
+                    and arg_root.id in params
                 ):
-                    self.external_chan_locals.add(arg_root.id)
-                    arg_slot = locals_.get(arg_root.id)
-                    if (
-                        arg_slot is None
-                        and arg_root.id in params
-                    ):
-                        arg_slot = frozenset({params[arg_root.id]})
-                    deps = deps | (arg_slot or frozenset())
+                    arg_slot = frozenset({params[arg_root.id]})
+                deps = deps | (arg_slot or frozenset())
         return deps
 
     def _captured_current_deps(
