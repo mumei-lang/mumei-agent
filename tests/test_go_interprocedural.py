@@ -6393,7 +6393,9 @@ def test_imported_pointer_var_deref_read_observes_escaped_binding(
 ):
     # `lib.PU = &b; b = v; return *lib.PU` — the member may point at
     # `b`, so the deref read unions the escaped binding's deps like
-    # the `*lib.PV` form does.
+    # the `*lib.PV` form does. The member store itself joins the
+    # external-write set, so the stored pointer's provenance (b)
+    # reaches the read too.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(b int64, v int64) int64 {\n"
@@ -6406,7 +6408,7 @@ def test_imported_pointer_var_deref_read_observes_escaped_binding(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_bound_pointer_deref_read_is_admitted(go_types_helper):
@@ -6600,7 +6602,9 @@ def test_member_pointer_deref_read_carries_escaped_pointee_deps(
     go_types_helper,
 ):
     # `lib.PV = &x; x = y; *lib.PV` may-read x's current value
-    # through the member's stored pointer.
+    # through the member's stored pointer. The member store joins
+    # the external-write set, so the stored pointer's provenance
+    # (x) reaches the read beside the pointee's own deps.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x lib.T, y lib.T) int64 {"
@@ -6611,7 +6615,7 @@ def test_member_pointer_deref_read_carries_escaped_pointee_deps(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_bound_pointer_deref_read_local_pointee_is_admitted(
@@ -25532,5 +25536,46 @@ def test_opaque_composite_array_of_slices_arg_shares_elem_memory(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_package_var_alias_write_reaches_member_read(
+    go_types_helper,
+):
+    # `s := PA` on a package var — the alias shares PA's backing:
+    # `s[0] = b` lands in the external-write set, so both `s[0]`
+    # (the local alias) and `PA[0]` (the member) observe it.
+    files = {
+        "a.go": "package p\nvar PA []int64\n"
+        "func F(b int64) int64 {\n"
+        "\ts := PA\n"
+        "\ts[0] = b\n"
+        "\treturn s[0] + PA[0]\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_member_element_write_observed_by_member_read(
+    go_types_helper,
+):
+    # `lib.VA[0] = b` stores `b`'s deps into external member
+    # memory — a later element read `lib.VA[1]` observes them like
+    # a `(*p)[i]` read observes an indirect store.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(b int64) int64 {\n"
+        "\tlib.VA[0] = b\n"
+        "\treturn lib.VA[1]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 

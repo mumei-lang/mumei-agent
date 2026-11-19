@@ -4000,6 +4000,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 depth + 1,
             )
             deps |= base | self.indirect_writes
+        elif (
+            member is not None
+            or package_var is not None
+            or package_pointee is not None
+        ):
+            # `lib.VA[i]`/`VA[i]`/`(*GP)[i]` — member and
+            # package-var element memory is external state: a
+            # store that reached it through an alias (`s := VA;
+            # s[0] = b`), a pointer or the member's own write
+            # (`lib.VA[0] = b`) joins the external-write set a
+            # later element read observes, like `(*p)[i]`.
+            deps |= self.indirect_writes
         return deps
 
     def _imported_container_member(
@@ -9034,6 +9046,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # into `indirect_writes` (like a send does) for a later
             # `<-GC`/`range GC` read to observe.
             chan_write_targets: set[int] = set()
+            # `lib.V = v`/`VA[i] = v` — member and package-var
+            # writes mutate external state: the stored value's
+            # deps join `indirect_writes` at apply time so a later
+            # element read (`lib.VA[k]`) observes them like a
+            # `(*p)[i]` store does. Ref indices collect here
+            # because the RHS values evaluate after the LHS pass.
+            external_write_targets: set[int] = set()
             # `p.C = ch` reseats which queue the field names: index →
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
@@ -9199,6 +9218,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # slot so the store loop unions the stored value's
                     # dependencies into every escaped binding.
                     refs.append(_ALIAS_FOLD if saw_deref else None)
+                    external_write_targets.add(len(refs) - 1)
                     if (
                         not saw_deref
                         and self._scalar_chan_fact(member.type)
@@ -9220,6 +9240,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         fn, params, locals_, transfers, count,
                     )
                     refs.append(_ALIAS_FOLD if saw_deref else None)
+                    external_write_targets.add(len(refs) - 1)
                     if (
                         not saw_deref
                         and self._scalar_chan_binding(binding.id)
@@ -9651,7 +9672,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             }
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
-                    if i in chan_write_targets:
+                    if i in external_write_targets:
+                        # The member/package-var store landed in
+                        # external memory — its value's deps join
+                        # the external-write set a later member or
+                        # pointee element read observes.
+                        self.indirect_writes |= value
+                    elif i in chan_write_targets:
                         # `GC = ch` — the RHS read evaluated to the
                         # queue's contents; reseating the external
                         # operand to it broadcasts those contents so
