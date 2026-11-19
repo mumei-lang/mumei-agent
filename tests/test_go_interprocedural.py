@@ -21348,15 +21348,28 @@ def test_func_result_direct_call_parenthesized_runs_opaque(
     assert result.effects == "unknown"
 
 
-def test_func_result_direct_call_inner_closed_stays_closed(
+def test_func_result_direct_call_nil_result_admitted(
     go_types_helper,
 ):
-    # `mk()()` where `mk`'s result is `nil` — the inner call
-    # cannot produce a func value, so the outer call fails
-    # closed through the inner evaluation.
+    # `mk()()` where `mk`'s result is `nil` — nil admits as a
+    # dep-free func value, so the anonymous callee runs opaque.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk() func() int64 { return nil }; "
+        "func F(x int64) int64 { return mk()() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+
+
+def test_func_result_direct_call_inner_closed_stays_closed(
+    go_types_helper,
+):
+    # `mk()()` where `mk`'s body is unsupported — the inner call
+    # cannot evaluate, so the outer call fails closed through it.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() func() int64 { m:=map[int]int{1:2}; _=m; return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
