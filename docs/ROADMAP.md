@@ -2650,12 +2650,14 @@ the tuple shares one RHS node, so make/alias/
 passthrough all resolve to None and only the
 per-position result type decides admission (a
 `chan` name at a non-`chan` or non-scalar slot
-stays closed). The `var` declaration form
-admits the same slot — `var ch, n = g()` binds
-the callee's passthrough queue when the chan
-name's position declares a scalar `chan` — while
-`var ch, n = G()` with a non-scalar element at
-the slot stays closed. A fresh
+stays closed). The `var` declaration and plain
+assignment forms admit the same slot — `var ch,
+n = g()` and `ch, n = g()` bind an external
+queue when the chan name's position declares a
+scalar `chan`; when the callee provably returns
+a `chan` argument at that position the name
+aliases the argument's queue instead — while a
+non-scalar element at the slot stays closed. A fresh
 `make` on an unaliased name keeps the old conflated
 admission since every name resolving to it already
 converges on the same slot. Still closed:
