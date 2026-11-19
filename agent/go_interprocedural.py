@@ -3261,6 +3261,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and fact.elem.kind in {"integer", "boolean"}
         )
 
+    def _calls_touch_external_chan(
+        self, calls: Iterable[CallTransfer]
+    ) -> bool:
+        """A recorded transfer — or a local callee reachable through
+        one — operates on a channel outside the caller's bindings.
+        `mid(v) { inner(v) }` where `inner` sends on `GC` leaves the
+        `GC` transfer inside `inner`'s summary, not `mid`'s, so the
+        check walks the local call graph with a `seen` bound."""
+        seen: set[str] = set()
+        stack = list(calls)
+        while stack:
+            c = stack.pop()
+            if self._external_chan_id(c.target):
+                return True
+            if c.target in seen or c.target not in self.functions:
+                continue
+            seen.add(c.target)
+            nested = self.summarize(c.target)
+            if nested is not None and nested.available:
+                stack.extend(nested.calls)
+        return False
+
     def _external_chan_id(self, target_id: str) -> bool:
         """A transfer target naming an external `chan` operand —
         a package-level chan var's binding, an imported member, or
@@ -4915,7 +4937,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             fn.body is None
             or fn.generic
             or fn.variadic
-            or not fn.results
             # A method's receiver is a leading signature slot like any
             # parameter: its declared fact must sit inside the admitted
             # kinds — a concrete named type's fact is `struct`/`pointer`
@@ -5113,7 +5134,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._func_arg_invocations = saved_func_args
             self._call_arg_deps = saved_call_arg_deps
             self.current_file = previous_file
-        if not saw_return[0]:
+        if not saw_return[0] and fn.results:
+            # A void callee may fall off the end of its body — Go
+            # treats that as an implicit bare `return`, which the
+            # dep model already carries as nothing.
             raise _Unsupported("unsupported_body", fn.body)
         return self.result(
             fn,
@@ -5264,6 +5288,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
             if len(expressions) == 0:
+                if not fn.results:
+                    # A bare `return` in a void callee carries
+                    # nothing — the same implicit return a
+                    # fall-off-the-end body gets.
+                    saw_return[0] = True
+                    return
                 # A bare `return` is only legal with a named result — it
                 # yields the result binding's current dependencies. With
                 # several named results the conflated dep set unions
@@ -11120,10 +11150,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # binding, but `GC` is no argument, so the call's
             # deps broadcast into `indirect_writes` for a later
             # `<-GC`/`range GC` to observe.
-            if any(
-                self._external_chan_id(c.target)
-                for c in callee.calls
-            ):
+            if self._calls_touch_external_chan(callee.calls):
                 self.indirect_writes |= stored
         return result
 
@@ -12703,9 +12730,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     locals_.get(recv_id)
                     or recv_deps
                 ) | stored
-            if any(
-                self._external_chan_id(c.target) for c in callee.calls
-            ):
+            if self._calls_touch_external_chan(callee.calls):
                 self.indirect_writes |= stored
         return result
 
@@ -13143,10 +13168,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # The declared callee's recorded ops on an external
                 # channel share its queue with the caller — same
                 # broadcast the local-callee site applies.
-                if any(
-                    self._external_chan_id(c.target)
-                    for c in declared.calls
-                ):
+                if self._calls_touch_external_chan(declared.calls):
                     self.indirect_writes |= stored
             # The callee's declared type pins fold like a local
             # call's — redeclaring any of them flags this summary.
