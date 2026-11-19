@@ -919,6 +919,32 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		if ch, ok := t.Underlying().(*types.Chan); ok {
 			add(ch.Elem())
 		}
+		// A collection's element types name dependencies the same way:
+		// an admitted `map[K]func(N)` or `[]func(N)` result relies on
+		// the declared `K`/`N` identities, so a redeclaration must flag
+		// the caller's summary stale like a renamed parameter does.
+		if m, ok := t.Underlying().(*types.Map); ok {
+			add(m.Key())
+			add(m.Elem())
+		}
+		if s, ok := t.Underlying().(*types.Slice); ok {
+			add(s.Elem())
+		}
+		if a, ok := t.Underlying().(*types.Array); ok {
+			add(a.Elem())
+		}
+		// A func-typed type declares its own inner named identities —
+		// `f func(lib.N) int64`, `type MyFn func(N) int64`, and the
+		// anonymous `func(N) int64` inside an admitted collection
+		// element alike — walk the nested signature too.
+		if s, ok := t.Underlying().(*types.Signature); ok {
+			for i := 0; i < s.Params().Len(); i++ {
+				add(s.Params().At(i).Type())
+			}
+			for i := 0; i < s.Results().Len(); i++ {
+				add(s.Results().At(i).Type())
+			}
+		}
 		if obj == nil {
 			return
 		}
@@ -930,17 +956,6 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		// early like before.)
 		if p, ok := t.Underlying().(*types.Pointer); ok {
 			add(p.Elem())
-		}
-		// A func-typed parameter or result (`f func(lib.N) int64`,
-		// `type MyFn func(N) int64`) declares its own inner named
-		// identities — walk the nested signature too.
-		if s, ok := t.Underlying().(*types.Signature); ok {
-			for i := 0; i < s.Params().Len(); i++ {
-				add(s.Params().At(i).Type())
-			}
-			for i := 0; i < s.Results().Len(); i++ {
-				add(s.Results().At(i).Type())
-			}
 		}
 	}
 	if sig.Recv() != nil {
