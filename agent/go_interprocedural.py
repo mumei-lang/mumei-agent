@@ -3718,6 +3718,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return member
         return None
 
+    def _call_result_type(self, node: Any) -> Any | None:
+        """The declared type fact of a call's single result — for
+        `direct_local`/`method`-style callees the Function record's
+        `results[0].type`, for `direct_import` the member's
+        `result_types[0]`. None for other kinds or multi-result
+        calls, whose per-slot types need an index."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None:
+            return None
+        if call.kind == "direct_import":
+            member = self.members.get(call.target)
+            if member is not None and member.result_types:
+                return member.result_types[0]
+            return None
+        target = self.functions.get(call.target)
+        if target is not None and len(target.results) == 1:
+            return target.results[0].type
+        return None
+
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
         """The DIRECT field names a `struct{...}` literal declares —
         identifiers of each `field_declaration`'s `name`, plus the
@@ -10173,6 +10203,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # field read, and stays closed like `s.M` on a
                     # computed operand does.
                     fields_ok = True
+                    field_idents = []
                     cur_sel = node
                     while (
                         cur_sel is not None
@@ -10184,9 +10215,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if fld is not None
                             else None
                         )
-                        if self._field_identity(fld_ref) is None:
+                        fld_ident = self._field_identity(fld_ref)
+                        if fld_ident is None:
                             fields_ok = False
                             break
+                        field_idents.append(fld_ident)
                         cur_sel = cur_sel.child_by_field_name(
                             "operand"
                         )
@@ -10204,10 +10237,71 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 None,
                             )
                     if fields_ok:
-                        return self.expression(
+                        deps = self.expression(
                             sel_operand, fn, params, locals_,
                             transfers, count, depth + 1,
                         )
+                        # Pin every level's declared field type —
+                        # `g(s).A.B` reads through field `A` whose
+                        # type `Q` may live in another file, so a
+                        # `Q` redeclaration must flag this summary
+                        # via `stale_dependents`.
+                        for ident in field_idents:
+                            ident_type = getattr(ident, "type", None)
+                            if (
+                                ident_type is not None
+                                and ident_type.type_id
+                            ):
+                                self.pinned.add(ident_type.type_id)
+                        # A pointer anywhere on the path — a `*S`
+                        # call result or an intermediate `*Q` field —
+                        # means the read dereferences memory aliases
+                        # may have written, so it reads like `*p`:
+                        # escaped bindings' current deps and indirect
+                        # writes union in, and the read is recorded
+                        # as an external effect.
+                        result_type = self._call_result_type(sel_base)
+                        ptr_type = (
+                            result_type
+                            if result_type is not None
+                            and result_type.kind == "pointer"
+                            else None
+                        )
+                        if ptr_type is None:
+                            for ident in field_idents:
+                                ident_type = getattr(
+                                    ident, "type", None
+                                )
+                                if (
+                                    ident_type is not None
+                                    and ident_type.kind == "pointer"
+                                ):
+                                    ptr_type = ident_type
+                                    break
+                        if ptr_type is not None:
+                            deps |= self.indirect_writes
+                            for escaped_id in self.escaped:
+                                if escaped_id in locals_:
+                                    deps |= locals_[escaped_id]
+                                elif escaped_id in params:
+                                    deps |= {params[escaped_id]}
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        node.start_byte,
+                                        node.end_byte,
+                                    ),
+                                    ptr_type.type_id
+                                    or getattr(
+                                        field_idents[-1], "id", ""
+                                    ),
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                        return deps
                 # `st.V` / `st.A.B` — a field of a tracked local
                 # composite: the binding's dep set conflates every
                 # field, so the read returns it whole. Local state —

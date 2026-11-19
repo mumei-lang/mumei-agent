@@ -19912,6 +19912,67 @@ def test_call_result_nested_field_read_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+def test_call_result_nested_field_read_pins_field_types(
+    go_types_helper,
+):
+    # `g(a).A.B` where `A`'s type `Q` is declared in another file —
+    # every level's declared field type pins, so redeclaring `Q`
+    # flags this summary via `stale_dependents`.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ A Q }\n"
+        "func g(x int64) P { return P{A: Q{B: x}} }\n"
+        "func F(a int64) int64 { return g(a).A.B }\n",
+        "b.go": "package p\n"
+        "type Q struct{ B int64 }\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    q = next(b for b in snapshot.bindings if b.name == "Q")
+    assert q.id in result.pinned
+
+
+def test_call_result_field_read_pointer_result_joins_escaped(
+    go_types_helper,
+):
+    # `lib.G(x).V` where `G` returns `*S` — the read dereferences
+    # memory an escaped alias may have written, so the escaped
+    # binding's current deps union into the result like a `*p` read.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, y int64) int64 {\n"
+        "    b := y\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return lib.G(x).V\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type S struct{ V int64 }\n"
+            "func G(a int64) *S { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert {0, 1}.issubset(result.return_dependencies)
+
+
 def test_call_result_index_stays_closed(go_types_helper):
     # `g(a)[0]` — the callee's array result is already closed at
     # the signature gate, so the caller fails closed too.
