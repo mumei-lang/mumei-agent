@@ -8471,6 +8471,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # already held), so it stays an append sharer even
             # though no surviving member name groups with it.
             func_elem_reseat_backings: dict[str, set[str]] = {}
+            # A stored map key's deps broadcast into
+            # `indirect_writes` only when the store lands — the RHS
+            # of the same statement reads the pre-state, so the
+            # union waits until after `values` evaluates below:
+            # `(*p)[k], r = 1, (*p)[0]` reads `(*p)[0]` without
+            # `k`'s deps.
+            pending_map_key_deps = frozenset()
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -8656,13 +8663,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             transfers, count, 0,
                         )
                         self._record_read(extra_deps)
-                        if fact.kind == "map":
+                        if fact.kind == "map" and extra is extras[0]:
                             # A map key is stored data — `(*p)[b]=1`
                             # stores `b`'s value, so a later key read
                             # (`for k := range *p`) must observe `b`'s
-                            # deps through the broadcast.
+                            # deps through the broadcast. `extras` is
+                            # innermost-first, so `extras[0]` is the
+                            # index into the written map — in
+                            # `(*p)[i][7] = 1` (a slice of maps) `i`
+                            # only selects which map receives the
+                            # store; `7` is the stored key.
                             map_key_deps |= extra_deps
-                    self.indirect_writes |= map_key_deps
+                    pending_map_key_deps |= map_key_deps
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -8948,6 +8960,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # reads `a`'s backing BEFORE `a`'s own store, so the
             # second append's records/sharers must come from these
             # snapshots, not the live maps earlier stores rewrote.
+            # The stored map keys' deps join the external-write set
+            # only now — the store lands after every RHS read.
+            self.indirect_writes |= pending_map_key_deps
             captures_after_eval = dict(self.closure_captures)
             writes_after_eval = dict(self.closure_writes)
             star_after_eval = set(self.closure_star_writes)
