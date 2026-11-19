@@ -933,6 +933,18 @@ class _Builder:
         # `fs = append(fs, …)` keeps the share — the grown slice may
         # reuse the same array.
         self._func_elem_groups: dict[str, set[str]] = {}
+        # Per-name backing identity: a set of opaque tokens, one
+        # per array instance the name may currently point at. A
+        # copy unions the operand's tokens onto the target; a
+        # definite reseat replaces them with a fresh token. Token
+        # sets (not pairwise edges) decide "same backing" — a
+        # conditional reseat leaves a name holding EITHER backing
+        # and a union of tokens keeps those alternatives separate,
+        # where merged share edges would fuse the old and new
+        # backings into one class (`c := b`; if-`b = a`; `d := a`
+        # — `c` and `d` never share).
+        self._func_elem_tokens: dict[str, frozenset[str]] = {}
+        self._func_elem_token_seq = 0
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -1470,7 +1482,12 @@ class _Builder:
             return None
         return ref.binding_id
 
-    def _func_elem_share(self, binding_id: str, src_id: str) -> None:
+    def _func_elem_share(
+        self,
+        binding_id: str,
+        src_id: str,
+        src_toks: frozenset[str] | None = None,
+    ) -> None:
         """`fs2 := fs` / `fs2 = fs` between func-element containers —
         the copy shares the backing, so element stores through either
         name union into both record sets."""
@@ -1478,6 +1495,35 @@ class _Builder:
             return
         self._func_elem_groups.setdefault(binding_id, set()).add(src_id)
         self._func_elem_groups.setdefault(src_id, set()).add(binding_id)
+        # Register the operand's own token so sharer lookups stay
+        # symmetric — `fs[0]` and `fs2[0]` see each other's writes.
+        self._func_elem_tokens.setdefault(src_id, frozenset({src_id}))
+        self._func_elem_tokens[binding_id] = (
+            self._func_elem_tokens.get(binding_id, frozenset())
+            | (
+                src_toks
+                if src_toks is not None
+                else self._func_elem_eval_tokens(src_id)
+            )
+        )
+
+    def _func_elem_eval_tokens(self, binding_id: str) -> frozenset[str]:
+        """The backing instances `binding_id` may point at — its own
+        id when nothing tracks it (the name's first backing)."""
+        return self._func_elem_tokens.get(
+            binding_id, frozenset({binding_id})
+        )
+
+    def _func_elem_sharers(self, binding_id: str) -> set[str]:
+        """Every name whose backing set intersects `binding_id`'s —
+        transitive through token identity, unlike `groups` edges
+        which only list direct partners."""
+        toks = self._func_elem_eval_tokens(binding_id)
+        return {
+            member_id
+            for member_id, member_toks in self._func_elem_tokens.items()
+            if member_toks & toks
+        } | {binding_id}
 
     def _func_elem_reseat(self, binding_id: str) -> None:
         """A non-append reseat (`fs = mk()`, `fs = []func(){…}`,
@@ -1492,6 +1538,13 @@ class _Builder:
                 if not members:
                     self._func_elem_groups.pop(member_id, None)
             self._adopt_element_records(binding_id, member_id)
+        # The name leaves its old backing for a fresh one — hand it
+        # a brand-new token so a default `binding_id` token cannot
+        # collide with the backing the name just detached from.
+        self._func_elem_token_seq += 1
+        self._func_elem_tokens[binding_id] = frozenset(
+            {f"{binding_id}#{self._func_elem_token_seq}"}
+        )
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
@@ -8041,10 +8094,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     refs.append((ref, True, False))
                     func_elem_targets.add(len(refs) - 1)
                     func_elem_holders[len(refs) - 1] = frozenset(
-                        {ref.binding_id}
-                        | self._func_elem_groups.get(
-                            ref.binding_id, set()
-                        )
+                        self._func_elem_sharers(ref.binding_id)
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
@@ -8173,28 +8223,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             writes_after_eval = dict(self.closure_writes)
             star_after_eval = set(self.closure_star_writes)
             calls_after_eval = set(self.closure_inner_calls)
-            groups_after_eval = {
-                key: set(group)
-                for key, group in self._func_elem_groups.items()
-            }
-            # `groups` holds pairwise share edges — `c := b` links
-            # `c` through a hub, not to every member — so the
-            # backing a name shares at eval time is its CONNECTED
-            # COMPONENT here, not `groups[src]` alone.
+            # Backing tokens resolve against the pre-state too —
+            # `a, b = d, a` copies the array `a` named at eval
+            # time, not the one `a`'s own store redirected it to.
+            tokens_after_eval = dict(self._func_elem_tokens)
+            # Eval-time backing classes derive from per-name token
+            # sets, not edge components: two backings never merge
+            # when a conditional reseat unions their edges. Index
+            # names by token and union the carriers of each token
+            # the name holds — linear in the token count, and only
+            # built when the statement can touch tracked func
+            # elements (earlier versions rebuilt the component
+            # partition per assignment, quadratically in aliases).
             func_elem_eval_class: dict[str, frozenset[str]] = {}
-            for _gk in groups_after_eval:
-                if _gk in func_elem_eval_class:
-                    continue
-                _comp: set[str] = set()
-                _stack = [_gk]
-                while _stack:
-                    _node = _stack.pop()
-                    if _node in _comp:
-                        continue
-                    _comp.add(_node)
-                    _stack.extend(groups_after_eval.get(_node, ()))
-                for _node in _comp:
-                    func_elem_eval_class[_node] = frozenset(_comp)
+            if func_elem_targets or self._func_elem_tokens:
+                _by_token: dict[str, set[str]] = {}
+                for _n, _ts in self._func_elem_tokens.items():
+                    for _t in _ts:
+                        _by_token.setdefault(_t, set()).add(_n)
+                for _n in set(self._func_elem_tokens) | set(_by_token):
+                    _cls = {_n} | _by_token.get(_n, set())
+                    for _t in self._func_elem_eval_tokens(_n):
+                        _cls |= _by_token.get(_t, set())
+                    func_elem_eval_class[_n] = frozenset(_cls)
             # Channel alias targets resolve against the pre-state
             # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
             # RHS's root must be read before any element's store
@@ -8769,9 +8820,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         func_elem_holders.get(
                             i, frozenset({ref.binding_id})
                         )
-                        | self._func_elem_groups.get(
-                            ref.binding_id, set()
-                        )
+                        | self._func_elem_sharers(ref.binding_id)
                     ) - func_elem_reseated | {ref.binding_id}
                     for holder_id in elem_holders:
                         # Accumulate like the container's own
@@ -8880,7 +8929,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._may_skip == 0
                         and tgt_bound is not None
                         and self._func_elem_collection(tgt_bound.type)
+                        and (
+                            src_id is None
+                            or self._func_elem_eval_tokens(src_id)
+                            != self._func_elem_eval_tokens(
+                                ref.binding_id
+                            )
+                        )
                     ):
+                        func_elem_reseat_backings[ref.binding_id] = (
+                            func_elem_eval_class.get(
+                                src_id, frozenset({src_id})
+                            )
+                            if src_id is not None
+                            else frozenset({ref.binding_id})
+                        )
                         # A definite reseat leaves the backing the
                         # name used to share — hand its element
                         # records to the remaining sharers BEFORE
@@ -8889,18 +8952,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # literal under `a` during RHS eval: that
                         # record belongs to the OLD array `a`'s
                         # sharers keep, not to `a`'s new backing.
-                        # A self-copy (`a, a = d, a`) reseats too:
-                        # the second `a` lands on its eval-time
-                        # backing, not on `d`'s.
-                        self._func_elem_reseat(ref.binding_id)
-                        func_elem_reseated.add(ref.binding_id)
-                        func_elem_reseat_backings[ref.binding_id] = (
-                            func_elem_eval_class.get(
+                        # The landing is the operand's EVAL-time
+                        # backing: when the name already holds
+                        # exactly that (`b = b` while `b` shares
+                        # `a`'s array) there is no detach — `b`
+                        # stays a holder for parallel element
+                        # writes. A self-copy (`a, a = d, a`)
+                        # still reseats: the second `a`'s live
+                        # tokens were already rewritten by the
+                        # first store, so it detaches and re-lands
+                        # on `a`'s eval-time backing.
+                        if (
+                            src_id is None
+                            or tokens_after_eval.get(
                                 src_id, frozenset({src_id})
                             )
-                            if src_id is not None
-                            else frozenset({ref.binding_id})
-                        )
+                            != self._func_elem_eval_tokens(
+                                ref.binding_id
+                            )
+                        ):
+                            self._func_elem_reseat(ref.binding_id)
+                            func_elem_reseated.add(ref.binding_id)
                     # A maybe-skipped copy leaves the name holding
                     # EITHER function value. When the source carries
                     # a resolvable record the union covers both
@@ -9138,7 +9210,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 share_members.discard(member_id)
                         for member_id in share_members:
                             self._func_elem_share(
-                                ref.binding_id, member_id
+                                ref.binding_id,
+                                member_id,
+                                tokens_after_eval.get(
+                                    member_id, frozenset({member_id})
+                                ),
                             )
                 elif (
                     not compound
@@ -9282,7 +9358,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 append_members.discard(member_id)
                         for member_id in append_members:
                             self._func_elem_share(
-                                ref.binding_id, member_id
+                                ref.binding_id,
+                                member_id,
+                                tokens_after_eval.get(
+                                    member_id, frozenset({member_id})
+                                ),
                             )
                         captured = captures_after_eval.get(
                             append_cont
@@ -13106,8 +13186,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # backing — the container's (new) element
                     # records union into each sharer like a store
                     # through it would.
-                    for holder_id in self._func_elem_groups.get(
-                        append_cont, set()
+                    for holder_id in (
+                        self._func_elem_sharers(append_cont)
+                        - {append_cont}
                     ):
                         self._adopt_element_records(
                             append_cont, holder_id

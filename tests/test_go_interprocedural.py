@@ -23295,3 +23295,74 @@ def test_func_elem_parallel_copy_keeps_old_sharer(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_self_assign_keeps_sharer(go_types_helper):
+    # `b, a[0] = b, f` — the self-copy `b = b` is not a reseat:
+    # `b` stays a holder of the shared backing, so the literal
+    # written through `a[0]` is still reachable from `b[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    b, a[0] = b, func() int64 { return x }\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_conditional_reseat_does_not_merge_backings(
+    go_types_helper,
+):
+    # `c := b`; a conditional `b = a2` rebind leaves `b` sharing
+    # EITHER backing — never fusing them. `d := a2` shares only
+    # `a2`'s backing, so the `c[0]` write must not reach `d[0]()`,
+    # while `b[0]()` still may see it through `b`'s old backing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, cond bool) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := b\n"
+        "    a2 := []func() int64{func() int64 { return 0 }}\n"
+        "    if cond {\n"
+        "        b = a2\n"
+        "    }\n"
+        "    d := a2\n"
+        "    c[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    return d[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_conditional_reseat_maybe_sharer_sees_write(
+    go_types_helper,
+):
+    # Same shape: `b` may still hold `c`'s backing, so the `c[0]`
+    # write DOES reach `b[0]()` — a may-share, not a merge.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, cond bool) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := b\n"
+        "    a2 := []func() int64{func() int64 { return 0 }}\n"
+        "    if cond {\n"
+        "        b = a2\n"
+        "    }\n"
+        "    c[0] = func() int64 { return x }\n"
+        "    _ = a2\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
