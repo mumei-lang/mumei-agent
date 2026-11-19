@@ -2637,7 +2637,12 @@ def test_imported_call_marks_effects_unknown(go_types_helper):
     assert result.calls[0].imported
 
 
-def test_composite_import_result_fails_closed(go_types_helper):
+def test_composite_import_result_range_opaque_fold(go_types_helper):
+    # `for range lib.S()` — the container result runs the minimal
+    # opaque fold like `lib.G(a)[i]`: the call's own dep set
+    # (here dep-free) and an imported transfer on the member's
+    # identity keep `effects` honest while iteration itself
+    # binds no names.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
@@ -2662,7 +2667,12 @@ def test_composite_import_result_fails_closed(go_types_helper):
     )
     summaries = ip.summarize_go_package(files, snapshot)
     result = named_package(files, snapshot, summaries, "F")
-    assert not result.available
+    assert result.available
+    member = next(
+        m for m in snapshot.imported_members if m.name == "S"
+    )
+    assert any(t.target == member.id for t in result.calls)
+    assert result.return_dependencies == frozenset({0})
 
 
 MULTI_LIB = {
@@ -22504,9 +22514,10 @@ def test_map_func_bound_container_chan_args_promoted(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_map_scalar_bound_container_stays_closed(go_types_helper):
-    # `fm := lib.Ms(x)` — a `map[string]int64` local is no
-    # func-element collection: the map-typed bind stays closed.
+def test_map_scalar_bound_container_admits(go_types_helper):
+    # `fm := lib.Ms(x); fm["k"]` — a `map[string]int64` local binds
+    # the call result: the element's provenance is the bound
+    # container's conflated set — the call's arg deps.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { fm := lib.Ms(x); return fm[\"k\"] }\n"
@@ -22525,7 +22536,8 @@ def test_map_scalar_bound_container_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_map_func_bound_container_same_package_declared_deps(go_types_helper):
@@ -24313,9 +24325,10 @@ def test_call_result_index_read_struct_elem_closed(go_types_helper):
     assert not result.available
 
 
-def test_call_result_index_read_bare_composite_stays_closed(go_types_helper):
-    # `s := lib.G(a); s[0]` — binding the composite result still fails
-    # closed; only the directly-indexed scalar read admits.
+def test_call_result_index_read_bare_composite_admits(go_types_helper):
+    # `s := lib.G(a); s[0]` — the bound composite's element carries
+    # the conflated container set — the call's arg deps — plus the
+    # index's own (a literal here).
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(a int64) int64 {\n"
@@ -24326,6 +24339,226 @@ def test_call_result_index_read_bare_composite_stays_closed(go_types_helper):
         "lib": {
             "g.go": "package lib\n"
             "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def _opaque_composite_lib():
+    return {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+            "func GM(x int64) map[int64]int64 {\n"
+            "\treturn map[int64]int64{x: x}\n}\n"
+            "func GA(x int64) [4]int64 { return [4]int64{x} }\n"
+            "func GG(x, y int64) []int64 {\n"
+            "\treturn []int64{x, y}\n}\n"
+            "var VA []int64\n"
+        }
+    }
+
+
+def _opaque_composite_result(go_types_helper, body):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n" + body + "\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(
+            go_types_helper, files, _opaque_composite_lib()
+        ),
+        files,
+        target_arch="amd64",
+    )
+    return named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+
+
+def test_opaque_composite_bind_index_read(go_types_helper):
+    # `s := lib.G(a); s[i]` — the element carries the call's dep set.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, i int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\treturn s[i]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_bind_dep_free_call(go_types_helper):
+    # `s := lib.GG()` — no args, no deps: the element is dep-free
+    # apart from the index's own.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(i int64) int64 {\n"
+        "\ts := lib.GG(0, 0)\n"
+        "\treturn s[i]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_composite_element_write_unions_sharers(go_types_helper):
+    # `s2 := s; s2[i] = b` — a store through one alias lands in the
+    # shared backing: `s[j]` reads `b`'s deps too.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b, j int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\ts2 := s\n"
+        "\ts2[0] = b\n"
+        "\treturn s[j]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_opaque_composite_array_copy_isolated(go_types_helper):
+    # `s2 := s` on `[N]T` copies — a store through `s2` never lands
+    # in `s`'s backing.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b, j int64) int64 {\n"
+        "\ts := lib.GA(a)\n"
+        "\ts2 := s\n"
+        "\ts2[0] = b\n"
+        "\treturn s[j]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_opaque_composite_range_binds_element_deps(go_types_helper):
+    # `for _, v := range s` — elements carry the container's
+    # conflated set.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, k int64) int64 {\n"
+        "\ts := lib.GM(a)\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range s { r = v }\n"
+        "\treturn r + k\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_len_carries_call_deps(go_types_helper):
+    # `len(s)` — like `len(lib.G(a))` the container's provenance is
+    # the call's own dep set.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\treturn int64(len(s))\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_composite_var_declaration_admits(go_types_helper):
+    # `var s = lib.G(a)` binds like `:=`.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, i int64) int64 {\n"
+        "\tvar s = lib.G(a)\n"
+        "\treturn s[i]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_rebind_retargets(go_types_helper):
+    # `s = lib.GG(a, b)` — the rebind detaches from the old backing;
+    # `s2` keeps sharing the first call's set.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b, j int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\ts2 := s\n"
+        "\ts = lib.GG(a, b)\n"
+        "\ts[0] = b\n"
+        "\treturn s2[j]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_opaque_composite_scalar_reseat_closes(go_types_helper):
+    # `s = lib.VA` — a package container is no bound source: the
+    # name loses its backing and `s[i]` fails closed again.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, j int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\ts = lib.VA\n"
+        "\treturn s[j]\n}",
+    )
+    assert not result.available
+
+
+def test_opaque_composite_literal_stays_closed(go_types_helper):
+    # `s := []int64{a}` — only call results and bound containers
+    # back a name; a literal keeps `s[i]` closed.
+    files = {
+        "a.go": "package p\n"
+        "func F(a, j int64) int64 {\n"
+        "\ts := []int64{a}\n"
+        "\treturn s[j]\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_opaque_composite_local_callee_stays_closed(go_types_helper):
+    # `s := G(a)` — a same-package callee has no declared result
+    # fact for an opaque fold.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) []int64 { return []int64{x} }\n"
+        "func F(a, i int64) int64 {\n"
+        "\ts := G(a)\n"
+        "\treturn s[i]\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_opaque_composite_multi_result_stays_closed(go_types_helper):
+    # `s, n := lib.G2(a)` — a slot-wise bind is out of scope; the
+    # composite name stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a, i int64) int64 {\n"
+        "\ts, n := lib.G2(a)\n"
+        "\treturn s[i] + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G2(x int64) ([]int64, int64) {\n"
+            "\treturn []int64{x}, x\n}\n"
         }
     }
     snapshot = load_go_package_snapshot(
