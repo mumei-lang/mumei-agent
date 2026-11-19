@@ -12049,7 +12049,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        """`i.M(args)` / `I.M(i, args)` — a method call on an
+        """`I.M(recv, args)` — a method-expression call on an
         interface-typed receiver.
 
         Dispatch is dynamic: which implementation runs is
@@ -12064,45 +12064,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
         (the value the dynamic implementation is reached through).
         A named interface's identity (`call.target`) pins so a
         method-set redeclare stales the caller; a receiver that
-        names no root binding stays closed."""
+        names no root binding stays closed. A `method`-flagged
+        record (`i.M(args)`) never reaches here — an interface-typed
+        operand is always an unsupported binding, so the unit only
+        emits `method_expr` dispatches."""
         receiver_node = None
         if call.method:
-            function_node = node.child_by_field_name("function")
-            while (
-                function_node is not None
-                and function_node.type == "parenthesized_expression"
-            ):
-                function_node = next(
-                    iter(function_node.named_children), None
-                )
-            if (
-                function_node is None
-                or function_node.type != "selector_expression"
-            ):
-                raise _Unsupported(
-                    "call_mapping_unavailable",
-                    _span(node),
-                    call.target,
-                )
-            receiver_node = function_node.child_by_field_name(
-                "operand"
+            raise _Unsupported(
+                "call_mapping_unavailable",
+                _span(node),
+                call.target,
             )
-            if receiver_node is None:
-                raise _Unsupported(
-                    "call_mapping_unavailable",
-                    _span(node),
-                    call.target,
-                )
-        elif call.method_expr and arguments:
-            # `I.M(i, args)` — the receiver is already the leading
-            # argument, evaluated below like every argument.
+        if call.method_expr and arguments:
+            # `I.M(recv, args)` — the receiver is already the
+            # leading argument, evaluated below like every argument.
             receiver_node = arguments[0]
         receiver_deps: frozenset[int] = frozenset()
-        if call.method and receiver_node is not None:
-            receiver_deps = self.expression(
-                receiver_node, fn, params, locals_, transfers,
-                count, depth + 1,
-            )
         arg_deps: frozenset[int] = frozenset()
         for arg in arguments:
             arg_deps |= self.expression(
@@ -12135,6 +12112,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         if call.target:
             self.pinned.add(call.target)
+        # `I[N].M(...)` — the named/alias identities the receiver's
+        # type arguments resolve to pin exactly like an instantiated
+        # callee's: `I` alone does not cover a redeclare of `N`.
+        self.pinned.update(getattr(call, "type_arg_type_ids", ()))
         transfers.append(
             CallTransfer(
                 FileSpan(

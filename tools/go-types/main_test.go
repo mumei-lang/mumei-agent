@@ -121,7 +121,8 @@ func TestOpaqueCalls(t *testing.T) {
 		{"func F(x string) int { return len(x) }", "builtin"},
 		{"func F(x int64) uint64 { return uint64(x) }", "conversion"},
 		{"func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }", "external_or_bodyless"},
-		{"type I interface{M() int}; func F(x I) int { return x.M() }", "interface_dispatch"},
+		{"type I interface{M() int}; func F(x I) int { return I.M(x) }", "interface_dispatch"},
+		{"type I interface{M() int}; func F(x I) int { return x.M() }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id(x) }", "method_generic_or_variadic"},
 		{"func V(x ...int) int { return 1 }; func F() int { return V(1) }", "method_generic_or_variadic"},
@@ -714,11 +715,14 @@ func TestProtocolRejectsMalformedRequests(t *testing.T) {
 	}
 }
 func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
-	// `i.M(x)` — an interface receiver dispatches dynamically, so
-	// no callee identity pins; the call records `interface_dispatch`
-	// marked `method` with the named interface's identity as the
-	// target. A promoted selection through an embedded interface
-	// stays `method_generic_or_variadic`.
+	// `I.M(x, y)` — an interface receiver dispatches dynamically, so
+	// no callee identity pins; the method expression records
+	// `interface_dispatch` marked `method_expr` with the named
+	// interface's identity as the target. A method-value call
+	// `i.M(x)` names an interface-typed operand — always an
+	// unsupported binding — and a promoted selection through an
+	// embedded interface names a receiver the gate cannot see:
+	// both stay `method_generic_or_variadic`.
 	src := "package p\ntype I interface{ M(int64) int64 }\n" +
 		"type S int64\nfunc (s S) M(v int64) int64 { return v }\n" +
 		"type EI struct{ I }\n" +
@@ -729,14 +733,17 @@ func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
 	if out.Status != "ok" {
 		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
 	}
-	kinds := map[string][]bool{}
+	kinds := map[string]int{}
 	for _, c := range out.Calls {
-		kinds[c.Kind] = append(kinds[c.Kind], c.Method || c.MethodExpr)
+		kinds[c.Kind]++
 	}
-	if len(kinds["interface_dispatch"]) != 2 {
-		t.Fatalf("expected two interface_dispatch records: %+v", out.Calls)
+	if kinds["interface_dispatch"] != 1 {
+		t.Fatalf("expected one interface_dispatch record: %+v", out.Calls)
 	}
-	if len(kinds["method_generic_or_variadic"]) != 1 {
-		t.Fatalf("the promoted embedded method must stay closed: %+v", out.Calls)
+	if kinds["method_generic_or_variadic"] != 2 {
+		t.Fatalf(
+			"method values on interfaces and promoted embedded methods must stay closed: %+v",
+			out.Calls,
+		)
 	}
 }

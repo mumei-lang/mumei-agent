@@ -1246,27 +1246,62 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 					}
 				}
 				// An interface receiver dispatches dynamically, so no
-				// callee identity can pin — but the call itself still
-				// admits under the opaque-external model: `i.M(x)` unions
-				// the receiver and argument deps and records an external
-				// effect, like a func-typed parameter call. Only a direct
-				// selection (`i.M`, `I.M`) admits — a method promoted
-				// through an embedded interface or struct names a receiver
-				// the gate cannot see and stays closed. The target carries
-				// the named interface's identity (`lib.I`) so a method-set
+				// callee identity can pin — but the method-expression
+				// call still admits under the opaque-external model:
+				// `I.M(recv, x)` unions the receiver and argument deps
+				// and records an external effect, like a func-typed
+				// parameter call. Only a direct method EXPRESSION
+				// admits: a method-value call `i.M(x)` names an
+				// interface-typed operand, and an interface-typed value
+				// is always an unsupported binding — the call would
+				// die at the receiver read anyway, so it keeps the
+				// `method_generic_or_variadic` record, and a method
+				// promoted through an embedded interface or struct
+				// names a receiver the gate cannot see and stays closed
+				// the same way. The target carries the named
+				// interface's identity (`lib.I`) so a method-set
 				// redeclare stales every admitted caller; an unnamed
-				// `interface{ M() }` receiver records an empty target.
-				if len(selection.Index()) == 1 {
-					rt := types.Unalias(selection.Recv())
+				// `interface{ M() }` receiver records an empty target
+				// and an alias to one (`type IA = interface{ M() }`)
+				// carries the alias's own declaration. Results must be
+				// scalar like every admitted opaque call — a
+				// `func`/`chan`/composite result (an iterator the
+				// caller then ranges or calls) is a value the dep model
+				// cannot read, so the call stays closed. An
+				// instantiated interface (`I[N]`) pins its named/alias
+				// type arguments as `type_arg_type_ids`, exactly like
+				// an instantiated callee — an unpinnable argument
+				// shape stays closed.
+				if len(selection.Index()) == 1 && selection.Kind() == types.MethodExpr {
+					rt := selection.Recv()
+					id := ""
+					if alias, ok := rt.(*types.Alias); ok {
+						id = ix.typeID(alias.Obj())
+						rt = types.Unalias(rt)
+					}
 					if ptr, ok := rt.(*types.Pointer); ok {
 						rt = types.Unalias(ptr.Elem())
 					}
 					if _, ok := rt.Underlying().(*types.Interface); ok {
-						id := ""
-						if named, ok := rt.(*types.Named); ok {
-							id = ix.typeID(named.Obj())
+						sig, ok := selection.Obj().Type().(*types.Signature)
+						if !ok || !allScalarResults(sig) {
+							return "method_generic_or_variadic", "", false, 0, nil
 						}
-						return "interface_dispatch", id, selection.Kind() == types.MethodVal, 0, nil
+						var typeArgIDs []string
+						if named, ok := rt.(*types.Named); ok {
+							if id == "" {
+								id = ix.typeID(named.Obj())
+							}
+							if targs := named.TypeArgs(); targs != nil && targs.Len() > 0 {
+								seen := map[string]bool{}
+								for i := 0; i < targs.Len(); i++ {
+									if !ix.collectTypeArgIDs(targs.At(i), seen, &typeArgIDs) {
+										return "method_generic_or_variadic", "", false, 0, nil
+									}
+								}
+							}
+						}
+						return "interface_dispatch", id, selection.Kind() == types.MethodVal, 0, typeArgIDs
 					}
 				}
 			}

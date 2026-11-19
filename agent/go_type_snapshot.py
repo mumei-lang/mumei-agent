@@ -141,6 +141,12 @@ class Call:
     # leading argument already IS the receiver.
     method: bool = False
     method_expr: bool = False
+    # `type_arg_type_ids` pins the named/alias identities an
+    # instantiated interface receiver's type arguments resolve to on
+    # an `interface_dispatch` call — the substituted identities are
+    # declared nowhere else, so the call record carries them for
+    # staleness pinning.
+    type_arg_type_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -698,6 +704,7 @@ def load_go_snapshot(
                     "kind",
                     "method",
                     "method_expr",
+                    "type_arg_type_ids",
                 }
             )
             c = item
@@ -714,16 +721,13 @@ def load_go_snapshot(
             )
             method = _boolean(c.get("method", False))
             method_expr = _boolean(c.get("method_expr", False))
-            # `method`/`method_expr` only travel on a `direct_local`
-            # or `interface_dispatch` record here — a single file
-            # declares no imports — and a method-value call (receiver
-            # operand) never doubles as a method-expression call
-            # (leading receiver argument).
+            # `method` only travels on a `direct_local` record here —
+            # a single file declares no imports — while `method_expr`
+            # may also ride an `interface_dispatch` record (`I.M`); a
+            # method-value call (receiver operand) never doubles as a
+            # method-expression call (leading receiver argument).
             _require(
-                (
-                    not method
-                    or kind in ("direct_local", "interface_dispatch")
-                )
+                (not method or kind == "direct_local")
                 and (
                     not method_expr
                     or (
@@ -750,7 +754,31 @@ def load_go_snapshot(
                 _require(target == "")
             args = tuple(_span(a, raw) for a in _list(c["arguments"]))
             _require(all(sp.start <= a.start <= a.end <= sp.end for a in args))
-            calls.append(Call(sp, args, owner, target, kind, method, method_expr))
+            # `type_arg_type_ids` only travels on an
+            # `interface_dispatch` record here — a single file
+            # declares no imports, so no other kind can substitute
+            # type arguments — and local type-declaration ids carry
+            # the single-file (no file index) shape.
+            type_arg_ids = _list(c.get("type_arg_type_ids", []))
+            _require(
+                (not type_arg_ids or kind == "interface_dispatch")
+                and all(
+                    type(i) is str and _TYPE_ID.fullmatch(i) is not None
+                    for i in type_arg_ids
+                )
+            )
+            calls.append(
+                Call(
+                    sp,
+                    args,
+                    owner,
+                    target,
+                    kind,
+                    method,
+                    method_expr,
+                    tuple(type_arg_ids),
+                )
+            )
         gaps = []
         for item in _list(v["gaps"]):
             g = _record(item, "reason", "span")
@@ -1103,13 +1131,13 @@ def load_go_package_snapshot(
             _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
             method = _boolean(c.get("method", False))
             # `method` travels on a method call — `lib.VS.PF(args)` on
-            # an imported member, `st.M(args)` on a same-package one or
-            # `i.M(args)` dispatching on an interface — never on a
-            # plain function call.
+            # an imported member or `st.M(args)` on a same-package
+            # one — never on a plain function call. An `i.M(args)`
+            # interface dispatch stays `method_generic_or_variadic`:
+            # an interface-typed operand is always an unsupported
+            # binding, so only `method_expr` dispatches record here.
             _require(
-                not method
-                or kind
-                in ("direct_import", "direct_local", "interface_dispatch")
+                not method or kind in ("direct_import", "direct_local")
             )
             method_expr = _boolean(c.get("method_expr", False))
             # `method_expr` likewise only travels on a method-expression
@@ -1133,10 +1161,14 @@ def load_go_package_snapshot(
                 and (not results or kind == "direct_import")
             )
             # `type_arg_type_ids` only travels on a `direct_import`
-            # record — no other callee can substitute type arguments.
+            # or `interface_dispatch` record — no other callee can
+            # substitute type arguments.
             type_arg_ids = _list(c.get("type_arg_type_ids", []))
             _require(
-                (not type_arg_ids or kind == "direct_import")
+                (
+                    not type_arg_ids
+                    or kind in ("direct_import", "interface_dispatch")
+                )
                 and all(
                     type(i) is str and _IMPORTED_ID.fullmatch(i) is not None
                     for i in type_arg_ids

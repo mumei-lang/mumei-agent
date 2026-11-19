@@ -5199,10 +5199,13 @@ def test_imported_pointer_receiver_method_is_admitted(go_types_helper):
 
 def test_imported_interface_method_stays_closed(go_types_helper):
     # Interface dispatch is dynamic: the recorded method identity would
-    # not cover the implementations actually reached. The call records
-    # `interface_dispatch` — which admits under the opaque-external
-    # model — but an interface-typed *parameter* is unsupported at the
-    # signature, so the function still stays closed.
+    # not cover the implementations actually reached. A method-value
+    # call `i.M(x)` names an interface-typed operand — always an
+    # unsupported binding — so only the `I.M(recv, ...)` method
+    # expression records `interface_dispatch`; `i.M` keeps
+    # `method_generic_or_variadic`, and an interface-typed *parameter*
+    # is unsupported at the signature regardless, so the function
+    # stays closed.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(i lib.I, x int64) int64 { return i.M(x) }\n"
@@ -5212,10 +5215,7 @@ def test_imported_interface_method_stays_closed(go_types_helper):
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "interface_dispatch" and call["method"] is True
-    # The named interface's own declaration identity rides as the
-    # target so a method-set redeclare stales admitted callers.
-    assert call["target"].startswith("sha256:")
+    assert call["kind"] == "method_generic_or_variadic"
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
@@ -5296,6 +5296,124 @@ def test_interface_dispatch_promoted_method_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_interface_dispatch_method_value_receiver_stays_closed(go_types_helper):
+    # `lib.I(t).M(x)` — a method-VALUE dispatch on an interface
+    # receiver. An interface-typed operand is always an unsupported
+    # binding (the receiver would die at the read), so the record
+    # keeps `method_generic_or_variadic` and only `I.M(recv, ...)`
+    # method expressions admit under `interface_dispatch`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64) int64 { return lib.I(t).M(x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = [
+        c for c in report["calls"] if c["kind"] != "conversion"
+    ]
+    assert call["kind"] == "method_generic_or_variadic"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_interface_dispatch_func_result_stays_closed(go_types_helper):
+    # `i.Iter()` returns a `func` value — the opaque-external dep
+    # model cannot read a func/chan/composite result (a caller would
+    # then call or range it), so only scalar results admit.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i lib.I2) func() int64 { return i.Iter() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type I2 interface{ Iter() func() int64 }\n"
+        }
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+
+
+def test_interface_dispatch_instantiated_pins_type_args(go_types_helper):
+    # `lib.I[lib.T].M(t, x)` — the interface's identity pins as the
+    # target and `T`'s declaration rides as `type_arg_type_ids`, so a
+    # redeclare of `T` stales the caller just like an instantiated
+    # callee's argument would.
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype T int64\n"
+            "func (t T) M(v int64) int64 { return v }\n"
+            "type I[P any] interface{ M(int64) int64 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64) int64 { return lib.I[lib.T].M(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "interface_dispatch"
+    assert call["method_expr"] is True
+    assert len(call["type_arg_type_ids"]) == 1
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert frozenset(call["type_arg_type_ids"]) <= frozenset(result.pinned)
+
+
+def test_interface_dispatch_alias_receiver_target(go_types_helper):
+    # `lib.IA` is an alias to an anonymous interface — the target
+    # carries the alias's own declaration id, not an empty string.
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype T int64\n"
+            "func (t T) M(v int64) int64 { return v }\n"
+            "type IA = interface{ M(int64) int64 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64) int64 { return lib.IA.M(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "interface_dispatch"
+    assert call["target"].startswith("sha256:")
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset(
+        {0, 1}
+    )
 
 
 def test_imported_instantiated_receiver_method_is_admitted(go_types_helper):

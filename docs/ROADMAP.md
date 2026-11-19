@@ -3976,19 +3976,28 @@ collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
 Boundaries: interface receivers classify as a separate
-`interface_dispatch` record (`i.M(x)` and the method expression
-`lib.I.M`) — dispatch is dynamic, so no callee identity pins, but
-the call itself admits under the opaque-external model: the
-receiver and argument deps union with every recorded effect the
-call site folds (indirect writes, escapes, promoted chan args)
-and a write-back fold lands on arg-or-receiver deps, exactly like
-a func-typed call. The record's `method`/`method_expr` flag still
-marks the shape, and its `target` pins the named interface's own
-declaration id (`lib.I`) so a method-set redeclare stales every
-admitted caller; an unnamed `interface{ M() }` receiver records an
-empty target. Only a direct selection admits — a method promoted
-through an embedded interface or struct names a receiver the gate
-cannot see and stays `method_generic_or_variadic`. Local
+`interface_dispatch` record — only the method expression
+`lib.I.M(recv, args)` admits. Dispatch is dynamic, so no callee
+identity pins, but the call itself admits under the
+opaque-external model: the receiver and argument deps union with
+every recorded effect the call site folds (indirect writes,
+escapes, promoted chan args) and a write-back fold lands on
+arg-or-receiver deps, exactly like a func-typed call. The record
+carries `method_expr` and its `target` pins the named
+interface's own declaration id (`lib.I`) so a method-set
+redeclare stales every admitted caller; an unnamed
+`interface{ M() }` receiver records an empty target and an alias
+to one carries the alias's declaration. A method-value call
+`i.M(x)` names an interface-typed operand — always an
+unsupported binding the receiver read cannot survive — so it
+keeps `method_generic_or_variadic`, and a method promoted
+through an embedded interface or struct names a receiver the
+gate cannot see and stays closed the same way. Results must be
+scalar — a `func`/`chan`/composite result is a value the dep
+model cannot read and stays closed — and an instantiated
+interface (`I[N]`) pins its named/alias type arguments as
+`type_arg_type_ids`, with an unpinnable argument shape staying
+closed. Local
 methods and generic methods are
 unchanged and closed — as are receivers still declared on type
 parameters (`lib.GT[P]` where `P` is unresolved) and instantiated
