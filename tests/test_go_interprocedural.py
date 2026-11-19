@@ -16320,9 +16320,12 @@ def test_bound_method_value_pointer_receiver_writes_back(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_bound_method_value_type_operand_stays_closed(go_types_helper):
-    # `f := St.M` is a method EXPRESSION — the type-name operand is
-    # not a variable receiver, so a call through `f` stays closed.
+def test_method_expr_value_call_counts_receiver_argument(
+    go_types_helper,
+):
+    # `f := St.M` is a method EXPRESSION value — argument 0 IS the
+    # receiver like the direct `St.M(s, 2)` call, so arity is
+    # parameters+1 and index 0 carries the receiver's deps.
     files = {
         "a.go": "package p\n"
         "type St struct { V int64 }\n"
@@ -16331,6 +16334,65 @@ def test_bound_method_value_type_operand_stays_closed(go_types_helper):
         "\ts := St{V: a}\n"
         "\tf := St.M\n"
         "\treturn f(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_value_copy_and_var_forms(go_types_helper):
+    # `var f = St.M` binds like `f := St.M`; `g := f` copies.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tvar f = St.M\n"
+        "\tg := f\n"
+        "\treturn g(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_value_receiver_resolves_at_call_site(
+    go_types_helper,
+):
+    # `s` reseats between `f := St.M` and `f(s, 2)` — the receiver
+    # arg evaluates at the CALL site, so the current `s` deps flow.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := St.M\n"
+        "\ts = St{V: b}\n"
+        "\treturn f(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_method_expr_value_computed_operand_stays_closed(
+    go_types_helper,
+):
+    # `f := g().M` — a computed operand binds no stable receiver,
+    # so the record stays empty and `f(2)` keeps its opaque shape.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func g() St { return St{V: 1} }\n"
+        "func F(a int64) int64 {\n"
+        "\tf := g().M\n"
+        "\treturn f(2)\n}\n"
     }
     _, snapshot, summaries = _method_unit(go_types_helper, files)
     result = named_package(files, snapshot, summaries, "F")

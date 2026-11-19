@@ -3639,12 +3639,16 @@ conservatively folds the write deps into the receiver binding —
 `st.M()` on a value variable auto-takes `&st`, so the fold applies
 even when the operand isn't `&st`-shaped.
 
-### Go deep-analysis: bound method values (`f := st.M`)
+### Go deep-analysis: bound method values (`f := st.M`, `f := St.M`)
 
 `f := st.M`, `var f = st.M` and `f = st.M` record the
 `(method, receiver)` binding pair under the bound name — the
 selector's field resolves to a same-package method whose receiver
-operand is a bare identifier. A `g := f`/`var g = f`/`g = f`
+operand is a bare identifier. A type-name operand (`f := St.M`, a
+method *expression* value) records `(method, None)` instead — the
+caller passes the receiver as argument 0, exactly like the direct
+`St.M(st, args)` call, so arity is `parameters + 1` and arg 0's
+deps sit at actuals[0]. A `g := f`/`var g = f`/`g = f`
 identifier copy propagates the pair like closure captures, and any
 other RHS clears it. A `f(args)` call then resolves through the
 method's summary exactly like `st.M(args)`: the recorded receiver
@@ -3657,10 +3661,9 @@ when the receiver itself is a bound pointer.
 A conditional rebind (`if c { f = t.M }`) drops the pair rather
 than pick an alternative — the call then runs opaque like any
 unrecorded local func var, unioning every may-rebind's receiver
-deps. `St.M` (a method *expression*, whose operand names a type,
-not a variable) and a computed receiver (`g().M`) record nothing —
-calls through them keep the `indirect_or_selector` record closed
-like before.
+deps. A computed receiver (`g().M`) records nothing — calls
+through it keep the `indirect_or_selector` record closed like
+before.
 
 ### C06 imported method calls on concrete named types
 

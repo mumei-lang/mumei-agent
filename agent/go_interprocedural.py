@@ -1017,15 +1017,15 @@ class _Builder:
     def _method_value_parts(
         self, node: Any
     ) -> tuple[str, str] | None:
-        """`(method binding id, receiver binding id)` of a method
-        value `s.M`, or None when the selector isn't one.
+        """`(method binding id, receiver binding id | None)` of a
+        method value — `s.M` binds the receiver identifier, `St.M`
+        (a type-name operand, a method *expression*) carries None —
+        or None when the selector isn't one.
 
         The field must resolve to a same-package method record
         (receiver non-null) and the operand — parens unwrapped —
-        to a bare identifier; a type-name operand (`St.M`, a method
-        *expression* value) carries no receiver binding and a
-        computed operand (`g().M`) binds no stable receiver, so both
-        stay closed.
+        to a bare identifier; a computed operand (`g().M`) binds no
+        stable receiver, so it stays closed.
         """
         if node is None or node.type != "selector_expression":
             return None
@@ -1056,6 +1056,15 @@ class _Builder:
         operand_ref = self.references.get(self.node_key(operand))
         if operand_ref is None:
             return None
+        operand_binding = self.bindings.get(operand_ref.binding_id)
+        if (
+            operand_binding is not None
+            and operand_binding.kind == "type"
+        ):
+            # `St.M` — a method *expression* value: no receiver
+            # binding exists at the bind site; the caller passes it
+            # as argument 0 like `St.M(st, args)` does.
+            return method_fn.binding_id, None
         return method_fn.binding_id, operand_ref.binding_id
 
     def _local_composite_base(
@@ -8279,22 +8288,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 return frozenset()
             if member is None:
-                # `s.M` — a bound method value: the selector field
-                # resolves to a same-package method, not a field.
-                # The receiver operand evaluates like the `st.M()`
-                # call operand; the binding site records the
-                # (method, receiver) pair under the new name so a
-                # later `f(args)` resolves through the method's
-                # summary. `St.M` (a type-name operand) and
-                # `g().M` (a computed receiver) evaluate the operand
-                # too but record nothing — a call through them keeps
-                # the `indirect_or_selector` record closed.
-                if self._method_value_parts(node) is not None:
+                # `s.M` / `St.M` — a bound method value: the
+                # selector field resolves to a same-package method,
+                # not a field. The receiver operand evaluates like
+                # the `st.M()` call operand; the binding site
+                # records the (method, receiver) pair under the new
+                # name so a later `f(args)` resolves through the
+                # method's summary — `St.M` (a type-name operand)
+                # records (method, None) and `f(recv, args)` puts
+                # the receiver at argument 0. `g().M` (a computed
+                # receiver) records nothing — a call through it
+                # keeps the `indirect_or_selector` record closed.
+                mv_parts = self._method_value_parts(node)
+                if mv_parts is not None:
                     operand = node.child_by_field_name("operand")
                     if operand is None:
                         raise _Unsupported(
                             "non_parameter_reference", _span(node)
                         )
+                    if mv_parts[1] is None:
+                        # `St.M` — the operand names a TYPE, not a
+                        # value: nothing evaluates. The binding site
+                        # still records the (method, None) pair.
+                        return frozenset()
                     return self.expression(
                         operand, fn, params, locals_,
                         transfers, count, depth + 1,
@@ -9890,7 +9906,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self,
         node: Any,
         arguments: list[Any],
-        bound_mv: tuple[str, str],
+        bound_mv: tuple[str, str | None],
         fn: Function,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
@@ -9898,14 +9914,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        """`f(args)` where `f := s.M` bound a method value.
+        """`f(args)` where `f := s.M` / `f := St.M` bound a method.
 
         The call resolves through the method's summary like
         `s.M(args)`: the receiver binding recorded at the bind site
         re-resolves HERE (a `s = …` reseat between them tracks the
         current set, like a captured binding in `_bound_closure_call`)
         and sits at actuals[0], matching the receiver-as-parameter-0
-        convention.
+        convention. A method-*expression* record (`f := St.M`)
+        carries no receiver binding — argument 0 IS the receiver,
+        exactly like the direct `St.M(st, args)` call.
         """
         method_id, recv_id = bound_mv
         target = self.functions.get(method_id)
@@ -9916,26 +9934,52 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or target.variadic
         ):
             raise _Unsupported("unsupported_expression", _span(node))
-        if len(arguments) != len(target.parameters):
+        method_expr = recv_id is None
+        expected = (
+            len(target.parameters) + (1 if method_expr else 0)
+        )
+        if len(arguments) != expected:
             raise _Unsupported(
                 "callee_unavailable", _span(node), method_id
             )
-        recv_binding = self.bindings.get(recv_id)
-        if recv_id in locals_:
-            recv_deps = locals_[recv_id]
-        elif recv_id in params:
-            recv_deps = frozenset({params[recv_id]})
+        arg_args = arguments[1:] if method_expr else arguments
+        if method_expr:
+            recv_deps = self.expression(
+                arguments[0], fn, params, locals_,
+                transfers, count, depth + 1,
+            )
+            recv_binding = None
+            if target.receiver.type.kind != "pointer":
+                root_ref = self._receiver_root_ref(arguments[0])
+                if (
+                    root_ref is not None
+                    and (rb := self.bindings.get(
+                        root_ref.binding_id
+                    )) is not None
+                    and rb.type.kind == "pointer"
+                ):
+                    # `f(p, x)` on a value receiver auto-derefs —
+                    # union pointee deps like `St.M(p, x)` does.
+                    recv_deps |= self.indirect_writes
         else:
-            raise _Unsupported("unsupported_expression", _span(node))
-        if (
-            recv_binding is not None
-            and recv_binding.type.kind == "pointer"
-            and target.receiver.type.kind != "pointer"
-        ):
-            # `p.V()` on a value receiver auto-derefs — the callee
-            # reads pointee memory, which broadcasts through
-            # `indirect_writes`, not `p`'s own set.
-            recv_deps |= self.indirect_writes
+            recv_binding = self.bindings.get(recv_id)
+            if recv_id in locals_:
+                recv_deps = locals_[recv_id]
+            elif recv_id in params:
+                recv_deps = frozenset({params[recv_id]})
+            else:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            if (
+                recv_binding is not None
+                and recv_binding.type.kind == "pointer"
+                and target.receiver.type.kind != "pointer"
+            ):
+                # `p.V()` on a value receiver auto-derefs — the callee
+                # reads pointee memory, which broadcasts through
+                # `indirect_writes`, not `p`'s own set.
+                recv_deps |= self.indirect_writes
         actual = (
             recv_deps,
             *(
@@ -9943,7 +9987,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     arg, fn, params, locals_,
                     transfers, count, depth + 1,
                 )
-                for arg in arguments
+                for arg in arg_args
             ),
         )
         callee = self.summarize(method_id)
