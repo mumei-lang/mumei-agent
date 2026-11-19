@@ -14295,13 +14295,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     member = self._imported_member_operand(arguments[0])
                     fact = member.type if member is not None else None
                     index_deps = frozenset()
+                    call_member = None
+                    call_node = None
                     if member is None:
-                        # `len(lib.V2[i])` — a container-typed element
-                        # reached through an index chain on an imported
-                        # var is external state like the var itself:
-                        # the result is dep-free apart from the
-                        # indexes' own dependencies, exactly like the
-                        # index read the same chain admits.
                         operand = arguments[0]
                         while (
                             operand is not None
@@ -14317,77 +14313,128 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 None,
                             )
                         if (
+                            operand is not None
+                            and operand.type == "call_expression"
+                        ):
+                            # `len(G(x))` / `cap(lib.G(x))` — a call
+                            # result's length is runtime container
+                            # state, dep-free like `len(lib.VA)`.
+                            # A resolvable callee evaluates through
+                            # `expression` for its effects only; a
+                            # bodyless imported callee whose COMPOSITE
+                            # result keeps the call opaque folds
+                            # minimally below (args ∪ writes ∪ chan
+                            # promotion ∪ transfer on the member).
+                            inner_call = self.calls.get(
+                                self.node_key(operand)
+                            )
+                            if (
+                                inner_call is None
+                                or inner_call.kind
+                                != "external_or_bodyless"
+                            ):
+                                self.expression(
+                                    operand, fn, params, locals_,
+                                    transfers, count, depth + 1,
+                                )
+                                return frozenset()
+                            call_member, fact = self._call_result_fact(
+                                operand
+                            )
+                            if call_member is None or fact is None:
+                                raise _Unsupported(
+                                    "unresolved_or_opaque_call",
+                                    _span(node),
+                                )
+                            call_node = operand
+                        elif (
                             operand is None
                             or operand.type != "index_expression"
                         ):
                             raise _Unsupported(
                                 "unresolved_or_opaque_call", _span(node)
                             )
-                        resolved = self._index_member(operand)
-                        if resolved is None:
-                            raise _Unsupported(
-                                "unresolved_or_opaque_call", _span(node)
-                            )
-                        member, levels = resolved
-                        # `_index_member` counts the levels *below*
-                        # the outermost index — the element `len`
-                        # reads sits one `elem` deeper still, so the
-                        # whole chain descends `levels + 1` facts.
-                        fact = member.type
-                        for _ in range(levels + 1):
-                            fact = (
-                                fact.elem if fact is not None else None
-                            )
-                        indexes = [
-                            operand.child_by_field_name("index")
-                        ]
-                        inner = operand.child_by_field_name("operand")
-                        while True:
-                            while (
-                                inner is not None
-                                and inner.type
-                                == "parenthesized_expression"
-                            ):
-                                inner = next(
-                                    (
-                                        c
-                                        for c in inner.named_children
-                                        if c.type != "comment"
-                                    ),
-                                    None,
-                                )
-                            if (
-                                inner is None
-                                or inner.type != "index_expression"
-                            ):
-                                break
-                            indexes.append(
-                                inner.child_by_field_name("index")
-                            )
-                            inner = inner.child_by_field_name("operand")
-                        for idx in reversed(indexes):
-                            if idx is None:
+                        else:
+                            # `len(lib.V2[i])` — a container-typed element
+                            # reached through an index chain on an imported
+                            # var is external state like the var itself:
+                            # the result is dep-free apart from the
+                            # indexes' own dependencies, exactly like the
+                            # index read the same chain admits.
+                            resolved = self._index_member(operand)
+                            if resolved is None:
                                 raise _Unsupported(
                                     "unresolved_or_opaque_call",
                                     _span(node),
                                 )
-                            if idx.type in {
-                                "int_literal",
-                                "float_literal",
-                                "imaginary_literal",
-                                "rune_literal",
-                                "interpreted_string_literal",
-                                "raw_string_literal",
-                            }:
-                                # A literal index carries no
-                                # dependencies, like the index read's
-                                # rule for `lib.VM["k"]`.
-                                continue
-                            index_deps |= self.expression(
-                                idx, fn, params, locals_,
-                                transfers, count, depth + 1,
-                            )
-                    if member is None or member.kind != "var":
+                            member, levels = resolved
+                            # `_index_member` counts the levels *below*
+                            # the outermost index — the element `len`
+                            # reads sits one `elem` deeper still, so the
+                            # whole chain descends `levels + 1` facts.
+                            fact = member.type
+                            for _ in range(levels + 1):
+                                fact = (
+                                    fact.elem
+                                    if fact is not None
+                                    else None
+                                )
+                            indexes = [
+                                operand.child_by_field_name("index")
+                            ]
+                            inner = operand.child_by_field_name("operand")
+                            while True:
+                                while (
+                                    inner is not None
+                                    and inner.type
+                                    == "parenthesized_expression"
+                                ):
+                                    inner = next(
+                                        (
+                                            c
+                                            for c in inner.named_children
+                                            if c.type != "comment"
+                                        ),
+                                        None,
+                                    )
+                                if (
+                                    inner is None
+                                    or inner.type != "index_expression"
+                                ):
+                                    break
+                                indexes.append(
+                                    inner.child_by_field_name("index")
+                                )
+                                inner = inner.child_by_field_name(
+                                    "operand"
+                                )
+                            for idx in reversed(indexes):
+                                if idx is None:
+                                    raise _Unsupported(
+                                        "unresolved_or_opaque_call",
+                                        _span(node),
+                                    )
+                                if idx.type in {
+                                    "int_literal",
+                                    "float_literal",
+                                    "imaginary_literal",
+                                    "rune_literal",
+                                    "interpreted_string_literal",
+                                    "raw_string_literal",
+                                }:
+                                    # A literal index carries no
+                                    # dependencies, like the index
+                                    # read's rule for `lib.VM["k"]`.
+                                    continue
+                                index_deps |= self.expression(
+                                    idx, fn, params, locals_,
+                                    transfers, count, depth + 1,
+                                )
+                    if member is not None and member.kind != "var":
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    if member is None and call_member is None:
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
@@ -14404,6 +14451,70 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
+                    if call_member is not None:
+                        inner_call = self.calls.get(
+                            self.node_key(call_node)
+                        )
+                        inner_args_node = call_node.child_by_field_name(
+                            "arguments"
+                        )
+                        inner_args = (
+                            _children(inner_args_node)
+                            if inner_args_node is not None
+                            else []
+                        )
+                        if tuple(
+                            self.node_key(a) for a in inner_args
+                        ) != tuple(
+                            _key3(a) for a in inner_call.arguments
+                        ):
+                            raise _Unsupported(
+                                "call_mapping_unavailable",
+                                _span(call_node),
+                                inner_call.target,
+                            )
+                        computed_args = tuple(
+                            self.expression(
+                                arg, fn, params, locals_, transfers,
+                                count, depth + 1,
+                            )
+                            for arg in inner_args
+                        )
+                        self._fold_func_arg_invocations(
+                            call_node, params, locals_, transfers
+                        )
+                        self.pinned.update(
+                            getattr(
+                                call_member, "signature_type_ids", ()
+                            )
+                            or ()
+                        )
+                        self._opaque_spans.add(_key3(inner_call.span))
+                        self._promote_chan_call_args(
+                            call_node, "", locals_, params
+                        )
+                        self._store_call_writes(
+                            list(inner_args),
+                            frozenset().union(*computed_args)
+                            if computed_args
+                            else frozenset(),
+                            locals_,
+                            params,
+                        )
+                        second_target = (
+                            inner_call.target or call_member.id
+                        )
+                        if second_target:
+                            transfers.append(
+                                CallTransfer(
+                                    inner_call.span,
+                                    second_target,
+                                    computed_args,
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                        return frozenset()
                     self._pin_fact_identities(member.type)
                     transfers.append(
                         CallTransfer(

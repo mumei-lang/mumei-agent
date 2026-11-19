@@ -3937,6 +3937,17 @@ folds through the minimal opaque-argument union — while the bare
 composite binding (`s := lib.G(a)`) stays closed, as do struct
 elements, multi-result calls and local callees whose composite
 result is not summarizable.
+`len`/`cap` on a call result — `len(lib.G(a))`, `cap(lib.M(a))` —
+admits through the same member resolution: the length is runtime
+container state, so the result is dep-free like `len(lib.VA)`,
+while a bodyless callee's call still folds minimally (argument
+deps evaluated, func-arg invocations drained, chan arguments
+promoted onto the external queue, writes stored, and a transfer
+recorded on the member). A resolvable callee — local or
+`direct_import` — evaluates through `expression` for its effects
+only, so `len(lib.S(x))` on a string result admits too. The
+pointer operand (`len(*lib.P(x))`), `len` on a bound local, and
+index/field chains keep the existing closure.
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.

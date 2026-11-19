@@ -22551,10 +22551,10 @@ def test_map_func_bound_container_same_package_declared_deps(go_types_helper):
 def test_map_scalar_result_stays_closed(go_types_helper):
     # `lib.Mk(x)` returning `map[string]int64` — a scalar-element
     # map is no func-element collection: the composite result keeps
-    # the `external_or_bodyless` closure.
+    # the `external_or_bodyless` closure when bound outright.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(x int64) int64 { return int64(len(lib.Mk(x))) }\n"
+        "func F(x int64) int64 { s := lib.Mk(x); _ = s; return x }\n"
     }
     lib = {
         "lib": {
@@ -25041,3 +25041,226 @@ def test_func_elem_chan_result_conversion_arg_promotes(go_types_helper):
     )
     assert result.available
     assert 0 in result.return_dependencies
+
+
+def test_len_call_result_imported_slice(go_types_helper):
+    # `len(lib.G(x))` — a call result's length is runtime container
+    # state: the result binds dep-free like `len(lib.VA)` while the
+    # bodyless callee folds minimally (member transfer recorded).
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert all(t.target for t in result.calls)
+
+
+def test_len_call_result_imported_map(go_types_helper):
+    # `len(lib.M(x))` — a map result admits the same arm.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.M(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(y int64) map[int64]int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_cap_call_result_imported(go_types_helper):
+    # `cap(lib.G(x))` shares the `len` arm.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(cap(lib.G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_len_call_result_scalar_callee(go_types_helper):
+    # `len(lib.S(x))` — an imported callee returning a string is a
+    # `direct_import` call: it evaluates through `expression` for
+    # its effects and the length stays dep-free.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.S(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "s.go": "package lib\n"
+            "func S(y int64) string { return \"\" }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_len_call_result_chan_arg_promotes(go_types_helper):
+    # `len(lib.G(q))` — the opaque callee may send on `q`: the
+    # argument's queue promotes external so a later `<-q` observes
+    # the caller's sends.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tn := int64(len(lib.G(q)))\n"
+        "\tq <- x\n"
+        "\treturn n + <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y chan int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_len_call_result_func_arg_write_back(go_types_helper):
+    # `len(lib.G(h, x))` — the opaque callee may invoke the passed
+    # func value: `h`'s captured write lands on `g` at the call
+    # site even though the call node folds inside `len` rather than
+    # routing through `expression` directly.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar g int64\n"
+        "\th := func(v int64) { g = v }\n"
+        "\tn := int64(len(lib.G(h, x)))\n"
+        "\treturn n + g\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(h func(int64), x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_len_call_result_local_callee_stays_closed(go_types_helper):
+    # `len(G(x))` on a LOCAL composite-returning callee stays
+    # closed — `G` itself cannot produce a summary (a composite
+    # result has no binding model), so the caller reports
+    # `callee_unsupported` rather than admitting the operand.
+    files = {
+        "a.go": "package p\n"
+        "func G(y int64) []int64 { return []int64{y} }\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_len_call_result_pointer_operand_stays_closed(go_types_helper):
+    # `len(*lib.P(x))` — a dereferenced pointer result is a unary
+    # operand, outside this arm; only a bare call admits.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(*lib.P(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "p.go": "package lib\n"
+            "func P(y int64) *[]int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
