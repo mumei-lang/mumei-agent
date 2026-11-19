@@ -11050,6 +11050,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 package_pointee = None
                 range_ident = None
                 computed = None
+                # `range G()` on a `*[N]T` result iterates the
+                # live pointee like `range p` (verified `go run`);
+                # `range *G()` and array-VALUE results copy.
+                computed_pointer_result = False
                 opaque_range = None
                 if (
                     right is not None
@@ -11144,6 +11148,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     "array",
                                     "map",
                                 } and (not sugar or elem.kind == "array"):
+                                    computed_pointer_result = True
                                     computed = (
                                         call_operand,
                                         elem,
@@ -11578,16 +11583,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or opaque_range is not None
                         )
                         and fact is not None
-                        and fact.kind != "array"
                         and len(lefts) >= 1
                         and len(lefts) <= 2
                     ):
                         # A map's key is stored data — keys added
                         # mid-iteration surface on later passes, so
                         # the key name re-joins like the element.
-                        # An array ranges over a start-time copy:
-                        # mid-iteration writes to the original never
-                        # reach the iteration, so nothing re-joins.
+                        # An array operand is evaluated once —
+                        # `for _, v := range *p` or an array VALUE
+                        # iterates a start-time copy: the element
+                        # still rebinds each pass (a body store into
+                        # `v` cannot survive), but mid-iteration
+                        # writes to the original never reach it — a
+                        # `static` re-join resets to the seed only.
+                        # The bare `for _, v := range p` sugar is
+                        # different: Go iterates the pointee's live
+                        # elements (`(*p)[i]` re-read each pass), so
+                        # a `*[N]T` operand under `sugar` re-joins
+                        # like a slice.
+                        range_static = (
+                            fact.kind == "array"
+                            and not (
+                                sugar
+                                and (
+                                    bound is not None
+                                    or computed_pointer_result
+                                )
+                            )
+                        )
                         if (
                             fact.kind == "map"
                             and lefts[0].type == "identifier"
@@ -11602,6 +11625,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     value_deps,
                                     None,
                                     computed is not None,
+                                    range_static,
                                 )
                             else:
                                 key_ref = self.references.get(
@@ -11613,13 +11637,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         value_deps,
                                         None,
                                         computed is not None,
+                                        range_static,
                                     )
                         if len(lefts) == 2 and lefts[1].text != b"_":
                             elem_binding = self.bindings_by_span.get(
                                 self.node_key(lefts[1])
                             )
                             if elem_binding is not None:
-                                range_elem = (elem_binding.id, value_deps, None, False)
+                                range_elem = (
+                                    elem_binding.id,
+                                    value_deps,
+                                    None,
+                                    False,
+                                    range_static,
+                                )
                             else:
                                 elem_ref = self.references.get(
                                     self.node_key(lefts[1])
@@ -11630,6 +11661,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         value_deps,
                                         None,
                                         False,
+                                        range_static,
                                     )
                 else:
                     if right is None or len(lefts) > 1 or (
@@ -11914,13 +11946,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         else None
                                     ),
                                     False,
+                                    False,
                                 )
                             elif func_iter:
                                 # `for v := range lib.Iter(&a)` —
                                 # the element re-joins escaped
                                 # memory each pass like a chan's.
                                 range_elem = (
-                                    binding.id, rdeps, None, True
+                                    binding.id, rdeps, None, True,
+                                    False,
                                 )
                         else:
                             ref = self.references.get(self.node_key(lefts[0]))
@@ -11971,10 +12005,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         else None
                                     ),
                                     False,
+                                    False,
                                 )
                             elif func_iter:
                                 range_elem = (
-                                    ref.binding_id, rdeps, None, True
+                                    ref.binding_id, rdeps, None,
+                                    True, False,
                                 )
             elif clause is not None and clause.type == "for_clause":
                 init = clause.child_by_field_name("initializer")
@@ -12027,24 +12063,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # carries that growth back through `scope`.
                         # A map's key re-joins the same way: keys
                         # added mid-iteration surface on later passes.
-                        elem_id, elem_base, elem_chan, elem_escaped = (
-                            range_rejoin
-                        )
+                        (
+                            elem_id,
+                            elem_base,
+                            elem_chan,
+                            elem_escaped,
+                            elem_static,
+                        ) = range_rejoin
                         extra = (
-                            (
-                                inner.get(elem_chan, frozenset())
-                                | (
-                                    self.indirect_writes
-                                    if (
-                                        elem_chan
-                                        in self.external_chan_locals
-                                        or elem_chan in params
+                            frozenset()
+                            if elem_static
+                            else (
+                                (
+                                    inner.get(elem_chan, frozenset())
+                                    | (
+                                        self.indirect_writes
+                                        if (
+                                            elem_chan
+                                            in self.external_chan_locals
+                                            or elem_chan in params
+                                        )
+                                        else frozenset()
                                     )
-                                    else frozenset()
                                 )
+                                if elem_chan is not None
+                                else self.indirect_writes
                             )
-                            if elem_chan is not None
-                            else self.indirect_writes
                         )
                         if elem_escaped:
                             # A func iterator's callee reads escaped

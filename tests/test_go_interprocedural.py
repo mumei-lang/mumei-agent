@@ -25604,3 +25604,59 @@ def test_map_key_write_deps_apply_after_rhs_reads(
     assert result.return_dependencies == frozenset({1})
 
 
+def test_range_over_pointer_result_call_reads_live_pointee(
+    go_types_helper,
+):
+    # `for _, v := range G(p)` where `G` returns `*[N]T` iterates
+    # the pointee's live elements like `range p` (verified `go
+    # run`): a mid-iteration store through the pointer surfaces in
+    # the element the next pass reads.
+    files = {
+        "a.go": "package p\n"
+        "func G(q *[4]int64) *[4]int64 { return q }\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range G(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_pointer_to_array_pair_rejoins_writes(
+    go_types_helper,
+):
+    # `for _, v := range p` over a `*[N]T` reads the pointee's
+    # live elements each pass — a mid-iteration store through the
+    # same pointer surfaces in the element the next pass reads.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range p {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
