@@ -3245,9 +3245,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
     def _chan_result_call(self, node: Any) -> Any:
         """The callee `node` calls when `ch := f()` binds a
         callee-produced queue — `f` declares one scalar-element
-        `chan` result. Only a local callee's function record
-        carries the result's kind; an imported member's signature
-        records identities, not kinds, so `lib.G()` stays closed."""
+        `chan` result. A local callee's function record carries the
+        result's fact directly; an imported member declares its
+        `result_types` facts so `lib.G()` admits the same way."""
         inner = node
         while (
             inner is not None
@@ -3260,16 +3260,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if inner is None or inner.type != "call_expression":
             return None
         call = self.calls.get(self.node_key(inner))
-        if call is None or call.kind != "direct_local":
+        if call is None:
             return None
-        target = self.functions.get(call.target)
-        if (
-            target is None
-            or len(target.results) != 1
-            or not self._scalar_chan_fact(target.results[0].type)
-        ):
-            return None
-        return target
+        if call.kind == "direct_local":
+            target = self.functions.get(call.target)
+            if (
+                target is None
+                or len(target.results) != 1
+                or not self._scalar_chan_fact(target.results[0].type)
+            ):
+                return None
+            return target
+        if call.kind == "direct_import":
+            member = self.members.get(call.target)
+            if (
+                member is None
+                or len(member.result_types) != 1
+                or not self._scalar_chan_fact(member.result_types[0])
+            ):
+                return None
+            return member
+        return None
 
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
         """The DIRECT field names a `struct{...}` literal declares —

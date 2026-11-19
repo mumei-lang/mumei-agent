@@ -15545,7 +15545,11 @@ def test_chan_result_boundaries_stay_closed(go_types_helper):
         assert not result.available, body
 
 
-def test_chan_result_imported_function_stays_closed(go_types_helper):
+def test_chan_result_imported_function_admitted(go_types_helper):
+    # `ch := lib.G()` binds a callee-produced external queue — the
+    # imported member's declared `result_types` carries the scalar-
+    # element channel so send/recv/close model the same way `ch := g()`
+    # does for a same-package callee.
     lib = {"lib": {"t.go": "package lib\nfunc G() chan int64 { return nil }\n"}}
     files = {
         "a.go": "package p\nimport \"lib\"\n"
@@ -15563,7 +15567,8 @@ def test_chan_result_imported_function_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_chan_result_passthrough_aliases_argument_queue(
@@ -17903,3 +17908,92 @@ def test_method_expr_value_promoted_receiver_reads_pointee_writes(
     result = named_package(files, snapshot, summaries, "F")
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_chan_result_send_recv_admitted(go_types_helper):
+    # `ch := lib.G()` where the imported callee declares one
+    # scalar-`chan` result binds an external queue — sends and
+    # receives on it follow the same model `ch := g()` uses for a
+    # local callee.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.G()\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G() chan int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_chan_result_var_and_alias_forms(go_types_helper):
+    # `var ch = lib.G()` and `ch2 := ch` follow the same admission:
+    # the var form binds the external queue and the copy aliases it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar ch = lib.G()\n"
+        "\tch2 := ch\n"
+        "\tch2 <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G() chan int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_chan_result_nonscalar_elem_stays_closed(
+    go_types_helper,
+):
+    # `ch := lib.GQ()` returning `chan chan int64` — the queue's
+    # elements are channels themselves, which the conflated dep set
+    # cannot model.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.GQ()\n"
+        "\t_ = ch\n"
+        "\treturn x\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func GQ() chan chan int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available

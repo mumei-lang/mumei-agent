@@ -336,6 +336,11 @@ class PackageMember:
     # "slice", ...) — emitted iff `pointee_type_ids` is, so a
     # dereference read can classify its result when `type_id` is empty.
     pointee_kind: str | None = None
+    # A function member's declared result type facts — `ch := lib.G()`
+    # admits the external queue model only when the single result's
+    # fact is a scalar-element `chan`. Empty for other kinds and for
+    # zero-result callees.
+    result_types: tuple[GoType, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -918,6 +923,7 @@ def load_go_package_snapshot(
                     "kind",
                     "type",
                     "signature_type_ids",
+                    "result_types",
                     "pointee_type_ids",
                     "pointee_kind",
                 }
@@ -990,9 +996,20 @@ def load_go_package_snapshot(
             if "pointee_kind" in m:
                 pointee_kind = _string(m["pointee_kind"])
                 _require(bool(pointee_kind))
+            # `result_types` rides on a function member alone — the
+            # per-result type facts let a caller classify what the
+            # call binds (`ch := lib.G()` on a scalar-`chan` result).
+            _require(
+                kind == "function" or "result_types" not in m
+            )
+            result_types = tuple(
+                _go_type(rt, target_arch)
+                for rt in _list(m.get("result_types", []))
+            )
             members.append(
                 PackageMember(
-                    mid, name, kind, t, sig_ids, pointee_ids, pointee_kind
+                    mid, name, kind, t, sig_ids, pointee_ids,
+                    pointee_kind, result_types,
                 )
             )
         _require(len({m.id for m in members}) == len(members))

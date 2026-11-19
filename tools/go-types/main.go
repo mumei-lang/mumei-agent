@@ -167,6 +167,12 @@ type member struct {
 	Kind             string   `json:"kind"`
 	Type             typeFact `json:"type"`
 	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
+	// ResultTypes declares each result's type fact on a function
+	// member, so a caller can classify what `ch := lib.G()` binds —
+	// a scalar-element `chan` result admits under the external queue
+	// model. Absent on every other member kind; empty for a
+	// zero-result callee.
+	ResultTypes []typeFact `json:"result_types,omitempty"`
 	// PointeeTypeIDs declares the named/alias identities a pointer-typed
 	// var's pointee mentions, at any depth of pointer, slice, array, map
 	// or channel constructors — `**T` declares `[T]`; `*int64` declares
@@ -246,19 +252,38 @@ func allScalarResults(sig *types.Signature) bool {
 	return true
 }
 
+// singleScalarChanResult admits a signature whose single result is a
+// `chan T` with a scalar (integer/boolean) element — `ch := lib.G()`
+// binds a callee-produced queue the consumer models like the local
+// `ch := g()` case. `chan chan T` and multi-result tuples carrying a
+// channel stay closed.
+func singleScalarChanResult(sig *types.Signature) bool {
+	res := sig.Results()
+	if res.Len() != 1 {
+		return false
+	}
+	ch, ok := res.At(0).Type().Underlying().(*types.Chan)
+	if !ok {
+		return false
+	}
+	b, ok := ch.Elem().Underlying().(*types.Basic)
+	return ok && (b.Info()&types.IsInteger != 0 || b.Kind() == types.Bool)
+}
+
 // directImportID admits an imported call only when it is summarizable:
 // every result must be scalar (integer/boolean), at any arity. Composite
 // results stay `external_or_bodyless` — a `range` over a composite would
 // break the fragment's integer-only range model. A multi-valued callee
 // declares its arity on the call record so the consumer can admit the
-// tuple unpacking `a, b := lib.F(x)`.
+// tuple unpacking `a, b := lib.F(x)`. A lone scalar-element `chan`
+// result admits too — the consumer binds it as an external queue.
 func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 	id := ix.importedID(f)
 	if id == "" {
 		return "", 0, false
 	}
 	sig, ok := f.Type().(*types.Signature)
-	if !ok || !allScalarResults(sig) {
+	if !ok || (!allScalarResults(sig) && !singleScalarChanResult(sig)) {
 		return "", 0, false
 	}
 	// A generic callee must go through the instantiation gate — the
@@ -628,6 +653,16 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 		// struct's `F func(N)` field) needs the same publication —
 		// the consumer's opaque `s.f(args)` call pins them.
 		m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+	}
+	if kind == "function" {
+		if sig, ok := obj.Type().(*types.Signature); ok {
+			for i := 0; i < sig.Results().Len(); i++ {
+				m.ResultTypes = append(
+					m.ResultTypes,
+					ix.typeOf(sig.Results().At(i).Type()),
+				)
+			}
+		}
 	}
 	ix.importMembers[id] = m
 	if kind == "type" {
