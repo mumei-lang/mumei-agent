@@ -12586,7 +12586,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or self._chan_root(cbid)
                 in self.external_chan_locals
             )
-            and self._scalar_chan_binding(cbid)
+            and (
+                self._scalar_chan_binding(cbid)
+                or self._chan_chan_fact(
+                    getattr(
+                        self.bindings.get(cbid), "type", None
+                    )
+                )
+            )
             for cbid in (captured or ())
         )
         if ref.binding_id in self.pointee_closures or external:
