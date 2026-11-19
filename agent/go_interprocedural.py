@@ -6530,7 +6530,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ]
             # `a, b = b, g(a)` — passthrough reseats resolve against
             # the pre-state too: `g(a)` hands back the queue `a`
-            # named BEFORE `a`'s own store redirects it.
+            # named BEFORE `a`'s own store redirects it. A
+            # multi-result call (`ch, n = g(q)`) shares one RHS
+            # node — the per-slot probe resolves this name's
+            # position.
             call_result_targets = [
                 (
                     self._chan_result_passthrough(
@@ -6538,7 +6541,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if len(lefts) == len(rights)
                     and self._chan_result_call(rights[i]) is not None
-                    else None
+                    else (
+                        self._chan_result_passthrough(
+                            rights[0], locals_, params, i
+                        )
+                        if len(rights) == 1
+                        and len(lefts) > 1
+                        else None
+                    )
                 )
                 for i in range(len(refs))
             ]
@@ -6646,6 +6656,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         len(lefts) == len(rights)
                         and self._chan_result_call(rights[i])
                         is not None
+                    ) or (
+                        len(rights) == 1
+                        and len(lefts) > 1
+                        and self._chan_result_call_at(rights[0], i)
+                        is not None
                     )
                     if not self._scalar_chan_binding(ref.binding_id) or (
                         not fresh_make
@@ -6714,7 +6729,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # each to external and union its
                                 # contents into the name's slot like
                                 # `target` below.
-                                call_args = rights[i].child_by_field_name(
+                                call_args = (
+                                    rights[i]
+                                    if len(lefts) == len(rights)
+                                    else rights[0]
+                                ).child_by_field_name(
                                     "arguments"
                                 )
                                 if call_args is not None:
