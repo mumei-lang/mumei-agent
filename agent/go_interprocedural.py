@@ -7935,6 +7935,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # pre-state before any store lands, so `x, y = y, x` swaps each
             # name's original dependencies. `x, y = lib.F(a)` unpacks one
             # multi-valued imported call into every LHS.
+            # The function-value record maps snapshot BEFORE the RHS
+            # evaluation too — a literal RHS records its own captures
+            # under the name it binds during eval, so `f, g = func(){…},
+            # f` must read `f`'s OLD records, not the fresh literal's.
+            captures_before = dict(self.closure_captures)
+            pointee_before = set(self.pointee_closures)
+            aliases_before = dict(self.func_aliases)
+            opaque_before = set(self.opaque_callees)
+            mv_before = dict(self.bound_method_values)
+            mv_deps_before = dict(self.bound_method_receiver_deps)
+            writes_before = dict(self.closure_writes)
+            star_before = set(self.closure_star_writes)
+            calls_before = set(self.closure_inner_calls)
             values = (
                 [
                     self.expression(
@@ -7950,18 +7963,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for rhs in rights
                 ]
             )
-            # Tuple assignment stores evaluate the pre-state in
-            # parallel — `h, g = g, h` swaps — so the capture
-            # propagation below reads the maps from BEFORE any store.
-            captures_before = dict(self.closure_captures)
-            pointee_before = set(self.pointee_closures)
-            aliases_before = dict(self.func_aliases)
-            opaque_before = set(self.opaque_callees)
-            mv_before = dict(self.bound_method_values)
-            mv_deps_before = dict(self.bound_method_receiver_deps)
-            writes_before = dict(self.closure_writes)
-            star_before = set(self.closure_star_writes)
-            calls_before = set(self.closure_inner_calls)
             # Channel alias targets resolve against the pre-state
             # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
             # RHS's root must be read before any element's store
