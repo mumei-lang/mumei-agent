@@ -10303,16 +10303,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ref = self.references.get(self.node_key(cur))
                 if ref is not None and ref.kind != "universe":
                     bid = ref.binding_id
-                    if bid in params:
-                        deps |= frozenset({params[bid]})
+                    # `locals_` wins over the parameter ordinal: a
+                    # reassigned parameter (`x = g()` or a `G(&x, y)`
+                    # call fold) carries its CURRENT deps there —
+                    # reading `params` first would report the stale
+                    # pre-assignment set.
+                    if bid in locals_:
+                        deps |= locals_[bid]
                         captured.add(bid)
                         binding = self.bindings.get(bid)
                         captures_pointer |= (
                             binding is not None
                             and binding.type.kind == "pointer"
                         )
-                    elif bid in locals_:
-                        deps |= locals_[bid]
+                    elif bid in params:
+                        deps |= frozenset({params[bid]})
                         captured.add(bid)
                         binding = self.bindings.get(bid)
                         captures_pointer |= (
