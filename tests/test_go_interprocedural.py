@@ -12136,6 +12136,52 @@ def test_immediate_func_literal_chan_arg_recv_external(
     assert result.effects == "unknown"
 
 
+def test_immediate_func_literal_chan_alias_recv_external(
+    go_types_helper,
+):
+    # `func(ch) { c := ch; <-c }(q)` — a literal-internal alias of
+    # the channel parameter still receives on the caller's queue.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { c := ch; return <-c }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_paren_chan_recv_external(
+    go_types_helper,
+):
+    # `func(ch) { <-(ch) }(q)` — a parenthesized operand resolves
+    # to the same receive.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return <-(ch) }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_immediate_func_literal_variadic_chan_recv_external(
+    go_types_helper,
+):
+    # `func(qs ...chan) { <-qs[0] }(q1, q2)` — a receive through a
+    # variadic slice element reads whichever argument queue carried
+    # it, so both external queues mark the effect.
+    data = unit(
+        go_types_helper,
+        "func F(q1 chan int64, q2 chan int64) int64 {\n"
+        "\treturn func(qs ...chan int64) int64 { return <-qs[0] }(q1, q2)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
 def test_immediate_func_literal_unused_chan_arg_no_effect(
     go_types_helper,
 ):

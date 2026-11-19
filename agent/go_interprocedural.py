@@ -11249,32 +11249,129 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # op would mark the summary `unknown` and fold phantom
         # write-throughs into the caller's deps.
         lit_param_ids: list[str | None] = []
+        lit_variadic = False
         plist = literal.child_by_field_name("parameters")
         if plist is not None:
             for decl in plist.named_children:
-                if decl.type != "parameter_declaration":
+                if decl.type not in {
+                    "parameter_declaration",
+                    "variadic_parameter_declaration",
+                }:
                     continue
+                if decl.type == "variadic_parameter_declaration":
+                    lit_variadic = True
                 for c in decl.named_children:
                     if c.type == "identifier":
                         pb = self.bindings_by_span.get(self.node_key(c))
                         lit_param_ids.append(
                             pb.id if pb is not None else None
                         )
+        # `c := ch` inside the literal aliases the queue under an
+        # internal name — a receive on the alias reaches the root, so
+        # map each simple `name := identifier`/`name = identifier`
+        # before scanning receives.
+        lit_chan_alias: dict[str, str] = {}
         recv_bids: set[str] = set()
+        # The DFS below pops children in reverse order, so a use
+        # could scan before its declaration — collect the simple
+        # `name := identifier`/`name = identifier` aliases in a
+        # separate pass first.
+        alias_stack = [literal]
+        while alias_stack:
+            cur = alias_stack.pop()
+            alias_stack.extend(_children(cur))
+            if cur.type in {
+                "short_var_declaration",
+                "var_declaration",
+            }:
+                left = cur.child_by_field_name("left")
+                right = cur.child_by_field_name("right")
+                lefts = _children(left) if left is not None else []
+                rights = _children(right) if right is not None else []
+                if (
+                    len(lefts) == len(rights) == 1
+                    and lefts[0].type == "identifier"
+                    and rights[0].type == "identifier"
+                ):
+                    lb = self.bindings_by_span.get(
+                        self.node_key(lefts[0])
+                    )
+                    rr = self.references.get(
+                        self.node_key(rights[0])
+                    )
+                    if lb is not None and rr is not None:
+                        lit_chan_alias[lb.id] = rr.binding_id
+
+        def _recv_base_bid(opnd: Any) -> str | None:
+            # `<-(ch)` / `range (ch)` unwrap like every operand read;
+            # `<-qs[0]` on a `...chan` parameter receives through the
+            # variadic slice's element, whose base is the param.
+            while (
+                opnd is not None
+                and opnd.type == "parenthesized_expression"
+            ):
+                opnd = next(
+                    (
+                        c
+                        for c in opnd.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if opnd is None:
+                return None
+            if opnd.type == "index_expression":
+                return _recv_base_bid(
+                    opnd.child_by_field_name("operand")
+                )
+            if opnd.type == "identifier":
+                rr = self.references.get(self.node_key(opnd))
+                if rr is not None:
+                    bid = rr.binding_id
+                    seen: set[str] = set()
+                    while bid in lit_chan_alias and bid not in seen:
+                        seen.add(bid)
+                        bid = lit_chan_alias[bid]
+                    return bid
+            return None
+
         stack = [literal]
         while stack:
             cur = stack.pop()
             operand = None
+            is_range = False
             if cur.type == "unary_expression":
                 op = cur.child_by_field_name("operator")
                 if op is not None and op.type == "<-":
                     operand = cur.child_by_field_name("operand")
             elif cur.type == "range_clause":
                 operand = cur.child_by_field_name("right")
-            if operand is not None and operand.type == "identifier":
-                rr = self.references.get(self.node_key(operand))
-                if rr is not None:
-                    recv_bids.add(rr.binding_id)
+                is_range = True
+            if operand is not None:
+                # `range qs` over a `...chan` slice yields its
+                # elements without receiving — only `range qs[i]` (a
+                # channel element) or `range ch` (a channel binding)
+                # pulls. A bare `<-x` operand is a channel by type.
+                norm = operand
+                while (
+                    norm is not None
+                    and norm.type == "parenthesized_expression"
+                ):
+                    norm = next(
+                        (
+                            c
+                            for c in norm.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                rbid = _recv_base_bid(operand)
+                if rbid is not None and (
+                    not is_range
+                    or (norm is not None and norm.type == "index_expression")
+                    or self._scalar_chan_binding(rbid)
+                ):
+                    recv_bids.add(rbid)
             stack.extend(_children(cur))
         external_chans: set[str] = set()
         for cbid in captured:
@@ -11286,9 +11383,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ):
                     external_chans.add(root)
         for i, arg in enumerate(arguments):
-            param_bid = (
-                lit_param_ids[i] if i < len(lit_param_ids) else None
-            )
+            if i < len(lit_param_ids):
+                param_bid = lit_param_ids[i]
+            elif lit_variadic and lit_param_ids:
+                # Every argument at and past the last declared
+                # position lands in the variadic slice — `func(qs
+                # ...chan){<-qs[0]}(q1, q2)` receives through ANY of
+                # them.
+                param_bid = lit_param_ids[-1]
+            else:
+                param_bid = None
             if param_bid is None or param_bid not in recv_bids:
                 continue
             cb = self._chan_binding(arg, locals_, params)
