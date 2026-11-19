@@ -441,7 +441,13 @@ def test_unsupported_value_and_call_semantics_are_explicit_not_safe_facts(
         compiler_report(go_types_helper, source), source, target_arch="amd64"
     )
     assert snapshot.gaps
-    assert all(not c.target for c in snapshot.calls if c.kind != "direct_local")
+    # `interface_dispatch` pins the named interface's declaration as
+    # its target; every other non-direct kind stays target-less.
+    assert all(
+        not c.target
+        for c in snapshot.calls
+        if c.kind not in ("direct_local", "interface_dispatch")
+    )
     serialized = json.dumps(asdict(snapshot))
     for key in ("verification_status", "lean_verified", "proved", "seal_grade"):
         assert key not in serialized

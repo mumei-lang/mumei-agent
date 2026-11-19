@@ -31,6 +31,7 @@ _CALL_KINDS = frozenset(
         "indirect_or_selector",
         "external_or_bodyless",
         "method_generic_or_variadic",
+        "interface_dispatch",
         "concurrent",
         "deferred",
     }
@@ -39,6 +40,10 @@ _CALL_KINDS = frozenset(
 # unit's own file digest, file index and coordinates, so the target a caller
 # records is exactly the binding identity the callee's own report produces.
 _IMPORTED_ID = re.compile(r"sha256:[0-9a-f]{64}:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+\Z")
+# A type-declaration identity in either unit shape: the packaged form
+# embeds the file index, the single-file form does not — `interface_
+# dispatch` targets pin a named interface's declaration either way.
+_TYPE_ID = re.compile(r"sha256:[0-9a-f]{64}(?::-?[0-9]+){3,4}\Z")
 _GAPS = frozenset(
     {
         "unsupported_value_semantics",
@@ -710,12 +715,22 @@ def load_go_snapshot(
             method = _boolean(c.get("method", False))
             method_expr = _boolean(c.get("method_expr", False))
             # `method`/`method_expr` only travel on a `direct_local`
-            # record here — a single file declares no imports — and a
-            # method-value call (receiver operand) never doubles as a
-            # method-expression call (leading receiver argument).
+            # or `interface_dispatch` record here — a single file
+            # declares no imports — and a method-value call (receiver
+            # operand) never doubles as a method-expression call
+            # (leading receiver argument).
             _require(
-                (not method or kind == "direct_local")
-                and (not method_expr or (kind == "direct_local" and not method))
+                (
+                    not method
+                    or kind in ("direct_local", "interface_dispatch")
+                )
+                and (
+                    not method_expr
+                    or (
+                        kind in ("direct_local", "interface_dispatch")
+                        and not method
+                    )
+                )
             )
             if kind == "direct_local":
                 _require(target in fn_by_id)
@@ -725,6 +740,12 @@ def load_go_snapshot(
                     and not (callee.generic or callee.variadic)
                     and callee.method == (method or method_expr)
                 )
+            elif kind == "interface_dispatch":
+                # The receiver dispatches dynamically: the target pins
+                # the named interface's own declaration identity and
+                # stays empty for an unnamed `interface{ M() }`
+                # receiver.
+                _require(not target or _TYPE_ID.fullmatch(target))
             else:
                 _require(target == "")
             args = tuple(_span(a, raw) for a in _list(c["arguments"]))
@@ -1082,16 +1103,25 @@ def load_go_package_snapshot(
             _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
             method = _boolean(c.get("method", False))
             # `method` travels on a method call — `lib.VS.PF(args)` on
-            # an imported member or `st.M(args)` on a same-package one —
-            # never on a plain function call.
-            _require(not method or kind in ("direct_import", "direct_local"))
+            # an imported member, `st.M(args)` on a same-package one or
+            # `i.M(args)` dispatching on an interface — never on a
+            # plain function call.
+            _require(
+                not method
+                or kind
+                in ("direct_import", "direct_local", "interface_dispatch")
+            )
             method_expr = _boolean(c.get("method_expr", False))
             # `method_expr` likewise only travels on a method-expression
             # record, and never beside `method` — a `recv.M(args)` call
             # has a receiver node, not a leading receiver argument.
             _require(
                 not method_expr
-                or (kind in ("direct_import", "direct_local") and not method)
+                or (
+                    kind
+                    in ("direct_import", "direct_local", "interface_dispatch")
+                    and not method
+                )
             )
             # `results` declares an imported callee's arity when it
             # exceeds one — a 0/1-result callee omits it, and no other
@@ -1130,6 +1160,18 @@ def load_go_package_snapshot(
                 _require(
                     _IMPORTED_ID.fullmatch(target) is not None
                     and target not in fn_by_id
+                )
+            elif kind == "interface_dispatch":
+                # The receiver dispatches dynamically: the target pins
+                # the named interface's own declaration identity (a
+                # method-set redeclare stales the caller) and stays
+                # empty for an unnamed `interface{ M() }` receiver.
+                _require(
+                    not target
+                    or (
+                        _IMPORTED_ID.fullmatch(target) is not None
+                        and target not in fn_by_id
+                    )
                 )
             else:
                 _require(target == "")

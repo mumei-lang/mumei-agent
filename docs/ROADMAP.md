@@ -3975,10 +3975,20 @@ is basic, named, alias or a composite constructor of those — the
 collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
-Boundaries: interface receivers stay `method_generic_or_variadic`
-— dispatch there is dynamic, and the recorded method identity would
-not cover the implementations actually reached (this covers both
-method values `i.M(x)` and method expressions `lib.I.M`). Local
+Boundaries: interface receivers classify as a separate
+`interface_dispatch` record (`i.M(x)` and the method expression
+`lib.I.M`) — dispatch is dynamic, so no callee identity pins, but
+the call itself admits under the opaque-external model: the
+receiver and argument deps union with every recorded effect the
+call site folds (indirect writes, escapes, promoted chan args)
+and a write-back fold lands on arg-or-receiver deps, exactly like
+a func-typed call. The record's `method`/`method_expr` flag still
+marks the shape, and its `target` pins the named interface's own
+declaration id (`lib.I`) so a method-set redeclare stales every
+admitted caller; an unnamed `interface{ M() }` receiver records an
+empty target. Only a direct selection admits — a method promoted
+through an embedded interface or struct names a receiver the gate
+cannot see and stays `method_generic_or_variadic`. Local
 methods and generic methods are
 unchanged and closed — as are receivers still declared on type
 parameters (`lib.GT[P]` where `P` is unresolved) and instantiated

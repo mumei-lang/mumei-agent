@@ -301,10 +301,9 @@ func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 // named receiver type and every result is scalar. The dependency model
 // is the same opaque `direct_import` shape — each result may depend on
 // the receiver and every argument; the consumer evaluates the receiver
-// expression for a `method` call. Interface receivers stay
-// `method_generic_or_variadic`: dispatch there is dynamic, and the
-// pinned method identity would not cover the implementations actually
-// reached.
+// expression for a `method` call. Interface receivers classify as
+// `interface_dispatch` instead: dispatch there is dynamic, so no callee
+// identity can pin, but the call admits under the opaque-external model.
 func (ix *indexer) directImportMethodID(f *types.Func, recv types.Type) (string, int, []string, bool) {
 	id := ix.importedID(f)
 	if id == "" {
@@ -353,8 +352,9 @@ func (ix *indexer) directImportMethodID(f *types.Func, recv types.Type) (string,
 // localReceiverOK admits a same-package method call only when the static
 // receiver type is concrete — a named type (or pointer to one) that is not
 // an interface and is not still generic. An interface receiver dispatches
-// dynamically: the callee the selection names is not the one that runs,
-// so both `i.M()` and the method expression `I.M` stay closed. A receiver
+// dynamically — the callee the selection names is not the one that runs —
+// so `i.M()` and the method expression `I.M` classify as
+// `interface_dispatch` rather than `direct_local`. A receiver
 // with type arguments (`GT[int]`) stays closed too — the substitution's
 // identity rides on no member the pins could cover.
 func localReceiverOK(recv types.Type) bool {
@@ -1237,11 +1237,36 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 					// operand and folds it at argument position 0 (the
 					// callee summary's receiver slot); a method
 					// expression `T.M(st, args)` needs no flag — the
-					// receiver is already the leading argument. Dynamic
-					// dispatch (interface receiver), generics, variadics
-					// and promoted selections stay closed.
+					// receiver is already the leading argument. Generics,
+					// variadics and promoted selections stay closed;
+					// dynamic dispatch admits below as
+					// `interface_dispatch`.
 					if fn, ok := functions[ix.id(f)]; ok && fn.Body != nil && !fn.Generic && !fn.Variadic && localReceiverOK(selection.Recv()) {
 						return "direct_local", fn.BindingID, selection.Kind() == types.MethodVal, 0, nil
+					}
+				}
+				// An interface receiver dispatches dynamically, so no
+				// callee identity can pin — but the call itself still
+				// admits under the opaque-external model: `i.M(x)` unions
+				// the receiver and argument deps and records an external
+				// effect, like a func-typed parameter call. Only a direct
+				// selection (`i.M`, `I.M`) admits — a method promoted
+				// through an embedded interface or struct names a receiver
+				// the gate cannot see and stays closed. The target carries
+				// the named interface's identity (`lib.I`) so a method-set
+				// redeclare stales every admitted caller; an unnamed
+				// `interface{ M() }` receiver records an empty target.
+				if len(selection.Index()) == 1 {
+					rt := types.Unalias(selection.Recv())
+					if ptr, ok := rt.(*types.Pointer); ok {
+						rt = types.Unalias(ptr.Elem())
+					}
+					if _, ok := rt.Underlying().(*types.Interface); ok {
+						id := ""
+						if named, ok := rt.(*types.Named); ok {
+							id = ix.typeID(named.Obj())
+						}
+						return "interface_dispatch", id, selection.Kind() == types.MethodVal, 0, nil
 					}
 				}
 			}
@@ -1547,7 +1572,7 @@ func analyze(req request) (out snapshot) {
 					kind, target, method, results, typeArgIDs = override, "", false, 0, nil
 				}
 				methodExpr := false
-				if kind == "direct_import" || kind == "direct_local" {
+				if kind == "direct_import" || kind == "direct_local" || kind == "interface_dispatch" {
 					if e, ok := unparen(node.Fun).(*ast.SelectorExpr); ok {
 						if sel := ix.info.Selections[e]; sel != nil {
 							methodExpr = sel.Kind() == types.MethodExpr
@@ -1576,7 +1601,7 @@ func analyze(req request) (out snapshot) {
 				// `direct_import` calls are summarized conservatively — the
 				// result may depend on every argument — so they are not a
 				// `call_not_summarized_*` gap.
-				if kind != "direct_local" && kind != "direct_import" {
+				if kind != "direct_local" && kind != "direct_import" && kind != "interface_dispatch" {
 					out.Gaps = append(out.Gaps, gap{"call_not_summarized_" + kind, &sp})
 				}
 			}

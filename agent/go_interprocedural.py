@@ -10041,6 +10041,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     "conversion",
                     "builtin",
                     "indirect_or_selector",
+                    "interface_dispatch",
                 }
             ):
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
@@ -10050,6 +10051,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 _key3(a) for a in call.arguments
             ):
                 raise _Unsupported("call_mapping_unavailable", _span(node), call.target)
+            if call.kind == "interface_dispatch":
+                return self._interface_dispatch_call(
+                    node, call, arguments, fn, params, locals_,
+                    transfers, count, depth,
+                )
             if call.kind == "indirect_or_selector":
                 # `h(args)` where `h` names a bound function literal —
                 # the record itself cannot say which shape the callee
@@ -12024,6 +12030,128 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # argument — the same escaped/indirect fold every opaque
         # call does.
         write_deps = arg_deps | callee_deps
+        self.indirect_writes |= write_deps
+        for escaped_id in self.escaped:
+            self._store(
+                locals_, params, escaped_id, write_deps, True
+            )
+        return deps
+
+    def _interface_dispatch_call(
+        self,
+        node: Any,
+        call: Any,
+        arguments: list[Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """`i.M(args)` / `I.M(i, args)` — a method call on an
+        interface-typed receiver.
+
+        Dispatch is dynamic: which implementation runs is
+        unknowable here, so the call runs opaque like a func-typed
+        parameter or a package `var` call — the result unions the
+        receiver's read deps, the arguments, `indirect_writes` and
+        every escaped binding, and the callee may write through
+        pointer arguments or send on channel arguments. Every
+        `chan` argument joins the external model — the unknown
+        implementation may hand it back or send on it — and the
+        external effect records on the receiver's root binding
+        (the value the dynamic implementation is reached through).
+        A named interface's identity (`call.target`) pins so a
+        method-set redeclare stales the caller; a receiver that
+        names no root binding stays closed."""
+        receiver_node = None
+        if call.method:
+            function_node = node.child_by_field_name("function")
+            while (
+                function_node is not None
+                and function_node.type == "parenthesized_expression"
+            ):
+                function_node = next(
+                    iter(function_node.named_children), None
+                )
+            if (
+                function_node is None
+                or function_node.type != "selector_expression"
+            ):
+                raise _Unsupported(
+                    "call_mapping_unavailable",
+                    _span(node),
+                    call.target,
+                )
+            receiver_node = function_node.child_by_field_name(
+                "operand"
+            )
+            if receiver_node is None:
+                raise _Unsupported(
+                    "call_mapping_unavailable",
+                    _span(node),
+                    call.target,
+                )
+        elif call.method_expr and arguments:
+            # `I.M(i, args)` — the receiver is already the leading
+            # argument, evaluated below like every argument.
+            receiver_node = arguments[0]
+        receiver_deps: frozenset[int] = frozenset()
+        if call.method and receiver_node is not None:
+            receiver_deps = self.expression(
+                receiver_node, fn, params, locals_, transfers,
+                count, depth + 1,
+            )
+        arg_deps: frozenset[int] = frozenset()
+        for arg in arguments:
+            arg_deps |= self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+        deps = receiver_deps | arg_deps | self.indirect_writes
+        for escaped_id in self.escaped:
+            if escaped_id in locals_:
+                deps |= locals_[escaped_id]
+            elif escaped_id in params:
+                deps |= frozenset({params[escaped_id]})
+        # `i.M(q)` — the dynamic implementation may send on or
+        # hand back a channel argument, so every `chan` argument
+        # joins the external model and its queue contents may
+        # reach the result.
+        deps |= self._promote_chan_call_args(
+            node, "", locals_, params
+        )
+        target_id = call.target
+        if receiver_node is not None:
+            root_ref = self._receiver_root_ref(receiver_node)
+            if (
+                root_ref is not None
+                and root_ref.binding_id
+            ):
+                target_id = root_ref.binding_id
+        if not target_id:
+            raise _Unsupported(
+                "unresolved_or_opaque_call", _span(node)
+            )
+        if call.target:
+            self.pinned.add(call.target)
+        transfers.append(
+            CallTransfer(
+                FileSpan(
+                    self.current_file,
+                    node.start_byte,
+                    node.end_byte,
+                ),
+                target_id,
+                (),
+                frozenset(),
+                imported=True,
+            )
+        )
+        # The callee may write `*p = y` or send `y` through an
+        # argument — the same escaped/indirect fold every opaque
+        # call does.
+        write_deps = arg_deps | receiver_deps
         self.indirect_writes |= write_deps
         for escaped_id in self.escaped:
             self._store(
