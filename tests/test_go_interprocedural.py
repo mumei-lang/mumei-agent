@@ -25066,3 +25066,62 @@ def test_range_over_deref_pointer_to_array_reads_copy(
     assert result.available
     assert result.return_dependencies == frozenset({1})
 
+
+
+def test_range_over_pointer_result_call_reads_live_pointee(
+    go_types_helper,
+):
+    # `for _, v := range G(p)` where `G` returns `*[N]T` iterates
+    # the pointee's live elements like `range p` (verified `go
+    # run`): a mid-iteration store through the pointer surfaces in
+    # the element the next pass reads.
+    files = {
+        "a.go": "package p\n"
+        "func G(q *[4]int64) *[4]int64 { return q }\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range G(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_array_value_result_call_reads_copy(
+    go_types_helper,
+):
+    # `for _, v := range A(p)` where `A` returns `[N]T` ranges a
+    # start-time copy — a mid-iteration store through `p` never
+    # reaches `v`.
+    files = {
+        "a.go": "package p\n"
+        "func A(q *[4]int64) [4]int64 { return *q }\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range A(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})

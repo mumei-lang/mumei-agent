@@ -10336,6 +10336,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 package_pointee = None
                 range_ident = None
                 computed = None
+                # `range G()` where `G` returns `*[N]T` iterates the
+                # pointee's live elements like `range p` (verified
+                # `go run`): a mid-iteration `(*p)[i] = x` IS
+                # observed. `range *G()` and an array-VALUE result
+                # iterate a start-time copy — `range_static` keys on
+                # this distinction.
+                computed_pointer_result = False
                 if (
                     right is not None
                     and member is None
@@ -10461,6 +10468,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     "array",
                                     "map",
                                 } and (not sugar or elem.kind == "array"):
+                                    computed_pointer_result = True
                                     computed = (
                                         call_operand,
                                         elem,
@@ -10943,7 +10951,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # like a slice.
                         range_static = (
                             fact.kind == "array"
-                            and not (bound is not None and sugar)
+                            and not (
+                                sugar
+                                and (
+                                    bound is not None
+                                    or computed_pointer_result
+                                )
+                            )
                         )
                         if (
                             fact.kind == "map"
