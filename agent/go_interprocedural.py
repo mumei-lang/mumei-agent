@@ -1005,30 +1005,129 @@ class _Builder:
             return binding
         return None
 
+    def _promotion_path(
+        self,
+        fields: tuple[Any, ...],
+        ident: Any,
+        seen: frozenset[str],
+    ) -> tuple[str, Any | None] | None:
+        """`ident`'s promotion path through `fields`, if found.
+
+        Returns `("ptr", ftype)` when some hop on the path is a
+        pointer-typed embedded field (the read dereferences it),
+        `("value", None)` when `ident` is reached through value
+        fields only, or None when no direct field's type declares
+        `ident` (its declaring type is unreachable from the
+        container's field list)."""
+        for f in fields:
+            ftype = getattr(f, "type", None)
+            if ftype is None:
+                continue
+            pointee = ftype.elem if ftype.kind == "pointer" else ftype
+            tid = getattr(pointee, "type_id", "")
+            tb = self._pointee_type(tid) if tid else None
+            if tb is None or tb.id in seen:
+                continue
+            inner = self._struct_fields(tb)
+            if ident.id in {x.id for x in inner}:
+                return (
+                    ("ptr", ftype)
+                    if ftype.kind == "pointer"
+                    else ("value", None)
+                )
+            sub = self._promotion_path(inner, ident, seen | {tb.id})
+            if sub is not None:
+                return (
+                    ("ptr", ftype)
+                    if ftype.kind == "pointer"
+                    else sub
+                )
+        return None
+
     def _promoted_field_pointer(
-        self, container_type: Any | None, ident: Any
+        self,
+        container_type: Any | None,
+        ident: Any,
+        call: Any | None = None,
     ) -> Any | None:
         """The embedded `*Q` a promoted field read crosses, if any.
 
         `g(q).P` on `type S struct{ *Q; ... }` resolves `P` to its
         own declaring type `Q` — the syntactic chain names no
         pointer, but the read dereferences the embedded one. `P`
-        is a DIRECT field when it appears in the container type's
-        source-order window; otherwise the read promotes, and a
-        pointer-typed direct field in that window is the crossing.
-        Returns None for direct fields and for promotions through
-        value embedding (`type S struct{ Q }` — no deref)."""
+        is a DIRECT field when it is one of the container's
+        declared fields; otherwise the read promotes, and the
+        crossing is the pointer-typed field on `P`'s promotion
+        path (an unrelated `R *R` sibling does not count — only
+        the field whose type actually declares `P`). Returns None
+        for direct fields and for promotions through value
+        embedding (`type S struct{ Q }` — no deref). A container
+        whose fields cannot be enumerated (an imported type, or
+        an anonymous literal in a callee with no resolvable
+        signature region) is treated as a crossing — the promoted
+        read may dereference an embed the report cannot see."""
         if container_type is None or container_type.kind != "struct":
             return None
         type_id = container_type.type_id
-        type_binding = self._pointee_type(type_id) if type_id else None
-        span = getattr(type_binding, "span", None)
-        if span is None:
-            return None
-        window = self._fields_declared_after(span)
-        if ident.id in {f.id for f in window}:
-            return None
-        for f in window:
+        if type_id:
+            if type_id not in self.bindings:
+                # An imported type member — the field list is not
+                # enumerable, so `ident` may be promoted through an
+                # embedded pointer the report does not carry.
+                return container_type
+            direct_fields = self._struct_fields(
+                self.bindings[type_id]
+            )
+            if ident.id in {f.id for f in direct_fields}:
+                return None
+        else:
+            # An anonymous `struct{...}` result — its direct fields
+            # are the scope-less bindings inside the callee's
+            # signature region (after the function's name span,
+            # before its body). A promoted field binds inside its
+            # own declaring type, outside that region.
+            target = (
+                self.functions.get(call.target)
+                if call is not None
+                else None
+            )
+            binding = (
+                self.bindings.get(target.binding_id)
+                if target is not None
+                else None
+            )
+            name_span = getattr(binding, "span", None)
+            body_span = getattr(target, "body", None)
+            if name_span is None or body_span is None:
+                # An imported or bodiless callee — the literal's
+                # fields cannot be enumerated.
+                return container_type
+            rfile = (
+                name_span.file if isinstance(name_span, FileSpan) else 0
+            )
+            direct_fields = tuple(
+                b
+                for b in self.bindings.values()
+                if b.kind == "variable"
+                and b.scope is None
+                and isinstance(b.span, FileSpan)
+                and b.span.file == rfile
+                and name_span.end < b.span.start < body_span.start
+            )
+            ispan = getattr(ident, "span", None)
+            if (
+                isinstance(ispan, FileSpan)
+                and ispan.file == rfile
+                and name_span.end < ispan.start < body_span.start
+            ):
+                return None
+        path = self._promotion_path(direct_fields, ident, frozenset())
+        if path is not None:
+            return path[1] if path[0] == "ptr" else None
+        # `ident` is not direct but no field's type declares it —
+        # the declaring type sits deeper than the model reaches:
+        # any pointer-typed direct field may carry the crossing.
+        for f in direct_fields:
             ftype = getattr(f, "type", None)
             if ftype is not None and ftype.kind == "pointer":
                 return ftype
@@ -10312,9 +10411,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 if len(field_idents) > 1
                                 else result_type
                             )
+                            call = self.calls.get(
+                                self.node_key(sel_base)
+                            )
                             ptr_type = (
                                 self._promoted_field_pointer(
-                                    container, field_idents[0]
+                                    container, field_idents[0], call
                                 )
                             )
                         if ptr_type is None:
