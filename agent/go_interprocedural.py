@@ -4023,6 +4023,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         params: dict[str, int],
         conditional: bool,
         value_deps: frozenset[int] = frozenset(),
+        key_deps: frozenset[int] = frozenset(),
     ) -> None:
         """Bind `for` range names to dep-free (external-state) values.
 
@@ -4034,11 +4035,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         — when the container lives in caller memory a bound pointer's
         aim selects (`for range *p`): those elements carry the
         pointer's own and the indirect stores' deps like `(*p)[i]`.
+        `key_deps` applies to the first name — a MAP's key is stored
+        data like the element, so a callee- or caller-produced map's
+        key carries the container's own deps; a slice/array index is
+        a position, not stored data, and stays dep-free.
         """
         for pos, name in enumerate(names):
             if name.text == b"_":
                 continue
-            deps = value_deps if pos == 1 else frozenset()
+            deps = value_deps if pos == 1 else key_deps
             binding = self.bindings_by_span.get(self.node_key(name))
             if binding is not None:
                 if binding.type.kind not in {
@@ -11357,14 +11362,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                     value_deps = frozenset()
-                    if opaque_range is not None and len(lefts) == 2:
-                        # `for range s` — each element carries the
+                    if opaque_range is not None:
+                        # `for range s` — each element (and a map's
+                        # key, when only one name binds) carries the
                         # bound container's conflated set across
                         # every sharer, like `s[i]`.
                         value_deps = self._opaque_container_deps(
                             opaque_range, scope
                         )
-                    if bound is not None and len(lefts) == 2:
+                    if bound is not None:
                         # `for range *p` — each element is caller
                         # memory the pointer's aim selects, so the
                         # bound name carries the pointer's own deps
@@ -11374,13 +11380,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             range_ident, fn, params, scope,
                             transfers, count, 0,
                         ) | self.indirect_writes
-                    elif computed is not None and len(lefts) == 2:
-                        # `for range *G()` — the elements live in the
-                        # memory the opaque result aims at, which may
-                        # alias any escaped binding like a `*p` read:
-                        # the argument deps (already evaluated above)
-                        # union with every escaped binding's current
-                        # deps and every indirect store.
+                    elif computed is not None:
+                        # `for range *G()` — the elements (and a
+                        # map's key, when only one name binds) live
+                        # in the memory the opaque result aims at,
+                        # which may alias any escaped binding like
+                        # a `*p` read: the argument deps (already
+                        # evaluated above) union with every escaped
+                        # binding's current deps and every indirect
+                        # store.
                         value_deps = (
                             frozenset().union(*computed_args)
                             if computed_args
@@ -11396,11 +11404,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # compiler's binding — scalar-or-pointer, matching
                     # the index-read rule (a struct element or a
                     # string map key stays closed).
+                    # A map's key is stored data like the element —
+                    # a caller- or callee-produced container's key
+                    # carries the same deps the element does.
                     self._bind_range_names(
-                        lefts, scope, params, conditional, value_deps
+                        lefts, scope, params, conditional, value_deps,
+                        (
+                            value_deps
+                            if fact is not None
+                            and fact.kind == "map"
+                            else frozenset()
+                        ),
                     )
                     if (
-                        (bound is not None or computed is not None)
+                        (
+                            bound is not None
+                            or computed is not None
+                            or opaque_range is not None
+                        )
                         and len(lefts) == 2
                         and lefts[1].text != b"_"
                     ):
