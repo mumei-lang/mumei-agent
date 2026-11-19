@@ -5444,6 +5444,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `<-cc` ops record external effects.
                         or self._chan_chan_fact(r.type)
                     )
+                    # A func-element collection result —
+                    # `[]func` / `[N]func` — admits like a scalar
+                    # `func` result: elements carry no scalar deps,
+                    # and the caller's `mk()[0]()` call runs opaque
+                    # on the container's slot like an imported
+                    # container member does.
+                    or (
+                        r.type.kind in {"slice", "array"}
+                        and r.type.elem is not None
+                        and r.type.elem.kind == "function"
+                    )
                 )
                 for r in fn.results
             )
@@ -13402,9 +13413,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 )
             else:
-                root_ref = self._receiver_root_ref(operand)
-                if root_ref is not None and root_ref.binding_id:
-                    target_id = root_ref.binding_id
+                if operand.type == "call_expression":
+                    # `mk(x)[0]()` — the container is a call result:
+                    # the span stands in for the anonymous slot, and
+                    # the call's `chan` arguments join the external
+                    # model like a `f := mk(ch)` capture (an element
+                    # may hold a closure that sends on it).
+                    target_id = self._immediate_span_id(operand)
+                    callee_deps |= self._func_result_chan_args(
+                        operand, locals_, params
+                    )
+                else:
+                    root_ref = self._receiver_root_ref(operand)
+                    if root_ref is not None and root_ref.binding_id:
+                        target_id = root_ref.binding_id
                 if operand is not None:
                     callee_deps |= self.expression(
                         operand, fn, params, locals_, transfers,
