@@ -15668,6 +15668,30 @@ def test_multi_result_chan_slot_send_recv_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_multi_result_chan_slot_passthrough_aliases_arg(
+    go_types_helper,
+):
+    # `c, n := g(q)` where `g` hands the parameter's queue back in
+    # slot 0 (`return q, 0`) — `c` names the ARGUMENT's queue like
+    # the single-result `c := g(q)` passthrough, so a send on `c`
+    # lands in `q`'s dep set and a receive on `q` reads it back.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) {\n"
+        "\treturn q, 0\n}\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\tc, n := g(q)\n"
+        "\tc <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_multi_result_chan_other_slots_close(go_types_helper):
     # Only the slot declaring a scalar `chan` binds a queue — a
     # `chan` LHS at a position whose result type is not `chan`

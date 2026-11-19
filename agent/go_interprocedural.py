@@ -3563,14 +3563,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
+        index: int = 0,
     ) -> Any | None:
         """`c := g(q)` where `g`'s whole body is `return <param>` —
         the bound name aliases the argument's queue (the callee hands
         the same queue back), so it binds through `chan_aliases`
-        rather than the external-local model. Returns the alias
-        source binding, or None when the callee is not a pure
-        passthrough or the passed-through argument is not a channel
-        identifier."""
+        rather than the external-local model. `index` picks the
+        result slot for a multi-result callee (`c, n := g(q)` checks
+        `return q, 0` at slot 0). Returns the alias source binding,
+        or None when the callee is not a pure passthrough or the
+        passed-through argument is not a channel identifier."""
         inner = node
         while (
             inner is not None
@@ -3617,13 +3619,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             items = [
                 c for c in expr.named_children if c.type != "comment"
             ]
-            expr = items[0] if len(items) == 1 else None
+            expr = items[index] if index < len(items) else None
+        elif index != 0:
+            return None
         if expr is None or expr.type != "identifier":
             return None
         ref = self.references.get(self.node_key(expr))
         if ref is None:
             return None
-        index = next(
+        param_index = next(
             (
                 i
                 for i, p in enumerate(target.parameters)
@@ -3631,7 +3635,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ),
             None,
         )
-        if index is None:
+        if param_index is None:
             return None
         args = inner.child_by_field_name("arguments")
         arg_nodes = (
@@ -3645,11 +3649,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         if call.method_expr:
             # `S.Pick(s, a, b)` — argument 0 is the receiver, so the
-            # callee's declared parameter `index` sits one slot later.
-            index += 1
-        if index >= len(arg_nodes):
+            # callee's declared parameter `param_index` sits one slot
+            # later.
+            param_index += 1
+        if param_index >= len(arg_nodes):
             return None
-        return self._chan_alias_target(arg_nodes[index], locals_, params)
+        return self._chan_alias_target(
+            arg_nodes[param_index], locals_, params
+        )
 
     def _is_make_chan_call(self, node: Any) -> bool:
         """`make(chan T[, cap])` — the one in-fragment channel
@@ -5313,7 +5320,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.chan_aliases[binding.id] = chan_alias.id
                     else:
                         passthrough = self._chan_result_passthrough(
-                            chan_rhs, locals_, params
+                            chan_rhs,
+                            locals_,
+                            params,
+                            i if len(rights) == 1 else 0,
                         )
                         if passthrough is not None:
                             # `c := g(q)` with `g`'s body `return ch`
