@@ -886,6 +886,13 @@ class _Builder:
         self._func_arg_invocations: dict[
             tuple[str, int, int], list[tuple[Any, str]]
         ] = {}
+        # Each call's evaluated-argument deps, accumulated as every
+        # argument returns through `expression` — the set a passed
+        # function value may be invoked WITH. Drained beside
+        # `_func_arg_invocations` when the call finishes.
+        self._call_arg_deps: dict[
+            tuple[str, int, int], frozenset[int]
+        ] = {}
         # Channel aliases — `ch2 := ch` / `var ch2 = ch` / `ch2 = x`
         # copies one queue's name, not its contents, so sends through
         # the alias must land in the SOURCE binding's dep set. The
@@ -5014,6 +5021,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
         saved_func_args = self._func_arg_invocations
+        saved_call_arg_deps = self._call_arg_deps
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -5025,6 +5033,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self.field_chan_queues = {}
         self.external_chan_locals = set()
         self._func_arg_invocations = {}
+        self._call_arg_deps = {}
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -5067,6 +5076,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
             self._func_arg_invocations = saved_func_args
+            self._call_arg_deps = saved_call_arg_deps
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -9213,18 +9223,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if isinstance(result, frozenset):
             for frame in self._read_stack:
                 frame.append(result)
+        parent = node.parent if node is not None else None
+        call_node = parent.parent if parent is not None else None
+        if (
+            isinstance(result, frozenset)
+            and parent is not None
+            and parent.type == "argument_list"
+            and call_node is not None
+            and call_node.type == "call_expression"
+        ):
+            key = self.node_key(call_node)
+            self._call_arg_deps[key] = (
+                self._call_arg_deps.get(key, frozenset()) | result
+            )
         if (
             node is not None
             and node.type == "call_expression"
             and self._func_arg_invocations
         ):
-            self._fold_func_arg_invocations(node, result, transfers)
+            self._fold_func_arg_invocations(node, transfers)
         return result
 
     def _fold_func_arg_invocations(
         self,
         node: Any,
-        deps: frozenset[int],
         transfers: list[CallTransfer],
     ) -> None:
         """Fold `H(G, x)`-shaped argument reads once the call's deps
@@ -9241,6 +9263,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         into `indirect_writes` for a later `<-q` to observe."""
         pending = self._func_arg_invocations.pop(
             self.node_key(node), ()
+        )
+        # What the callee may invoke the passed functions WITH: every
+        # argument the call evaluated, not the call's result — a
+        # `g(x); return 0` callee still hands `x` to the invoked
+        # function even though its own result depends on nothing.
+        arg_deps = self._call_arg_deps.pop(
+            self.node_key(node), frozenset()
         )
         for arg_node, binding_id in pending:
             callee = (
@@ -9274,7 +9303,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for c in callee.calls
                 )
             ):
-                self.indirect_writes |= deps
+                self.indirect_writes |= arg_deps
 
     def _record_read(self, deps: frozenset[int]) -> None:
         """Attribute an implicit read to every open statement

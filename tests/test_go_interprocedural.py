@@ -18172,6 +18172,22 @@ def test_func_name_argument_invocation_sends_visible(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+def test_func_name_argument_invocation_discarded_result(go_types_helper):
+    # `H` invokes the callback but discards its result: `g(x);
+    # return 0`. The broadcast must carry the call's ARGUMENT deps —
+    # the call's own result deps are empty, yet `x` still reaches
+    # the shared queue through `G`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func G(v int64) int64 { q <- v; return v }; "
+        "func H(g func(int64) int64, x int64) int64 { g(x); return 0 }; "
+        "func F(x int64) int64 { H(G, x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
 def test_func_name_argument_pure_callee_no_broadcast(go_types_helper):
     # The same shape with a pure `G`: no write or send can reach the
     # shared queue, so the receive keeps its dep-free result and the
