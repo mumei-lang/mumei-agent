@@ -17997,3 +17997,38 @@ def test_imported_chan_result_nonscalar_elem_stays_closed(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_imported_chan_result_passthrough_arg_shares_queue(
+    go_types_helper,
+):
+    # `ch := lib.G(q)` — the imported callee's body is opaque and
+    # may be `return q`, so `q`'s queue joins the external model:
+    # a send through `ch` broadcasts into `indirect_writes` and a
+    # receive through `q` observes it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tch := lib.G(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q chan int64) chan int64 { return q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+

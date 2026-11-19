@@ -3282,6 +3282,69 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return member
         return None
 
+    def _imported_chan_result_args(
+        self, node: Any, locals_: dict, params: dict
+    ) -> tuple:
+        """The channel arguments of an imported `ch := lib.G(...)`
+        call — every `chan` argument's resolved root binding.
+
+        The imported callee's body is opaque: `lib.G(q)` may hand
+        the caller's own queue back (`return q`), so each channel
+        argument must join the external model — the result may
+        literally be that queue."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return ()
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_import":
+            return ()
+        member = self.members.get(call.target)
+        if (
+            member is None
+            or len(member.result_types) != 1
+            or not self._scalar_chan_fact(member.result_types[0])
+        ):
+            return ()
+        arg_list = next(
+            (
+                c
+                for c in inner.named_children
+                if c.type == "argument_list"
+            ),
+            None,
+        )
+        if arg_list is None:
+            return ()
+        roots = []
+        for arg in arg_list.named_children:
+            if arg.type == "comment":
+                continue
+            while arg.type == "parenthesized_expression":
+                arg = next(
+                    (
+                        c
+                        for c in arg.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+                if arg is None:
+                    break
+            if arg is None or arg.type != "identifier":
+                continue
+            chan = self._chan_binding(arg, locals_, params)
+            if chan is not None:
+                roots.append(self._chan_root(chan.id))
+        return tuple(roots)
+
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
         """The DIRECT field names a `struct{...}` literal declares —
         identifiers of each `field_declaration`'s `name`, plus the
@@ -5175,6 +5238,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         else:
                             self.external_chan_locals.add(binding.id)
+                            # `ch := lib.G(q)` — the imported callee
+                            # may hand `q`'s queue back, so every
+                            # `chan` argument joins the external
+                            # model and its current contents seed
+                            # the bound name's slot.
+                            for arg_root in (
+                                self._imported_chan_result_args(
+                                    rights[i], locals_, params
+                                )
+                            ):
+                                self.external_chan_locals.add(arg_root)
+                                value = value | locals_.get(
+                                    arg_root,
+                                    (
+                                        frozenset({params[arg_root]})
+                                        if arg_root in params
+                                        else frozenset()
+                                    ),
+                                )
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]
@@ -5515,6 +5597,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.external_chan_locals.add(
                                     binding.id
                                 )
+                                for arg_root in (
+                                    self._imported_chan_result_args(
+                                        value_nodes[i], locals_, params
+                                    )
+                                ):
+                                    self.external_chan_locals.add(
+                                        arg_root
+                                    )
+                                    value = value | locals_.get(
+                                        arg_root,
+                                        (
+                                            frozenset(
+                                                {params[arg_root]}
+                                            )
+                                            if arg_root in params
+                                            else frozenset()
+                                        ),
+                                    )
                     if not conditional:
                         self._ptr_deps[binding.id] = (
                             rhs_ptrs[i]
@@ -6575,6 +6675,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_[ref.binding_id] = (
                                 base or frozenset()
                             ) | value
+                            # `ch = lib.G(q)` — an imported callee
+                            # may hand `q`'s queue back, so every
+                            # `chan` argument joins the external
+                            # model and its contents seed the slot.
+                            for arg_root in (
+                                self._imported_chan_result_args(
+                                    rights[i], locals_, params
+                                )
+                            ):
+                                self.external_chan_locals.add(
+                                    arg_root
+                                )
+                                locals_[ref.binding_id] |= (
+                                    locals_.get(
+                                        arg_root,
+                                        (
+                                            frozenset(
+                                                {params[arg_root]}
+                                            )
+                                            if arg_root in params
+                                            else frozenset()
+                                        ),
+                                    )
+                                )
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
