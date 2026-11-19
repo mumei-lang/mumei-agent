@@ -798,6 +798,12 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		if ptr, ok := t.(*types.Pointer); ok {
 			t = ptr.Elem()
 		}
+		// A channel's element type names a dependency too — `chan N`
+		// (or `type QC chan N`) pins N as surely as a parameter or
+		// result of type `N` does.
+		if ch, ok := t.Underlying().(*types.Chan); ok {
+			add(ch.Elem())
+		}
 		var obj *types.TypeName
 		switch typ := t.(type) {
 		case *types.Named:

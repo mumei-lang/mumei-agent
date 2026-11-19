@@ -18067,3 +18067,41 @@ def test_range_over_imported_chan_result_reads_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_imported_chan_result_named_elem_pins_identity(
+    go_types_helper,
+):
+    # `func G() chan N` — the channel's element is a named type
+    # declared in the imported unit; the caller's summary must pin
+    # N's identity so `stale_dependents` re-analyzes when only N
+    # changes.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.G()\n"
+        "\tv := <-ch\n"
+        "\tch <- v\n"
+        "\treturn int64(v)\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "type N int64\n"
+            "func G() chan N { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    member = next(
+        m for m in snapshot.imported_members if m.name == "G"
+    )
+    # The producer emits the element type's identity on the
+    # callee's signature so the caller's call pin covers it.
+    assert member.signature_type_ids
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert set(member.signature_type_ids) <= set(result.pinned)
