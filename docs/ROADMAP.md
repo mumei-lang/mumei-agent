@@ -2683,8 +2683,14 @@ alternative scope and every alternative joins back by
 union — an if/else chain whose guards are comm ops;
 `break` exits the select like a switch clause, an
 empty `select {}` blocks forever and stays closed,
-and a non-identifier receive target (`s.V = <-ch`)
-stays closed — while `len(ch)`/`cap(ch)` now admit as
+and a non-identifier receive target admits the way the
+ordinary assignment does — `s.V = <-ch` accumulates the
+received deps into the composite's base (broadcast on a
+declared-type base), while `*p = <-ch`, `(*p)[i] = <-ch`
+and `(*p)[i].F = <-ch` alias-fold them into every escaped
+binding plus `indirect_writes`; an unbound-container target
+(`a[i] = <-ch`) still stays closed — while
+`len(ch)`/`cap(ch)` now admit as
 dep-free — the queue length and capacity are runtime
 state, not parameter provenance; on a `chan` parameter
 each records an imported transfer like a receive does —
