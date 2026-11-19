@@ -15916,3 +15916,71 @@ def test_empty_select_stays_closed(go_types_helper):
         )
     )
     assert not result.available
+
+
+def test_select_receive_package_var_store_records_write(
+    go_types_helper,
+):
+    # `G = <-ch` mutates package state like `G = v`: the var's own
+    # identity records the imported transfer and `effects` reports
+    # the external mutation — the receive store no longer drops it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var G int64\n"
+            "func F(ch chan int64) int64 {\n"
+            "\tselect {\n"
+            "\tcase G = <-ch:\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert sum(t.imported for t in result.calls) >= 2
+
+
+def test_select_receive_member_store_records_write(go_types_helper):
+    # `lib.VS.F = <-ch` is the imported-member spelling of the same
+    # external store — the member's identity records it.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(ch chan int64) int64 {\n"
+        "\tselect {\n"
+        "\tcase lib.VS.F = <-ch:\n"
+        "\tdefault:\n"
+        "\t}\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    members = {m.name: m for m in snapshot.imported_members}
+    assert any(t.target == members["VS"].id for t in result.calls)
+
+
+def test_select_send_eval_reaches_earlier_case_body(go_types_helper):
+    # Every case's channel operand and send value evaluates once,
+    # in source order, on entering the select: `out <- x` in the
+    # second alternative broadcasts `x` into `indirect_writes`
+    # before any case body runs, so the first case's `<-out`
+    # observes it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64, out chan int64, x int64) int64 {\n"
+            "\tvar r int64\n"
+            "\tselect {\n"
+            "\tcase <-ch:\n"
+            "\t\tr = <-out\n"
+            "\tcase out <- x:\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})

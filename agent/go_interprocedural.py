@@ -2836,7 +2836,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         operator = node.child_by_field_name("operator")
         return operator is not None and operator.type == "<-"
 
-    def _select_receive(
+    def _select_receive_eval(
         self,
         node: Any,
         fn: Function,
@@ -2844,14 +2844,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
-        conditional: bool,
-    ) -> None:
-        """A `communication_case` receive — `v := <-ch`, `v, ok := <-ch`,
-        `v = <-ch`, `v, ok = <-ch` or a bare `<-ch`. The receive
-        evaluates like any `<-` expression (the operand gates the same
-        way); each bound name takes the receive's deps — the comma-ok
-        flag conservatively shares them, matching `v, ok := <-ch`.
-        Only bare-identifier stores admit: `s.V = <-ch` stays closed.
+    ) -> tuple[list, Any, frozenset[int]]:
+        """Evaluate a `communication_case` receive in the entry scope.
+
+        `v := <-ch`, `v, ok := <-ch`, `v = <-ch`, `v, ok = <-ch` or a
+        bare `<-ch`: Go evaluates the channel operand — and, with it,
+        the receive's recorded deps — once, in source order, before
+        any case is chosen, so this runs on the select's pre-state
+        like a send's channel and value operands do. Returns the LHS
+        nodes, the receive node (for diagnostics) and its deps; the
+        bound names store later, inside the chosen alternative.
         """
         lefts: list = []
         recv = None
@@ -2865,8 +2867,50 @@ member, or one explicit dereference of one (`(*t).F` — the same
         recv_deps = self.expression(
             recv, fn, params, locals_, transfers, count, 0
         )
+        return lefts, recv, recv_deps
+
+    def _select_receive_store(
+        self,
+        lefts: list,
+        recv: Any,
+        recv_deps: frozenset[int],
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        conditional: bool,
+    ) -> None:
+        """Bind a select receive's LHS names inside the chosen case.
+
+        Each bound name takes the receive's deps — the comma-ok flag
+        conservatively shares them, matching `v, ok := <-ch`.
+        Bare-identifier stores into locals admit like any `=`/`:=`;
+        `G = <-ch`, `G.V = <-ch` or `lib.V = <-ch` mutate external
+        state the same way the ordinary assignment admits — the
+        var's or member's identity records the transfer and the
+        received deps drop. A composite local's field (`s.V = <-ch`)
+        stays closed.
+        """
         for lhs in lefts:
             if lhs.text == b"_":
+                continue
+            package_write = self._package_var_write(lhs)
+            if package_write is not None:
+                binding, extras, _ = package_write
+                self._record_package_write(
+                    lhs, binding, extras, fn, params, locals_,
+                    transfers, count,
+                )
+                continue
+            member_write = self._imported_member_write(lhs)
+            if member_write is not None:
+                member, extras, _ = member_write
+                self._record_member_write(
+                    lhs, member, extras, fn, params, locals_,
+                    transfers, count,
+                )
                 continue
             if lhs.type != "identifier":
                 raise _Unsupported("unsupported_statement", _span(node))
@@ -7259,20 +7303,52 @@ member, or one explicit dereference of one (`(*t).F` — the same
             frame = {"kind": "switch", "exited": False}
             self.frames.append(frame)
             try:
+                # Go evaluates every case's channel operand and send
+                # value once, in source order, on entering the
+                # select — before a case is chosen. Run each comm
+                # op against the entry scope so a later case's
+                # operand calls (`case out <- h():` mutating a
+                # captured pointer, say) reach every alternative's
+                # join and every earlier case's reads; only the
+                # receive's bound names and each clause's body run
+                # inside a fresh alternative.
+                receives: list[
+                    tuple[list, Any, frozenset[int]] | None
+                ] = []
                 for clause in clauses:
-                    branch = dict(locals_)
-                    ptr_branch = dict(self._ptr_deps)
+                    receive = next(
+                        (
+                            s
+                            for s in clause.named_children
+                            if s.type == "receive_statement"
+                        ),
+                        None,
+                    )
+                    if receive is not None:
+                        receives.append(
+                            self._select_receive_eval(
+                                receive, fn, params, locals_,
+                                transfers, count,
+                            )
+                        )
+                        continue
+                    receives.append(None)
                     for sub in clause.named_children:
                         if sub.type == "send_statement":
                             self._branch_statement(
-                                sub, fn, params, branch, transfers,
+                                sub, fn, params, locals_, transfers,
                                 count, deps, saw_return, conditional,
                             )
-                        elif sub.type == "receive_statement":
-                            self._select_receive(
-                                sub, fn, params, branch, transfers,
-                                count, conditional,
-                            )
+                for clause, receive in zip(clauses, receives):
+                    branch = dict(locals_)
+                    ptr_branch = dict(self._ptr_deps)
+                    if receive is not None:
+                        lefts, recv, recv_deps = receive
+                        self._select_receive_store(
+                            lefts, recv, recv_deps, clause, fn,
+                            params, branch, transfers, count,
+                            conditional,
+                        )
                     body = next(
                         (
                             c
