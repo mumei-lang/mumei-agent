@@ -13066,6 +13066,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 callee_node, fn, params, locals_, transfers, count,
                 depth + 1,
             )
+            # The returned func value may capture a `chan` the
+            # producing call received — `mk(ch)(x)` may send `x`
+            # into `ch`'s queue, so its `chan` arguments join the
+            # external model exactly like `f := mk(ch)` binds.
+            callee_deps |= self._func_result_chan_args(
+                callee_node, locals_, params
+            )
             target_id = self._immediate_span_id(callee_node)
         if target_id is None:
             raise _Unsupported("unsupported_expression", _span(node))

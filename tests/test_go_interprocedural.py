@@ -20553,6 +20553,30 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     assert not result.available
 
 
+def test_call_result_callee_chan_arg_joins_external_queue(
+    go_types_helper,
+):
+    # `mk(ch)(x)` — the returned func may capture `ch` and send
+    # `x` into it, so the inner call's `chan` argument joins the
+    # external model like `f := mk(ch)` does: `<-ch` afterwards
+    # observes `x` through `indirect_writes`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func snd(c chan int64, v int64) { c <- v }\n"
+        "func mk(ch chan int64) func(int64) {\n"
+        "    return func(x int64) { snd(ch, x) }\n"
+        "}\n"
+        "func F(x int64) int64 {\n"
+        "    ch := make(chan int64)\n"
+        "    mk(ch)(x)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_func_result_imported_stays_closed(go_types_helper):
     # `f := lib.Mk()` — the producer classifies a func-result callee
     # as `external_or_bodyless`, so the call stays closed.
