@@ -497,3 +497,16 @@ def test_route_refuses_output_over_key_registry(tmp_path):
         == 1
     )
     assert json.loads(registry.read_text())["registry"] != {}
+
+
+def test_key_registry_unhashable_key_id_reports_false():
+    from agent.core_evidence import producer_key_registry
+
+    for bad_id in (["k"], {"k": 1}):
+        verification = verify_signature_envelope(
+            _envelope(producer_key_id=bad_id),
+            _PUBLIC_KEY_HEX,
+            key_registry=producer_key_registry(_registry_doc()),
+            reference_time=_REFERENCE,
+        )
+        assert verification["key_authentic"] is False

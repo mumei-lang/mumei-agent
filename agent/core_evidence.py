@@ -692,7 +692,12 @@ def evaluate_signature_envelope(
         # authentic registry needs the distribution/attestation story
         # (the route emits no claim about where the document came
         # from).
-        entry = key_registry.get(envelope.get("producer_key_id"))
+        key_id = envelope.get("producer_key_id")
+        # A non-string producer key id already fails `match`'s shape
+        # check; an unhashable one (list/dict) would raise TypeError
+        # inside `get`, so guard the lookup instead of crashing on a
+        # malformed envelope.
+        entry = key_registry.get(key_id) if type(key_id) is str else None
         evaluation["key_authentic"] = (
             match
             and entry is not None
@@ -837,7 +842,8 @@ def verify_signature_envelope(
         # `key_authentic` holds only when the envelope matched AND
         # its producer key id names an entry whose declared window
         # covers the declared reference time.
-        entry = key_registry.get(envelope.get("producer_key_id"))
+        key_id = envelope.get("producer_key_id")
+        entry = key_registry.get(key_id) if type(key_id) is str else None
         verification["key_authentic"] = (
             match
             and entry is not None
