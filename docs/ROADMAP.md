@@ -3935,7 +3935,6 @@ composite result stays `external_or_bodyless` still admits through
 the index (the member's `result_types` carry the fact) — the call
 folds through the minimal opaque-argument union — while struct
 elements, multi-result calls and local callees whose composite
-<<<<<<< HEAD
 result is not summarizable stay closed.
 A bare composite binding — `s := lib.G(a)` or `var s = lib.G(a)` —
 now admits when the callee's declared single result is a slice,
@@ -3955,10 +3954,6 @@ non-scalar elements stay closed, as do `param` containers.
 Multi-level index READS (`s[i][j]`) admit one `elem` descent per
 level like the imported-member read; element WRITES stay
 one-level (`s[i] = v` only).
-||||||| 8d73e76e
-result is not summarizable.
-=======
-result is not summarizable.
 A range over a call result — `for _, v := range lib.G(a)` and the
 explicit `for range *lib.P(a)` deref — admits on the same shape:
 the imported member's `result_types` carry the container (or
@@ -3978,9 +3973,9 @@ promoted onto the external queue, writes stored, and a transfer
 recorded on the member). A resolvable callee — local or
 `direct_import` — evaluates through `expression` for its effects
 only, so `len(lib.S(x))` on a string result admits too. The
-pointer operand (`len(*lib.P(x))`), `len` on a bound local, and
-index/field chains keep the existing closure.
->>>>>>> origin/develop
+pointer operand (`len(*lib.P(x))`), `len` on a bound local other
+than the bare composite binding above, and index/field chains keep
+the existing closure.
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.

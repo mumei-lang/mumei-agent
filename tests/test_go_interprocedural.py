@@ -26292,6 +26292,91 @@ def test_range_over_deref_pointer_result_call_reads_copy(
     assert all(t.target for t in result.calls)
 
 
+def test_spread_multi_result_call_arg_local_callee_stays_closed(
+    go_types_helper,
+):
+    # `W(G(x))` — a multi-result call spreads across the local
+    # callee's parameters; the one argument node cannot map to the
+    # declared `return_dependencies` indices, so the unit fails
+    # closed rather than reading `actual` out of bounds.
+    files = {
+        "a.go": "package p\n"
+        "func G(a int64) (int64, *int64) { return a, nil }\n"
+        "func W(s int64, p *int64) int64 { return s }\n"
+        "func F(x int64) int64 {\n"
+        "\treturn W(G(x))\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_single_result_call_arg_admits(go_types_helper):
+    # `lib.H(lib.G(x))` — a single-result call argument admits: its
+    # dep set folds into the call like any expression.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := lib.H(lib.G(x))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(a int64) int64 { return a }\n"
+            "func H(b int64) int64 { return b }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_len_call_result_imported_slice(go_types_helper):
+    # `len(lib.G(x))` — a call result's length is runtime container
+    # state whose provenance is the call's own dep set, like an
+    # index read on the same result, while the bodyless callee
+    # folds minimally (member transfer recorded).
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(lib.G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert all(t.target for t in result.calls)
+
+
 def test_len_call_result_imported_map(go_types_helper):
     # `len(lib.M(x))` — a map result admits the same arm.
     files = {

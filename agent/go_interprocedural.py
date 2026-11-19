@@ -15723,6 +15723,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             raise _Unsupported(reason, _span(node), target_id)
         assert callee.return_dependencies is not None
+        if any(
+            parameter >= len(actual)
+            for parameter in callee.return_dependencies
+        ):
+            # `W(G(x))` — a multi-result call spreads across the
+            # callee's parameters; the one argument node cannot map
+            # to them positionally.
+            raise _Unsupported(
+                "call_mapping_unavailable", _span(node), target_id
+            )
         result = frozenset(
             i for parameter in callee.return_dependencies for i in actual[parameter]
         )
@@ -17771,6 +17781,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             raise _Unsupported(reason, _span(node), method_id)
         assert callee.return_dependencies is not None
+        if any(
+            parameter >= len(actual)
+            for parameter in callee.return_dependencies
+        ):
+            raise _Unsupported(
+                "call_mapping_unavailable", _span(node), method_id
+            )
         result = frozenset(
             i
             for parameter in callee.return_dependencies
@@ -18306,6 +18323,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # follows the callee's declared effects exactly like a
             # local callee's own transfers — a bounded callee leaves
             # the caller's `effects` bounded too.
+            if any(
+                i >= len(actual) for i in declared.return_dependencies
+            ):
+                # A multi-result call spreads across the declared
+                # callee's parameters — the one argument node cannot
+                # map to them positionally.
+                raise _Unsupported(
+                    "call_mapping_unavailable", call.span, call.target
+                )
             result = (
                 frozenset().union(
                     *(actual[i] for i in declared.return_dependencies)
