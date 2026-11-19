@@ -5127,6 +5127,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
                     self._scalar_chan_binding(binding.id)
+                    # A multi-valued call's slot has no per-result RHS
+                    # node — `_, ch := G(q)`'s ch names a channel the
+                    # conflated dep set cannot model, so it stays
+                    # closed rather than guessing at rights[i].
+                    and len(lefts) == len(rights)
                     and (
                         self._is_make_chan_call(rights[i])
                         or self._chan_alias_target(
@@ -5462,6 +5467,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding.type.kind == "chan"
                         and (
                             not self._scalar_chan_binding(binding.id)
+                            # `var _, ch = G(q)` — a multi-valued
+                            # call's slot produces a channel the dep
+                            # model cannot carry; stays closed like
+                            # the short-decl form.
+                            or (
+                                value_nodes
+                                and len(names) != len(value_nodes)
+                            )
                             or (
                                 value_nodes
                                 and not self._is_make_chan_call(

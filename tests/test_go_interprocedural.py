@@ -2896,6 +2896,39 @@ def test_multi_result_method_call_unpacks(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_multi_result_chan_slot_stays_closed(go_types_helper):
+    # `_, ch := G(q)` — a channel in a non-first result slot has no
+    # per-slot RHS node, so the bind stays closed rather than
+    # indexing past `rights` or modelling an unresolvable queue.
+    files = {
+        "a.go": "package p\n"
+        "func G(q chan int64) (int64, chan int64) { return 1, q }\n"
+        "func F(q chan int64) int64 {\n"
+        "\t_, ch := G(q)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_multi_result_chan_slot_var_form_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func G(q chan int64) (int64, chan int64) { return 1, q }\n"
+        "func F(q chan int64) int64 {\n"
+        "\tvar _, ch = G(q)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_multi_result_arity_mismatch_stays_closed(go_types_helper):
     # `a, b := f()` admits only when the record's declared arity equals
     # the tuple width — a forged `results: 3` on a two-wide unpack must
