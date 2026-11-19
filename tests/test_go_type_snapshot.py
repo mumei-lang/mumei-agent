@@ -425,7 +425,6 @@ def test_callee_change_invalidates_entire_unit_even_with_unchanged_caller_body(
         "func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }",
         "func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }",
         "func F(x int64) uint64 { return uint64(x) }",
-        "func G() {}; func F() { defer G(); go G() }",
         "func F() int64 { return (func() int64 { return 1 })() }",
         "func F(f func()) { _ = f }",
         "func G() int64 { return 1 }; var V = G(); func F() int64 { return V }",

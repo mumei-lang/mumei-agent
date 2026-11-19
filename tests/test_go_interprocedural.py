@@ -18379,6 +18379,116 @@ def test_func_name_alias_assignment_and_param(go_types_helper):
     assert [c.target for c in result.calls] == [g_id, g_id]
 
 
+def test_func_name_argument_admitted(go_types_helper):
+    # `H(G, x)` — a declared function name in a call's argument list
+    # reads dep-free (it is a declaration, not data) while G's own
+    # binding and signature identities pin, so a redeclare of `G`
+    # stales the caller. The invocation itself is H's business: its
+    # summary already folds the func-typed parameter's external call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func H(g func(int64) int64, x int64) int64 { return g(x) }; "
+        "func F(x int64) int64 { return H(G, x) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert named(source, snapshot, summaries, "G").binding_id in result.pinned
+
+
+def test_func_name_argument_through_external_call(go_types_helper):
+    # `f(G)` — the same read admits through an opaque external call
+    # (a func-typed parameter): the callee may invoke G at an unknown
+    # time, but that is exactly what the external transfer reports.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func F(f func(func(int64) int64) int64) int64 { return f(G) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert named(source, snapshot, summaries, "G").binding_id in result.pinned
+
+
+def test_func_name_argument_invocation_sends_visible(go_types_helper):
+    # `H(G, x)` where the invoked `G` sends its argument into a
+    # shared external channel: the receive must see the call's deps —
+    # the invocation is recorded on G's identity and the call's deps
+    # broadcast into `indirect_writes`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func G(v int64) int64 { q <- v; return v }; "
+        "func H(g func(int64) int64, x int64) int64 { return g(x) }; "
+        "func F(x int64) int64 { H(G, x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_name_argument_invocation_discarded_result(go_types_helper):
+    # `H` invokes the callback but discards its result: `g(x);
+    # return 0`. The broadcast must carry the call's ARGUMENT deps —
+    # the call's own result deps are empty, yet `x` still reaches
+    # the shared queue through `G`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func G(v int64) int64 { q <- v; return v }; "
+        "func H(g func(int64) int64, x int64) int64 { g(x); return 0 }; "
+        "func F(x int64) int64 { H(G, x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_name_argument_receiver_value_reaches_callback(go_types_helper):
+    # `st.M(G)`: the method hands its receiver's field to the
+    # callback — `g(st.V)` — so the RECEIVER's deps join the call's
+    # argument deps for the broadcast, not just the syntactic
+    # argument list's.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "type T struct { V int64 }; "
+        "func G(v int64) int64 { q <- v; return v }; "
+        "func (st T) M(g func(int64) int64) int64 { g(st.V); return 0 }; "
+        "func F(x int64) int64 { var st T; st.V = x; st.M(G); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_name_argument_pure_callee_no_broadcast(go_types_helper):
+    # The same shape with a pure `G`: no write or send can reach the
+    # shared queue, so the receive keeps its dep-free result and the
+    # recorded transfer is not `imported`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func G(v int64) int64 { return v }; "
+        "func H(g func(int64) int64, x int64) int64 { return g(x) }; "
+        "func F(x int64) int64 { H(G, x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+    g_id = named(source, snapshot, summaries, "G").binding_id
+    g_calls = [c for c in result.calls if c.target == g_id]
+    assert g_calls and not any(c.imported for c in g_calls)
+
+
+def test_func_name_non_argument_positions_stay_closed(go_types_helper):
+    # A function name outside store-RHS and argument positions —
+    # here the operand of a comparison — still names no readable
+    # value and stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func F() bool { return G == nil }",
+    )
+    assert not named(source, snapshot, summaries).available
+
+
 def test_conditional_func_alias_on_param_stays_external(go_types_helper):
     result = named(
         *unit(
@@ -19551,3 +19661,163 @@ def test_void_callee_external_chan_write_reaches_through_two_hops(
     h = named_package(files, snapshot, summaries, "H")
     assert f.available and h.available
     assert f.return_dependencies == h.return_dependencies
+
+
+def test_go_statement_admitted(go_types_helper):
+    # `go g(x)`: the callee and its arguments evaluate at the
+    # statement, the goroutine's result is discarded — the call
+    # folds like a plain call whose effects may (or may not)
+    # happen.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func g(x int64) int64 { q <- x; return x }; "
+        "func F(x int64) int64 { go g(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_statement_admitted(go_types_helper):
+    # `defer g(x)`: arguments evaluate at the statement, the call
+    # runs before the function returns — its effects fold exactly
+    # like the plain call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func g(x int64) int64 { q <- x; return x }; "
+        "func F(x int64) int64 { defer g(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_go_pure_callee_admitted(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func g(x int64) int64 { return x }; "
+        "func F(x int64) int64 { go g(x); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    g_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "g"
+    )
+    assert any(c.target == g_id for c in result.calls)
+
+
+def test_go_func_literal_stays_closed(go_types_helper):
+    # `go func(){...}()` — the extractor classifies a func_literal
+    # callee as `closure`, which the CFG gate keeps closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { go func() { }(); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_defer_void_callee_admitted(go_types_helper):
+    # A void callee admits on this branch — `defer s(x)` folds
+    # the deferred send's effects like the plain statement call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func s(x int64) { q <- x }; "
+        "func F(x int64) int64 { defer s(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_go_statement_imported_callee(go_types_helper):
+    # `go lib.G(x)` — the `special` marker rides the package call
+    # record, and the imported callee still classifies.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { go lib.G(x); return x }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G(x int64) int64 { return x }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    call = next(c for c in snapshot.calls if c.special)
+    assert call.special == "concurrent" and call.kind == "direct_import"
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_may_write_reaches_named_result(go_types_helper):
+    # `defer set(&r,x); return 0` — the deferred store lands AFTER
+    # `r = 0` is evaluated, so F actually returns x. The dep model
+    # must carry the deferred call's argument deps into the named
+    # result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func set(p *int64, v int64) int64 { *p = v; return v }; "
+        "func F(x int64) (r int64) { defer set(&r, x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_pure_callee_does_not_touch_result(go_types_helper):
+    # A deferred callee with no write capacity can't change the
+    # named result — `return 0` stays dep-free.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func logv(v int64) int64 { return v }; "
+        "func F(x int64) (r int64) { defer logv(x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_defer_argument_calls_record_once(go_types_helper):
+    # `defer G(Id(x))` evaluates the argument exactly once — Id's
+    # transfer appears once in the caller's call list, not twice.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func Id(v int64) int64 { return v }; "
+        "func G(v int64) int64 { return v }; "
+        "func F(x int64) int64 { defer G(Id(x)); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    id_fn = next(
+        f for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "Id"
+    )
+    g_fn = next(
+        f for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "G"
+    )
+    assert sorted(c.target for c in result.calls) == sorted(
+        [id_fn.binding_id, g_fn.binding_id]
+    )
+
+
+def test_defer_indirect_callee_arg_deps_reach_named_result(
+    go_types_helper,
+):
+    # `defer cb(&r,x)` through an unresolvable func value — the
+    # opaque call records no argument deps on its transfer, but the
+    # deferred write can still carry x into the named result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var cb func(*int64, int64) int64; "
+        "defer cb(&r, x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert 0 in result.return_dependencies

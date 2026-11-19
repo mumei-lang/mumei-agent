@@ -2133,8 +2133,13 @@ body hash and half-open, body-relative Unicode-codepoint spans, not byte offsets
 or resolved source-file identities. Calls are opaque, normally-returning steps;
 this is not an interprocedural, exceptional-flow or concurrency model.
 
-Unsupported switch/select, defer/go, heuristic termination, labels/goto and
-other statements return explicit source-mapped gaps **without** a partial
+A `go`/`defer` statement now admits like an expression-statement call:
+Go evaluates the callee and its arguments at the statement itself, so
+the call folds normally while its result is discarded — a `defer`d
+call runs before the function returns and a goroutine's effects may
+happen, and the union model covers both orderings. Unsupported
+switch/select, heuristic termination, labels/goto and other
+statements return explicit source-mapped gaps **without** a partial
 graph. Parse/parser unavailability also produces a gap. More language/type
 coverage, fixed-point CFG dataflow and full source provenance remain open
 C02/C05/C06 work.
@@ -2441,8 +2446,11 @@ This is not SSA, alias/value-flow analysis or cross-file cache invalidation.
 Only ordinary calls resolved to an implemented, non-method, non-generic,
 non-variadic function declaration in this unit get a `direct_local` target.
 Function variables/aliases, selectors, methods, generic/variadic calls,
-bodyless declarations, builtins, conversions, defer/go and closure/initializer
-contexts stay explicit and opaque. A direct target says nothing about purity,
+bodyless declarations, builtins, conversions and closure/initializer
+contexts stay explicit and opaque. A call inside a `go` or `defer`
+statement classifies normally and carries a `special`
+("concurrent"/"deferred") marker, since the callee resolves and its
+arguments evaluate at the statement like any other call. A direct target says nothing about purity,
 termination, recursion, argument/return/effect transfer or proof. Non-scalar
 value semantics remain explicit gaps even when declaration lookup succeeds.
 
@@ -2741,7 +2749,17 @@ path-dependent — a different function, a literal, or a
 param still carrying the caller's callback — drops the
 alias so the call falls back to the opaque external model;
 a package-level `var Alias = Id` keeps the opaque external
-model since any caller may reassign it. An in-place
+model since any caller may reassign it. A function name in a
+call's argument list — `H(G, args)` — reads dep-free: it is a
+declaration, not data, but the callee may invoke it, so the
+read queues a pending invocation that the call's own fold
+drains once its deps are known — recording a transfer on G's
+identity (`imported` when G's effects are unbounded) and,
+when G can write or send into shared state, broadcasting the
+call's deps into `indirect_writes` for a later receive to
+observe. G's binding and signature identities pin for
+staleness. Other non-store positions — a `return`, a
+comparison operand — stay closed. An in-place
 literal call — `func(...) T { ... }(args)` — admits like
 a bound-literal call whose captures resolve at the call
 site: the result unions the captured bindings' current
@@ -2759,8 +2777,10 @@ written value's deps on that binding at the call site
 function name inside the literal body (`return G(x)`)
 needs no capture — only the send/go/defer statements
 that target a shared queue stay closed. A function name
-read in any non-store position (argument,
-return, operand) stays closed),
+read in a call's argument list admits dep-free (the
+possible invocation folds through the call's own record);
+a name in any other non-store position
+(return, operand) stays closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies

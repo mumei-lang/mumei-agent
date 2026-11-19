@@ -144,6 +144,12 @@ type call struct {
 	// composite imported var receiver (`lib.S.PF(lib.VS)`) is a
 	// dep-free external read like `lib.VS.PF()`.
 	MethodExpr bool `json:"method_expr,omitempty"`
+	// Special marks a call evaluated inside a `go` or `defer`
+	// statement — "concurrent" or "deferred" respectively. The
+	// callee classifies normally: Go evaluates the function and
+	// arguments at the statement itself, so only the invocation's
+	// timing differs from a plain call.
+	Special string `json:"special,omitempty"`
 }
 
 type gap struct {
@@ -1637,9 +1643,7 @@ func analyze(req request) (out snapshot) {
 				special[node.Call] = "deferred"
 			case *ast.CallExpr:
 				kind, target, method, results, typeArgIDs := ix.classify(node, functions)
-				if override, ok := special[node]; ok {
-					kind, target, method, results, typeArgIDs = override, "", false, 0, nil
-				}
+				specialKind := special[node]
 				methodExpr := false
 				if kind == "direct_import" || kind == "direct_local" || kind == "interface_dispatch" {
 					if e, ok := unparen(node.Fun).(*ast.SelectorExpr); ok {
@@ -1663,7 +1667,7 @@ func analyze(req request) (out snapshot) {
 				for _, arg := range node.Args {
 					args = append(args, ix.nodeSpan(arg))
 				}
-				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs, methodExpr})
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs, methodExpr, specialKind})
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}

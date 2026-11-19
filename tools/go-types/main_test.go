@@ -126,8 +126,6 @@ func TestOpaqueCalls(t *testing.T) {
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id(x) }", "method_generic_or_variadic"},
 		{"func V(x ...int) int { return 1 }; func F() int { return V(1) }", "method_generic_or_variadic"},
-		{"func G() {}; func F() { go G() }", "concurrent"},
-		{"func G() {}; func F() { defer G() }", "deferred"},
 		{"func F() int { return (func() int { return 1 })() }", "indirect_or_selector"},
 	}
 	for _, tc := range cases {
@@ -140,6 +138,22 @@ func TestOpaqueCalls(t *testing.T) {
 			if len(out.Calls) != 1 || out.Calls[0].Kind != tc.kind ||
 				(out.Calls[0].Target == "") == wantTarget {
 				t.Fatal("an unsupported call acquired a direct target")
+			}
+		})
+	}
+}
+
+func TestGoDeferCallsClassifyWithSpecial(t *testing.T) {
+	cases := []struct{ source, special string }{
+		{"func G(x int64) int64 { return x }; func F(x int64) int64 { go G(x); return x }", "concurrent"},
+		{"func G(x int64) int64 { return x }; func F(x int64) int64 { defer G(x); return x }", "deferred"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.special, func(t *testing.T) {
+			out := checked(t, "package p; "+tc.source, "amd64")
+			if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_local" ||
+				out.Calls[0].Target == "" || out.Calls[0].Special != tc.special {
+				t.Fatal("a go/defer call did not keep its classified target")
 			}
 		})
 	}

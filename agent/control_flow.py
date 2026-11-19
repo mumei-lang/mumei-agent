@@ -93,7 +93,9 @@ class CFGConstruction:
     gaps: tuple[CFGGap, ...] = ()
 
 
-_SIMPLE = frozenset({"define", "assign", "inc", "dec", "const", "var", "expr"})
+_SIMPLE = frozenset(
+    {"define", "assign", "inc", "dec", "const", "var", "expr", "go", "defer"}
+)
 _STRUCTURED = frozenset(
     {"if", "for", "range", "block", "return", "terminate", "switch"}
 )
@@ -472,7 +474,8 @@ def _use_text(statement: tree_sitter_extract.Statement) -> str:
         return statement.condition
     if statement.kind == "case":
         return " ".join(statement.values)
-    if statement.kind in {"range", "return", "expr", "define", "const", "var"}:
+    if statement.kind in {"range", "return", "expr", "define", "const",
+                          "var", "go", "defer"}:
         return " ".join(statement.values)
     if statement.kind == "assign":
         # Compound targets (x.f, a[i], *p) are reads of every identifier
