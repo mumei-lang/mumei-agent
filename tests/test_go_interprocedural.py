@@ -22501,3 +22501,80 @@ def test_func_elem_named_container_type_pins_identity(go_types_helper):
     fm = next(b for b in snapshot.bindings if b.name == "fm")
     assert result.available
     assert fm.type.type_id in result.pinned
+
+
+def test_func_elem_collection_arg_folds_element_writes(go_types_helper):
+    # `g(fs)` — an opaque callee may invoke `fs[k]` inside; a
+    # collection argument queues like a passed func value so its
+    # elements' write targets fold at the call site. `fs[0]` writes
+    # `a = x`, so `a` must carry `x`'s deps after the call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(g func([]func(int64) int64), x int64) int64 {\n"
+        "    var a int64\n"
+        "    fs := []func(int64) int64{func(v int64) int64 { a = x; return a }}\n"
+        "    g(fs)\n"
+        "    return a\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_func_elem_conversion_call_arg_callback_writeback(
+    go_types_helper,
+):
+    # `fs[0](g)` — the conversion-form element call carries `g` as
+    # its operand argument; the callback's write target `a` must
+    # fold the call's argument deps like `h(g)` does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fs []func(func()), x int64) int64 {\n"
+        "    var a int64\n"
+        "    g := func() { a = x }\n"
+        "    fs[0](g)\n"
+        "    return a\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_func_literal_conversion_elem_call_capture(go_types_helper):
+    # `fs[i](x)` inside a literal — the type-position `fs`/`i` are
+    # still captured reads, and the conversion shape is a real call:
+    # the literal's deps and effectfulness must reflect both.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fs []func(int64) int64, i int64, x int64) int64 {\n"
+        "    cl := func() int64 { return fs[i](x) }\n"
+        "    return cl()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_elem_conversion_result_chan_arg_promoted(
+    go_types_helper,
+):
+    # `f := fs[0](ch)` — the produced closure may capture `ch`;
+    # the chan argument promotes to the external model like
+    # `mk(ch)` does, so a later opaque `f()` send is observed by
+    # `<-ch`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(fs []func(chan int64) func() int64, x int64, y int64) int64 {\n"
+        "    ch := make(chan int64)\n"
+        "    f := fs[0](ch)\n"
+        "    _ = f()\n"
+        "    _ = y\n"
+        "    return x + <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
