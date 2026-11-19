@@ -4219,6 +4219,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return node
 
+    def _comma_ok_opaque_map(self, node: Any, width: int) -> bool:
+        """`v, ok := m[k]` on a bound opaque map (`m := lib.M(a)`).
+
+        Same two-name shape as the imported-member comma-ok: the
+        read flows through `_imported_index_read`'s bound-container
+        arm, so the value carries the container's conflated deps
+        plus the key's; the flag conservatively takes them too."""
+        if width != 2 or node is None or node.type != "index_expression":
+            return False
+        operand = node.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = next(
+                (
+                    c
+                    for c in operand.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if operand is None or operand.type != "identifier":
+            return False
+        ref = self.references.get(self.node_key(operand))
+        if (
+            ref is None
+            or ref.binding_id not in self._opaque_container_tokens
+        ):
+            return False
+        binding = self.bindings.get(ref.binding_id)
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "map"
+        )
+
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
         """(member, single-result fact) for a call operand.
 
@@ -7581,6 +7618,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is None
                     and self._comma_ok_map_index(rights[0], len(lefts))
                     is None
+                    and not self._comma_ok_opaque_map(
+                        rights[0], len(lefts)
+                    )
                     and not self._is_chan_recv(rights[0], len(lefts))
                 ):
                     raise _Unsupported("unsupported_statement", _span(node))
@@ -8184,6 +8224,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             value_nodes[0], len(names)
                         )
                         is not None
+                        or self._comma_ok_opaque_map(
+                            value_nodes[0], len(names)
+                        )
                         or self._is_chan_recv(
                             value_nodes[0], len(names)
                         )
@@ -8915,6 +8958,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is not None
                     or self._comma_ok_map_index(rights[0], len(lefts))
                     is not None
+                    or self._comma_ok_opaque_map(rights[0], len(lefts))
                     or self._is_chan_recv(rights[0], len(lefts))
                 )
             )
