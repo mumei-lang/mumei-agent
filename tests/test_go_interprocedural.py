@@ -23910,14 +23910,17 @@ def test_func_elem_nested_array_element_copies(go_types_helper):
 
 
 def test_func_elem_nested_fresh_slot_isolated(go_types_helper):
-    # `fm := [][]func{fs}` — only slot 0 aliases `fs`'s backing;
-    # `fm[1]` is a fresh nil inner slice, so a store through
-    # `fm[1][i]` must not reach `fs`.
+    # `fm := [][]func{fs, []func{…}}` — only slot 0 aliases `fs`'s
+    # backing; `fm[1]` is a fresh inner slice the store writes for
+    # real, so `fm[1][i]` must not reach `fs`.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    fs := []func() int64{func() int64 { return 0 }}\n"
-        "    fm := [][]func() int64{fs, nil}\n"
+        "    fm := [][]func() int64{\n"
+        "        fs,\n"
+        "        []func() int64{func() int64 { return 0 }},\n"
+        "    }\n"
         "    fm[1][0] = func() int64 { return x }\n"
         "    _ = fm\n"
         "    return fs[0]()\n"
