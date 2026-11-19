@@ -23146,6 +23146,7 @@ def test_func_elem_parallel_append_same_backing(go_types_helper):
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
         "    a2 := a\n"
         "    z := func() int64 { return 0 }\n"
         "    var c []func() int64\n"
@@ -23213,6 +23214,7 @@ def test_func_elem_parallel_fresh_backing_leaves_append(go_types_helper):
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
         "    z := func() int64 { return 0 }\n"
         "    var b []func() int64\n"
         "    a, b = make([]func() int64, 1), append(a, z)\n"
@@ -23257,6 +23259,7 @@ def test_func_elem_parallel_copy_uses_eval_backing(go_types_helper):
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
         "    b := a\n"
         "    d := []func() int64{}\n"
         "    z := func() int64 { return 0 }\n"
@@ -23281,6 +23284,7 @@ def test_func_elem_parallel_copy_keeps_old_sharer(go_types_helper):
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    a := make([]func() int64, 1, 2)\n"
+        "    a[0] = func() int64 { return 0 }\n"
         "    b := a\n"
         "    d := []func() int64{}\n"
         "    z := func() int64 { return 0 }\n"
