@@ -18156,6 +18156,40 @@ def test_func_name_argument_through_external_call(go_types_helper):
     assert named(source, snapshot, summaries, "G").binding_id in result.pinned
 
 
+def test_func_name_argument_invocation_sends_visible(go_types_helper):
+    # `H(G, x)` where the invoked `G` sends its argument into a
+    # shared external channel: the receive must see the call's deps —
+    # the invocation is recorded on G's identity and the call's deps
+    # broadcast into `indirect_writes`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func G(v int64) int64 { q <- v; return v }; "
+        "func H(g func(int64) int64, x int64) int64 { return g(x) }; "
+        "func F(x int64) int64 { H(G, x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_name_argument_pure_callee_no_broadcast(go_types_helper):
+    # The same shape with a pure `G`: no write or send can reach the
+    # shared queue, so the receive keeps its dep-free result and the
+    # recorded transfer is not `imported`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func G(v int64) int64 { return v }; "
+        "func H(g func(int64) int64, x int64) int64 { return g(x) }; "
+        "func F(x int64) int64 { H(G, x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+    g_id = named(source, snapshot, summaries, "G").binding_id
+    g_calls = [c for c in result.calls if c.target == g_id]
+    assert g_calls and not any(c.imported for c in g_calls)
+
+
 def test_func_name_non_argument_positions_stay_closed(go_types_helper):
     # A function name outside store-RHS and argument positions —
     # here the operand of a comparison — still names no readable
