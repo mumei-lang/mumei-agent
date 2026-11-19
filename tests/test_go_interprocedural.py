@@ -15562,3 +15562,38 @@ def test_struct_argument_observes_callee_writes(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_anonymous_struct_rebind_keeps_field_window(go_types_helper):
+    # `cp, z := struct{ V int64 }{...}, int64(0)` — identical anon
+    # literals unify in the type checker, so `cp.V` resolves to the
+    # first literal's field; the window's name match keeps it direct.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(y int64) int64 {\n"
+            "\tst := struct{ V int64 }{V: y}\n"
+            "\tcp := st\n"
+            "\tcp, z := struct{ V int64 }{V: y}, int64(0)\n"
+            "\t_ = z\n"
+            "\treturn cp.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_var_rebind_keeps_field_window(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(y int64) int64 {\n"
+            "\tvar cp = struct{ V int64 }{V: y}\n"
+            "\tcp = struct{ V int64 }{V: y}\n"
+            "\treturn cp.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})

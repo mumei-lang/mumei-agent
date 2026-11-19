@@ -1173,10 +1173,20 @@ class _Builder:
                 ) or getattr(container_binding, "span", None)
                 if span is None:
                     return False
-                direct = {
-                    f.id for f in self._fields_declared_after(span)
-                }
-                if resolved_fields[j].id not in direct:
+                window = self._fields_declared_after(span)
+                direct = {f.id for f in window}
+                # Identical anonymous struct literals unify in the
+                # type checker — `cp, z := struct{ V int64 }{...}, _`
+                # resolves `cp.V` to the FIRST literal's field
+                # binding, outside this window. A name match against
+                # the window's own fields keeps that resolution
+                # admitted while a promoted name still misses.
+                direct_names = {f.name for f in window}
+                resolved = resolved_fields[j]
+                if (
+                    resolved.id not in direct
+                    and resolved.name not in direct_names
+                ):
                     return False
                 continue
             type_binding = self._pointee_type(type_id)
@@ -3048,7 +3058,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
-        if inner is None or inner.type != "call_expression":
+        if inner is None:
+            return None
+        if inner.type == "composite_literal":
+            # `p = struct{ V int64 }{V: y}` — the literal's own
+            # `struct_type` declares the fields; anchoring at its
+            # start keeps a rebind's window from falling back to the
+            # name's span (or popping an earlier anchor).
+            literal = inner.child_by_field_name("type")
+            if literal is None or literal.type != "struct_type":
+                return None
+            return FileSpan(
+                self.current_file,
+                literal.start_byte,
+                literal.start_byte,
+            )
+        if inner.type != "call_expression":
             return None
         call = self.calls.get(self.node_key(inner))
         if call is None or call.kind != "direct_local":
