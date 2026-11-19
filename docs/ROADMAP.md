@@ -3988,10 +3988,32 @@ is basic, named, alias or a composite constructor of those — the
 collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
-Boundaries: interface receivers stay `method_generic_or_variadic`
-— dispatch there is dynamic, and the recorded method identity would
-not cover the implementations actually reached (this covers both
-method values `i.M(x)` and method expressions `lib.I.M`). Local
+Boundaries: interface receivers classify as a separate
+`interface_dispatch` record — only the method expression
+`lib.I.M(recv, args)` admits. Dispatch is dynamic, so no callee
+identity pins, but the call itself admits under the
+opaque-external model: the receiver and argument deps union with
+every recorded effect the call site folds (indirect writes,
+escapes, promoted chan args) and a write-back fold lands on
+arg-or-receiver deps, exactly like a func-typed call. The record
+carries `method_expr` and its `target` pins the named
+interface's own declaration id (`lib.I`) so a method-set
+redeclare stales every admitted caller; an unnamed
+`interface{ M() }` receiver records an empty target and an alias
+to one carries the alias's declaration — with the underlying
+named interface's identity riding `type_arg_type_ids` too when
+the alias names one (`type A = I`), so regenerating `I` in
+another file still stales the caller. A method-value call
+`i.M(x)` names an interface-typed operand — always an
+unsupported binding the receiver read cannot survive — so it
+keeps `method_generic_or_variadic`, and a method promoted
+through an embedded interface or struct names a receiver the
+gate cannot see and stays closed the same way. Results must be
+scalar — a `func`/`chan`/composite result is a value the dep
+model cannot read and stays closed — and an instantiated
+interface (`I[N]`) pins its named/alias type arguments as
+`type_arg_type_ids`, with an unpinnable argument shape staying
+closed. Local
 methods and generic methods are
 unchanged and closed — as are receivers still declared on type
 parameters (`lib.GT[P]` where `P` is unresolved) and instantiated

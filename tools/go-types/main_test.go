@@ -121,6 +121,7 @@ func TestOpaqueCalls(t *testing.T) {
 		{"func F(x string) int { return len(x) }", "builtin"},
 		{"func F(x int64) uint64 { return uint64(x) }", "conversion"},
 		{"func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }", "external_or_bodyless"},
+		{"type I interface{M() int}; func F(x I) int { return I.M(x) }", "interface_dispatch"},
 		{"type I interface{M() int}; func F(x I) int { return x.M() }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id(x) }", "method_generic_or_variadic"},
@@ -132,7 +133,12 @@ func TestOpaqueCalls(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.kind+tc.source[:6], func(t *testing.T) {
 			out := checked(t, "package p; "+tc.source, "amd64")
-			if len(out.Calls) != 1 || out.Calls[0].Kind != tc.kind || out.Calls[0].Target != "" {
+			// `interface_dispatch` is admitted: its target pins the
+			// named interface's declaration so a method-set
+			// redeclare stales every admitted caller.
+			wantTarget := tc.kind == "interface_dispatch"
+			if len(out.Calls) != 1 || out.Calls[0].Kind != tc.kind ||
+				(out.Calls[0].Target == "") == wantTarget {
 				t.Fatal("an unsupported call acquired a direct target")
 			}
 		})
@@ -766,5 +772,38 @@ func TestProtocolRejectsMalformedRequests(t *testing.T) {
 		if json.Unmarshal(output.Bytes(), &reply) != nil || reply.Status == "ok" {
 			t.Fatal("malformed request accepted")
 		}
+	}
+}
+func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
+	// `I.M(x, y)` — an interface receiver dispatches dynamically, so
+	// no callee identity pins; the method expression records
+	// `interface_dispatch` marked `method_expr` with the named
+	// interface's identity as the target. A method-value call
+	// `i.M(x)` names an interface-typed operand — always an
+	// unsupported binding — and a promoted selection through an
+	// embedded interface names a receiver the gate cannot see:
+	// both stay `method_generic_or_variadic`.
+	src := "package p\ntype I interface{ M(int64) int64 }\n" +
+		"type S int64\nfunc (s S) M(v int64) int64 { return v }\n" +
+		"type EI struct{ I }\n" +
+		"func F(i I, x int64) int64 { return i.M(x) }\n" +
+		"func G(x S, y int64) int64 { return I.M(x, y) }\n" +
+		"func H(e EI, x int64) int64 { return e.M(x) }\n"
+	out := analyze(request{Sources: []namedSource{{"a.go", src}}, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	kinds := map[string]int{}
+	for _, c := range out.Calls {
+		kinds[c.Kind]++
+	}
+	if kinds["interface_dispatch"] != 1 {
+		t.Fatalf("expected one interface_dispatch record: %+v", out.Calls)
+	}
+	if kinds["method_generic_or_variadic"] != 2 {
+		t.Fatalf(
+			"method values on interfaces and promoted embedded methods must stay closed: %+v",
+			out.Calls,
+		)
 	}
 }

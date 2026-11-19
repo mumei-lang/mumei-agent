@@ -31,6 +31,7 @@ _CALL_KINDS = frozenset(
         "indirect_or_selector",
         "external_or_bodyless",
         "method_generic_or_variadic",
+        "interface_dispatch",
         "concurrent",
         "deferred",
     }
@@ -39,6 +40,10 @@ _CALL_KINDS = frozenset(
 # unit's own file digest, file index and coordinates, so the target a caller
 # records is exactly the binding identity the callee's own report produces.
 _IMPORTED_ID = re.compile(r"sha256:[0-9a-f]{64}:[0-9]+:[0-9]+:-?[0-9]+:-?[0-9]+\Z")
+# A type-declaration identity in either unit shape: the packaged form
+# embeds the file index, the single-file form does not — `interface_
+# dispatch` targets pin a named interface's declaration either way.
+_TYPE_ID = re.compile(r"sha256:[0-9a-f]{64}(?::-?[0-9]+){3,4}\Z")
 _GAPS = frozenset(
     {
         "unsupported_value_semantics",
@@ -136,6 +141,14 @@ class Call:
     # leading argument already IS the receiver.
     method: bool = False
     method_expr: bool = False
+    # `type_arg_type_ids` pins the named/alias identities an
+    # instantiated interface receiver's type arguments resolve to on
+    # an `interface_dispatch` call — the substituted identities are
+    # declared nowhere else, so the call record carries them for
+    # staleness pinning. An alias receiver (`type A = I`) rides it
+    # too: the target is the alias's own declaration while the
+    # underlying named interface's identity pins alongside.
+    type_arg_type_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -300,9 +313,13 @@ class PackageCall:
     # tuple unpacking `a, b := lib.F(x)`. 0 means zero or one result.
     results: int = 0
     # `type_arg_type_ids` pins the named/alias identities an
-    # instantiated callee's type arguments resolve to — the substituted
-    # identities are declared nowhere else, so the call record carries
-    # them for staleness pinning exactly like a member's signature ids.
+    # instantiated callee's or receiver's type arguments resolve to —
+    # the substituted identities are declared nowhere else, so the
+    # call record carries them for staleness pinning exactly like a
+    # member's signature ids. An alias interface receiver
+    # (`type A = I`) rides it too: the target is the alias's own
+    # declaration while the underlying named interface's identity
+    # pins alongside.
     type_arg_type_ids: tuple[str, ...] = ()
 
 
@@ -693,6 +710,7 @@ def load_go_snapshot(
                     "kind",
                     "method",
                     "method_expr",
+                    "type_arg_type_ids",
                 }
             )
             c = item
@@ -709,13 +727,20 @@ def load_go_snapshot(
             )
             method = _boolean(c.get("method", False))
             method_expr = _boolean(c.get("method_expr", False))
-            # `method`/`method_expr` only travel on a `direct_local`
-            # record here — a single file declares no imports — and a
+            # `method` only travels on a `direct_local` record here —
+            # a single file declares no imports — while `method_expr`
+            # may also ride an `interface_dispatch` record (`I.M`); a
             # method-value call (receiver operand) never doubles as a
             # method-expression call (leading receiver argument).
             _require(
                 (not method or kind == "direct_local")
-                and (not method_expr or (kind == "direct_local" and not method))
+                and (
+                    not method_expr
+                    or (
+                        kind in ("direct_local", "interface_dispatch")
+                        and not method
+                    )
+                )
             )
             if kind == "direct_local":
                 _require(target in fn_by_id)
@@ -725,11 +750,41 @@ def load_go_snapshot(
                     and not (callee.generic or callee.variadic)
                     and callee.method == (method or method_expr)
                 )
+            elif kind == "interface_dispatch":
+                # The receiver dispatches dynamically: the target pins
+                # the named interface's own declaration identity and
+                # stays empty for an unnamed `interface{ M() }`
+                # receiver.
+                _require(not target or _TYPE_ID.fullmatch(target))
             else:
                 _require(target == "")
             args = tuple(_span(a, raw) for a in _list(c["arguments"]))
             _require(all(sp.start <= a.start <= a.end <= sp.end for a in args))
-            calls.append(Call(sp, args, owner, target, kind, method, method_expr))
+            # `type_arg_type_ids` only travels on an
+            # `interface_dispatch` record here — a single file
+            # declares no imports, so no other kind can substitute
+            # type arguments — and local type-declaration ids carry
+            # the single-file (no file index) shape.
+            type_arg_ids = _list(c.get("type_arg_type_ids", []))
+            _require(
+                (not type_arg_ids or kind == "interface_dispatch")
+                and all(
+                    type(i) is str and _TYPE_ID.fullmatch(i) is not None
+                    for i in type_arg_ids
+                )
+            )
+            calls.append(
+                Call(
+                    sp,
+                    args,
+                    owner,
+                    target,
+                    kind,
+                    method,
+                    method_expr,
+                    tuple(type_arg_ids),
+                )
+            )
         gaps = []
         for item in _list(v["gaps"]):
             g = _record(item, "reason", "span")
@@ -1082,16 +1137,25 @@ def load_go_package_snapshot(
             _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
             method = _boolean(c.get("method", False))
             # `method` travels on a method call — `lib.VS.PF(args)` on
-            # an imported member or `st.M(args)` on a same-package one —
-            # never on a plain function call.
-            _require(not method or kind in ("direct_import", "direct_local"))
+            # an imported member or `st.M(args)` on a same-package
+            # one — never on a plain function call. An `i.M(args)`
+            # interface dispatch stays `method_generic_or_variadic`:
+            # an interface-typed operand is always an unsupported
+            # binding, so only `method_expr` dispatches record here.
+            _require(
+                not method or kind in ("direct_import", "direct_local")
+            )
             method_expr = _boolean(c.get("method_expr", False))
             # `method_expr` likewise only travels on a method-expression
             # record, and never beside `method` — a `recv.M(args)` call
             # has a receiver node, not a leading receiver argument.
             _require(
                 not method_expr
-                or (kind in ("direct_import", "direct_local") and not method)
+                or (
+                    kind
+                    in ("direct_import", "direct_local", "interface_dispatch")
+                    and not method
+                )
             )
             # `results` declares an imported callee's arity when it
             # exceeds one — a 0/1-result callee omits it, and no other
@@ -1103,10 +1167,14 @@ def load_go_package_snapshot(
                 and (not results or kind == "direct_import")
             )
             # `type_arg_type_ids` only travels on a `direct_import`
-            # record — no other callee can substitute type arguments.
+            # or `interface_dispatch` record — no other callee can
+            # substitute type arguments.
             type_arg_ids = _list(c.get("type_arg_type_ids", []))
             _require(
-                (not type_arg_ids or kind == "direct_import")
+                (
+                    not type_arg_ids
+                    or kind in ("direct_import", "interface_dispatch")
+                )
                 and all(
                     type(i) is str and _IMPORTED_ID.fullmatch(i) is not None
                     for i in type_arg_ids
@@ -1130,6 +1198,18 @@ def load_go_package_snapshot(
                 _require(
                     _IMPORTED_ID.fullmatch(target) is not None
                     and target not in fn_by_id
+                )
+            elif kind == "interface_dispatch":
+                # The receiver dispatches dynamically: the target pins
+                # the named interface's own declaration identity (a
+                # method-set redeclare stales the caller) and stays
+                # empty for an unnamed `interface{ M() }` receiver.
+                _require(
+                    not target
+                    or (
+                        _IMPORTED_ID.fullmatch(target) is not None
+                        and target not in fn_by_id
+                    )
                 )
             else:
                 _require(target == "")
