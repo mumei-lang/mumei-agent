@@ -857,7 +857,14 @@ class FileAttemptSequenceStore:
                 dir_fd = None
             if dir_fd is not None:
                 try:
-                    os.fsync(dir_fd)
+                    # A filesystem that opens a directory can still
+                    # refuse fsync on it (EINVAL/ENOTSUP) — the rename
+                    # already landed, so keep the file-level guarantee
+                    # rather than fail a completed publication.
+                    try:
+                        os.fsync(dir_fd)
+                    except OSError:
+                        pass
                 finally:
                     os.close(dir_fd)
         except BaseException:
