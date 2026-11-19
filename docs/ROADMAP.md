@@ -2670,8 +2670,13 @@ and the call's `chan` arguments join the external
 model since the opaque callee may return one — the
 `var` and plain-assignment forms admit identically,
 while a `chan chan T` or other non-scalar result at
-any position stays closed. Still closed:
-non-scalar elements — while `select` now admits: each communication case's
+any position stays closed. An imported method
+declares the same way: `ch := st.M()` or `ch, n :=
+st.M()` admits when `M`'s signature carries a
+scalar-element `chan` at the bound slot (the call
+records `direct_import` marked `method`). Still
+closed: non-scalar elements — while `select` now
+admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
 a bare `<-ch`) or send (`ch <- v`) runs in a fresh
 alternative scope and every alternative joins back by
