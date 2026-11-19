@@ -3314,12 +3314,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 pool.extend(reversed(current.named_children))
         return frozenset(names)
 
-    def _call_result_struct_literal(self, node: Any) -> Any | None:
+    def _call_result_struct_literal(
+        self, node: Any, result_index: int = 0
+    ) -> Any | None:
         """(literal, file) for the `struct{...}` literal a `:=`/`var`
         RHS binds — a composite literal's own `type` child, or the
-        result signature literal of a direct local call's single
-        anonymous-struct result. The signature literal lives in the
-        callee's file; a composite literal in the current one."""
+        result signature literal of a direct local call's anonymous-
+        struct result at `result_index` (`_, s := G()` picks slot 1).
+        The signature literal lives in the callee's file; a composite
+        literal in the current one."""
         inner = node
         while (
             inner is not None
@@ -3346,9 +3349,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         target = self.functions.get(call.target)
         if (
             target is None
-            or len(target.results) != 1
-            or target.results[0].type.kind != "struct"
-            or target.results[0].type.type_id
+            or len(target.results) <= result_index
+            or target.results[result_index].type.kind != "struct"
+            or target.results[result_index].type.type_id
         ):
             return None
         fn_binding = self.bindings.get(target.binding_id)
@@ -3375,11 +3378,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for c in result_node.named_children
                 if c.type == "parameter_declaration"
             ]
-            literal = (
-                decls[0].child_by_field_name("type")
-                if len(decls) == 1
-                else None
-            )
+            # `(a int64, s struct{ V int64 })` — slot i's type lives on
+            # the declaration that covers it; a declaration spans one
+            # result per name, or exactly one when it carries none.
+            literal = None
+            slot = result_index
+            for param_decl in decls:
+                width = (
+                    sum(
+                        1
+                        for c in param_decl.named_children
+                        if c.type == "identifier"
+                    )
+                    or 1
+                )
+                if slot < width:
+                    literal = param_decl.child_by_field_name("type")
+                    break
+                slot -= width
         if literal is None or literal.type != "struct_type":
             return None
         file = (
@@ -4657,7 +4673,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             fn.body is None
             or fn.generic
             or fn.variadic
-            or len(fn.results) != 1
+            or not fn.results
             # A method's receiver is a leading signature slot like any
             # parameter: its declared fact must sit inside the admitted
             # kinds — a concrete named type's fact is `struct`/`pointer`
@@ -4759,10 +4775,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count = [0]
         locals_: dict[str, frozenset[int]] = {}
         # A named result is an ordinary local pre-initialised to the zero
-        # value — dep-free until a body statement writes to it.
-        result_binding = fn.results[0].binding_id
-        if result_binding:
-            locals_[result_binding] = frozenset()
+        # value — dep-free until a body statement writes to it. A
+        # multi-result signature seeds every named slot the same way.
+        for result in fn.results:
+            if result.binding_id:
+                locals_[result.binding_id] = frozenset()
         # A `struct` parameter's conflated dep set lives in `locals_`
         # like a composite local's (`s.V = x` folds in, `s.V` reads
         # it) — seed it with the parameter's own index so reads
@@ -4989,36 +5006,52 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 expressions = _children(expressions[0])
             if len(expressions) == 0:
                 # A bare `return` is only legal with a named result — it
-                # yields the result binding's current dependencies.
-                result_id = (
-                    fn.results[0].binding_id if len(fn.results) == 1 else ""
-                )
-                if not result_id:
+                # yields the result binding's current dependencies. With
+                # several named results the conflated dep set unions
+                # every slot: the caller cannot tell which result
+                # position fed a bound name, matching the imported
+                # multi-result model.
+                result_ids = [
+                    r.binding_id for r in fn.results if r.binding_id
+                ]
+                if len(result_ids) != len(fn.results) or not result_ids:
                     raise _Unsupported("unsupported_return", _span(node))
-                # A `r = q` store on a `chan` named result goes
-                # through `chan_aliases` (no dep set lands in
-                # `locals_[r]`) — resolve the queue root like an
-                # identifier read does so `return` carries q's deps.
-                result_root = self._chan_root(result_id)
-                if result_root in params:
-                    result_deps = frozenset(
-                        {params[result_root]}
-                    ) | self.indirect_writes
-                elif result_root in self.external_chan_locals:
-                    result_deps = (
-                        locals_.get(result_root, frozenset())
-                        | self.indirect_writes
-                    )
-                else:
-                    result_deps = locals_.get(
-                        result_root, frozenset()
-                    )
+                result_deps = frozenset()
+                for result_id in result_ids:
+                    # A `r = q` store on a `chan` named result goes
+                    # through `chan_aliases` (no dep set lands in
+                    # `locals_[r]`) — resolve the queue root like an
+                    # identifier read does so `return` carries q's deps.
+                    result_root = self._chan_root(result_id)
+                    if result_root in params:
+                        result_deps |= frozenset(
+                            {params[result_root]}
+                        ) | self.indirect_writes
+                    elif result_root in self.external_chan_locals:
+                        result_deps |= (
+                            locals_.get(result_root, frozenset())
+                            | self.indirect_writes
+                        )
+                    else:
+                        result_deps |= locals_.get(
+                            result_root, frozenset()
+                        )
                 deps[0] |= result_deps
                 self._record_read(result_deps)
             elif len(expressions) == 1:
                 deps[0] |= self.expression(
                     expressions[0], fn, params, locals_, transfers, count, 0
                 )
+            elif len(expressions) == len(fn.results):
+                # `return a, b` — every expression's deps fold into the
+                # one conflated set, so a bound name may carry the
+                # sibling slots' provenance too (the same
+                # over-approximation the imported multi-result unpack
+                # uses).
+                for e in expressions:
+                    deps[0] |= self.expression(
+                        e, fn, params, locals_, transfers, count, 0
+                    )
             else:
                 raise _Unsupported("unsupported_return", _span(node))
             saw_return[0] = True
@@ -5121,6 +5154,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
                     self._scalar_chan_binding(binding.id)
+                    # A multi-valued call's slot has no per-result RHS
+                    # node — `_, ch := G(q)`'s ch names a channel the
+                    # conflated dep set cannot model, so it stays
+                    # closed rather than guessing at rights[i].
+                    and len(lefts) == len(rights)
                     and (
                         self._is_make_chan_call(rights[i])
                         or self._chan_alias_target(
@@ -5276,9 +5314,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and not binding.type.type_id
                 ):
                     lit_result = (
-                        self._call_result_struct_literal(rights[i])
-                        if i < len(rights)
-                        else None
+                        self._call_result_struct_literal(rights[0], i)
+                        if len(lefts) != len(rights)
+                        else self._call_result_struct_literal(
+                            rights[i]
+                        )
                     )
                     anchor = (
                         FileSpan(
@@ -5456,6 +5496,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding.type.kind == "chan"
                         and (
                             not self._scalar_chan_binding(binding.id)
+                            # `var _, ch = G(q)` — a multi-valued
+                            # call's slot produces a channel the dep
+                            # model cannot carry; stays closed like
+                            # the short-decl form.
+                            or (
+                                value_nodes
+                                and len(names) != len(value_nodes)
+                            )
                             or (
                                 value_nodes
                                 and not self._is_make_chan_call(
@@ -5651,10 +5699,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding.type.kind == "struct"
                         and not binding.type.type_id
                         and spec.child_by_field_name("type") is None
-                        and i < len(value_nodes)
+                        and (i < len(value_nodes) or multi)
                     ):
-                        lit_result = self._call_result_struct_literal(
-                            value_nodes[i]
+                        lit_result = (
+                            self._call_result_struct_literal(
+                                value_nodes[0], i
+                            )
+                            if multi
+                            else self._call_result_struct_literal(
+                                value_nodes[i]
+                            )
                         )
                         if lit_result is not None:
                             self.anon_struct_anchor[binding.id] = (
@@ -8388,13 +8442,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
         }:
             return None
         call = self.calls.get(self.node_key(node))
-        if (
-            call is not None
-            and call.owner == fn.binding_id
-            and call.kind == "direct_import"
-            and call.results == arity
-        ):
+        if call is None or call.owner != fn.binding_id:
+            return None
+        if call.kind == "direct_import" and call.results == arity:
             return call
+        if call.kind in {"direct_local", "method", "method_expr"}:
+            # The probe only stamps a result arity on imported calls —
+            # a local callee's own Function record declares it.
+            target = self.functions.get(call.target)
+            if (
+                target is not None
+                and len(target.results) == arity
+                and arity > 1
+            ):
+                return call
         return None
 
     @staticmethod
