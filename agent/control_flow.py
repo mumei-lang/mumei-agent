@@ -366,7 +366,11 @@ def _walk(
 
 
 def _assigned_names(statement: tree_sitter_extract.Statement) -> frozenset[str]:
-    if statement.kind not in _ASSIGNMENT_KINDS:
+    # "case" joins for `v := <-ch` / `v, ok := <-ch` select
+    # communication cases: the extractor puts the bound names in
+    # `targets`. Expression cases never carry targets, so widening
+    # the kind set changes nothing for them.
+    if statement.kind not in _ASSIGNMENT_KINDS | {"case"}:
         return frozenset()
     return frozenset(
         target

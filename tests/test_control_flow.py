@@ -1255,3 +1255,30 @@ def test_compound_assign_does_not_assign_the_root():
     (after,) = by_text(cfg, body, "y :=")
     assert "x" not in facts_map[write.node_id].all_paths
     assert "x" not in facts_map[after.node_id].all_paths
+
+
+def test_select_comm_channel_counts_as_use():
+    body = "ch := in; select { case <-ch: }; after()"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    # `<-ch` inside the communication case reads ch — the `ch := in`
+    # assignment is not dead.
+    assert hints.unused == ()
+
+
+def test_select_send_channel_and_value_count_as_uses():
+    body = "ch := in; x := 1; select { case ch <- x: }; after()"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    assert hints.unused == ()
+
+
+def test_select_receive_assignment_counts_in_facts():
+    body = "select { case x = <-ch: default: }; use(x)"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    # `x = <-ch` assigns x on the case path only: the post-select
+    # read is a possible (not definite) unassigned use.
+    assert [(u.name, u.definite) for u in hints.unassigned] == [
+        ("x", False)
+    ]

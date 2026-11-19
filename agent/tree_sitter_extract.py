@@ -1193,8 +1193,39 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
         for child in node.named_children:
             if child.type in {"expression_case", "default_case", "type_case", "communication_case"}:
                 case_values = ()
+                case_targets = ()
                 if child.type == "expression_case":
                     case_values = _go_expression_list(source_bytes, child.child_by_field_name("value"))
+                elif child.type == "communication_case":
+                    for grand in child.named_children:
+                        if grand.type == "send_statement":
+                            # `ch <- x` — the channel and the value
+                            # both read.
+                            case_values = tuple(
+                                _decode(source_bytes, n).strip()
+                                for n in (
+                                    grand.child_by_field_name("channel"),
+                                    grand.child_by_field_name("value"),
+                                )
+                                if n is not None
+                            )
+                        elif grand.type == "receive_statement":
+                            # `v := <-ch` — the bound names assign,
+                            # the receive expression reads.
+                            recv = None
+                            for part in grand.named_children:
+                                if part.type == "expression_list":
+                                    case_targets = tuple(
+                                        _decode(source_bytes, t).strip()
+                                        for t in part.named_children
+                                        if t.type != "comment"
+                                    )
+                                elif part.is_named:
+                                    recv = part
+                            if recv is not None:
+                                case_values = (
+                                    _decode(source_bytes, recv).strip(),
+                                )
                 case_body: list[Statement] = []
                 for grand in child.named_children:
                     if grand.type == "statement_list":
@@ -1204,6 +1235,7 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
                         kind="case" if child.type != "default_case" else "default",
                         text=_decode(source_bytes, child).strip(),
                         start=offsets[child.start_byte] - base,
+                        targets=case_targets,
                         values=case_values,
                         body=tuple(case_body),
                     )
