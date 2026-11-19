@@ -2895,10 +2895,11 @@ def test_multi_result_method_call_unpacks(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_multi_result_chan_slot_stays_closed(go_types_helper):
-    # `_, ch := G(q)` — a channel in a non-first result slot has no
-    # per-slot RHS node, so the bind stays closed rather than
-    # indexing past `rights` or modelling an unresolvable queue.
+def test_multi_result_chan_slot_admitted(go_types_helper):
+    # `_, ch := G(q)` — slot 1 declares a scalar `chan`, so the
+    # name binds an external queue even though the multi-valued
+    # call shares one RHS node: the receive follows the
+    # channel-parameter external model.
     files = {
         "a.go": "package p\n"
         "func G(q chan int64) (int64, chan int64) { return 1, q }\n"
@@ -2910,7 +2911,8 @@ def test_multi_result_chan_slot_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.effects == "unknown"
 
 
 def test_multi_result_chan_slot_var_form_stays_closed(go_types_helper):
@@ -15644,14 +15646,57 @@ def test_chan_result_len_records_transfer(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_multi_result_chan_slot_send_recv_admitted(go_types_helper):
+    # `ch, n := g()` where `g` declares a scalar `chan` in slot 0 —
+    # the multi-valued call shares one RHS node, so the chan name
+    # binds an external queue per slot: sends broadcast and the
+    # receive reads them back like `ch := g()`.
+    files = {
+        "a.go": "package p\n"
+        "func g() (chan int64, int64) {\n"
+        "\treturn make(chan int64), 0\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tch, n := g()\n"
+        "\tch <- x\n"
+        "\treturn <-ch + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_multi_result_chan_other_slots_close(go_types_helper):
+    # Only the slot declaring a scalar `chan` binds a queue — a
+    # `chan` LHS at a position whose result type is not `chan`
+    # stays closed.
+    files = {
+        "a.go": "package p\n"
+        "func g() (int64, chan string) {\n"
+        "\tvar ch chan string\n\treturn 0, ch\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tn, ch := g()\n"
+        "\t_ = ch\n"
+        "\treturn n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_chan_result_boundaries_stay_closed(go_types_helper):
-    # A multi-result callee, a non-scalar element, an imported
-    # function's result (whose signature carries no kind), and a
-    # nested `chan chan` element all stay closed.
+    # A non-scalar element, a non-scalar element inside a
+    # multi-result tuple, an imported function's result (whose
+    # signature carries no kind), and a nested `chan chan` element
+    # all stay closed.
     for decl, body in [
         (
-            "func g() (chan int64, int64) {\n"
-            "\tvar ch chan int64\n\treturn ch, 0\n}\n",
+            "func g() (chan string, int64) {\n"
+            "\tvar ch chan string\n\treturn ch, 0\n}\n",
             "ch, _ := g()\n\t_ = ch",
         ),
         (

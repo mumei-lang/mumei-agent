@@ -3345,6 +3345,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 roots.append(self._chan_root(chan.id))
         return tuple(roots)
 
+    def _chan_result_call_at(self, node: Any, index: int) -> Any:
+        """`node` calls a local callee declaring a scalar `chan` in
+        result slot `index` — a multi-result callee's `ch` position
+        (`ch, n := g()` where `g` returns `(chan T, int64)`).
+        Returns the callee's Function record or None. Each slot's
+        LHS resolves against the same call node, so only the
+        per-position result type decides admission."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_local":
+            return None
+        target = self.functions.get(call.target)
+        if (
+            target is None
+            or index >= len(target.results)
+            or not self._scalar_chan_fact(target.results[index].type)
+        ):
+            return None
+        return target
+
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
         """The DIRECT field names a `struct{...}` literal declares —
         identifiers of each `field_declaration`'s `name`, plus the
@@ -5228,19 +5258,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
                     self._scalar_chan_binding(binding.id)
-                    # A multi-valued call's slot has no per-result RHS
-                    # node — `_, ch := G(q)`'s ch names a channel the
-                    # conflated dep set cannot model, so it stays
-                    # closed rather than guessing at rights[i].
-                    and len(lefts) == len(rights)
                     and (
-                        self._is_make_chan_call(rights[i])
-                        or self._chan_alias_target(
-                            rights[i], locals_, params
+                        (
+                            len(lefts) == len(rights)
+                            and (
+                                self._is_make_chan_call(rights[i])
+                                or self._chan_alias_target(
+                                    rights[i], locals_, params
+                                )
+                                is not None
+                                or self._chan_result_call(rights[i])
+                                is not None
+                            )
                         )
-                        is not None
-                        or self._chan_result_call(rights[i])
-                        is not None
+                        # A multi-valued call's slot has no per-result
+                        # RHS node — `ch, n := g()` admits when the
+                        # callee declares a scalar `chan` in slot i;
+                        # the name binds an external queue like
+                        # `ch := g()` does.
+                        or (
+                            len(rights) == 1
+                            and self._chan_result_call_at(rights[0], i)
+                            is not None
+                        )
                     )
                 ):
                     # `ch2 := ch` aliases one queue under a second
@@ -5255,17 +5295,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # over, and only a scalar element keeps queue
                     # contents inside the dep model.
                     raise _Unsupported("binding_unavailable", _span(node))
-                if binding.type.kind == "chan" and not self._is_make_chan_call(
+                chan_rhs = (
                     rights[i]
+                    if len(lefts) == len(rights)
+                    # A multi-valued call's chan slot shares the single
+                    # RHS node — make/alias/passthrough all resolve to
+                    # None on it, so the name takes the external model.
+                    else rights[0]
+                )
+                if binding.type.kind == "chan" and not self._is_make_chan_call(
+                    chan_rhs
                 ):
                     chan_alias = self._chan_alias_target(
-                        rights[i], locals_, params
+                        chan_rhs, locals_, params
                     )
                     if chan_alias is not None:
                         self.chan_aliases[binding.id] = chan_alias.id
                     else:
                         passthrough = self._chan_result_passthrough(
-                            rights[i], locals_, params
+                            chan_rhs, locals_, params
                         )
                         if passthrough is not None:
                             # `c := g(q)` with `g`'s body `return ch`
