@@ -18072,6 +18072,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # reseat `s` or its fields — so `locals_[s]`
                     # correctly keeps its pre-call set.
                     self.indirect_writes |= stored
+                elif (
+                    ref is not None
+                    and ref.binding_id
+                    in self._opaque_container_tokens
+                ):
+                    # `lib.Update(s, b)` — a tracked opaque
+                    # container's backing shares caller memory with
+                    # the callee: `q[0] = b` inside it lands in
+                    # every sharer's set like a caller-side `s[i] =
+                    # b`, and broadcasts like escaped memory does.
+                    for holder_id in self._opaque_container_sharers(
+                        ref.binding_id
+                    ):
+                        self._store(
+                            locals_, params, holder_id, stored, True
+                        )
+                    self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the
