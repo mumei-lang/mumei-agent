@@ -798,12 +798,11 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		if ptr, ok := t.(*types.Pointer); ok {
 			t = ptr.Elem()
 		}
-		// A channel's element type names a dependency too — `chan N`
-		// (or `type QC chan N`) pins N as surely as a parameter or
-		// result of type `N` does.
-		if ch, ok := t.Underlying().(*types.Chan); ok {
-			add(ch.Elem())
-		}
+		// Resolve the named identity BEFORE descending into the
+		// element type: a self-referential declaration (`type C chan
+		// C`, `type F func(F)`) recurses back onto itself through the
+		// chan/signature walk below, and only an already-marked `seen`
+		// entry terminates it.
 		var obj *types.TypeName
 		switch typ := t.(type) {
 		case *types.Named:
@@ -813,15 +812,23 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		case *types.TypeParam:
 			obj = typ.Obj()
 		}
+		if obj != nil {
+			if id := ix.typeID(obj); id != "" {
+				if seen[id] {
+					return
+				}
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		// A channel's element type names a dependency too — `chan N`
+		// (or `type QC chan N`) pins N as surely as a parameter or
+		// result of type `N` does.
+		if ch, ok := t.Underlying().(*types.Chan); ok {
+			add(ch.Elem())
+		}
 		if obj == nil {
 			return
-		}
-		if id := ix.typeID(obj); id != "" {
-			if seen[id] {
-				return
-			}
-			seen[id] = true
-			ids = append(ids, id)
 		}
 		// A named/alias parameter or result whose underlying is a
 		// pointer — `type PP *T` — pins the pointee too: an admitted

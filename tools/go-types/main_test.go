@@ -555,6 +555,29 @@ func TestRecursiveSliceTypeTerminates(t *testing.T) {
 	}
 }
 
+func TestRecursiveChanSignatureTypeIDsTerminate(t *testing.T) {
+	// `type C chan C` is valid Go — the signature's element walk must
+	// see the already-recorded identity instead of recursing until
+	// the stack overflows.
+	unit := []namedSource{{"a.go", "package p\ntype C chan C\nfunc F(c C) C { return c }"}}
+	out := analyze(request{Sources: unit, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var fb binding
+	for _, b := range named(out, "F") {
+		if b.Kind == "function" {
+			fb = b
+		}
+	}
+	if fb.ID == "" {
+		t.Fatalf("F missing from snapshot")
+	}
+	if len(fb.SignatureTypeIDs) != 1 {
+		t.Fatalf("F should pin only C's identity, got %v", fb.SignatureTypeIDs)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {
