@@ -305,18 +305,34 @@ func funcResultOK(t types.Type) bool {
 	return ok
 }
 
+// funcElemMapResultOK: a `map[K]func(...)` result — like the
+// slice/array func-element collections, which value a keyed slot
+// holds is unknowable, so calls through it run opaque on the
+// container. Map *literals* never reach the model — a `map`
+// composite stays unsupported as a local — so only call results
+// and imported/package members produce these.
+func funcElemMapResultOK(t types.Type) bool {
+	m, ok := t.Underlying().(*types.Map)
+	if !ok {
+		return false
+	}
+	_, isFunc := m.Elem().Underlying().(*types.Signature)
+	return isFunc
+}
+
 // importedResultsOK admits a signature when every result is
 // scalar/pointer, a scalar-element `chan`, a `chan chan T` one
 // level deep, or a `func` type — a multi-result callee like
 // `func G() (chan int64, int64)` whose chan slot the consumer binds
 // as an external queue like `ch := lib.G()`, or whose func slot binds
-// an opaque func value like `f := lib.Mk()`. Deeper nesting and other
-// composites stay `external_or_bodyless` at any position.
+// an opaque func value like `f := lib.Mk()`. A `map[K]func` result
+// admits like a `[]func`/`[N]func` collection. Deeper nesting and
+// other composites stay `external_or_bodyless` at any position.
 func importedResultsOK(sig *types.Signature) bool {
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
 		t := res.At(i).Type()
-		if !scalarResultOK(t) && !scalarChanElemOK(t) && !funcResultOK(t) && !chanChanElemOK(t) {
+		if !scalarResultOK(t) && !scalarChanElemOK(t) && !funcResultOK(t) && !chanChanElemOK(t) && !funcElemMapResultOK(t) {
 			return false
 		}
 	}

@@ -5731,13 +5731,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         or self._chan_chan_fact(r.type)
                     )
                     # A func-element collection result —
-                    # `[]func` / `[N]func` — admits like a scalar
-                    # `func` result: elements carry no scalar deps,
-                    # and the caller's `mk()[0]()` call runs opaque
-                    # on the container's slot like an imported
-                    # container member does.
+                    # `[]func` / `[N]func` / `map[K]func` — admits
+                    # like a scalar `func` result: elements carry
+                    # no scalar deps, and the caller's `mk()[0]()`
+                    # call runs opaque on the container's slot like
+                    # an imported container member does.
                     or (
-                        r.type.kind in {"slice", "array"}
+                        r.type.kind in {"slice", "array", "map"}
                         and r.type.elem is not None
                         and r.type.elem.kind == "function"
                     )
