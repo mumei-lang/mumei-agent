@@ -16197,3 +16197,139 @@ def test_external_func_var_call_pins_named_func_type(
         and b.type.type_id
     )
     assert alias_binding.type.type_id in result.pinned
+
+
+def test_func_param_branch_bound_literal_stays_external(
+    go_types_helper,
+):
+    # `if b { f = func()... }` under a func-typed PARAMETER — the
+    # untaken path still runs the caller's own callback, so the call
+    # reports the parameter's ordinal alongside the literal's deps
+    # and effects stay unknown.
+    files = {
+        "a.go": "package p\n"
+        "func F(f func() int64, b bool) int64 {\n"
+        "\tif b { f = func() int64 { return 0 } }\n"
+        "\treturn f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    (call,) = [c for c in result.calls if c.imported]
+    known = {b.id for b in snapshot.bindings}
+    assert call.target in known
+
+
+def test_func_param_reseat_reads_new_binding_deps(
+    go_types_helper,
+):
+    # `f = g` reseats the callee to g's dep set — `f()` reports {1},
+    # not f's own parameter ordinal {0}.
+    files = {
+        "a.go": "package p\n"
+        "func F(f, g func() int64) int64 {\n"
+        "\tf = g\n\treturn f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_external_func_call_writes_callee_deps_into_escaped(
+    go_types_helper,
+):
+    # `f(&x)` — the opaque callee may write what IT carries through
+    # the pointer, so the escaped binding folds in the callee's own
+    # dep {0} (not only the argument's deps).
+    files = {
+        "a.go": "package p\n"
+        "func F(f func(*int64), y int64) int64 {\n"
+        "\tx := y\n\tf(&x)\n\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+    assert 1 in result.return_dependencies
+    assert result.effects == "unknown"
+
+
+def test_external_func_call_reads_escaped_through_pointer_arg(
+    go_types_helper,
+):
+    # `return f(p)` — the opaque callee may READ `*p`, so the call's
+    # deps union the escaped binding's current deps like a `*p`
+    # read does.
+    files = {
+        "a.go": "package p\n"
+        "func F(f func(*int64) int64, y int64) int64 {\n"
+        "\tx := y\n\tp := &x\n\treturn f(p)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_func_typed_param_pins_inner_signature_types(
+    go_types_helper,
+):
+    # `f func(N) int64` — the inner named type's identity rides on
+    # the binding's signature_type_ids and must pin for staleness.
+    files = {
+        "a.go": "package p\n"
+        "type N int64\n"
+        "func F(f func(N) int64, n N) int64 { return f(n) }\n",
+        "b.go": "package p\n"
+        "// second file so the type's own identity is cross-file\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    n_binding = next(
+        b for b in snapshot.bindings
+        if b.name == "N" and b.kind == "type"
+    )
+    assert n_binding.id in result.pinned
+
+
+def test_named_func_type_var_pins_inner_signature_types(
+    go_types_helper,
+):
+    # `var Alias MyFn` where `type MyFn func(N) int64` — the binding
+    # pins MyFn via type_id; the INNER `N` rides on the member's /
+    # binding's signature_type_ids.
+    files = {
+        "a.go": "package p\n"
+        "type N int64\n"
+        "type MyFn func(N) int64\n"
+        "var Alias MyFn\n"
+        "func F(n N) int64 { return Alias(n) }\n",
+        "b.go": "package p\n"
+        "// second file so the type's own identity is cross-file\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    n_binding = next(
+        b for b in snapshot.bindings
+        if b.name == "N" and b.kind == "type"
+    )
+    assert n_binding.id in result.pinned

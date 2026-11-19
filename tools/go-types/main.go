@@ -84,6 +84,13 @@ type binding struct {
 	Span  span     `json:"span"`
 	Scope *span    `json:"scope"`
 	Type  typeFact `json:"type"`
+	// SignatureTypeIDs lists the named/alias type identities a
+	// func-typed binding's signature mentions — `func F(f func(N)
+	// int64)` or `var f MyFn`. The func type fact itself carries no
+	// inner facts, so a caller pinning the callee's declared type
+	// relies on this record to flag its own summary stale when N
+	// regenerates.
+	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
 }
 
 type reference struct {
@@ -579,10 +586,12 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 	m := member{
 		ID: id, Name: obj.Name(), Kind: kind, Type: ix.typeOf(obj.Type()),
 	}
-	if kind == "function" {
-		if sig, ok := obj.Type().(*types.Signature); ok {
-			m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
-		}
+	if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
+		// `func G(...)` declares them, and so does a named function
+		// type member (`type MyFn func(N) int64`): a `var f MyFn`
+		// binding's func fact carries no inner ids, so the member
+		// must publish what MyFn's signature names.
+		m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
 	}
 	ix.importMembers[id] = m
 	if kind == "type" {
@@ -745,6 +754,17 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		// early like before.)
 		if p, ok := t.Underlying().(*types.Pointer); ok {
 			add(p.Elem())
+		}
+		// A func-typed parameter or result (`f func(lib.N) int64`,
+		// `type MyFn func(N) int64`) declares its own inner named
+		// identities — walk the nested signature too.
+		if s, ok := t.Underlying().(*types.Signature); ok {
+			for i := 0; i < s.Params().Len(); i++ {
+				add(s.Params().At(i).Type())
+			}
+			for i := 0; i < s.Results().Len(); i++ {
+				add(s.Results().At(i).Type())
+			}
 		}
 	}
 	if sig.Recv() != nil {
@@ -1016,9 +1036,13 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 		f := ix.fileOf(obj.Pos())
 		sp = fileSpan(f, start, start+len(obj.Name()))
 	}
-	ix.out.Bindings = append(ix.out.Bindings, binding{
-		id, obj.Name(), kind, sp, ix.scope(obj), tf,
-	})
+	bnd := binding{
+		id, obj.Name(), kind, sp, ix.scope(obj), tf, nil,
+	}
+	if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
+		bnd.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+	}
+	ix.out.Bindings = append(ix.out.Bindings, bnd)
 	// Anonymous `struct{...}` VALUES admit under the consumer's
 	// conflated dep-set model, but an anonymous struct in a signature
 	// (param or result) still names value semantics the fragment

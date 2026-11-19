@@ -88,6 +88,11 @@ class Binding:
     span: ByteSpan
     scope: ByteSpan | None
     type: GoType
+    # A func-typed binding's declared named/alias signature type
+    # identities (`func F(f func(N) int64)`, `var f MyFn`) — the
+    # func type fact carries no inner facts, so callers pin these
+    # for staleness exactly like a member's signature_type_ids.
+    signature_type_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -236,6 +241,10 @@ class PackageBinding:
     span: FileSpan
     scope: FileSpan | None
     type: GoType
+    # Same as Binding.signature_type_ids: a func-typed binding's
+    # declared named/alias signature identities (`f func(N) int64`,
+    # `var f MyFn`, `type MyFn func(N)`).
+    signature_type_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -542,7 +551,21 @@ def load_go_snapshot(
         _require(re.fullmatch(r"go1\.\d+\.\d+", compiler) is not None)
         bindings = []
         for item in _list(v["bindings"]):
-            b = _record(item, "id", "name", "kind", "span", "scope", "type")
+            _require(
+                isinstance(item, dict)
+                and {"id", "name", "kind", "span", "scope", "type"} <= set(item)
+                and set(item)
+                <= {
+                    "id",
+                    "name",
+                    "kind",
+                    "span",
+                    "scope",
+                    "type",
+                    "signature_type_ids",
+                }
+            )
+            b = item
             sp = _span(b["span"], raw)
             scope = _span(b["scope"], raw) if b["scope"] is not None else None
             name, kind = _string(b["name"]), _string(b["kind"])
@@ -557,11 +580,32 @@ def load_go_snapshot(
             _require(b["id"] == binding_id)
             bindings.append(
                 Binding(
-                    binding_id, name, kind, sp, scope, _go_type(b["type"], target_arch)
+                    binding_id,
+                    name,
+                    kind,
+                    sp,
+                    scope,
+                    _go_type(b["type"], target_arch),
+                    tuple(
+                        _string(s)
+                        for s in _list(b.get("signature_type_ids", []))
+                    ),
                 )
             )
         by_id = {b.id: b for b in bindings}
         _require(len(by_id) == len(bindings))
+        for b in bindings:
+            _require(
+                len(set(b.signature_type_ids)) == len(b.signature_type_ids)
+                and all(
+                    (s in by_id and by_id[s].kind == "type")
+                    or (
+                        s not in by_id
+                        and _IMPORTED_ID.fullmatch(s) is not None
+                    )
+                    for s in b.signature_type_ids
+                )
+            )
         references = []
         for item in _list(v["references"]):
             ref = _record(item, "span", "binding_id", "kind")
@@ -738,7 +782,21 @@ def load_go_package_snapshot(
         raws = _package_raws(probe, sources)
         bindings = []
         for item in _list(v["bindings"]):
-            b = _record(item, "id", "name", "kind", "span", "scope", "type")
+            _require(
+                isinstance(item, dict)
+                and {"id", "name", "kind", "span", "scope", "type"} <= set(item)
+                and set(item)
+                <= {
+                    "id",
+                    "name",
+                    "kind",
+                    "span",
+                    "scope",
+                    "type",
+                    "signature_type_ids",
+                }
+            )
+            b = item
             sp = _file_span(b["span"], raws)
             _require(sp.file >= 0)
             scope = _file_span(b["scope"], raws) if b["scope"] is not None else None
@@ -757,11 +815,32 @@ def load_go_package_snapshot(
             _require(b["id"] == binding_id)
             bindings.append(
                 PackageBinding(
-                    binding_id, name, kind, sp, scope, _go_type(b["type"], target_arch)
+                    binding_id,
+                    name,
+                    kind,
+                    sp,
+                    scope,
+                    _go_type(b["type"], target_arch),
+                    tuple(
+                        _string(s)
+                        for s in _list(b.get("signature_type_ids", []))
+                    ),
                 )
             )
         by_id = {b.id: b for b in bindings}
         _require(len(by_id) == len(bindings))
+        for b in bindings:
+            _require(
+                len(set(b.signature_type_ids)) == len(b.signature_type_ids)
+                and all(
+                    (s in by_id and by_id[s].kind == "type")
+                    or (
+                        s not in by_id
+                        and _IMPORTED_ID.fullmatch(s) is not None
+                    )
+                    for s in b.signature_type_ids
+                )
+            )
         references = []
         for item in _list(v["references"]):
             ref = _record(item, "span", "binding_id", "kind")
@@ -820,7 +899,12 @@ def load_go_package_snapshot(
                     for tid in _type_ids(t)
                 )
             )
-            _require(kind == "function" or "signature_type_ids" not in m)
+            # A `type MyFn func(N) int64` member declares its inner
+            # ids exactly like a `func` member does.
+            _require(
+                kind in {"function", "type"}
+                or "signature_type_ids" not in m
+            )
             sig_ids_raw = _list(m.get("signature_type_ids", []))
             sig_ids = tuple(_string(s) for s in sig_ids_raw)
             _require(

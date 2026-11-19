@@ -2664,15 +2664,28 @@ always records an imported transfer on the var's real
 binding identity (effects unknown). A function-typed
 parameter `f func(int64) int64` calls the same way —
 `f(args)` is an opaque external call, since the caller
-chooses the callee. For any such external callee (package
-function var or func-typed parameter) the argument deps
-also fold into every escaped binding and into indirect
-writes — the opaque callee may write `*p = y` through a
-pointer argument or send `y` on a channel argument — and
-the callee's declared type identity pins alongside the
-var's/parameter's binding identity so a named `type MyFn
-func(...)` regenerating in another file flags the caller
-stale. Calls or writes inside the literal, selector/computed
+chooses the callee — and it stays external even when a
+branch binds a literal under it (`if b { f = func()... }`),
+because the untaken path still runs the caller's callback.
+For any such external callee (package function var or
+func-typed parameter) the callee name reads its current
+deps — `f = g` reseats `f` to g's set — the call unions the
+escaped bindings' deps like a `*p` read (the opaque callee
+may read caller memory through a pointer argument), and the
+argument deps together with the callee's own read set fold
+into every escaped binding and into indirect writes — the
+opaque callee may write `*p = y` through a pointer argument
+or send `y` on a channel argument — and the callee's
+declared type identity pins alongside the var's/parameter's
+binding identity so a named `type MyFn func(...)`
+regenerating in another file flags the caller stale. A
+func-typed binding's signature (`f func(N) int64`, `var f
+MyFn`, `type MyFn func(N) int64`) declares its inner
+named/alias type identities on the binding's
+`signature_type_ids` — the func type fact itself carries
+none — and they pin at the declaring function's own
+signature, at resolved local callees and at external calls
+alike. Calls or writes inside the literal, selector/computed
 callees and reading a function name as a value (`h := G`)
 stay closed),
 per-statement read attribution now
