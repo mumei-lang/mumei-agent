@@ -3053,6 +3053,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if write_target is not None:
                 type_id, ref, nested = write_target
+                # The store's destination read mirrors `=`:
+                # a bound-pointer base reads the pointer's
+                # provenance (plus the indirect stores a nested
+                # `t.W.f` traversal may read), while a tracked
+                # local composite reads its continuing dep set.
+                if type_id:
+                    dest = self._pointer_deps(
+                        ref.binding_id, params, locals_
+                    )
+                    if nested:
+                        dest = dest | self.indirect_writes
+                else:
+                    dest = locals_.get(
+                        ref.binding_id,
+                        frozenset({params[ref.binding_id]})
+                        if ref.binding_id in params
+                        else frozenset(),
+                    )
+                self._record_read(dest)
                 if type_id:
                     transfers.append(
                         CallTransfer(
