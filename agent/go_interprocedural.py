@@ -10375,7 +10375,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         operand, fn, params, locals_, transfers,
                         count, depth + 1,
                     )
-            if index is not None:
+            if index is not None and index.type not in {
+                "int_literal",
+                "rune_literal",
+                "interpreted_string_literal",
+                "raw_string_literal",
+            }:
+                # A constant index contributes nothing — `M["id"](x)`
+                # names the same slot class as `M[k](x)`. A computed
+                # index evaluates like any argument.
                 callee_deps |= self.expression(
                     index, fn, params, locals_, transfers, count,
                     depth + 1,

@@ -17099,3 +17099,31 @@ def test_imported_func_field_member_pins_signature_type_ids(
         m for m in snapshot.imported_members if m.name == "N"
     )
     assert n_member.id in result.pinned
+
+
+def test_computed_func_call_constant_index_is_dep_free(
+    go_types_helper,
+):
+    # `lib.VMF["id"](x)` — a constant index names the same slot class
+    # as a computed key and contributes no deps; only the container's
+    # read and the arguments flow into the result.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.VMF[\"id\"](x) }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "var VMF map[string]func(int64) int64\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
