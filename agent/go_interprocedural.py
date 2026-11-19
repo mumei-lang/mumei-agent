@@ -8886,7 +8886,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
             mark = len(transfers)
-            self.expression(
+            ret = self.expression(
                 inner[0], fn, params, locals_, transfers, count, 0
             )
             if kind == "defer_statement":
@@ -8894,14 +8894,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # the result expressions evaluate — so a callee that
                 # can write may still change a named result:
                 # `defer set(&r,x); return 0` returns x, not 0. What it
-                # could write with is bounded by the call's arguments,
-                # already recorded on its transfer — reusing them keeps
-                # the arguments (and any calls inside them, like
-                # `defer G(Id(x))`) evaluated exactly once.
-                outer = transfers[-1] if len(transfers) > mark else None
-                if outer is None or not outer.arguments:
+                # could write with is bounded by the call's arguments.
+                # The call's own transfer is matched by span — argument
+                # calls append theirs after it on the opaque paths.
+                defer_arg_deps = frozenset()
+                for t in transfers[mark:]:
+                    if (
+                        getattr(t.span, "start", None)
+                            == inner[0].start_byte
+                        and getattr(t.span, "end", None)
+                            == inner[0].end_byte
+                    ):
+                        if t.arguments:
+                            defer_arg_deps |= frozenset().union(
+                                *t.arguments
+                            )
+                if not defer_arg_deps and isinstance(ret, frozenset):
+                    # Opaque callees (func-value, interface dispatch)
+                    # record `()` arguments but fold every evaluated
+                    # dep — arguments included — into the call's
+                    # result, so it bounds the writes conservatively.
+                    arg_list = inner[0].child_by_field_name(
+                        "arguments"
+                    )
+                    if arg_list is not None and _children(arg_list):
+                        defer_arg_deps = ret
+                if not defer_arg_deps:
                     return
-                defer_arg_deps = frozenset().union(*outer.arguments)
                 call = self.calls.get(self.node_key(inner[0]))
                 callee = (
                     self.summarize(call.target)

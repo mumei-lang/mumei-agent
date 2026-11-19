@@ -19620,3 +19620,19 @@ def test_defer_argument_calls_record_once(go_types_helper):
     assert sorted(c.target for c in result.calls) == sorted(
         [id_fn.binding_id, g_fn.binding_id]
     )
+
+
+def test_defer_indirect_callee_arg_deps_reach_named_result(
+    go_types_helper,
+):
+    # `defer cb(&r,x)` through an unresolvable func value — the
+    # opaque call records no argument deps on its transfer, but the
+    # deferred write can still carry x into the named result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var cb func(*int64, int64) int64; "
+        "defer cb(&r, x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert 0 in result.return_dependencies
