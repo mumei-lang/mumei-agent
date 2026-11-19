@@ -121,7 +121,6 @@ func TestOpaqueCalls(t *testing.T) {
 		{"func F(x string) int { return len(x) }", "builtin"},
 		{"func F(x int64) uint64 { return uint64(x) }", "conversion"},
 		{"func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }", "external_or_bodyless"},
-		{"type T struct{}; func (T) M() int { return 1 }; func F(x T) int { return x.M() }", "method_generic_or_variadic"},
 		{"type I interface{M() int}; func F(x I) int { return x.M() }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id(x) }", "method_generic_or_variadic"},

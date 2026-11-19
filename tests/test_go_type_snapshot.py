@@ -105,6 +105,7 @@ def schema_fixture() -> dict:
                 "method": False,
                 "generic": False,
                 "variadic": False,
+                "receiver": None,
             }
         ],
         "references": [],
@@ -420,7 +421,6 @@ def test_callee_change_invalidates_entire_unit_even_with_unchanged_caller_body(
     "fragment",
     [
         "func F(a any) { switch x := a.(type) { case int64: _ = x; case string: _ = x } }",
-        "type T struct{}; func (T) M() int64 { return 1 }; func F(x T) int64 { return x.M() }",
         "type I interface{M() int64}; func F(x I) int64 { return x.M() }",
         "func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }",
         "func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }",

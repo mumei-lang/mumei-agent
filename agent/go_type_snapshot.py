@@ -117,6 +117,10 @@ class Function:
     method: bool
     generic: bool
     variadic: bool
+    # A method's receiver binds like a leading parameter: a `st.M(args)`
+    # call evaluates the receiver operand into actual[0], so the callee
+    # summary's `return_dependencies` index 0 is the receiver.
+    receiver: Parameter | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,12 @@ class Call:
     owner: str
     target: str
     kind: str
+    # `method` marks a `direct_local` `recv.M(args)` call — the receiver
+    # operand is evaluated separately and binds the callee's leading
+    # receiver parameter. `method_expr` marks `T.M(recv, args)` — the
+    # leading argument already IS the receiver.
+    method: bool = False
+    method_expr: bool = False
 
 
 @dataclass(frozen=True)
@@ -159,7 +169,7 @@ class GoTypeSnapshot:
         fn = next((f for f in self.functions if f.binding_id == binding_id), None)
         _require(fn is not None)
         assert fn is not None
-        if fn.body is None or fn.method or fn.generic or fn.variadic:
+        if fn.body is None or fn.generic or fn.variadic:
             return control_flow.CFGConstruction(
                 None,
                 (control_flow.CFGGap("typed_function_profile_not_supported"),),
@@ -263,6 +273,10 @@ class PackageFunction:
     method: bool
     generic: bool
     variadic: bool
+    # A method's receiver binds like a leading parameter: a `st.M(args)`
+    # call evaluates the receiver operand into actual[0], so the callee
+    # summary's `return_dependencies` index 0 is the receiver.
+    receiver: Parameter | None = None
 
 
 @dataclass(frozen=True)
@@ -354,7 +368,7 @@ class GoPackageSnapshot:
         fn = next((f for f in self.functions if f.binding_id == binding_id), None)
         _require(fn is not None)
         assert fn is not None
-        if fn.body is None or fn.method or fn.generic or fn.variadic:
+        if fn.body is None or fn.generic or fn.variadic:
             return control_flow.CFGConstruction(
                 None,
                 (control_flow.CFGGap("typed_function_profile_not_supported"),),
@@ -632,6 +646,7 @@ def load_go_snapshot(
                 "method",
                 "generic",
                 "variadic",
+                "receiver",
             )
             binding_id = _string(f["binding_id"])
             _require(binding_id in by_id and by_id[binding_id].kind == "function")
@@ -651,13 +666,31 @@ def load_go_snapshot(
                     _boolean(f["method"]),
                     _boolean(f["generic"]),
                     _boolean(f["variadic"]),
+                    _parameter(f["receiver"], target_arch)
+                    if f["receiver"] is not None
+                    else None,
                 )
             )
         fn_by_id = {f.binding_id: f for f in functions}
         _require(len(fn_by_id) == len(functions))
         calls = []
         for item in _list(v["calls"]):
-            c = _record(item, "span", "arguments", "owner", "target", "kind")
+            _require(
+                isinstance(item, dict)
+                and {"span", "arguments", "owner", "target", "kind"}
+                <= set(item)
+                and set(item)
+                <= {
+                    "span",
+                    "arguments",
+                    "owner",
+                    "target",
+                    "kind",
+                    "method",
+                    "method_expr",
+                }
+            )
+            c = item
             sp, owner, target = (
                 _span(c["span"], raw),
                 _string(c["owner"]),
@@ -669,18 +702,29 @@ def load_go_snapshot(
                 and kind != "direct_import"
                 and (not owner or owner in fn_by_id)
             )
+            method = _boolean(c.get("method", False))
+            method_expr = _boolean(c.get("method_expr", False))
+            # `method`/`method_expr` only travel on a `direct_local`
+            # record here — a single file declares no imports — and a
+            # method-value call (receiver operand) never doubles as a
+            # method-expression call (leading receiver argument).
+            _require(
+                (not method or kind == "direct_local")
+                and (not method_expr or (kind == "direct_local" and not method))
+            )
             if kind == "direct_local":
                 _require(target in fn_by_id)
                 callee = fn_by_id[target]
                 _require(
                     callee.body is not None
-                    and not (callee.method or callee.generic or callee.variadic)
+                    and not (callee.generic or callee.variadic)
+                    and callee.method == (method or method_expr)
                 )
             else:
                 _require(target == "")
             args = tuple(_span(a, raw) for a in _list(c["arguments"]))
             _require(all(sp.start <= a.start <= a.end <= sp.end for a in args))
-            calls.append(Call(sp, args, owner, target, kind))
+            calls.append(Call(sp, args, owner, target, kind, method, method_expr))
         gaps = []
         for item in _list(v["gaps"]):
             g = _record(item, "reason", "span")
@@ -959,6 +1003,7 @@ def load_go_package_snapshot(
                 "method",
                 "generic",
                 "variadic",
+                "receiver",
             )
             binding_id = _string(f["binding_id"])
             _require(binding_id in by_id and by_id[binding_id].kind == "function")
@@ -980,6 +1025,9 @@ def load_go_package_snapshot(
                     _boolean(f["method"]),
                     _boolean(f["generic"]),
                     _boolean(f["variadic"]),
+                    _parameter(f["receiver"], target_arch)
+                    if f["receiver"] is not None
+                    else None,
                 )
             )
         fn_by_id = {f.binding_id: f for f in functions}
@@ -1012,15 +1060,17 @@ def load_go_package_snapshot(
             kind = _string(c["kind"])
             _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
             method = _boolean(c.get("method", False))
-            # `method` only travels on an imported method call — a local
-            # callee with a receiver never becomes `direct_import`.
-            _require(not method or kind == "direct_import")
+            # `method` travels on a method call — `lib.VS.PF(args)` on
+            # an imported member or `st.M(args)` on a same-package one —
+            # never on a plain function call.
+            _require(not method or kind in ("direct_import", "direct_local"))
             method_expr = _boolean(c.get("method_expr", False))
-            # `method_expr` likewise only travels on a `direct_import`
+            # `method_expr` likewise only travels on a method-expression
             # record, and never beside `method` — a `recv.M(args)` call
             # has a receiver node, not a leading receiver argument.
             _require(
-                not method_expr or (kind == "direct_import" and not method)
+                not method_expr
+                or (kind in ("direct_import", "direct_local") and not method)
             )
             # `results` declares an imported callee's arity when it
             # exceeds one — a 0/1-result callee omits it, and no other
@@ -1044,9 +1094,14 @@ def load_go_package_snapshot(
             if kind == "direct_local":
                 _require(target in fn_by_id)
                 callee = fn_by_id[target]
+                # A same-package method call carries `method`
+                # (`st.M(args)`) or `method_expr` (`T.M(st, args)`); a
+                # plain function never does — the flag and the callee's
+                # receiver must agree.
                 _require(
                     callee.body is not None
-                    and not (callee.method or callee.generic or callee.variadic)
+                    and not (callee.generic or callee.variadic)
+                    and callee.method == (method or method_expr)
                 )
             elif kind == "direct_import":
                 # The callee lives in a resolved imported unit: the target

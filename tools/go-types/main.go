@@ -112,6 +112,11 @@ type function struct {
 	Method     bool        `json:"method"`
 	Generic    bool        `json:"generic"`
 	Variadic   bool        `json:"variadic"`
+	// Receiver carries a method's receiver variable like a leading
+	// parameter (null for plain functions): the consumer binds it at
+	// argument position 0, so `recv.M(args)` resolves the receiver's
+	// deps through the method's own summary.
+	Receiver *parameter `json:"receiver"`
 }
 
 type call struct {
@@ -318,6 +323,34 @@ func (ix *indexer) directImportMethodID(f *types.Func, recv types.Type) (string,
 		}
 	}
 	return id, sig.Results().Len(), ids, true
+}
+
+// localReceiverOK admits a same-package method call only when the static
+// receiver type is concrete — a named type (or pointer to one) that is not
+// an interface and is not still generic. An interface receiver dispatches
+// dynamically: the callee the selection names is not the one that runs,
+// so both `i.M()` and the method expression `I.M` stay closed. A receiver
+// with type arguments (`GT[int]`) stays closed too — the substitution's
+// identity rides on no member the pins could cover.
+func localReceiverOK(recv types.Type) bool {
+	rt := types.Unalias(recv)
+	if ptr, ok := rt.(*types.Pointer); ok {
+		rt = types.Unalias(ptr.Elem())
+	}
+	named, ok := rt.(*types.Named)
+	if !ok {
+		return false
+	}
+	if _, ok := named.Underlying().(*types.Interface); ok {
+		return false
+	}
+	if targs := named.TypeArgs(); targs != nil && targs.Len() > 0 {
+		return false
+	}
+	if tp := named.TypeParams(); tp != nil && tp.Len() > 0 {
+		return false
+	}
+	return true
 }
 
 // directImportInstantiation admits an explicit instantiation of an imported
@@ -1141,6 +1174,18 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 						// flag is needed.
 						return "direct_import", id, selection.Kind() == types.MethodVal, arity, ids
 					}
+					// A method declared in this unit resolves through its
+					// own summary like `direct_local`: `st.M(args)` marks
+					// `method` so the consumer evaluates the receiver
+					// operand and folds it at argument position 0 (the
+					// callee summary's receiver slot); a method
+					// expression `T.M(st, args)` needs no flag — the
+					// receiver is already the leading argument. Dynamic
+					// dispatch (interface receiver), generics, variadics
+					// and promoted selections stay closed.
+					if fn, ok := functions[ix.id(f)]; ok && fn.Body != nil && !fn.Generic && !fn.Variadic && localReceiverOK(selection.Recv()) {
+						return "direct_local", fn.BindingID, selection.Kind() == types.MethodVal, 0, nil
+					}
 				}
 			}
 			return "method_generic_or_variadic", "", false, 0, nil
@@ -1404,6 +1449,10 @@ func analyze(req request) (out snapshot) {
 				Method: sig.Recv() != nil, Generic: sig.TypeParams().Len() != 0 || sig.RecvTypeParams().Len() != 0,
 				Variadic: sig.Variadic(),
 			}
+			if sig.Recv() != nil {
+				recv := parameter{ix.id(sig.Recv()), ix.typeOf(sig.Recv().Type())}
+				fn.Receiver = &recv
+			}
 			if fd.Body != nil {
 				body := ix.spanOf(fd.Body.Lbrace+1, fd.Body.Rbrace)
 				fn.Body = &body
@@ -1441,7 +1490,7 @@ func analyze(req request) (out snapshot) {
 					kind, target, method, results, typeArgIDs = override, "", false, 0, nil
 				}
 				methodExpr := false
-				if kind == "direct_import" {
+				if kind == "direct_import" || kind == "direct_local" {
 					if e, ok := unparen(node.Fun).(*ast.SelectorExpr); ok {
 						if sel := ix.info.Selections[e]; sel != nil {
 							methodExpr = sel.Kind() == types.MethodExpr

@@ -3561,7 +3561,9 @@ parens/selectors/indexes), and a chain through a *pointer-typed*
 intermediate field (`st.A.N` where `A *P2`) stays closed — the
 deref reads caller memory the conflated set cannot represent.
 Composite-typed package globals, method values (`f := st.M`),
-method calls (`st.M()`), `st[i]` and `*st.V` stay closed.
+`st[i]` and `*st.V` stay closed. Direct method *calls* (`st.M(x)`,
+`T.M(st, x)`) admit in the Go interprocedural frontier's
+method-call slice below.
 
 ### C07 per-statement read attribution
 
@@ -3651,6 +3653,34 @@ including the single-type-arg `type_conversion_expression` shape
 in RHS position. A void
 instantiated callee records its
 argument-dependency union like any other `direct_import` transfer.
+
+### Go deep-analysis: same-package method calls (`st.M(x)`, `T.M(st, x)`)
+
+A `direct_local` call on a same-package method now resolves through
+the callee's summary like a plain local call: the producer emits a
+`receiver` parameter on every function record (null for plain
+functions) and flags the call `method` for a method value
+(`st.M(args)`) or `method_expr` for a method expression
+(`T.M(st, args)`). The receiver binds as leading parameter index 0 —
+a `st.M(args)` call evaluates the selector operand for its deps and
+prepends it to the actuals; `T.M(st, args)` already carries the
+receiver as argument 0, so arity is `parameters + 1`. The callee
+summary's `return_dependencies` index 0 is the receiver, so
+`st.V + x` reports the deps the caller seeded `st` with.
+
+Admission stays narrow: the receiver must be a concrete named type
+(`localReceiverOK` unwraps aliases and one pointer layer, rejects
+interface underlyings, type parameters and instantiated types), the
+callee must be non-generic, non-variadic and single-result like
+every other admitted function, and the receiver's declared fact must
+sit in the admitted kinds (scalar, pointer, struct, scalar-element
+`chan`). A bound method *value* (`f := st.M`) and result-less or
+generic/variadic/interface-receiver methods stay closed; method
+calls on imported named types keep the `direct_import` path. An
+effectful pointer-receiver callee conservatively folds the write
+deps into the receiver binding — `st.M()` on a value variable
+auto-takes `&st`, so the fold applies even when the operand isn't
+`&st`-shaped.
 
 ### C06 imported method calls on concrete named types
 
