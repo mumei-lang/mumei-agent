@@ -789,6 +789,11 @@ func (ix *indexer) recordPointeeMembers(t types.Type, seen map[string]bool) {
 // member read that would pin it otherwise.
 func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 	seen := map[string]bool{}
+	// Two instantiations of one generic declaration share its id
+	// (`Q[A]`, `Q[B]`) but carry different element types, so the
+	// recursion guard keys on the whole instantiated type — the
+	// `seen` map above only dedupes the emitted ids.
+	seenType := map[string]bool{}
 	var ids []string
 	var add func(t types.Type)
 	add = func(t types.Type) {
@@ -798,11 +803,15 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		if ptr, ok := t.(*types.Pointer); ok {
 			t = ptr.Elem()
 		}
-		// Resolve the named identity BEFORE descending into the
-		// element type: a self-referential declaration (`type C chan
-		// C`, `type F func(F)`) recurses back onto itself through the
-		// chan/signature walk below, and only an already-marked `seen`
-		// entry terminates it.
+		// A self-referential declaration (`type C chan C`, `type F
+		// func(F)`) recurses back onto itself through the
+		// chan/signature walk below, and only an already-marked entry
+		// terminates it.
+		key := t.String()
+		if seenType[key] {
+			return
+		}
+		seenType[key] = true
 		var obj *types.TypeName
 		switch typ := t.(type) {
 		case *types.Named:
@@ -813,10 +822,7 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 			obj = typ.Obj()
 		}
 		if obj != nil {
-			if id := ix.typeID(obj); id != "" {
-				if seen[id] {
-					return
-				}
+			if id := ix.typeID(obj); id != "" && !seen[id] {
 				seen[id] = true
 				ids = append(ids, id)
 			}

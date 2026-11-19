@@ -578,6 +578,26 @@ func TestRecursiveChanSignatureTypeIDsTerminate(t *testing.T) {
 	}
 }
 
+func TestGenericChanInstantiationsPinEachElementType(t *testing.T) {
+	// `Q[A]` and `Q[B]` share the declaration's identity — the
+	// element walk must still descend into each instantiation so
+	// both `A` and `B` land in the signature's type deps.
+	unit := []namedSource{{"a.go", "package p\ntype A int64\ntype B int64\ntype Q[T any] chan T\nfunc G(a Q[A], b Q[B]) int64 { return 0 }"}}
+	out := analyze(request{Sources: unit, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var gb binding
+	for _, b := range named(out, "G") {
+		if b.Kind == "function" {
+			gb = b
+		}
+	}
+	if len(gb.SignatureTypeIDs) != 3 {
+		t.Fatalf("G should pin Q plus each instantiation's element type, got %v", gb.SignatureTypeIDs)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {
