@@ -1008,6 +1008,7 @@ class _Builder:
         # the composite element's position (or literal map key):
         # binding_id -> slot key -> donor bindings.
         self._func_elem_inner_donors: dict[str, dict[str, set[str]]] = {}
+        self._func_elem_surrogate_seq = 0
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -1845,7 +1846,16 @@ class _Builder:
             # records under a surrogate id the donor sets can still
             # resolve, or `fm[0][i]` loses every element the old
             # slice carried.
-            surrogate = binding_id + "/func_elem"
+            # Unique per reseat: the same variable can detach
+            # twice (`fs = mk(); fs = mk2()`) and each abandoned
+            # backing parks under its own surrogate, so a nested
+            # container aliasing the FIRST backing does not see
+            # the second's elements.
+            self._func_elem_surrogate_seq += 1
+            surrogate = (
+                binding_id + "/func_elem/"
+                + str(self._func_elem_surrogate_seq)
+            )
             replacement = {surrogate}
             if captured:
                 self.closure_captures[surrogate] = captured

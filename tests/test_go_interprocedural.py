@@ -23969,6 +23969,25 @@ def test_func_elem_nested_donor_reseat_surrogate(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_func_elem_nested_reseat_surrogate_unique(go_types_helper):
+    # Two successive abandons park under DIFFERENT surrogates: the
+    # `fm[0]` slot still resolves only the FIRST backing's elements —
+    # the second reseat's literal ({return x}) must not leak in.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fm := [][]func() int64{fs}\n"
+        "    fs = []func() int64{func() int64 { return 0 }}\n"
+        "    fs = []func() int64{func() int64 { return x }}\n"
+        "    return fm[0][0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
 def test_func_elem_nested_store_reads_donor_deps(go_types_helper):
     # `fs[0] = cb` folds the param func value's deps into `fs`'s own
     # set — `fm[0]` aliases that backing, so the nested call reads
