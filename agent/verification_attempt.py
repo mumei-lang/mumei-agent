@@ -4,6 +4,7 @@ Records cannot authorize a tool, prove observation freshness or establish that
 a process was stopped. No default verification path consumes these records.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -858,13 +859,21 @@ class FileAttemptSequenceStore:
             if dir_fd is not None:
                 try:
                     # A filesystem that opens a directory can still
-                    # refuse fsync on it (EINVAL/ENOTSUP) — the rename
-                    # already landed, so keep the file-level guarantee
-                    # rather than fail a completed publication.
+                    # refuse fsync on it (EINVAL/ENOTSUP/ENOSYS) — the
+                    # rename already landed, so keep the file-level
+                    # guarantee rather than fail a completed
+                    # publication. A real I/O failure (EIO, EBADF, …)
+                    # propagates: publication must not report durable
+                    # success it did not get.
                     try:
                         os.fsync(dir_fd)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        if e.errno not in (
+                            errno.EINVAL,
+                            errno.ENOTSUP,
+                            errno.ENOSYS,
+                        ):
+                            raise
                 finally:
                     os.close(dir_fd)
         except BaseException:

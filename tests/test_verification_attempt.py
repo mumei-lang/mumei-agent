@@ -1,6 +1,7 @@
 """Host-observation contracts only: no runner, authority or Evidence consumer."""
 
 import builtins
+import errno
 import hashlib
 import importlib
 import itertools
@@ -4210,3 +4211,41 @@ def test_file_store_write_fsyncs_directory(tmp_path, monkeypatch):
     # the platform cannot fsync a directory only the file lands.
     assert kinds[0] == "file"
     assert "dir" in kinds or len(kinds) == 1
+
+
+def test_file_store_dir_fsync_io_error_propagates(tmp_path, monkeypatch):
+    # An fsync failure that is not "unsupported" (EIO, not EINVAL)
+    # must surface — publication cannot claim durable success it did
+    # not get.
+    real_fsync = os.fsync
+
+    def flaky(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "simulated io error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", flaky)
+    store = _file_store(tmp_path)
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(OSError):
+        store.publish(sequence)
+
+
+def test_file_store_dir_fsync_unsupported_is_tolerated(
+    tmp_path, monkeypatch
+):
+    # Where the filesystem refuses fsync on a directory (EINVAL), the
+    # rename already landed — publication keeps the file-level
+    # guarantee instead of failing a completed write.
+    real_fsync = os.fsync
+
+    def refusing(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "fsync unsupported on dir")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refusing)
+    store = _file_store(tmp_path)
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    assert store.current == sequence
