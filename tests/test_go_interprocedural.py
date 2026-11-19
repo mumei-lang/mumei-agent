@@ -19869,3 +19869,63 @@ def test_defer_indirect_callee_arg_deps_reach_named_result(
     result = named(source, snapshot, summaries)
     assert result.available
     assert 0 in result.return_dependencies
+
+
+def test_call_result_field_read_admitted(go_types_helper):
+    # `g(a).V` — a field of a call result carries the call's
+    # conflated result deps.
+    files = {
+        "a.go": "package p\n"
+        "type P struct{ V int64 }\n"
+        "func g(x int64) P { return P{V: x} }\n"
+        "func F(a int64) int64 { return g(a).V }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_call_result_nested_field_read_admitted(go_types_helper):
+    # `g(a).A.B` — a nested field of a call result conflates the
+    # same way.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ B int64 }\n"
+        "type P struct{ A Q }\n"
+        "func g(x int64) P { return P{A: Q{B: x}} }\n"
+        "func F(a int64) int64 { return g(a).A.B }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_call_result_index_stays_closed(go_types_helper):
+    # `g(a)[0]` — the callee's array result is already closed at
+    # the signature gate, so the caller fails closed too.
+    files = {
+        "a.go": "package p\n"
+        "func g(x int64) [2]int64 { return [2]int64{x, 0} }\n"
+        "func F(a int64) int64 { return g(a)[0] }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available

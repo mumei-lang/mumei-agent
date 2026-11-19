@@ -10122,6 +10122,92 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                     return deps | self.indirect_writes
+                # `g(a).V` — a field of a call result: the call's
+                # conflated result dep set covers whichever field the
+                # read selects, so the operand evaluates like a
+                # value. A method name (`g(a).M`) is filtered below —
+                # `_method_value_parts` rejects computed operands, so
+                # a method value on a call result stays closed.
+                sel_operand = node.child_by_field_name("operand")
+                while (
+                    sel_operand is not None
+                    and sel_operand.type == "parenthesized_expression"
+                ):
+                    sel_operand = next(
+                        (
+                            c
+                            for c in sel_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                # `g(a).A.B` — walk the selector chain to its base:
+                # only a call base means the field rides a call
+                # result; an identifier base still takes the local
+                # composite path (which keeps promoted-field reads
+                # closed).
+                sel_base = sel_operand
+                while (
+                    sel_base is not None
+                    and sel_base.type == "selector_expression"
+                ):
+                    sel_base = sel_base.child_by_field_name("operand")
+                    while (
+                        sel_base is not None
+                        and sel_base.type == "parenthesized_expression"
+                    ):
+                        sel_base = next(
+                            (
+                                c
+                                for c in sel_base.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                if (
+                    sel_base is not None
+                    and sel_base.type == "call_expression"
+                ):
+                    # Every selector level must resolve to a declared
+                    # field — `g().M` names a method value, not a
+                    # field read, and stays closed like `s.M` on a
+                    # computed operand does.
+                    fields_ok = True
+                    cur_sel = node
+                    while (
+                        cur_sel is not None
+                        and cur_sel.type == "selector_expression"
+                    ):
+                        fld = cur_sel.child_by_field_name("field")
+                        fld_ref = (
+                            self.references.get(self.node_key(fld))
+                            if fld is not None
+                            else None
+                        )
+                        if self._field_identity(fld_ref) is None:
+                            fields_ok = False
+                            break
+                        cur_sel = cur_sel.child_by_field_name(
+                            "operand"
+                        )
+                        while (
+                            cur_sel is not None
+                            and cur_sel.type
+                            == "parenthesized_expression"
+                        ):
+                            cur_sel = next(
+                                (
+                                    c
+                                    for c in cur_sel.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                    if fields_ok:
+                        return self.expression(
+                            sel_operand, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
                 # `st.V` / `st.A.B` — a field of a tracked local
                 # composite: the binding's dep set conflates every
                 # field, so the read returns it whole. Local state —
