@@ -1346,30 +1346,58 @@ class _Builder:
                 ref = self.references.get(self.node_key(el))
                 src = ref.binding_id if ref is not None else None
                 if src and src != bound_id:
-                    captured = self.closure_captures.get(src)
-                    if captured:
-                        self.closure_captures[bound_id] = (
-                            self.closure_captures.get(
-                                bound_id, frozenset()
-                            )
-                            | captured
-                        )
-                    writes = self.closure_writes.get(src)
-                    if writes:
-                        self.closure_writes[bound_id] = (
-                            self.closure_writes.get(
-                                bound_id, frozenset()
-                            )
-                            | writes
-                        )
-                    if src in self.closure_star_writes:
-                        self.closure_star_writes.add(bound_id)
-                    if src in self.closure_inner_calls:
-                        self.closure_inner_calls.add(bound_id)
+                    self._adopt_element_records(src, bound_id)
                 # A selector's operand (`st` in `st.M`) names no
                 # element — skip its children like an identifier's.
                 continue
             stack.extend(el.children)
+
+    def _adopt_element_records(self, src: str, bound_id: str) -> None:
+        """Union one func value's captures and write targets into a
+        container binding — `fs[i] = f` behaves like an element
+        inside `fs := []func(){f}`."""
+        captured = self.closure_captures.get(src)
+        if captured:
+            self.closure_captures[bound_id] = (
+                self.closure_captures.get(bound_id, frozenset())
+                | captured
+            )
+        writes = self.closure_writes.get(src)
+        if writes:
+            self.closure_writes[bound_id] = (
+                self.closure_writes.get(bound_id, frozenset()) | writes
+            )
+        if src in self.closure_star_writes:
+            self.closure_star_writes.add(bound_id)
+        if src in self.closure_inner_calls:
+            self.closure_inner_calls.add(bound_id)
+
+    def _func_elem_index_target(
+        self, lhs: Any, locals_: dict[str, frozenset[int]]
+    ) -> tuple[Any, Any | None] | None:
+        """`fs[i]` — an index store whose operand names a bound
+        func-element container local. Returns (ref, index_node), or
+        None when the operand is not a local `[]func`/`[N]func`/
+        `map[K]func` binding. A param container stays closed: its
+        elements live in caller memory, which is an external
+        mutation the local model cannot track."""
+        if lhs is None or lhs.type != "index_expression":
+            return None
+        operand = lhs.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = operand.child_by_field_name("operand")
+        if operand is None or operand.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(operand))
+        if ref is None or ref.binding_id not in locals_:
+            return None
+        bound = self.bindings.get(ref.binding_id)
+        if bound is None or not self._func_elem_collection(bound.type):
+            return None
+        return ref, lhs.child_by_field_name("index")
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
@@ -4641,6 +4669,109 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and arguments[0].type == "channel_type"
         )
 
+    def _func_elem_make(self, node: Any) -> bool:
+        """`make(<coll>[, n])` — a fresh EMPTY func-element
+        container: `make([]func, n)`/`make(map[K]func)` binds the
+        same way `fs := []func(){}` does — zero elements, an empty
+        dep set, and the bind gates admit on the declared collection
+        type. A named collection type (`make(FM, n)`) resolves
+        through its declared fact; `make(chan T)` stays on the
+        channel path."""
+        if node is None or node.type != "call_expression":
+            return False
+        call = self.calls.get(self.node_key(node))
+        if call is None or call.kind != "builtin":
+            return False
+        function_node = node.child_by_field_name("function")
+        while (
+            function_node is not None
+            and function_node.type == "parenthesized_expression"
+        ):
+            function_node = next(
+                iter(function_node.named_children), None
+            )
+        if function_node is None or function_node.text != b"make":
+            return False
+        arguments_node = node.child_by_field_name("arguments")
+        arguments = (
+            _children(arguments_node) if arguments_node is not None else []
+        )
+        if not arguments or len(arguments) > 3:
+            return False
+        type_arg = arguments[0]
+        while (
+            type_arg is not None and type_arg.type == "parenthesized_type"
+        ):
+            type_arg = next(iter(type_arg.named_children), None)
+        if type_arg is None:
+            return False
+        if type_arg.type in {"slice_type", "array_type"}:
+            elem = type_arg.child_by_field_name("element")
+            return elem is not None and elem.type == "function_type"
+        if type_arg.type == "map_type":
+            value = type_arg.child_by_field_name("value")
+            return value is not None and value.type == "function_type"
+        if type_arg.type == "type_identifier":
+            ref = self.references.get(self.node_key(type_arg))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            return (
+                binding is not None
+                and binding.kind == "type"
+                and self._func_elem_collection(binding.type)
+            )
+        return False
+
+    def _pin_func_elem_make_type(self, node: Any) -> bool:
+        """Pin the named identities a func-element `make` type
+        expression names. `_pin_type_node` rejects signature
+        literals outright, so the collection's non-signature
+        children pin through it while the func element's own
+        parameter/result types walk their names instead."""
+        while (
+            node is not None and node.type == "parenthesized_type"
+        ):
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "type_identifier":
+            return self._pin_type_node(node)
+        if node.type == "slice_type":
+            elem = node.child_by_field_name("element")
+            return self._pin_signature_type(elem)
+        if node.type == "array_type":
+            elem = node.child_by_field_name("element")
+            return self._pin_signature_type(elem)
+        if node.type == "map_type":
+            key = node.child_by_field_name("key")
+            value = node.child_by_field_name("value")
+            return self._pin_type_node(
+                key
+            ) and self._pin_signature_type(value)
+        return False
+
+    def _pin_signature_type(self, node: Any) -> bool:
+        """Pin every named identity a `func` type literal's
+        parameter and result types name."""
+        if node is None or node.type != "function_type":
+            return False
+        ok = True
+        params = node.child_by_field_name("parameters")
+        if params is not None:
+            for decl in params.named_children:
+                typed = decl.child_by_field_name("type")
+                if typed is not None and not self._pin_type_node(
+                    typed
+                ):
+                    ok = False
+        result = node.child_by_field_name("result")
+        if result is not None and not self._pin_type_node(result):
+            ok = False
+        return ok
+
     def _imported_member_write(
         self, node: Any
     ) -> tuple[PackageMember, tuple[Any, ...], bool] | None:
@@ -7385,6 +7516,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
             field_chan_lhs: dict[int, Any] = {}
+            # `fs[i] = f` — an element store into a bound func-element
+            # container keeps the stored value's records under the
+            # container's name; the store loop unions rather than
+            # copying like a plain rebind would.
+            func_elem_targets: set[int] = set()
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -7682,6 +7818,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                     refs.append(_ALIAS_FOLD)
+                    continue
+                # `fs[i] = f` — an element store into a bound
+                # func-element container (`fs := []func(){…}` or
+                # `fm := lib.Mk(x)`): the container's conflated slot
+                # accumulates the stored value's deps like a
+                # composite's continuing set, the index evaluates
+                # like a write's, and the stored value's func records
+                # union into the container's below — a `fs[k]()` call
+                # resolves every element through the one slot. A
+                # param container's elements live in caller memory —
+                # that external mutation stays closed here.
+                func_elem_lhs = self._func_elem_index_target(
+                    lhs, locals_
+                )
+                if func_elem_lhs is not None:
+                    ref, index = func_elem_lhs
+                    if index is not None and index.type not in (
+                        _INDEX_LITERALS
+                    ):
+                        self._record_read(
+                            self.expression(
+                                index, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                        )
+                    refs.append((ref, True, False))
+                    func_elem_targets.add(len(refs) - 1)
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
             # Go assignments run in two phases — destination operands
@@ -8359,11 +8522,58 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             | tokens
                         )
+                # `fs[i] = f` — a store into a func-element
+                # container unions the stored value's records into
+                # the container's, like an element inside
+                # `fs := []func(){f}`. The pre-state snapshots make
+                # `f, fs[i] = g, f` adopt f's OLD records — the
+                # parallel store's write to f lands after.
+                if (
+                    i in func_elem_targets
+                    and len(lefts) == len(rights)
+                    and rights[i].type
+                    in {"identifier", "selector_expression"}
+                ):
+                    src_ref = self.references.get(
+                        self.node_key(rights[i])
+                    )
+                    src_id = (
+                        src_ref.binding_id
+                        if src_ref is not None
+                        else None
+                    )
+                    if (
+                        src_id is not None
+                        and src_id != ref.binding_id
+                    ):
+                        if src_id in captures_before:
+                            self.closure_captures[ref.binding_id] = (
+                                self.closure_captures.get(
+                                    ref.binding_id, frozenset()
+                                )
+                                | captures_before[src_id]
+                            )
+                        if src_id in writes_before:
+                            self.closure_writes[ref.binding_id] = (
+                                self.closure_writes.get(
+                                    ref.binding_id, frozenset()
+                                )
+                                | writes_before[src_id]
+                            )
+                        if src_id in star_before:
+                            self.closure_star_writes.add(
+                                ref.binding_id
+                            )
+                        if src_id in calls_before:
+                            self.closure_inner_calls.add(
+                                ref.binding_id
+                            )
                 # `h2 = h` — an assignment copy propagates the
                 # closure's capture record like `h2 := h` does; a
                 # non-closure RHS clears a stale record on the name.
                 if (
                     not compound
+                    and i not in func_elem_targets
                     and len(lefts) == len(rights)
                     and rights[i].type == "identifier"
                 ):
@@ -8559,13 +8769,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 elif (
                     not compound
+                    and i not in func_elem_targets
                     and len(lefts) == len(rights)
                     and rights[i].type == "selector_expression"
                     and ref is not None
                 ):
                     # `f = s.M` — rebind to a method value; a
                     # conditional rebind keeps the old alternative, so
-                    # pop instead.
+                    # pop instead. A func-element index store is not a
+                    # name rebind — the adoption above already unioned
+                    # the selector's records into the container's.
                     mv = self._method_value_parts(rights[i])
                     if mv is not None and not (
                         conditional or self._may_skip > 0
@@ -8589,7 +8802,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             ref.binding_id,
                             conditional or self._may_skip > 0,
                         )
-                elif not compound and ref is not None:
+                elif (
+                    not compound
+                    and ref is not None
+                    and i not in func_elem_targets
+                ):
                     self._drop_bound_method(
                         ref.binding_id,
                         conditional or self._may_skip > 0,
@@ -8657,14 +8874,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             ),
                             ref.binding_id,
                         )
-                else:
+                elif i not in func_elem_targets:
                     # `h = (f)` / `h = f()` — a non-identifier RHS
                     # leaves the name holding a value the alias
                     # cannot resolve; an unconditional store loses
                     # the target outright and a maybe-skipped one
                     # leaves it path-dependent, so the records drop
                     # either way — conditionally escaping the old
-                    # value's write targets and captures first.
+                    # value's write targets and captures first. A
+                    # func-element index store keeps the container's
+                    # unioned records the adoption above built.
                     self._drop_func_value_records(
                         ref.binding_id,
                         conditional or self._may_skip > 0,
@@ -12140,16 +12359,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # like `new`, and a buffered capacity evaluates
                     # for calls but is not a stored value. The
                     # channel's dep set starts empty and grows by
-                    # send. Slice/map `make` stays opaque — a
-                    # composite value still cannot bind.
+                    # send.
                     if (
                         len(arguments) not in {1, 2}
                         or arguments[0].type != "channel_type"
                         or not self._pin_type_node(arguments[0])
                     ):
-                        raise _Unsupported(
-                            "unresolved_or_opaque_call", _span(node)
-                        )
+                        # `make([]func, n)`/`make(map[K]func)` —
+                        # a fresh EMPTY func-element container:
+                        # the type pins its named identities, a size
+                        # or capacity argument evaluates for calls
+                        # but is not a stored value, and the
+                        # container's dep set starts empty and grows
+                        # by element stores. A non-func collection
+                        # still cannot bind — it stays opaque.
+                        if (
+                            not self._func_elem_make(node)
+                            or not self._pin_func_elem_make_type(
+                                arguments[0]
+                            )
+                        ):
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call", _span(node)
+                            )
+                        for extra in arguments[1:]:
+                            self.expression(
+                                extra, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
+                        return frozenset()
                     if len(arguments) == 2:
                         self.expression(
                             arguments[1], fn, params, locals_,
@@ -13576,6 +13814,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and member.type.kind == "function"
             ):
                 bound_id = member.id
+        elif (
+            name_node is not None
+            and name_node.type == "index_expression"
+        ):
+            # `fs[i] = func() { …x… }` stores the literal into a
+            # func-element container's slot — record under the
+            # container's binding like a composite literal element,
+            # so `fs[k]()` re-resolves the captures at call time.
+            operand = name_node.child_by_field_name("operand")
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = operand.child_by_field_name("operand")
+            container_ref = (
+                self.references.get(self.node_key(operand))
+                if operand is not None
+                and operand.type == "identifier"
+                else None
+            )
+            container = (
+                self.bindings.get(container_ref.binding_id)
+                if container_ref is not None
+                else None
+            )
+            if container is not None and self._func_elem_collection(
+                container.type
+            ):
+                bound_id = container.id
+                in_composite = True
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
             if in_composite:

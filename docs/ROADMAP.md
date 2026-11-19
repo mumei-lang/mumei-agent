@@ -2855,9 +2855,7 @@ may capture the queue, so a later `ch <- x` reaches `fs[k]()` via
 `indirect_writes`. A `nil` literal admits as a dep-free value in
 every expression position (`return nil`, `G(nil)`, `f = nil`,
 `p == nil`) — a nil read on a non-nilable type cannot compile, and
-the nil queue holds nothing. `map[K]func` results stay closed: a
-keyed slot is not a numbered element, so the conflated dep set
-cannot say which slot the call invokes.
+the nil queue holds nothing.
 A `map[K]func` call result admits through the same gate:
 `lib.Mk(x)["k"]()` runs the keyed element as an opaque call on
 the container's slot — which value a map key holds is as
@@ -2869,7 +2867,27 @@ way a `[]func` local does (`fm := lib.Mk(x)`, `var fm =
 lib.Mk(x)`, `fm = lib.Mk(x)`): a keyed slot is as unknowable as
 a numbered index, so `fm["k"]()` calls opaque on the
 container's slot and the producing call's `chan` arguments
-promote through it.
+promote through it. `make` on a func-element collection binds
+the same way (`fs := make([]func, n)`, `make(map[K]func)`,
+`make(FM, n)` on a named collection type): a fresh empty
+container whose dep set starts empty and grows by element
+stores, while `make` on a non-func collection still cannot
+bind.
+An element store into a bound container — `fs[i] = v`,
+`fm[k] = v` — unions the stored value's deps into the
+container's conflated set, and a func-typed RHS is recorded
+element-wise: a literal's captures, write targets and inner
+calls record under the container's name like a composite
+element's, and an identifier or selector RHS adopts the
+referent's own func records into the container (read from the
+pre-state, so `cl, fs[0] = g, cl` still hands `fs[0]` `cl`'s
+OLD records — the element store is not a name rebind, so the
+record-clearing that a scalar store's name gets does not apply).
+A computed index or key evaluates like an argument on the store
+side too. A param container's elements live in caller memory, a
+scalar-element container has no func records, and a nested
+`fm[k][i]` write is a container-of-container the index model
+does not reach — all three stores stay closed.
 A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
 inner callee resolves) admits as an opaque indirect call: Go
 evaluates the callee expression before the arguments, so the
