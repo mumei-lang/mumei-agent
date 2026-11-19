@@ -13551,8 +13551,9 @@ def test_chan_parameter_records_effects_and_staleness(go_types_helper):
 
 
 def test_chan_parameter_boundaries_stay_closed(go_types_helper):
-    # Non-scalar elements, a channel result, a receive-valued
-    # binding and select all stay closed.
+    # Non-scalar elements, a receive-valued binding and select all
+    # stay closed. A scalar `chan` result (`Res`) admits — ops on
+    # the bound name follow the external queue model.
     files = {
         "a.go": "package p\n"
         "func Ptr(ch chan *int64) int64 { return 0 }\n"
@@ -13577,7 +13578,7 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
         for name in ("Ptr", "Res", "Alias", "Sel")
     }
     assert not results["Ptr"].available
-    assert not results["Res"].available
+    assert results["Res"].available
     assert not results["Alias"].available
     assert not results["Sel"].available
 
@@ -15099,3 +15100,204 @@ def test_bound_field_channel_tuple_store_uses_prestate_queue(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_chan_result_send_recv_admitted(go_types_helper):
+    # `ch := g()` where `g` declares a scalar `chan` result binds a
+    # callee-produced queue: ops follow the channel-parameter
+    # external model — sends broadcast into indirect writes and the
+    # receive reads them back.
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := g()\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_var_form_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar ch = g()\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_close_and_range_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := g()\n"
+        "\tch <- x\n"
+        "\tclose(ch)\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range ch {\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_alias_follows_external_queue(go_types_helper):
+    # `ch2 := ch` aliases the callee-produced queue — ops resolve
+    # through `_chan_root` to the external-local binding.
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := g()\n"
+        "\tch2 := ch\n"
+        "\tch2 <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_argument_propagates_queue_contents(
+    go_types_helper,
+):
+    # Passing the result-bound name as a `chan` argument carries the
+    # broadcast send deps, like passing a channel parameter does.
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func H(ch chan int64) int64 { return <-ch }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := g()\n"
+        "\tch <- x\n"
+        "\treturn H(ch)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_callee_contents_reach_caller(go_types_helper):
+    # Contents the callee sent before returning the queue carry
+    # through the result's dep set into the caller's receive.
+    files = {
+        "a.go": "package p\n"
+        "func g(y int64) chan int64 {\n"
+        "\tch := make(chan int64)\n"
+        "\tch <- y\n"
+        "\treturn ch\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tch := g(x)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_len_records_transfer(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "func g() chan int64 { return make(chan int64) }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := g()\n"
+        "\t_ = len(ch)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_chan_result_boundaries_stay_closed(go_types_helper):
+    # A multi-result callee, a non-scalar element, an imported
+    # function's result (whose signature carries no kind), and a
+    # nested `chan chan` element all stay closed.
+    for decl, body in [
+        (
+            "func g() (chan int64, int64) {\n"
+            "\tvar ch chan int64\n\treturn ch, 0\n}\n",
+            "ch, _ := g()\n\t_ = ch",
+        ),
+        (
+            "func g() chan string { return make(chan string) }\n",
+            "ch := g()\n\t_ = ch",
+        ),
+        (
+            "func g() chan chan int64 {\n"
+            "\tvar ch chan chan int64\n\treturn ch\n}\n",
+            "ch := g()\n\t_ = ch",
+        ),
+    ]:
+        files = {
+            "a.go": "package p\n"
+            + decl
+            + "func F(x int64) int64 {\n\t"
+            + body
+            + "\n\treturn x\n}\n"
+        }
+        snapshot = _snapshot_for(go_types_helper, files)
+        result = named_package(
+            files,
+            snapshot,
+            ip.summarize_go_package(files, snapshot),
+            "F",
+        )
+        assert not result.available, body
+
+
+def test_chan_result_imported_function_stays_closed(go_types_helper):
+    lib = {"lib": {"t.go": "package lib\nfunc G() chan int64 { return nil }\n"}}
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.G()\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available

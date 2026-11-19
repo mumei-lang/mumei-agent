@@ -2607,9 +2607,22 @@ writes — and a bound pointer's scalar-element `chan` field
 (`p.C <- x`, `<-p.W.C`, `close(p.C)`, `for range p.C`) admits
 the same way, the queue living in caller memory: ops record on
 the field member's identity, sends broadcast into the indirect
-writes, reads union `deps(root)` — while `chan` results,
-non-scalar elements,
-rebinding a channel under a branch or loop (a conditional
+writes, reads union `deps(root)`. A `chan T` result now admits
+the same way a `chan` parameter does: `ch := g()` and
+`var ch = g()` bind a callee-produced queue when the
+(local) callee declares a single scalar `chan` result —
+ops on the bound name broadcast sends into indirect
+writes and observe the caller's queue through them,
+exactly like a parameter. An alias to that name
+(`ch2 := ch`) follows the external queue through the
+root binding, a bare read or argument surfaces the
+queue's widened set, and a function literal that
+captures the name records the same external effect a
+captured `chan` parameter does. Still closed:
+non-scalar elements, an imported `lib.G()` channel
+result (the signature carries no element kind), a
+multi-result callee, a `ch = g()` rebind, rebinding a
+channel under a branch or loop (a conditional
 `ch2 = ch3` could mean either queue), and `select`
 stay closed, while `len(ch)`/`cap(ch)` now admit as
 dep-free — the queue length and capacity are runtime
@@ -2895,9 +2908,10 @@ parameters and `&x` aliases, slice/map/channel resource state
 the external-state transfer model, local `make(chan T)` channels
 admit under the conflated dep-set model, and scalar-element `chan`
 parameters admit under the external sync-resource model; the
-still-closed shapes are `chan` results, non-scalar elements,
+still-closed shapes are non-scalar elements,
 conditionally-changed channel bindings, channel operands in
-external state and `select`),
+external state, `chan` results from imported or multi-result
+callees, and `select`),
 slice/map `make` constructor
 state, selector/computed callees and function-typed parameters
 all fail closed —
