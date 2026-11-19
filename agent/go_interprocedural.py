@@ -1295,13 +1295,20 @@ class _Builder:
         captured state, and `fs[k]()` then calls opaque on the
         container's slot like an imported member's element does.
         A keyed map slot is as unknowable as a slice index, so the
-        keyed `fm["k"]()` resolves through the same slot."""
-        return (
+        keyed `fm["k"]()` resolves through the same slot. A named
+        container type (`type FS []func`, `type FM map[K]func`)
+        pins its declared identities on admit — the caller's
+        element-call contract changes with a redeclaration like a
+        named composite's does."""
+        collection = (
             fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
             and fact.elem.kind == "function"
         )
+        if collection:
+            self._pin_fact_identities(fact)
+        return collection
 
     def _is_func_elem_composite(self, rhs_node: Any, binding_id: str) -> bool:
         """`fs := []func(){…}` — a composite literal binding to a
@@ -1315,6 +1322,54 @@ class _Builder:
             and bound is not None
             and self._func_elem_collection(bound.type)
         )
+
+    def _adopt_container_element_records(
+        self, rhs_node: Any, bound_id: str
+    ) -> None:
+        """`fs := []func(){cl}` — an element naming an existing func
+        value carries that value's captures and write targets into
+        the container like a literal element's own records do. The
+        container snapshots `cl`'s CURRENT records: a later `cl =`
+        rebind does not change which function the slot holds."""
+        body = rhs_node.child_by_field_name("body")
+        if body is None:
+            return
+        stack = [body]
+        while stack:
+            el = stack.pop()
+            if el.type == "func_literal":
+                # A literal element records under the container
+                # itself during eval — its inner identifiers are
+                # captures, not elements.
+                continue
+            if el.type in {"identifier", "selector_expression"}:
+                ref = self.references.get(self.node_key(el))
+                src = ref.binding_id if ref is not None else None
+                if src and src != bound_id:
+                    captured = self.closure_captures.get(src)
+                    if captured:
+                        self.closure_captures[bound_id] = (
+                            self.closure_captures.get(
+                                bound_id, frozenset()
+                            )
+                            | captured
+                        )
+                    writes = self.closure_writes.get(src)
+                    if writes:
+                        self.closure_writes[bound_id] = (
+                            self.closure_writes.get(
+                                bound_id, frozenset()
+                            )
+                            | writes
+                        )
+                    if src in self.closure_star_writes:
+                        self.closure_star_writes.add(bound_id)
+                    if src in self.closure_inner_calls:
+                        self.closure_inner_calls.add(bound_id)
+                # A selector's operand (`st` in `st.M`) names no
+                # element — skip its children like an identifier's.
+                continue
+            stack.extend(el.children)
 
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
@@ -6538,8 +6593,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ):
                         # `fs := []func(){…}` — the element
                         # literals recorded captures under this
-                        # container during RHS eval; keep them.
-                        pass
+                        # container during RHS eval; keep them,
+                        # and adopt the func-value records an
+                        # element identifier carries (`{cl}`).
+                        self._adopt_container_element_records(
+                            rights[i], binding.id
+                        )
                     else:
                         # Any other RHS clears every func-value record
                         # an earlier bind left on the reused name — a
@@ -7114,8 +7173,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             value_nodes[i], binding.id
                         ):
                             # `var fs = []func(){…}` — keep the
-                            # element literals' capture records.
-                            pass
+                            # element literals' capture records
+                            # and adopt identifier elements'.
+                            self._adopt_container_element_records(
+                                value_nodes[i], binding.id
+                            )
                         else:
                             self._drop_func_value_records(binding.id)
                     else:
@@ -8576,6 +8638,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.closure_inner_calls.discard(
                                 ref.binding_id
                             )
+                    elif self._is_func_elem_composite(
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        ),
+                        ref.binding_id,
+                    ):
+                        # `fs = []func(){…}` — a composite RHS on
+                        # an existing container keeps its element
+                        # records and adopts identifier elements'.
+                        self._adopt_container_element_records(
+                            (
+                                rights[i]
+                                if len(lefts) == len(rights)
+                                else rights[0]
+                            ),
+                            ref.binding_id,
+                        )
                 else:
                     # `h = (f)` / `h = f()` — a non-identifier RHS
                     # leaves the name holding a value the alias
@@ -14123,7 +14204,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # The callee may write `*p = y` or send `y` through an
         # argument — the same escaped/indirect fold every opaque
         # call does.
-        write_deps = arg_deps | callee_deps
+        # The callee may write through the state it read — like
+        # the bound-literal path, the write-back carries the whole
+        # call read set (`deps` already unions `arg_deps`, escaped
+        # bindings, and the re-resolved captures): `fs :=
+        # []func(){func(){ y = v }}; fs[0]()` writes `y` from the
+        # captured `v`, so `y` must gain `v`'s deps.
+        write_deps = deps | callee_deps
         self.indirect_writes |= write_deps
         for escaped_id in self.escaped:
             self._store(

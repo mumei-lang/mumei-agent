@@ -22317,3 +22317,78 @@ def test_map_scalar_result_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_func_elem_container_writeback_carries_captured_sources(
+    go_types_helper,
+):
+    # `fs[0]()` — an element writing `y = v` from a captured `v`
+    # folds the whole call read set into the write target, like the
+    # bound-literal path: `y` gains `v`'s deps.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    v := x; var y int64\n"
+        "    fs := []func(){func(){ y = v }}\n"
+        "    fs[0]()\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_container_adopts_identifier_element_records(
+    go_types_helper,
+):
+    # `fs := []func(){cl}` — the container snapshots `cl`'s func
+    # records: its captures re-resolve at the call site and its
+    # write targets fold the call deps.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, y int64) int64 {\n"
+        "    v := y\n"
+        "    cl := func() int64 { return v }\n"
+        "    fs := []func() int64{cl}\n"
+        "    v = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    v := x; var y int64\n"
+        "    cl := func() { y = v }\n"
+        "    fs := []func(){cl}\n"
+        "    fs[0]()\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_named_container_type_pins_identity(go_types_helper):
+    # `type FM map[string]func() int64` — a bound `FM` local admits
+    # like the anonymous form, and the named type's identity pins so
+    # redeclaring `FM` flags `stale_dependents`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type FM map[string]func() int64\n"
+        "func mk(x int64) FM { return nil }\n"
+        "func F(x int64) int64 {\n"
+        "    var fm FM\n"
+        "    fm = mk(x)\n"
+        "    return fm[\"k\"]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    fm = next(b for b in snapshot.bindings if b.name == "fm")
+    assert result.available
+    assert fm.type.type_id in result.pinned
