@@ -6598,7 +6598,77 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 _span(call_node),
                                 call.target,
                             )
-                        computed_args = tuple(
+                        computed_args = ()
+                        target_fn = self.functions.get(call.target)
+                        if call.method:
+                            # `for range st.Items()` — the receiver
+                            # operand evaluates first like the
+                            # `st.M(args)` call path, so the elements
+                            # inherit its deps and a pointer receiver
+                            # folds the callee's writes back.
+                            range_function_node = (
+                                call_node.child_by_field_name(
+                                    "function"
+                                )
+                            )
+                            while (
+                                range_function_node is not None
+                                and range_function_node.type
+                                == "parenthesized_expression"
+                            ):
+                                range_function_node = next(
+                                    iter(
+                                        range_function_node
+                                        .named_children
+                                    ),
+                                    None,
+                                )
+                            range_receiver_node = (
+                                range_function_node
+                                .child_by_field_name("operand")
+                                if (
+                                    range_function_node is not None
+                                    and range_function_node.type
+                                    == "selector_expression"
+                                )
+                                else None
+                            )
+                            if range_receiver_node is None:
+                                raise _Unsupported(
+                                    "call_mapping_unavailable",
+                                    _span(call_node),
+                                    call.target,
+                                )
+                            range_receiver_deps = self.expression(
+                                range_receiver_node, fn, params,
+                                scope, transfers, count, 0,
+                            )
+                            if (
+                                target_fn is not None
+                                and target_fn.receiver is not None
+                                and target_fn.receiver.type.kind
+                                != "pointer"
+                            ):
+                                range_root = self._receiver_root_ref(
+                                    range_receiver_node
+                                )
+                                range_root_binding = (
+                                    self.bindings.get(
+                                        range_root.binding_id
+                                    )
+                                    if range_root is not None
+                                    else None
+                                )
+                                if (
+                                    range_root_binding is not None
+                                    and range_root_binding.type.kind
+                                    == "pointer"
+                                ):
+                                    range_receiver_deps |= (
+                                        self.indirect_writes
+                                    )
+                            computed_args = (range_receiver_deps,)
+                        computed_args = computed_args + tuple(
                             self.expression(
                                 arg, fn, params, scope,
                                 transfers, count, 0,
@@ -6606,7 +6676,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             for arg in args
                         )
                         computed_call = call
-                        target_fn = self.functions.get(call.target)
                         if target_fn is not None:
                             for signature_param in (
                                 *(
@@ -6620,14 +6689,81 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self._pin_fact_identities(
                                     signature_param.type
                                 )
+                        range_write_args = list(args)
+                        if call.method:
+                            range_write_args.append(range_receiver_node)
                         self._store_call_writes(
-                            args,
+                            range_write_args,
                             frozenset().union(*computed_args)
                             if computed_args
                             else frozenset(),
                             scope,
                             params,
                         )
+                        if (
+                            target_fn is not None
+                            and target_fn.receiver is not None
+                            and target_fn.receiver.type.kind
+                            == "pointer"
+                        ):
+                            range_receiver_operand = (
+                                range_receiver_node
+                                if call.method
+                                else (args[0] if args else None)
+                            )
+                            range_rref = (
+                                self._receiver_root_ref(
+                                    range_receiver_operand
+                                )
+                                if range_receiver_operand is not None
+                                else None
+                            )
+                            range_rbinding = (
+                                self.bindings.get(
+                                    range_rref.binding_id
+                                )
+                                if range_rref is not None
+                                else None
+                            )
+                            if (
+                                range_rref is not None
+                                and range_rbinding is not None
+                                and (
+                                    range_rref.binding_id in scope
+                                    or range_rref.binding_id in params
+                                )
+                            ):
+                                range_stored = (
+                                    frozenset().union(*computed_args)
+                                    if computed_args
+                                    else frozenset()
+                                )
+                                if (
+                                    range_rbinding.type.kind
+                                    == "pointer"
+                                ):
+                                    self.indirect_writes |= (
+                                        range_stored
+                                    )
+                                else:
+                                    range_base = (
+                                        scope.get(
+                                            range_rref.binding_id
+                                        )
+                                        if range_rref.binding_id
+                                        in scope
+                                        else frozenset(
+                                            {
+                                                params[
+                                                    range_rref
+                                                    .binding_id
+                                                ]
+                                            }
+                                        )
+                                    )
+                                    scope[range_rref.binding_id] = (
+                                        range_base | range_stored
+                                    )
                     transfers.append(
                         CallTransfer(
                             FileSpan(
