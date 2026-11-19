@@ -5894,6 +5894,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(refs))
             ]
+            # `a, b = b, g(a)` — passthrough reseats resolve against
+            # the pre-state too: `g(a)` hands back the queue `a`
+            # named BEFORE `a`'s own store redirects it.
+            call_result_targets = [
+                (
+                    self._chan_result_passthrough(
+                        rights[i], locals_, params
+                    )
+                    if len(lefts) == len(rights)
+                    and self._chan_result_call(rights[i]) is not None
+                    else None
+                )
+                for i in range(len(refs))
+            ]
             # A `p.C = rhs` field store's queue tokens resolve
             # against the pre-state too — `a, p.C = b, a` must
             # record the queue `a` named BEFORE `a`'s store, not
@@ -6034,12 +6048,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # callee hands the argument's queue back so
                         # `ch` aliases it like `ch = q`, otherwise
                         # the name keeps an external queue of its
-                        # own and drops any prior alias. Either way
-                        # the locals_ slot stays the old queue's
-                        # contents, as with the alias reseat above.
-                        passthrough = self._chan_result_passthrough(
-                            rights[i], locals_, params
-                        )
+                        # own and drops any prior alias.
+                        passthrough = call_result_targets[i]
                         if passthrough is not None:
                             self.chan_aliases[ref.binding_id] = (
                                 passthrough.id
@@ -6051,6 +6061,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.external_chan_locals.add(
                                 ref.binding_id
                             )
+                            # The slot keeps the old queue's
+                            # contents (other aliases still read
+                            # them) AND the callee-produced
+                            # dependencies — `g(x)`'s result can
+                            # carry `x`, so `<-ch` must see it.
+                            base = locals_.get(ref.binding_id)
+                            if (
+                                base is None
+                                and ref.binding_id in params
+                            ):
+                                base = frozenset(
+                                    {params[ref.binding_id]}
+                                )
+                            locals_[ref.binding_id] = (
+                                base or frozenset()
+                            ) | value
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)

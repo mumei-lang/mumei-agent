@@ -15764,3 +15764,48 @@ def test_chan_result_rebind_under_branch_stays_closed(
     )
     assert not result.available
 
+
+
+def test_chan_result_rebind_carries_callee_arg_deps(go_types_helper):
+    # `ch = g(x)` — the callee-produced queue can carry `x`, so a
+    # receive through the reseated name must see the call's deps,
+    # not only the old slot and indirect writes.
+    files = {
+        "a.go": "package p\n"
+        "func g(v int64) chan int64 { c := make(chan int64); c <- v; return c }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar ch chan int64\n"
+        "\tch = g(x)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_result_rebind_passthrough_resolves_pre_state(
+    go_types_helper,
+):
+    # `a, b = b, g(a)` — Go evaluates `g(a)` before either store, so
+    # the passthrough reseat must bind `b` to the queue `a` named
+    # BEFORE `a = b` redirected it. Post-state resolution would
+    # point `b` back at its own queue and drop `a`'s deps.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) chan int64 { return q }\n"
+        "func F(a chan int64, b chan int64, x int64) int64 {\n"
+        "\ta, b = b, g(a)\n"
+        "\tb <- x\n"
+        "\treturn <-b\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
+    assert result.effects == "unknown"
