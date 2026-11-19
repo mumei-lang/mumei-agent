@@ -2677,12 +2677,29 @@ the chan name's position binds an external queue,
 and the call's `chan` arguments join the external
 model since the opaque callee may return one — the
 `var` and plain-assignment forms admit identically,
-while a `chan chan T` or other non-scalar result at
-any position stays closed. An imported method
-declares the same way: `ch := st.M()` or `ch, n :=
-st.M()` admits when `M`'s signature carries a
-scalar-element `chan` at the bound slot (the call
-records `direct_import` marked `method`). Still
+while a non-scalar element other than
+`chan chan T` at any position stays closed. An
+imported method declares the same way: `ch := st.M()`
+or `ch, n := st.M()` admits when `M`'s signature
+carries a scalar-element `chan` at the bound slot
+(the call records `direct_import` marked `method`).
+One level of channel-of-channels admits under the
+external queue model: a `chan chan T` parameter or
+result (local or imported), a package-level `var cc
+chan chan T`, or a `cc := G()` / `cc, n := G()`
+bound name joins the external model — `cc <- ch`
+records an imported effect and promotes the sent
+channel's queue external, `c := <-cc` binds the
+received channel as an external name (dep-free like
+any external receive), and `close(cc)` records the
+same imported effect as on a scalar `chan`
+parameter. Deeper nesting (`chan chan chan T`), a
+local `make(chan chan T)` or `var cc chan chan T`,
+`range` over the outer queue, a tuple receive `c2, _
+= <-cc`, and `cc = G()` rebinding all stay closed —
+a channel value flowing between two local queues or
+through an unmodelled rebind would alias queues the
+conflated dep set cannot track. Still
 closed: non-scalar elements — while `select` now
 admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
