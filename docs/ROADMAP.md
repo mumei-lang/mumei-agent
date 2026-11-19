@@ -3095,9 +3095,14 @@ still shadow it.
 Boundaries: this slice admits the named result's *dependency* role only
 — no zero-value semantics are modelled, and a bare `return` without a
 named result stays `unsupported_return` (the compiler rejects it
-anyway). Multiple named results, unnamed multi-result signatures,
-methods and generics stay `unsupported_signature`, and result bindings
-keep needing scalar type. Bare-return legality is guaranteed by
+anyway). A multi-result signature (named or unnamed, every result in
+the admitted kinds) is admitted too: the callee reports ONE conflated
+dependency set over all its results, so `a, b := g()` hands each bound
+name the union — the same over-approximation the C06 multi-valued
+imported results slice uses — while `return e1, e2` and a bare
+`return` over several named slots fold into it. Result bindings keep
+needing scalar type, and methods/generics follow the same gates as
+single-result signatures. Bare-return legality is guaranteed by
 `go/types` before the reader runs — no extra validation is needed.
 
 ### C07 multi-file package units and per-file freshness

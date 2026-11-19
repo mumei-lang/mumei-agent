@@ -4646,7 +4646,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             fn.body is None
             or fn.generic
             or fn.variadic
-            or len(fn.results) != 1
+            or not fn.results
             # A method's receiver is a leading signature slot like any
             # parameter: its declared fact must sit inside the admitted
             # kinds — a concrete named type's fact is `struct`/`pointer`
@@ -4748,10 +4748,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count = [0]
         locals_: dict[str, frozenset[int]] = {}
         # A named result is an ordinary local pre-initialised to the zero
-        # value — dep-free until a body statement writes to it.
-        result_binding = fn.results[0].binding_id
-        if result_binding:
-            locals_[result_binding] = frozenset()
+        # value — dep-free until a body statement writes to it. A
+        # multi-result signature seeds every named slot the same way.
+        for result in fn.results:
+            if result.binding_id:
+                locals_[result.binding_id] = frozenset()
         # A `struct` parameter's conflated dep set lives in `locals_`
         # like a composite local's (`s.V = x` folds in, `s.V` reads
         # it) — seed it with the parameter's own index so reads
@@ -4978,36 +4979,52 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 expressions = _children(expressions[0])
             if len(expressions) == 0:
                 # A bare `return` is only legal with a named result — it
-                # yields the result binding's current dependencies.
-                result_id = (
-                    fn.results[0].binding_id if len(fn.results) == 1 else ""
-                )
-                if not result_id:
+                # yields the result binding's current dependencies. With
+                # several named results the conflated dep set unions
+                # every slot: the caller cannot tell which result
+                # position fed a bound name, matching the imported
+                # multi-result model.
+                result_ids = [
+                    r.binding_id for r in fn.results if r.binding_id
+                ]
+                if len(result_ids) != len(fn.results) or not result_ids:
                     raise _Unsupported("unsupported_return", _span(node))
-                # A `r = q` store on a `chan` named result goes
-                # through `chan_aliases` (no dep set lands in
-                # `locals_[r]`) — resolve the queue root like an
-                # identifier read does so `return` carries q's deps.
-                result_root = self._chan_root(result_id)
-                if result_root in params:
-                    result_deps = frozenset(
-                        {params[result_root]}
-                    ) | self.indirect_writes
-                elif result_root in self.external_chan_locals:
-                    result_deps = (
-                        locals_.get(result_root, frozenset())
-                        | self.indirect_writes
-                    )
-                else:
-                    result_deps = locals_.get(
-                        result_root, frozenset()
-                    )
+                result_deps = frozenset()
+                for result_id in result_ids:
+                    # A `r = q` store on a `chan` named result goes
+                    # through `chan_aliases` (no dep set lands in
+                    # `locals_[r]`) — resolve the queue root like an
+                    # identifier read does so `return` carries q's deps.
+                    result_root = self._chan_root(result_id)
+                    if result_root in params:
+                        result_deps |= frozenset(
+                            {params[result_root]}
+                        ) | self.indirect_writes
+                    elif result_root in self.external_chan_locals:
+                        result_deps |= (
+                            locals_.get(result_root, frozenset())
+                            | self.indirect_writes
+                        )
+                    else:
+                        result_deps |= locals_.get(
+                            result_root, frozenset()
+                        )
                 deps[0] |= result_deps
                 self._record_read(result_deps)
             elif len(expressions) == 1:
                 deps[0] |= self.expression(
                     expressions[0], fn, params, locals_, transfers, count, 0
                 )
+            elif len(expressions) == len(fn.results):
+                # `return a, b` — every expression's deps fold into the
+                # one conflated set, so a bound name may carry the
+                # sibling slots' provenance too (the same
+                # over-approximation the imported multi-result unpack
+                # uses).
+                for e in expressions:
+                    deps[0] |= self.expression(
+                        e, fn, params, locals_, transfers, count, 0
+                    )
             else:
                 raise _Unsupported("unsupported_return", _span(node))
             saw_return[0] = True
@@ -8172,13 +8189,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
         }:
             return None
         call = self.calls.get(self.node_key(node))
-        if (
-            call is not None
-            and call.owner == fn.binding_id
-            and call.kind == "direct_import"
-            and call.results == arity
-        ):
+        if call is None or call.owner != fn.binding_id:
+            return None
+        if call.kind == "direct_import" and call.results == arity:
             return call
+        if call.kind in {"direct_local", "method", "method_expr"}:
+            # The probe only stamps a result arity on imported calls —
+            # a local callee's own Function record declares it.
+            target = self.functions.get(call.target)
+            if (
+                target is not None
+                and len(target.results) == arity
+                and arity > 1
+            ):
+                return call
         return None
 
     @staticmethod

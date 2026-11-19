@@ -161,7 +161,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
     "declarations",
     [
         "func Ext(x int64) int64; func F(x int64) int64 { return Ext(x) }",
-        "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
         "func F(x int64) int64 {return 1.0}",
         "func F(x int64) int64 {return (func() int64 {return x})()}",
@@ -668,8 +667,6 @@ def test_named_result_dependencies(go_types_helper, declarations, expected):
         # result never passes a binding check inside a range clause).
         "func F(x int64) int64 { for i:=range \"ab\" { _ = i }; return x }",
         "func F(x int64) int64 { for i:=range string(x) { _ = i }; return x }",
-        # Multi-valued call results stay outside the fragment.
-        "func G(a int64) (int64, int64) { return a, a }\nfunc F(x int64) int64 { var y int64; x, y = G(x); return y }",
     ],
 )
 def test_for_shapes_stay_unsupported(go_types_helper, declarations):
@@ -851,8 +848,6 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Unsupported switch initializer shapes stay outside the fragment.
-        "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { switch v,w:=G(x); v { case 1: return v+w }; return x }",
         "func G(v int64) { _ = v }\nfunc F(x int64) int64 { switch G(x); x { case 1: return x }; return x }",
         # select is unmodelled concurrency.
         "func F(x int64) int64 { select {}; return x }",
@@ -989,16 +984,6 @@ def test_var_declaration_dependencies(go_types_helper, declarations, expected):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Multi-value calls stay outside the fragment — one RHS
-        # expression can never supply two declared names here.
-        (
-            "func G(x int64) (int64, int64) { return x, x }; "
-            "func F(x int64) int64 { a, b := G(x); _ = b; return a }"
-        ),
-        (
-            "func G(x int64) (int64, int64) { return x, x }; "
-            "func F(x int64) int64 { var a, b int64 = G(x); _ = b; return a }"
-        ),
         # Non-scalar names in a declaration are unavailable.
         "func F(x int64) int64 { a, b := x, \"s\"; _ = b; return a }",
         "func F(x int64) int64 { var a, b string; _ = a; _ = b; return x }",
@@ -1370,8 +1355,6 @@ def test_callee_summary_is_not_polluted_by_caller_exit_state(
         "func F(x int64) int64 { if y:=1.5; y>0 {return x}; return 0 }",
         # An unsummarizable callee in an initializer stays a gap.
         "func G(v int64) { _ = v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
-        # A for loop with a multi-value init is not modelled.
-        "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { for i,j:=G(x); i<x; i++ { _ = j }; return x }",
         # A branch with an unsupported statement blocks the summary.
     ],
 )
@@ -1384,8 +1367,6 @@ def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Tuple declarations fed by a multi-value call stay outside.
-        "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { y,z:=G(x); return y+z }",
         # A call statement to an unsummarizable callee keeps its gap.
         "func G(){}; func F(x int64) int64 { G(); return x }",
         # Legal statement-position builtins outside the fragment keep
@@ -2832,6 +2813,87 @@ def test_results_zero_is_the_absent_equivalent(go_types_helper):
     load_go_package_snapshot(
         json.dumps(tampered).encode(), files, target_arch="amd64"
     )
+
+
+def test_multi_result_local_call_unpacks(go_types_helper):
+    # `a, b := g()` on a same-package callee unpacks like the imported
+    # shape — both names carry the conflated dependency set the callee
+    # reports for its results.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) (int64, int64) { return x, x + 1 }\n"
+        "func F(a int64) int64 {\n"
+        "\ty, z := G(a)\n"
+        "\treturn y + z\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_local_call_in_var_and_assignment(go_types_helper):
+    # `var a, b = g()` and `c, d = g()` take the same tuple unpacking
+    # as `:=` for a local callee.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64) (int64, int64) { return x, x + 1 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar a, b = G(x)\n"
+        "\tvar c, d int64\n"
+        "\tc, d = G(a)\n"
+        "\treturn b + c + d\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_named_results_bare_return(go_types_helper):
+    # A bare `return` on `func G(x) (r, s int64)` unions every named
+    # slot into the conflated result set.
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64, y int64) (r, s int64) {\n"
+        "\tr = x\n"
+        "\ts = y\n"
+        "\treturn\n}\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\tu, v := G(a, b)\n"
+        "\treturn u + v\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # Conflated: both bound names carry the union of both actuals.
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_multi_result_method_call_unpacks(go_types_helper):
+    # `a, b := s.M(x)` — a method call unpacks exactly like the plain
+    # callee, the receiver still folding into the conflated set.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) (int64, int64) { return st.V, x }\n"
+        "func F(a int64, x int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\ty, z := s.M(x)\n"
+        "\treturn y + z\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_multi_result_arity_mismatch_stays_closed(go_types_helper):
