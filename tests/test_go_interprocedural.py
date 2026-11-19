@@ -14681,7 +14681,10 @@ def test_chan_chan_callee_result_binds_external(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    # `c := <-c2` pulls a channel from the outer queue — the
+    # received name also carries the queue's own deps (cc, 0)
+    # beside the value sent through the chain (x, 1).
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_chan_chan_multi_result_slot_admitted(go_types_helper):
@@ -14738,6 +14741,124 @@ def test_chan_chan_imported_result_send_recv_chain(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_package_var_send_carries_arg_deps(go_types_helper):
+    # A package-level `chan chan` send inside a callee — `CC <- q`
+    # in `Publish` — must be visible to the caller: the callee's
+    # transfer target is shared state, so the caller's `q` joins
+    # the external model and the received channel's sends carry
+    # `x` through the chain.
+    files = {
+        "a.go": "package p\n"
+        "var CC chan chan int64\n"
+        "func Publish(q chan int64) { CC <- q }\n"
+        "func F(x int64, a int64) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tq <- a\n"
+        "\tPublish(q)\n"
+        "\tc := <-CC\n"
+        "\tc <- x\n"
+        "\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_call_result_receive_carries_queue_deps(go_types_helper):
+    # `cc := G(x, p)` — the received channel `c := <-cc` pulls from
+    # the outer queue, so `c` carries the queue's own deps
+    # (the callee's result deps, here `p` at ordinal 1).
+    files = {
+        "a.go": "package p\n"
+        "func G(x int64, p chan chan int64) chan chan int64 {\n"
+        "\t_ = x\n\treturn p\n}\n"
+        "func F(x int64, p chan chan int64) int64 {\n"
+        "\tcc := G(x, p)\n"
+        "\tc := <-cc\n"
+        "\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
+    # `cc <- q` inside `Publish` hands `q`'s queue to the outer
+    # queue's domain — the caller's `chan` argument roots promote
+    # external, so `q <- a` before the call and `return <-q` after
+    # stay connected to the chain.
+    files = {
+        "a.go": "package p\n"
+        "func Publish(cc chan chan int64, q chan int64) {\n"
+        "\tcc <- q\n}\n"
+        "func F(x int64, cc chan chan int64, a int64) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tq <- a\n"
+        "\tPublish(cc, q)\n"
+        "\tc := <-cc\n"
+        "\tc <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_chan_chan_call_valued_send_promotes_args(go_types_helper):
+    # `cc <- G(q)` — the sent value is a call, not an identifier,
+    # but the callee may return `q` itself: the call's chan
+    # argument roots promote like the direct identifier form.
+    files = {
+        "a.go": "package p\n"
+        "func G(q chan int64) chan int64 {\n"
+        "\treturn q\n}\n"
+        "func F(x int64, cc chan chan int64, a int64) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tq <- a\n"
+        "\tcc <- G(q)\n"
+        "\tc := <-cc\n"
+        "\tc <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_captured_receive_records_external_effect(go_types_helper):
+    # `h := func() { <-cc }` — a `chan chan` captured in a literal
+    # is external state like a scalar `chan` param: calling `h`
+    # reads the shared outer queue, so the summary must record an
+    # imported effect rather than `none_in_supported_fragment`.
+    files = {
+        "a.go": "package p\n"
+        "func F(cc chan chan int64) int64 {\n"
+        "\th := func() { <-cc }\n"
+        "\th()\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
     assert result.effects == "unknown"
 
 
