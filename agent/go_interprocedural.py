@@ -9240,11 +9240,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             key = self.node_key(node)
             if self._func_arg_invocations:
                 self._fold_func_arg_invocations(node, transfers)
-            if key not in self._func_arg_invocations:
-                # No callback was passed — drop the accumulated
-                # argument deps instead of holding them for the
-                # rest of the body.
-                self._call_arg_deps.pop(key, None)
+            # The fold already popped this call's entry when a
+            # callback was pending; for a plain call the accumulated
+            # argument deps are dropped here instead of lingering
+            # for the rest of the body.
+            self._call_arg_deps.pop(key, None)
         return result
 
     def _fold_func_arg_invocations(
