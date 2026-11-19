@@ -1040,6 +1040,7 @@ class _Builder:
         while frontier:
             nxt: list[tuple[Any, Any | None]] = []
             unenumerable: Any | None = None
+            found_value = False
             for f, ptr_field in frontier:
                 ftype = f.type
                 pointee = (
@@ -1047,8 +1048,6 @@ class _Builder:
                 )
                 tid = getattr(pointee, "type_id", "")
                 tb = self._pointee_type(tid) if tid else None
-                if tb is not None and tb.id in seen:
-                    continue
                 if tb is None or getattr(tb, "span", None) is None:
                     # `type S struct{ lib.Q }` — an imported or
                     # otherwise unenumerable embedded type: `ident`
@@ -1057,14 +1056,20 @@ class _Builder:
                     if unenumerable is None:
                         unenumerable = f
                     continue
-                seen = seen | {tb.id}
                 inner = self._struct_fields(tb)
                 if ident.id in {x.id for x in inner}:
-                    return (
-                        ("ptr", ptr_field)
-                        if ptr_field is not None
-                        else ("value", None)
-                    )
+                    # Keep scanning the level: a pointer-typed
+                    # sibling may carry the real promotion (a
+                    # pre-`embedded` report cannot tell `R Q` from
+                    # `*Q`), so a same-depth pointer crossing wins
+                    # over this value match.
+                    if ptr_field is not None:
+                        return ("ptr", ptr_field)
+                    found_value = True
+                    continue
+                if tb.id in seen:
+                    continue
+                seen = seen | {tb.id}
                 nxt.extend(
                     (
                         g,
@@ -1080,6 +1085,8 @@ class _Builder:
                 )
             if unenumerable is not None:
                 return ("ptr", unenumerable.type)
+            if found_value:
+                return ("value", None)
             frontier = nxt
         return None
 

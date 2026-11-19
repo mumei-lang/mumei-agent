@@ -20225,11 +20225,12 @@ def test_call_result_promotion_old_report_without_embedded_marker(
     # from embedded fields — the promotion search must keep the
     # pre-marker search-all behavior for it instead of treating
     # every field as named (which would drop `g().P`'s external
-    # read on `type S struct{ *Q }`).
+    # read), and a same-depth pointer sibling still wins over a
+    # named-field lookalike's value match (`R Q` vs `*Q`).
     files = {
         "a.go": "package p\n"
         "type Q struct{ P int64 }\n"
-        "type S struct{ *Q }\n"
+        "type S struct{ R Q; *Q }\n"
         "func g(q int64) S { return S{} }\n"
         "func F(q int64) int64 {\n"
         "    b := q\n"
