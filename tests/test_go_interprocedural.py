@@ -22928,3 +22928,83 @@ def test_func_elem_append_forms(go_types_helper):
     )
     result = named(source, snapshot, summaries)
     assert not result.available
+
+
+def test_func_elem_alias_store_accumulates_into_sharer(go_types_helper):
+    # `fs[0] = g` after `fs2 := append(fs, lit)` — the element store
+    # reaches the sharer's dep set like the container's own store
+    # does: it accumulates, so the appended element's deps survive.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{func() int64 { return 0 }}\n"
+        "    fs2 := append(fs, func() int64 { return y })\n"
+        "    fs[0] = func() int64 { return 0 }\n"
+        "    y = x\n"
+        "    return fs2[1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_tuple_reseat_keeps_old_sharer_write(go_types_helper):
+    # `a, a[0] = b, f` — the element write lands in the OLD backing
+    # `a` named when the statement resolved, which `a2` still
+    # shares. The holder set unions the resolution-time sharers
+    # with the landing-time group.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{func() int64 { return 1 }}\n"
+        "    a, a[0] = b, func() int64 { return y }\n"
+        "    _ = b\n"
+        "    y = x\n"
+        "    return a2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_append_result_call_writeback(go_types_helper):
+    # `append(fs, func(){y = x})[0]()` — the appended literal
+    # recorded under the container's binding, so a direct call on
+    # the append result folds its write-back like `fs[i]()` does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    _ = fs\n"
+        "    append(fs, func() int64 { y = x; return y })[1]()\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_paren_append_rhs(go_types_helper):
+    # `fs = (append(fs, lit))` — parens unwrap before the append
+    # arm, so the appended literal's captures stay on `fs`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs = (append(fs, func() int64 { return y }))\n"
+        "    y = x\n"
+        "    return fs[1]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
