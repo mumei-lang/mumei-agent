@@ -1016,6 +1016,228 @@ class _Builder:
             return binding
         return None
 
+    def _embed_name_compatible(self, field: Any) -> bool:
+        """A pre-`embedded` report leaves the field unmarked, but the
+        declaration form is still visible in source: a name followed
+        by a type (`R *Q`, `Q Q`) or another name (`A, B *Q`) is
+        definitely NAMED — an embedded field is a bare identifier,
+        so only a `\\n` / `;` / `}` (or EOF, possibly after a
+        tag or a comment) may follow it. Comparing
+        the field name to the resolved type's name fails for
+        aliases (`type A = *Q` embeds as `A`, not `Q`), so the
+        source text after the field's own span decides."""
+        span = getattr(field, "span", None)
+        if span is None:
+            return True
+        raw = self.raws.get(getattr(span, "file", 0) or 0)
+        if raw is None:
+            return True
+        i, n = span.end, len(raw)
+        while True:
+            while i < n and raw[i:i + 1] in (b" ", b"\t", b"\r"):
+                i += 1
+            if raw[i:i + 2] == b"//":
+                j = raw.find(b"\n", i)
+                i = n if j < 0 else j + 1
+                continue
+            if raw[i:i + 2] == b"/*":
+                j = raw.find(b"*/", i + 2)
+                i = n if j < 0 else j + 2
+                continue
+            if raw[i:i + 1] == b"`":
+                # A struct tag can decorate an embedded field too
+                # (`*Q `json:"q"``) — skip it and keep checking.
+                j = raw.find(b"`", i + 1)
+                i = n if j < 0 else j + 1
+                continue
+            break
+        if i >= n:
+            return True
+        return raw[i:i + 1] in (b"\n", b";", b"}")
+
+    def _promotion_path(
+        self,
+        fields: tuple[Any, ...],
+        ident: Any,
+        seen: frozenset[str],
+    ) -> tuple[str, Any | None] | None:
+        """`ident`'s promotion path through `fields`, if found.
+
+        Selectors promote only through EMBEDDED (anonymous) fields
+        and resolve at the shallowest depth — `type S struct{ R Q;
+        *Q }` reaches `P` via `*Q` alone (the named `R Q` never
+        carries a promotion), and `type S struct{ R; Q }` picks
+        `Q` over the deeper `R.*Q`. A breadth-first walk over
+        embedded fields matches both rules; a same-depth
+        ambiguity does not compile, so the first hit at a level
+        is the program's real path.
+
+        Returns `("ptr", ftype)` with the shallowest pointer-typed
+        embedded field's type fact when the path crosses one,
+        `("value", None)` when `ident` is reached through value
+        fields only, `("ptr", f.type)` when an embedded field's
+        type is unenumerable (imported or anonymous) so `ident`
+        may hide behind an invisible pointer, or None when no
+        embedded field's type declares `ident` (its declaring
+        type is unreachable from the container's field list)."""
+        # (embedded field, the path's first pointer-typed field)
+        frontier: list[tuple[Any, Any | None]] = [
+            (f, ftype if ftype.kind == "pointer" else None)
+            for f in fields
+            if getattr(f, "embedded", None) is not False
+            and (getattr(f, "embedded", None) is True
+                 or self._embed_name_compatible(f))
+            and (ftype := getattr(f, "type", None)) is not None
+        ]
+        while frontier:
+            nxt: list[tuple[Any, Any | None]] = []
+            unenumerable: Any | None = None
+            found_value = False
+            for f, ptr_field in frontier:
+                ftype = f.type
+                pointee = (
+                    ftype.elem if ftype.kind == "pointer" else ftype
+                )
+                tid = getattr(pointee, "type_id", "")
+                tb = self._pointee_type(tid) if tid else None
+                if tb is None or getattr(tb, "span", None) is None:
+                    # `type S struct{ lib.Q }` — an imported or
+                    # otherwise unenumerable embedded type: `ident`
+                    # may sit inside it behind a pointer the
+                    # report cannot see.
+                    if unenumerable is None:
+                        unenumerable = f
+                    continue
+                inner = self._struct_fields(tb)
+                if ident.id in {x.id for x in inner}:
+                    # Keep scanning the level: a pointer-typed
+                    # sibling may carry the real promotion (a
+                    # pre-`embedded` report cannot tell `R Q` from
+                    # `*Q`), so a same-depth pointer crossing wins
+                    # over this value match.
+                    if ptr_field is not None:
+                        return ("ptr", ptr_field)
+                    found_value = True
+                    continue
+                if tb.id in seen:
+                    continue
+                seen = seen | {tb.id}
+                nxt.extend(
+                    (
+                        g,
+                        ptr_field
+                        if ptr_field is not None
+                        else (
+                            gtype if gtype.kind == "pointer" else None
+                        ),
+                    )
+                    for g in inner
+                    if getattr(g, "embedded", None) is not False
+                    and (getattr(g, "embedded", None) is True
+                         or self._embed_name_compatible(g))
+                    and (gtype := getattr(g, "type", None)) is not None
+                )
+            if found_value:
+                # A known value read beats an unknown path: when
+                # `lib.X` could *also* declare `ident`, the
+                # compiler would have rejected the promotion as
+                # ambiguous, so the unenumerable type cannot carry
+                # this read in a valid program.
+                return ("value", None)
+            if unenumerable is not None:
+                return ("ptr", unenumerable.type)
+            frontier = nxt
+        return None
+
+    def _promoted_field_pointer(
+        self,
+        container_type: Any | None,
+        ident: Any,
+        call: Any | None = None,
+    ) -> Any | None:
+        """The embedded `*Q` a promoted field read crosses, if any.
+
+        `g(q).P` on `type S struct{ *Q; ... }` resolves `P` to its
+        own declaring type `Q` — the syntactic chain names no
+        pointer, but the read dereferences the embedded one. `P`
+        is a DIRECT field when it is one of the container's
+        declared fields; otherwise the read promotes, and the
+        crossing is the pointer-typed field on `P`'s promotion
+        path (an unrelated `R *R` sibling does not count — only
+        the field whose type actually declares `P`). Returns None
+        for direct fields and for promotions through value
+        embedding (`type S struct{ Q }` — no deref). A container
+        whose fields cannot be enumerated (an imported type, or
+        an anonymous literal in a callee with no resolvable
+        signature region) is treated as a crossing — the promoted
+        read may dereference an embed the report cannot see."""
+        if container_type is None or container_type.kind != "struct":
+            return None
+        type_id = container_type.type_id
+        if type_id:
+            if type_id not in self.bindings:
+                # An imported type member — the field list is not
+                # enumerable, so `ident` may be promoted through an
+                # embedded pointer the report does not carry.
+                return container_type
+            direct_fields = self._struct_fields(
+                self.bindings[type_id]
+            )
+            if ident.id in {f.id for f in direct_fields}:
+                return None
+        else:
+            # An anonymous `struct{...}` result — its direct fields
+            # are the scope-less bindings inside the callee's
+            # signature region (after the function's name span,
+            # before its body). A promoted field binds inside its
+            # own declaring type, outside that region.
+            target = (
+                self.functions.get(call.target)
+                if call is not None
+                else None
+            )
+            binding = (
+                self.bindings.get(target.binding_id)
+                if target is not None
+                else None
+            )
+            name_span = getattr(binding, "span", None)
+            body_span = getattr(target, "body", None)
+            if name_span is None or body_span is None:
+                # An imported or bodiless callee — the literal's
+                # fields cannot be enumerated.
+                return container_type
+            rfile = (
+                name_span.file if isinstance(name_span, FileSpan) else 0
+            )
+            direct_fields = tuple(
+                b
+                for b in self.bindings.values()
+                if b.kind == "variable"
+                and b.scope is None
+                and isinstance(b.span, FileSpan)
+                and b.span.file == rfile
+                and name_span.end < b.span.start < body_span.start
+            )
+            ispan = getattr(ident, "span", None)
+            if (
+                isinstance(ispan, FileSpan)
+                and ispan.file == rfile
+                and name_span.end < ispan.start < body_span.start
+            ):
+                return None
+        path = self._promotion_path(direct_fields, ident, frozenset())
+        if path is not None:
+            return path[1] if path[0] == "ptr" else None
+        # `ident` is not direct but no field's type declares it —
+        # the declaring type sits deeper than the model reaches:
+        # any pointer-typed direct field may carry the crossing.
+        for f in direct_fields:
+            ftype = getattr(f, "type", None)
+            if ftype is not None and ftype.kind == "pointer":
+                return ftype
+        return None
+
     def _local_field(self, field_ref: Any) -> Any | None:
         """The struct field a `kind == \"local\"` reference names — a
         `variable` binding with `scope is None` (the field marker:
@@ -3992,6 +4214,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 return None
             return member
+        return None
+
+    def _call_result_type(self, node: Any) -> Any | None:
+        """The declared type fact of a call's single result — for
+        `direct_local`/`method`-style callees the Function record's
+        `results[0].type`, for `direct_import` the member's
+        `result_types[0]`. None for other kinds or multi-result
+        calls, whose per-slot types need an index."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None:
+            return None
+        if call.kind == "direct_import":
+            member = self.members.get(call.target)
+            if member is not None and member.result_types:
+                return member.result_types[0]
+            return None
+        target = self.functions.get(call.target)
+        if target is not None and len(target.results) == 1:
+            return target.results[0].type
         return None
 
     def _struct_literal_field_names(self, literal: Any) -> frozenset[str]:
@@ -10989,6 +11241,185 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                     return deps | self.indirect_writes
+                # `g(a).V` — a field of a call result: the call's
+                # conflated result dep set covers whichever field the
+                # read selects, so the operand evaluates like a
+                # value. A method name (`g(a).M`) is filtered below —
+                # `_method_value_parts` rejects computed operands, so
+                # a method value on a call result stays closed.
+                sel_operand = node.child_by_field_name("operand")
+                while (
+                    sel_operand is not None
+                    and sel_operand.type == "parenthesized_expression"
+                ):
+                    sel_operand = next(
+                        (
+                            c
+                            for c in sel_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                # `g(a).A.B` — walk the selector chain to its base:
+                # only a call base means the field rides a call
+                # result; an identifier base still takes the local
+                # composite path (which keeps promoted-field reads
+                # closed).
+                sel_base = sel_operand
+                while (
+                    sel_base is not None
+                    and sel_base.type == "selector_expression"
+                ):
+                    sel_base = sel_base.child_by_field_name("operand")
+                    while (
+                        sel_base is not None
+                        and sel_base.type == "parenthesized_expression"
+                    ):
+                        sel_base = next(
+                            (
+                                c
+                                for c in sel_base.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                if (
+                    sel_base is not None
+                    and sel_base.type == "call_expression"
+                ):
+                    # Every selector level must resolve to a declared
+                    # field — `g().M` names a method value, not a
+                    # field read, and stays closed like `s.M` on a
+                    # computed operand does.
+                    fields_ok = True
+                    field_idents = []
+                    cur_sel = node
+                    while (
+                        cur_sel is not None
+                        and cur_sel.type == "selector_expression"
+                    ):
+                        fld = cur_sel.child_by_field_name("field")
+                        fld_ref = (
+                            self.references.get(self.node_key(fld))
+                            if fld is not None
+                            else None
+                        )
+                        fld_ident = self._field_identity(fld_ref)
+                        if fld_ident is None:
+                            fields_ok = False
+                            break
+                        field_idents.append(fld_ident)
+                        cur_sel = cur_sel.child_by_field_name(
+                            "operand"
+                        )
+                        while (
+                            cur_sel is not None
+                            and cur_sel.type
+                            == "parenthesized_expression"
+                        ):
+                            cur_sel = next(
+                                (
+                                    c
+                                    for c in cur_sel.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                    if fields_ok:
+                        deps = self.expression(
+                            sel_operand, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                        # Pin every level's declared field type —
+                        # `g(s).A.B` reads through field `A` whose
+                        # type `Q` may live in another file, so a
+                        # `Q` redeclaration must flag this summary
+                        # via `stale_dependents`.
+                        for ident in field_idents:
+                            ident_type = getattr(ident, "type", None)
+                            if (
+                                ident_type is not None
+                                and ident_type.type_id
+                            ):
+                                self.pinned.add(ident_type.type_id)
+                        # A pointer CROSSED by the read — a `*S`
+                        # call result or an intermediate `*Q` field —
+                        # means the read dereferences memory aliases
+                        # may have written, so it reads like `*p`:
+                        # escaped bindings' current deps and indirect
+                        # writes union in, and the read is recorded
+                        # as an external effect. A TERMINAL pointer
+                        # field (`g().P` with `P *Q`) reads only the
+                        # pointer value — no deref, no union.
+                        result_type = self._call_result_type(sel_base)
+                        ptr_type = (
+                            result_type
+                            if result_type is not None
+                            and result_type.kind == "pointer"
+                            else None
+                        )
+                        if ptr_type is None:
+                            # `g(q).P` where `P` promotes through an
+                            # embedded `*Q` — the syntactic chain
+                            # names no pointer, but the read crosses
+                            # one into caller memory. The terminal
+                            # field's container is its own parent
+                            # level's type, or the call result's.
+                            container = (
+                                getattr(
+                                    field_idents[1], "type", None
+                                )
+                                if len(field_idents) > 1
+                                else result_type
+                            )
+                            call = self.calls.get(
+                                self.node_key(sel_base)
+                            )
+                            ptr_type = (
+                                self._promoted_field_pointer(
+                                    container, field_idents[0], call
+                                )
+                            )
+                        if ptr_type is None:
+                            # `field_idents[0]` is the terminal field
+                            # read — `g().P` with `P *Q` yields the
+                            # pointer VALUE without dereferencing.
+                            # Only a pointer an earlier level crosses
+                            # (`g().P.V`) dereferences.
+                            for ident in field_idents[1:]:
+                                ident_type = getattr(
+                                    ident, "type", None
+                                )
+                                if (
+                                    ident_type is not None
+                                    and ident_type.kind == "pointer"
+                                ):
+                                    ptr_type = ident_type
+                                    break
+                        if ptr_type is not None:
+                            deps |= self.indirect_writes
+                            for escaped_id in self.escaped:
+                                if escaped_id in locals_:
+                                    deps |= locals_[escaped_id]
+                                elif escaped_id in params:
+                                    deps |= {params[escaped_id]}
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        node.start_byte,
+                                        node.end_byte,
+                                    ),
+                                    ptr_type.type_id
+                                    or getattr(
+                                        field_idents[-1], "id", ""
+                                    ),
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                        return deps
                 # `st.V` / `st.A.B` — a field of a tracked local
                 # composite: the binding's dep set conflates every
                 # field, so the read returns it whole. Local state —
@@ -13355,8 +13786,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        """`s.f(args)` / `m[k](args)` — an `indirect_or_selector`
-        call whose callee is read through a field or an index.
+        """`s.f(args)` / `m[k](args)` / `mk(x)()` — an
+        `indirect_or_selector` call whose callee is read through a
+        field, an index, or a call result.
 
         Which function value the slot holds is unknowable here, so
         the call runs opaque like a func-typed parameter or a
@@ -13479,6 +13911,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     index, fn, params, locals_, transfers, count,
                     depth + 1,
                 )
+        elif callee_node.type == "call_expression":
+            # `mk(x)()` / `lib.Mk(x)()` — the callee is the func
+            # value a call returns. Go evaluates the callee
+            # expression before the arguments, so the inner call's
+            # own records and argument deps land first; the outer
+            # call then runs opaque on the result — the inner
+            # call's span stands in for the anonymous callee like
+            # an immediate literal call's does. An inner call the
+            # model cannot evaluate fails closed here.
+            callee_deps = self.expression(
+                callee_node, fn, params, locals_, transfers, count,
+                depth + 1,
+            )
+            # The returned func value may capture a `chan` the
+            # producing call received — `mk(ch)(x)` may send `x`
+            # into `ch`'s queue, so its `chan` arguments join the
+            # external model exactly like `f := mk(ch)` binds.
+            callee_deps |= self._func_result_chan_args(
+                callee_node, locals_, params
+            )
+            target_id = self._immediate_span_id(callee_node)
         if target_id is None:
             raise _Unsupported("unsupported_expression", _span(node))
         deps = callee_deps | self.indirect_writes

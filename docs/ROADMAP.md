@@ -2832,7 +2832,7 @@ deps ride the result's dep set — so `f := mk(x)` binds an opaque
 func value whose calls resolve through the ordinary func-value
 path (`var f = mk()` and `f = mk()` admit identically, and a
 multi-result signature with a func slot unpacks the same way).
-`return nil` and a call-result callee (`mk()()`) stay closed.
+`return nil` stays closed.
 An imported func-result callee (`f := lib.Mk()`) records
 `direct_import` and binds an opaque func value the same way —
 see the C06 imported-callee section below.
@@ -2843,6 +2843,16 @@ call's `chan` arguments join the external model exactly like the
 `f := mk(ch)` capture, so `mk(ch)[0](x)` can send `x` into `ch`'s
 queue). Binding the container itself (`fs := mk(x); fs[0]()`)
 and `map[K]func` results stay closed.
+A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
+inner callee resolves) admits as an opaque indirect call: Go
+evaluates the callee expression before the arguments, so the
+inner call's own records land first, the outer call's result
+unions the inner call's dep set with the arguments', and the
+external effect records an `imported` transfer on the inner
+call's span identity — an anonymous callee with no binding to
+name, like an immediate literal call's. `mk()()()` nests the
+same evaluation. An inner call the model cannot evaluate keeps
+the outer call closed.
 
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
@@ -3720,6 +3730,13 @@ parens/selectors/indexes), and a chain through a *pointer-typed*
 intermediate field (`st.A.N` where `A *P2`) stays closed — the
 deref reads caller memory the conflated set cannot represent.
 Composite-typed package globals, `st[i]` and `*st.V` stay closed.
+A field read of a call result — `g(a).V`, `g(a).A.B` — admits the
+same conflation: the call's result dep set covers whichever field
+the read selects, so the operand evaluates like a value (only a
+call at the selector chain's base takes this path — an identifier
+base keeps the local composite path and its promoted-field gate,
+and an index on a call result like `g(a)[0]` stays closed with
+the callee's unsupported signature).
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.
