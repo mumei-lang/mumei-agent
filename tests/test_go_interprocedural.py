@@ -16676,3 +16676,31 @@ def test_loop_closure_callback_swap_keeps_external_model(go_types_helper):
     assert result.available
     assert result.effects == "unknown"
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_loop_closure_callback_swap_keeps_updated_capture_deps(
+    go_types_helper,
+):
+    # Closure/callback swap where the captured LOCAL is re-seated in
+    # the loop body (`x = a`): the dropped capture record joins its
+    # bindings' current deps into the name's set, so `f()` carries the
+    # update through the external-model fallback.
+    files = {
+        "a.go": "package p\n"
+        "func F(cb func() int64, a int64) int64 {\n"
+        "\tx := int64(0)\n"
+        "\tf := func() int64 { return x }\n"
+        "\tg := cb\n"
+        "\tfor i := int64(0); i < 2; i = i + 1 {\n"
+        "\t\tf, g = g, f\n"
+        "\t\tx = a\n"
+        "\t}\n"
+        "\treturn f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})

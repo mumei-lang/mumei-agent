@@ -7056,6 +7056,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         # callee's deps and effects —
                                         # drop it so the call keeps
                                         # the opaque external model.
+                                        # The dropped list's captured
+                                        # bindings join the name's own
+                                        # dep set resolved NOW: the
+                                        # literal possibility still
+                                        # reads them, and the external
+                                        # fallback's name deps carry
+                                        # the update (`x = a` in the
+                                        # body) the record tracked.
+                                        popped = (
+                                            prev_c.get(key) or frozenset()
+                                        ) | (
+                                            cur_c.get(key) or frozenset()
+                                        )
+                                        extra: frozenset = frozenset()
+                                        for cbid in popped:
+                                            root = (
+                                                self._chan_root(cbid)
+                                                if self._is_chan_binding(
+                                                    cbid
+                                                )
+                                                else cbid
+                                            )
+                                            if root in inner:
+                                                extra |= inner[root]
+                                                if (
+                                                    root
+                                                    in self.external_chan_locals
+                                                ):
+                                                    extra |= (
+                                                        self.indirect_writes
+                                                    )
+                                            elif root in params:
+                                                extra |= frozenset(
+                                                    {params[root]}
+                                                )
+                                        if extra:
+                                            inner[key] = (
+                                                inner.get(key, frozenset())
+                                                | extra
+                                            )
                                         self.closure_captures.pop(key, None)
                                     else:
                                         # Present in both states —
