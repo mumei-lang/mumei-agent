@@ -118,8 +118,6 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
 @pytest.mark.parametrize(
     "body,reason",
     [
-        ("select { default: return 0 }", "unsupported_select_switch"),
-        ("select { case x := <-ch: return x }", "unsupported_select_switch"),
         ("switch v := x.(type) { case int: return 1 }", "unsupported_type_switch"),
         ("defer f(); return 0", "unsupported_defer"),
         ("go f(); return 0", "unsupported_go"),
@@ -1023,6 +1021,39 @@ def test_expression_switch_builds_case_alternatives():
     assert len(cfg.reachable()) == len(cfg.nodes)
 
 
+def test_select_cases_edge_like_switch_alternatives():
+    # A select's communication cases are exclusive alternatives
+    # joined at the following statement — like a switch whose
+    # guards are comm ops.
+    body = "select { case v := <-ch: a(v); case ch2 <- y: b(); default: c() }"
+    result = control_flow.build_go_cfg(body)
+    assert result.graph is not None
+    cfg = result.graph
+    select_node = next(n for n in cfg.nodes if n.kind == "switch")
+    case_targets = {
+        e.target for e in cfg.edges if e.source == select_node.node_id
+    }
+    assert len(case_targets) == 3  # two comm cases + default
+    # A select without a default BLOCKS until a case is ready —
+    # no fall-through edge to the following statement.
+    body2 = "select { case v := <-ch: a(v); case ch2 <- y: b() }; d()"
+    result2 = control_flow.build_go_cfg(body2)
+    assert result2.graph is not None
+    select2 = next(
+        n for n in result2.graph.nodes if n.kind == "switch"
+    )
+    assert all(e.kind == "case" for e in result2.graph.edges if e.source == select2.node_id)
+
+
+def test_select_case_body_with_fallthrough_stays_unsupported():
+    # `fallthrough` is not legal in select cases — one parsed
+    # anyway stays unmodelled rather than silently edged.
+    body = "select { case v := <-ch: fallthrough; default: a() }"
+    result = control_flow.build_go_cfg(body)
+    assert result.graph is None
+    assert "unsupported_fallthrough" in {g.reason for g in result.gaps}
+
+
 def test_switch_without_default_edges_to_following():
     cfg = graph("switch x { case 0: a(); case 1: b() }; after()")
     (switch,) = nodes(cfg, "switch")
@@ -1224,3 +1255,30 @@ def test_compound_assign_does_not_assign_the_root():
     (after,) = by_text(cfg, body, "y :=")
     assert "x" not in facts_map[write.node_id].all_paths
     assert "x" not in facts_map[after.node_id].all_paths
+
+
+def test_select_comm_channel_counts_as_use():
+    body = "ch := in; select { case <-ch: }; after()"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    # `<-ch` inside the communication case reads ch — the `ch := in`
+    # assignment is not dead.
+    assert hints.unused == ()
+
+
+def test_select_send_channel_and_value_count_as_uses():
+    body = "ch := in; x := 1; select { case ch <- x: }; after()"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    assert hints.unused == ()
+
+
+def test_select_receive_assignment_counts_in_facts():
+    body = "select { case x = <-ch: default: }; use(x)"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    # `x = <-ch` assigns x on the case path only: the post-select
+    # read is a possible (not definite) unassigned use.
+    assert [(u.name, u.definite) for u in hints.unassigned] == [
+        ("x", False)
+    ]

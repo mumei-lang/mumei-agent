@@ -136,8 +136,14 @@ def _gaps(
             else:
                 gaps.append(CFGGap("labelled_jump", span))
         elif kind == "switch":
-            if statement.operator in {"type", "select"}:
-                gaps.append(CFGGap(f"unsupported_{statement.operator}_switch", span))
+            if statement.operator == "type":
+                gaps.append(CFGGap("unsupported_type_switch", span))
+            elif statement.operator == "select":
+                for case in statement.body:
+                    if case.kind not in {"case", "default"}:
+                        gaps.append(
+                            CFGGap("unsupported_case", _span(case))
+                        )
             else:
                 for case in statement.body:
                     if case.kind == "case" and not case.values:
@@ -153,10 +159,12 @@ def _gaps(
                 # Case bodies may break the switch; continue still
                 # needs an enclosing loop. A terminal fallthrough in a
                 # non-final clause is modelled, so it is not walked as
-                # an unsupported statement.
+                # an unsupported statement. Select cases never carry
+                # fallthrough — one there stays unsupported.
                 stmts = case.body
                 if (
-                    stmts
+                    statement.operator != "select"
+                    and stmts
                     and stmts[-1].kind == "fallthrough"
                     and index < len(cases) - 1
                 ):
@@ -264,7 +272,12 @@ class _Builder:
                     case_node = self.node(case.kind, case)
                     self.edge(node, case_node, "case")
                     self.edge(case_node, entries[index])
-                if not any(case.kind == "default" for case in cases):
+                if (
+                    not any(case.kind == "default" for case in cases)
+                    and statement.operator != "select"
+                ):
+                    # A select with no default blocks until a case is
+                    # ready — it has no fall-through edge.
                     self.edge(node, following)
             elif kind in {"for", "range"}:
                 post = self.sequence(statement.post, node, loop, labels)
@@ -353,7 +366,11 @@ def _walk(
 
 
 def _assigned_names(statement: tree_sitter_extract.Statement) -> frozenset[str]:
-    if statement.kind not in _ASSIGNMENT_KINDS:
+    # "case" joins for `v := <-ch` / `v, ok := <-ch` select
+    # communication cases: the extractor puts the bound names in
+    # `targets`. Expression cases never carry targets, so widening
+    # the kind set changes nothing for them.
+    if statement.kind not in _ASSIGNMENT_KINDS | {"case"}:
         return frozenset()
     return frozenset(
         target

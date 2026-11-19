@@ -2836,6 +2836,129 @@ member, or one explicit dereference of one (`(*t).F` — the same
         operator = node.child_by_field_name("operator")
         return operator is not None and operator.type == "<-"
 
+    def _select_receive_eval(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+    ) -> tuple[list, Any, frozenset[int]]:
+        """Evaluate a `communication_case` receive in the entry scope.
+
+        `v := <-ch`, `v, ok := <-ch`, `v = <-ch`, `v, ok = <-ch` or a
+        bare `<-ch`: Go evaluates the channel operand — and, with it,
+        the receive's recorded deps — once, in source order, before
+        any case is chosen, so this runs on the select's pre-state
+        like a send's channel and value operands do. Returns the LHS
+        nodes, the receive node (for diagnostics) and its deps; the
+        bound names store later, inside the chosen alternative.
+        """
+        lefts: list = []
+        recv = None
+        for child in node.children:
+            if child.type == "expression_list":
+                lefts = _children(child)
+            elif child.is_named:
+                recv = child
+        if recv is None:
+            raise _Unsupported("unsupported_statement", _span(node))
+        recv_deps = self.expression(
+            recv, fn, params, locals_, transfers, count, 0
+        )
+        return lefts, recv, recv_deps
+
+    def _select_receive_store(
+        self,
+        lefts: list,
+        recv: Any,
+        recv_deps: frozenset[int],
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        conditional: bool,
+    ) -> None:
+        """Bind a select receive's LHS names inside the chosen case.
+
+        Each bound name takes the receive's deps — the comma-ok flag
+        conservatively shares them, matching `v, ok := <-ch`.
+        Bare-identifier stores into locals admit like any `=`/`:=`;
+        `G = <-ch`, `G.V = <-ch` or `lib.V = <-ch` mutate external
+        state the same way the ordinary assignment admits — the
+        var's or member's identity records the transfer and the
+        received deps drop. A composite local's field (`s.V = <-ch`)
+        stays closed.
+        """
+        # Go evaluates every LHS operand — index and call arguments
+        # inside a composite write target — before any assignment
+        # lands, so `i, GB[Set(&r, i)] = <-ch` must read the OLD `i`
+        # inside `Set`'s arguments. Resolve every target and evaluate
+        # its extras first, then perform the stores.
+        pending: list[Any] = []
+        for lhs in lefts:
+            if lhs.text == b"_":
+                pending.append(None)
+                continue
+            package_write = self._package_var_write(lhs)
+            if package_write is not None:
+                binding, extras, _ = package_write
+                self._eval_write_extras(
+                    extras, fn, params, locals_, transfers, count
+                )
+                pending.append(("package", lhs, binding, extras))
+                continue
+            member_write = self._imported_member_write(lhs)
+            if member_write is not None:
+                member, extras, _ = member_write
+                self._eval_write_extras(
+                    extras, fn, params, locals_, transfers, count
+                )
+                pending.append(("member", lhs, member, extras))
+                continue
+            if lhs.type != "identifier":
+                raise _Unsupported("unsupported_statement", _span(node))
+            binding = self.bindings_by_span.get(self.node_key(lhs))
+            if binding is None:
+                ref = self.references.get(self.node_key(lhs))
+                if ref is not None and ref.binding_id:
+                    binding = self.bindings.get(ref.binding_id)
+            if binding is None or binding.type.kind not in {
+                "integer",
+                "boolean",
+                "pointer",
+            }:
+                raise _Unsupported("binding_unavailable", _span(node))
+            pending.append(("local", binding))
+        for entry in pending:
+            if entry is None:
+                continue
+            if entry[0] == "package":
+                _, lhs, binding, extras = entry
+                self._record_package_write(
+                    lhs, binding, extras, fn, params, locals_,
+                    transfers, count, eval_extras=False,
+                )
+            elif entry[0] == "member":
+                _, lhs, member, extras = entry
+                self._record_member_write(
+                    lhs, member, extras, fn, params, locals_,
+                    transfers, count, eval_extras=False,
+                )
+            else:
+                _, binding = entry
+                # `:=` binds fresh names (and a reused one keeps the
+                # skipped path's value under `conditional`), `=`
+                # stores into the existing binding — `_store` already
+                # gives the may-skip union semantics both need inside
+                # a case.
+                self._store(
+                    locals_, params, binding.id, recv_deps, conditional
+                )
+
     def _is_chan_binding(self, binding_id: str) -> bool:
         """The bound name's declared type is a channel."""
         binding = self.bindings.get(binding_id)
@@ -3498,6 +3621,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
+        eval_extras: bool = True,
     ) -> None:
         """Record an imported member write's mutation and index calls."""
         if member.kind != "var":
@@ -3532,6 +3656,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 imported=True,
             )
         )
+        if eval_extras:
+            self._eval_write_extras(
+                extras, fn, params, locals_, transfers, count
+            )
+
+    def _eval_write_extras(
+        self,
+        extras: tuple[Any, ...],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+    ) -> None:
         # Extras were collected outermost-first while descending the
         # operand chain; Go evaluates indices inside-out — the inner
         # index of `lib.V2[f()][g()]` runs before `g()` — so a write
@@ -3562,6 +3700,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
+        eval_extras: bool = True,
     ) -> None:
         """Record a package-level `var` write's mutation + index calls.
 
@@ -3582,16 +3721,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 imported=True,
             )
         )
-        for extra in reversed(extras):
+        if eval_extras:
             # Same rule as `_record_member_write`: indices evaluate
             # inside-out, literals skip, and the read's dependencies
             # attribute to the statement.
-            if extra.type in _INDEX_LITERALS:
-                continue
-            self._record_read(
-                self.expression(
-                    extra, fn, params, locals_, transfers, count, 0
-                )
+            self._eval_write_extras(
+                extras, fn, params, locals_, transfers, count
             )
 
     def _opaque_write_target(
@@ -7186,6 +7321,119 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.expression(
                 inner[0], fn, params, locals_, transfers, count, 0
             )
+            return
+        if kind == "select_statement":
+            # A select is a nondeterministic choice: each case's
+            # communication op and body run in a fresh alternative
+            # scope and every alternative joins back by union — like
+            # an if/else chain whose guards are comm ops. `break`
+            # inside a select body exits the select itself, matching
+            # the switch frames. An empty `select {}` blocks forever —
+            # it never reaches the following statements, so it stays
+            # outside the fragment.
+            clauses = [
+                c
+                for c in node.named_children
+                if c.type in {"communication_case", "default_case"}
+            ]
+            if not clauses:
+                raise _Unsupported("unsupported_statement", _span(node))
+            frame = {"kind": "switch", "exited": False}
+            self.frames.append(frame)
+            try:
+                # Go evaluates every case's channel operand and send
+                # value once, in source order, on entering the
+                # select — before a case is chosen. Run each comm
+                # op against the entry scope so a later case's
+                # operand calls (`case out <- h():` mutating a
+                # captured pointer, say) reach every alternative's
+                # join and every earlier case's reads; only the
+                # receive's bound names and each clause's body run
+                # inside a fresh alternative.
+                receives: list[
+                    tuple[list, Any, frozenset[int]] | None
+                ] = []
+                for clause in clauses:
+                    receive = next(
+                        (
+                            s
+                            for s in clause.named_children
+                            if s.type == "receive_statement"
+                        ),
+                        None,
+                    )
+                    if receive is not None:
+                        receives.append(
+                            self._select_receive_eval(
+                                receive, fn, params, locals_,
+                                transfers, count,
+                            )
+                        )
+                        continue
+                    receives.append(None)
+                    for sub in clause.named_children:
+                        if sub.type == "send_statement":
+                            self._branch_statement(
+                                sub, fn, params, locals_, transfers,
+                                count, deps, saw_return, conditional,
+                            )
+                # Every clause is an alternative starting from the
+                # entry scope — joining one before evaluating the
+                # next would leak the earlier case's stores into it
+                # (`case i = <-ch:` must not change what `i` means
+                # inside `default:`). Merge all branches into a
+                # single environment and join it once.
+                joined: dict[str, frozenset[int]] = {}
+                joined_ptr: dict[str, frozenset[int]] = {}
+                ptr_entry = dict(self._ptr_deps)
+                for clause, receive in zip(clauses, receives):
+                    branch = dict(locals_)
+                    # `_branch_sequence` rewrites the shared
+                    # `_ptr_deps` map in place — swap in a fresh
+                    # entry copy per clause or one alternative's
+                    # pointer stores (`p = q`) leak into the next.
+                    self._ptr_deps = dict(ptr_entry)
+                    if receive is not None:
+                        lefts, recv, recv_deps = receive
+                        self._select_receive_store(
+                            lefts, recv, recv_deps, clause, fn,
+                            params, branch, transfers, count,
+                            conditional,
+                        )
+                    body = next(
+                        (
+                            c
+                            for c in clause.named_children
+                            if c.type == "statement_list"
+                        ),
+                        None,
+                    )
+                    self._branch_sequence(
+                        _children(body) if body is not None else [],
+                        fn, params, branch, transfers,
+                        count, deps, saw_return, conditional,
+                    )
+                    for bid, bdeps in branch.items():
+                        joined[bid] = joined.get(
+                            bid, frozenset()
+                        ) | bdeps
+                    for bid, bdeps in self._ptr_deps.items():
+                        joined_ptr[bid] = joined_ptr.get(
+                            bid, frozenset()
+                        ) | bdeps
+                self._join(locals_, joined, params)
+                for bid, bdeps in joined_ptr.items():
+                    base = ptr_entry.get(bid)
+                    if base is None:
+                        base = (
+                            frozenset({params[bid]})
+                            if bid in params
+                            else frozenset()
+                        )
+                    ptr_entry[bid] = base | bdeps
+                self._ptr_deps = ptr_entry
+            finally:
+                self.frames.pop()
             return
         if kind == "send_statement":
             # `ch <- x` on a local channel — the queue is one

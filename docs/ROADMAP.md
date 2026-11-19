@@ -2631,8 +2631,16 @@ non-scalar elements, an imported `lib.G()` channel
 result (the signature carries no element kind), a
 multi-result callee, and rebinding a
 channel under a branch or loop (a conditional
-`ch2 = ch3` could mean either queue), and `select`
-stay closed, while `len(ch)`/`cap(ch)` now admit as
+`ch2 = ch3` could mean either queue) stay closed,
+while `select` now admits: each communication case's
+receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
+a bare `<-ch`) or send (`ch <- v`) runs in a fresh
+alternative scope and every alternative joins back by
+union — an if/else chain whose guards are comm ops;
+`break` exits the select like a switch clause, an
+empty `select {}` blocks forever and stays closed,
+and a non-identifier receive target (`s.V = <-ch`)
+stays closed — while `len(ch)`/`cap(ch)` now admit as
 dep-free — the queue length and capacity are runtime
 state, not parameter provenance; on a `chan` parameter
 each records an imported transfer like a receive does —
