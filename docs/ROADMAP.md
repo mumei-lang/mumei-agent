@@ -2836,6 +2836,13 @@ multi-result signature with a func slot unpacks the same way).
 An imported func-result callee (`f := lib.Mk()`) records
 `direct_import` and binds an opaque func value the same way —
 see the C06 imported-callee section below.
+A func-element collection result — `[]func` / `[N]func` — admits
+at the same gate: the caller's `mk(x)[0]()` runs the indexed
+element as an opaque call on the container's slot (the producing
+call's `chan` arguments join the external model exactly like the
+`f := mk(ch)` capture, so `mk(ch)[0](x)` can send `x` into `ch`'s
+queue). Binding the container itself (`fs := mk(x); fs[0]()`)
+and `map[K]func` results stay closed.
 A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
 inner callee resolves) admits as an opaque indirect call: Go
 evaluates the callee expression before the arguments, so the

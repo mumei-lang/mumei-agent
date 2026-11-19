@@ -21340,6 +21340,117 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     assert not result.available
 
 
+def test_func_element_slice_result_call_admitted(go_types_helper):
+    # `mk(x)[0]()` — indexing a func-element slice result and
+    # calling the element: the index callee runs opaque on the
+    # container slot, and `mk`'s `[]func` result admits like a
+    # scalar `func` result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) []func() int64 {\n"
+        "    return []func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64) int64 { return mk(x)[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert any(t.imported for t in result.calls)
+
+
+def test_func_element_array_result_call_admitted(go_types_helper):
+    # `[N]func` admits the same way — `mk(x)[1]()` runs opaque.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) [2]func() int64 {\n"
+        "    return [2]func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64) int64 { return mk(x)[1]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_result_chan_arg_joins_external_queue(go_types_helper):
+    # `mk(ch)[0](x)` — the produced element may be a closure that
+    # sends on `ch`, so the call's `chan` argument joins the
+    # external model exactly like the `f := mk(ch)` bind does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func snd(c chan int64, v int64) { c <- v }\n"
+        "func mk(ch chan int64) []func(int64) {\n"
+        "    return []func(int64){func(x int64) { snd(ch, x) }}\n"
+        "}\n"
+        "func F(x int64) int64 {\n"
+        "    ch := make(chan int64)\n"
+        "    mk(ch)[0](x)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_result_capture_reassigned_before_return(
+    go_types_helper,
+):
+    # `cl` captured `y` when it was const — but `y = x` before the
+    # `return []func(){cl}` means the element's closure observes x:
+    # the composite-literal return must re-resolve captured deps too.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) []func() int64 {\n"
+        "    y := int64(0)\n"
+        "    cl := func() int64 { return y }\n"
+        "    y = x\n"
+        "    return []func() int64{cl}\n"
+        "}\n"
+        "func F(a int64) int64 { return mk(a)[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_result_chan_receiver_joins_external_queue(
+    go_types_helper,
+):
+    # `c.Mk()[0](x)` — a chan-typed receiver shares its queue with
+    # the produced closure like a `chan` argument does, so the
+    # element's send reaches a later `<-c` through indirect_writes.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type C chan int64\n"
+        "func snd(c chan int64, v int64) { c <- v }\n"
+        "func (c C) Mk() []func(int64) {\n"
+        "    return []func(int64){func(x int64) { snd(c, x) }}\n"
+        "}\n"
+        "func F(c C, x int64) int64 {\n"
+        "    c.Mk()[0](x)\n"
+        "    return <-c\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_element_bound_container_call_stays_closed(go_types_helper):
+    # `fs := mk(x); fs[0]()` — binding the func-element container
+    # itself is outside this slice; the indexed call stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) []func() int64 {\n"
+        "    return []func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64) int64 { fs := mk(x); return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
 def test_call_result_callee_chan_arg_joins_external_queue(
     go_types_helper,
 ):
