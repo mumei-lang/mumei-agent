@@ -1016,6 +1016,38 @@ class _Builder:
             return binding
         return None
 
+    def _embed_name_compatible(self, field: Any) -> bool:
+        """A pre-`embedded` report leaves the field unmarked, but the
+        declaration form is still visible in source: a name followed
+        by a type (`R *Q`, `Q Q`) or another name (`A, B *Q`) is
+        definitely NAMED — an embedded field is a bare identifier,
+        so only a `\\n` / `;` / `}` (or EOF) may follow it. Comparing
+        the field name to the resolved type's name fails for
+        aliases (`type A = *Q` embeds as `A`, not `Q`), so the
+        source text after the field's own span decides."""
+        span = getattr(field, "span", None)
+        if span is None:
+            return True
+        raw = self.raws.get(getattr(span, "file", 0) or 0)
+        if raw is None:
+            return True
+        i, n = span.end, len(raw)
+        while True:
+            while i < n and raw[i:i + 1] in (b" ", b"\t"):
+                i += 1
+            if raw[i:i + 2] == b"//":
+                j = raw.find(b"\n", i)
+                i = n if j < 0 else j + 1
+                continue
+            if raw[i:i + 2] == b"/*":
+                j = raw.find(b"*/", i + 2)
+                i = n if j < 0 else j + 2
+                continue
+            break
+        if i >= n:
+            return True
+        return raw[i:i + 1] in (b"\n", b";", b"}")
+
     def _promotion_path(
         self,
         fields: tuple[Any, ...],
@@ -1046,6 +1078,8 @@ class _Builder:
             (f, ftype if ftype.kind == "pointer" else None)
             for f in fields
             if getattr(f, "embedded", None) is not False
+            and (getattr(f, "embedded", None) is True
+                 or self._embed_name_compatible(f))
             and (ftype := getattr(f, "type", None)) is not None
         ]
         while frontier:
@@ -1066,16 +1100,6 @@ class _Builder:
                     # report cannot see.
                     if unenumerable is None:
                         unenumerable = f
-                    continue
-                if (
-                    getattr(f, "embedded", None) is None
-                    and f.name != tb.name
-                ):
-                    # A pre-`embedded` report cannot mark the field
-                    # either way, but a field whose name is not its
-                    # type's name (`R *Q`, `R Q`) is definitely
-                    # named — embedded fields always carry the
-                    # type's own name — so it never promotes.
                     continue
                 inner = self._struct_fields(tb)
                 if ident.id in {x.id for x in inner}:
@@ -1102,6 +1126,8 @@ class _Builder:
                     )
                     for g in inner
                     if getattr(g, "embedded", None) is not False
+                    and (getattr(g, "embedded", None) is True
+                         or self._embed_name_compatible(g))
                     and (gtype := getattr(g, "type", None)) is not None
                 )
             if found_value:

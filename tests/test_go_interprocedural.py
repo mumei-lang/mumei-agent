@@ -20994,6 +20994,42 @@ def test_call_result_promotion_value_match_beats_unenumerable_embed(
     assert result.effects == "none_in_supported_fragment"
 
 
+def test_call_result_promotion_old_report_embedded_alias_pointer(
+    go_types_helper,
+):
+    # `type A = *Q` embedded as `A` in a pre-`embedded` report:
+    # the field name does not match the resolved pointee's name
+    # (A vs Q), but a bare-identifier declaration IS embed-
+    # compatible, so the `*Q` crossing still reads external.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type A = *Q\n"
+        "type S struct{ A }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(q).P\n"
+        "}\n"
+    }
+    payload = json.loads(package_report(go_types_helper, files))
+    old_payload = json.dumps(_strip_embedded_keys(payload)).encode()
+    snapshot = load_go_package_snapshot(
+        old_payload,
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
 def test_call_result_anon_struct_embedded_pointer_reads_external(
     go_types_helper,
 ):
