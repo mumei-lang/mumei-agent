@@ -1289,14 +1289,16 @@ class _Builder:
         return composite
 
     def _func_elem_collection(self, fact: Any) -> bool:
-        """A `[]func`/`[N]func` container — a slice or array whose
-        elements are function values. It binds like a composite
+        """A `[]func`/`[N]func`/`map[K]func` container — a collection
+        whose elements are function values. It binds like a composite
         local: one conflated dep set carries every element's
         captured state, and `fs[k]()` then calls opaque on the
-        container's slot like an imported member's element does."""
+        container's slot like an imported member's element does.
+        A keyed map slot is as unknowable as a slice index, so the
+        keyed `fm["k"]()` resolves through the same slot."""
         return (
             fact is not None
-            and fact.kind in {"slice", "array"}
+            and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
             and fact.elem.kind == "function"
         )

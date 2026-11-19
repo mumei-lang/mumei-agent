@@ -21604,10 +21604,11 @@ def test_func_element_container_chan_arg_promoted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
-def test_func_element_map_container_stays_closed(go_types_helper):
-    # `map[int]func` — a keyed container is not a numbered slot: the
-    # conflated dep set cannot say which slot `fs[k]()` invokes, so
-    # it stays closed like other unmodelled composites.
+def test_func_element_map_container_index_call_admitted(go_types_helper):
+    # `map[int]func` — a keyed slot is as unknowable as a numbered
+    # index: the container binds one conflated dep set, `fs[k]()`
+    # calls opaque on the slot, and a literal's element captures
+    # (`return x`) join it.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk(x int64) map[int]func() int64 {\n"
@@ -21616,7 +21617,8 @@ def test_func_element_map_container_stays_closed(go_types_helper):
         "func F(x int64) int64 { fs := mk(x); return fs[0]() }",
     )
     result = named(source, snapshot, summaries)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_call_result_callee_chan_arg_joins_external_queue(
@@ -22140,10 +22142,11 @@ def test_map_func_result_computed_index_call_admitted(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_map_func_bound_container_stays_closed(go_types_helper):
-    # `fm := lib.Mk(x)` — a map-typed local is not a fragment
-    # binding (map literals never reach the model), so the bound
-    # container stays closed until a func-element map bind slice.
+def test_map_func_bound_container_index_call_admitted(go_types_helper):
+    # `fm := lib.Mk(x); fm["k"]()` — a bound `map[K]func` container
+    # indexes and calls like the slice-element containers do: the
+    # callee runs opaque on the container's slot, carrying the
+    # producing call's dep set.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { fm := lib.Mk(x); return fm[\"k\"]() }\n"
@@ -22162,7 +22165,133 @@ def test_map_func_bound_container_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_map_func_bound_container_computed_key_admitted(go_types_helper):
+    # `fm[k]()` — a computed key evaluates like an argument: its
+    # deps join the container's read set.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, k int64) int64 { fm := lib.Mk(x); return fm[k]() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) map[int64]func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_map_func_bound_container_var_and_assign_admitted(go_types_helper):
+    # `var fm = lib.Mk(x)` and `fm = lib.Mk(x)` bind like `:=`.
+    for decl in (
+        "var fm = lib.Mk(x);",
+        "var fm map[string]func() int64; fm = lib.Mk(x);",
+    ):
+        files = {
+            "a.go": "package p\nimport \"lib\"\n"
+            f"func F(x int64) int64 {{ {decl} return fm[\"k\"]() }}\n"
+        }
+        lib = {
+            "lib": {
+                "m.go": "package lib\n"
+                "func Mk(a int64) map[string]func() int64 { return nil }\n"
+            }
+        }
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, lib),
+            files,
+            target_arch="amd64",
+        )
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+        assert result.available, decl
+        assert result.return_dependencies == frozenset({0}), decl
+
+
+def test_map_func_bound_container_chan_args_promoted(go_types_helper):
+    # `fm := lib.Mk(ch)` — the container's `chan` call args promote
+    # like `f := mk(ch)`: elements may capture the queue, so a
+    # later `ch <- x` reaches `fm["k"]()` via `indirect_writes`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, ch chan int64) int64 {\n"
+        "    fm := lib.Mk(ch); ch <- x; return fm[\"k\"]()\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(c chan int64) map[string]func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_map_scalar_bound_container_stays_closed(go_types_helper):
+    # `fm := lib.Ms(x)` — a `map[string]int64` local is no
+    # func-element collection: the map-typed bind stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { fm := lib.Ms(x); return fm[\"k\"] }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Ms(a int64) map[string]int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
     assert not result.available
+
+
+def test_map_func_bound_container_same_package_declared_deps(go_types_helper):
+    # A same-package producer's declared deps carry through: `mk`
+    # returns `nil` regardless of `x`, so the bound container holds
+    # no dep on it — only the computed key contributes.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, k int64) int64 { fm := mk(x); return fm[k]() }\n",
+        "b.go": "package p\n"
+        "func mk(x int64) map[int64]func() int64 { return nil }\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_map_scalar_result_stays_closed(go_types_helper):
