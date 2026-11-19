@@ -15509,3 +15509,56 @@ def test_struct_parameter_boundaries_stay_closed(go_types_helper):
     ):
         result = named(*unit(go_types_helper, decls))
         assert not result.available
+
+
+def test_struct_parameter_multiple_names(go_types_helper):
+    # `s, t struct{...}` — each name's fields resolve through the
+    # signature literal's anchor.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, s, t struct{ V int64 }) int64 {\n"
+            "\treturn s.V + t.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_anonymous_struct_result_field_read(go_types_helper):
+    # `p := G(x)` where G returns an anonymous struct — p's field
+    # window anchors at the result signature literal.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(x int64) struct{ V int64 } {\n"
+            "\treturn struct{ V int64 }{V: x}\n}\n"
+            "func F(x int64) int64 {\n"
+            "\tp := G(x)\n"
+            "\treturn p.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_argument_observes_callee_writes(go_types_helper):
+    # `G(s, w)` where G stores `w` through `s.P` — the struct arg's
+    # fields are by-value, but the shared pointee memory makes the
+    # callee's stored deps observable at the caller's `*q` read.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(s struct{ P *int64 }, x int64) int64 {\n"
+            "\tq := s.P\n"
+            "\t*q = x\n"
+            "\treturn x\n}\n"
+            "func F(v int64, w int64) int64 {\n"
+            "\ts := struct{ P *int64 }{P: &v}\n"
+            "\tG(s, w)\n"
+            "\tq := s.P\n"
+            "\treturn *q\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})

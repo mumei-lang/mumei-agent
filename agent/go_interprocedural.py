@@ -3034,6 +3034,104 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return target
 
+    def _call_result_struct_anchor(self, node: Any) -> Any | None:
+        """The anchor for a direct local call's single anonymous-struct
+        result — `p := G(x)` where G is `func G(...) struct{ V int64 }`
+        declares V inside G's signature, not after p's name, so p's
+        field window anchors at the literal's own start."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_local":
+            return None
+        target = self.functions.get(call.target)
+        if (
+            target is None
+            or len(target.results) != 1
+            or target.results[0].type.kind != "struct"
+            or target.results[0].type.type_id
+        ):
+            return None
+        fn_binding = self.bindings.get(target.binding_id)
+        block = (
+            self.blocks.get(_key3(fn_binding.span))
+            if fn_binding is not None
+            else None
+        )
+        decl = block.parent if block is not None else None
+        result_node = (
+            decl.child_by_field_name("result")
+            if decl is not None
+            else None
+        )
+        if result_node is None:
+            return None
+        if result_node.type == "struct_type":
+            literal = result_node
+        else:
+            # `func G() (struct{...})` — a parenthesized result list
+            # with one declaration whose type child is the literal.
+            decls = [
+                c
+                for c in result_node.named_children
+                if c.type == "parameter_declaration"
+            ]
+            literal = (
+                decls[0].child_by_field_name("type")
+                if len(decls) == 1
+                else None
+            )
+        if literal is None or literal.type != "struct_type":
+            return None
+        file = (
+            fn_binding.span.file
+            if isinstance(fn_binding.span, FileSpan)
+            else 0
+        )
+        return FileSpan(file, literal.start_byte, literal.start_byte)
+
+    def _record_sig_struct_anchors(
+        self, decl: Any, file: int
+    ) -> None:
+        """`func F(s, t struct{ V int64 }) (r struct{ W int64 })` —
+        an anonymous-struct parameter or named result declares its
+        fields inside the signature's literal, which sits after the
+        LAST name in the declaration (or inside the result list), so
+        each binding's field window anchors at the literal's own
+        start, not the binding's name span."""
+        if decl is None:
+            return
+        for field in ("parameters", "result"):
+            lst = decl.child_by_field_name(field)
+            if lst is None or lst.type != "parameter_list":
+                continue
+            for param_decl in lst.named_children:
+                if param_decl.type != "parameter_declaration":
+                    continue
+                literal = param_decl.child_by_field_name("type")
+                if literal is None or literal.type != "struct_type":
+                    continue
+                anchor = FileSpan(
+                    file, literal.start_byte, literal.start_byte
+                )
+                for name in param_decl.named_children:
+                    if name.type != "identifier":
+                        continue
+                    binding = self.bindings_by_span.get(
+                        (file, name.start_byte, name.end_byte)
+                    )
+                    if binding is not None:
+                        self.anon_struct_anchor[binding.id] = anchor
+
     def _chan_result_passthrough(
         self,
         node: Any,
@@ -4329,6 +4427,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
                 )
+        # Anonymous-struct signature slots declare their fields
+        # inside the signature literal — anchor each binding's field
+        # window there (a multi-name `s, t struct{...}` shares the
+        # one literal after the last name).
+        self._record_sig_struct_anchors(block.parent, body_key[0])
         deps: list[frozenset[int]] = [frozenset()]
         saw_return = [False]
         # The frame stack and the pinned set belong to this function
@@ -4756,26 +4859,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.pointee_closures.add(binding.id)
                     else:
                         self.pointee_closures.discard(binding.id)
-                    # `cp := st` — a copied anonymous struct shares
-                    # st's declared type, so cp's fields follow st's
-                    # anchor, not cp's own name.
+                # `cp := st` — a copied anonymous struct shares st's
+                # declared type, so cp's fields follow st's anchor,
+                # not cp's own name. `p := G(x)` declares its fields
+                # inside G's result signature — the literal anchors
+                # the window the same way.
+                if (
+                    binding.type.kind == "struct"
+                    and not binding.type.type_id
+                ):
+                    anchor = (
+                        self._call_result_struct_anchor(rights[i])
+                        if i < len(rights)
+                        else None
+                    )
+                    src_id = None
                     if (
-                        binding.type.kind == "struct"
-                        and not binding.type.type_id
-                        and src_id is not None
+                        len(lefts) == len(rights)
+                        and rights[i].type == "identifier"
                     ):
+                        src_ref = self.references.get(
+                            self.node_key(rights[i])
+                        )
+                        src_id = (
+                            src_ref.binding_id
+                            if src_ref is not None
+                            else None
+                        )
+                    if anchor is None and src_id is not None:
                         src_binding = self.bindings.get(src_id)
                         anchor = self.anon_struct_anchor.get(
                             src_id
                         ) or getattr(src_binding, "span", None)
-                        if anchor is not None:
-                            self.anon_struct_anchor[binding.id] = (
-                                anchor
-                            )
-                        else:
-                            self.anon_struct_anchor.pop(
-                                binding.id, None
-                            )
+                    if anchor is not None:
+                        self.anon_struct_anchor[binding.id] = anchor
+                    else:
+                        self.anon_struct_anchor.pop(binding.id, None)
             return
         if kind == "var_declaration":
             # Grouped `var (...)` declarations never reach here — the
@@ -5016,6 +5135,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.anon_struct_anchor.pop(
                                     binding.id, None
                                 )
+                    # `var p = G(x)` — an anonymous-struct result's
+                    # fields live inside G's signature literal, like
+                    # `p := G(x)`; anchor the field window there.
+                    if (
+                        binding.type.kind == "struct"
+                        and not binding.type.type_id
+                        and spec.child_by_field_name("type") is None
+                        and i < len(value_nodes)
+                    ):
+                        anchor = self._call_result_struct_anchor(
+                            value_nodes[i]
+                        )
+                        if anchor is not None:
+                            self.anon_struct_anchor[binding.id] = anchor
                     # `var a, b struct{...}` — the literal follows the
                     # LAST name, so every earlier name's fields anchor
                     # there, not at its own span (whose window closes
@@ -5023,6 +5156,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         binding.type.kind == "struct"
                         and not binding.type.type_id
+                        and spec.child_by_field_name("type") is not None
                         and len(names) > 1
                     ):
                         last = self.bindings_by_span.get(
@@ -9094,6 +9228,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_.get(binding.id, frozenset())
                             | stored
                         )
+                elif (
+                    binding is not None
+                    and binding.type.kind == "struct"
+                ):
+                    # `G(s)` hands the callee a struct whose
+                    # pointer/chan/map/slice fields share caller
+                    # memory — `*s.P = x`, `s.C <- x`, `s.M[k] = v`
+                    # writes reach shared state the caller can
+                    # observe through `*q`/`&s.V` escapes and later
+                    # calls, so they broadcast into `indirect_writes`
+                    # like a pointer argument's do. The struct's own
+                    # field VALUES stay by-value — the callee cannot
+                    # reseat `s` or its fields — so `locals_[s]`
+                    # correctly keeps its pre-call set.
+                    self.indirect_writes |= stored
 
 
 def _declared_key(binding_id: str) -> tuple[str, int] | None:
