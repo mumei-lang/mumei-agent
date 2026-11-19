@@ -10841,17 +10841,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                     value_deps = frozenset()
                     if bound is not None:
-                        # `for range *p` — each element (and a
-                        # map's key, when only one name binds) is
-                        # caller memory the pointer's aim selects,
-                        # so the bound name carries the pointer's
-                        # own deps and every earlier indirect
-                        # store, the same union `(*p)[i]`'s read
-                        # reports.
-                        value_deps = self.expression(
-                            range_ident, fn, params, scope,
-                            transfers, count, 0,
-                        ) | self.indirect_writes
+                        if (
+                            bound[2].kind == "array"
+                            and len(lefts) <= 1
+                        ):
+                            # `for i := range p` and `for range
+                            # *p` never evaluate the operand: Go
+                            # skips the range expression when at
+                            # most one iteration variable is
+                            # present and `len(x)` is constant.
+                            # The pointer write is not observed
+                            # and no element binds at all (the
+                            # index is dep-free), so nothing
+                            # carries `p`'s deps.
+                            pass
+                        else:
+                            # `for range *p` — each element (and a
+                            # map's key, when only one name
+                            # binds) is caller memory the
+                            # pointer's aim selects, so the bound
+                            # name carries the pointer's own deps
+                            # and every earlier indirect store,
+                            # the same union `(*p)[i]`'s read
+                            # reports.
+                            value_deps = self.expression(
+                                range_ident, fn, params, scope,
+                                transfers, count, 0,
+                            ) | self.indirect_writes
                     elif computed is not None:
                         # `for range *G()` — the elements (and a
                         # map's key, when only one name binds) live

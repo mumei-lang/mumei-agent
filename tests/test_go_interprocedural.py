@@ -18615,6 +18615,39 @@ def test_range_over_bound_map_key_tracks_mid_iteration_writes(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_range_over_pointer_to_array_index_does_not_read_pointer(
+    go_types_helper,
+):
+    # `for i := range p` over `*[4]int64` never evaluates the
+    # operand — Go skips the range expression when at most one
+    # iteration variable is present and `len(x)` is constant — so
+    # `p` is not read, and `i` stays dep-free.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor i := range p {\n"
+        "\t\tr += int64(i)\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    # No statement reads `p` (param index 0) — an evaluated
+    # operand would land it in `statement_reads`.
+    assert not any(
+        r.deps == frozenset({0}) for r in result.statement_reads
+    )
+
+
 
 
 def test_method_expr_chan_result_passthrough_skips_receiver(
