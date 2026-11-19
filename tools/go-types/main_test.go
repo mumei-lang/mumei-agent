@@ -845,3 +845,23 @@ func TestImportedFuncResultAdmits(t *testing.T) {
 		t.Fatalf("a multi-result func-slot callee was rejected: %+v", out.Calls)
 	}
 }
+
+func TestFuncElemMapResultPinsElementIdentities(t *testing.T) {
+	// An admitted `map[K]func(N)` result relies on the declared `K`
+	// and `N` identities — the signature's type deps must pin them
+	// so a redeclaration flags the caller's summary stale.
+	unit := []namedSource{{"a.go", "package p\ntype K string\ntype N int64\nfunc Mk(x int64) map[K]func(N) int64 { return nil }"}}
+	out := analyze(request{Sources: unit, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var mb binding
+	for _, b := range named(out, "Mk") {
+		if b.Kind == "function" {
+			mb = b
+		}
+	}
+	if len(mb.SignatureTypeIDs) != 2 {
+		t.Fatalf("Mk should pin K and N through the map result, got %v", mb.SignatureTypeIDs)
+	}
+}

@@ -305,18 +305,34 @@ func funcResultOK(t types.Type) bool {
 	return ok
 }
 
+// funcElemMapResultOK: a `map[K]func(...)` result — like the
+// slice/array func-element collections, which value a keyed slot
+// holds is unknowable, so calls through it run opaque on the
+// container. Map *literals* never reach the model — a `map`
+// composite stays unsupported as a local — so only call results
+// and imported/package members produce these.
+func funcElemMapResultOK(t types.Type) bool {
+	m, ok := t.Underlying().(*types.Map)
+	if !ok {
+		return false
+	}
+	_, isFunc := m.Elem().Underlying().(*types.Signature)
+	return isFunc
+}
+
 // importedResultsOK admits a signature when every result is
 // scalar/pointer, a scalar-element `chan`, a `chan chan T` one
 // level deep, or a `func` type — a multi-result callee like
 // `func G() (chan int64, int64)` whose chan slot the consumer binds
 // as an external queue like `ch := lib.G()`, or whose func slot binds
-// an opaque func value like `f := lib.Mk()`. Deeper nesting and other
-// composites stay `external_or_bodyless` at any position.
+// an opaque func value like `f := lib.Mk()`. A `map[K]func` result
+// admits like a `[]func`/`[N]func` collection. Deeper nesting and
+// other composites stay `external_or_bodyless` at any position.
 func importedResultsOK(sig *types.Signature) bool {
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
 		t := res.At(i).Type()
-		if !scalarResultOK(t) && !scalarChanElemOK(t) && !funcResultOK(t) && !chanChanElemOK(t) {
+		if !scalarResultOK(t) && !scalarChanElemOK(t) && !funcResultOK(t) && !chanChanElemOK(t) && !funcElemMapResultOK(t) {
 			return false
 		}
 	}
@@ -903,6 +919,32 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		if ch, ok := t.Underlying().(*types.Chan); ok {
 			add(ch.Elem())
 		}
+		// A collection's element types name dependencies the same way:
+		// an admitted `map[K]func(N)` or `[]func(N)` result relies on
+		// the declared `K`/`N` identities, so a redeclaration must flag
+		// the caller's summary stale like a renamed parameter does.
+		if m, ok := t.Underlying().(*types.Map); ok {
+			add(m.Key())
+			add(m.Elem())
+		}
+		if s, ok := t.Underlying().(*types.Slice); ok {
+			add(s.Elem())
+		}
+		if a, ok := t.Underlying().(*types.Array); ok {
+			add(a.Elem())
+		}
+		// A func-typed type declares its own inner named identities —
+		// `f func(lib.N) int64`, `type MyFn func(N) int64`, and the
+		// anonymous `func(N) int64` inside an admitted collection
+		// element alike — walk the nested signature too.
+		if s, ok := t.Underlying().(*types.Signature); ok {
+			for i := 0; i < s.Params().Len(); i++ {
+				add(s.Params().At(i).Type())
+			}
+			for i := 0; i < s.Results().Len(); i++ {
+				add(s.Results().At(i).Type())
+			}
+		}
 		if obj == nil {
 			return
 		}
@@ -914,17 +956,6 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		// early like before.)
 		if p, ok := t.Underlying().(*types.Pointer); ok {
 			add(p.Elem())
-		}
-		// A func-typed parameter or result (`f func(lib.N) int64`,
-		// `type MyFn func(N) int64`) declares its own inner named
-		// identities — walk the nested signature too.
-		if s, ok := t.Underlying().(*types.Signature); ok {
-			for i := 0; i < s.Params().Len(); i++ {
-				add(s.Params().At(i).Type())
-			}
-			for i := 0; i < s.Results().Len(); i++ {
-				add(s.Results().At(i).Type())
-			}
 		}
 	}
 	if sig.Recv() != nil {

@@ -2858,6 +2858,15 @@ every expression position (`return nil`, `G(nil)`, `f = nil`,
 the nil queue holds nothing. `map[K]func` results stay closed: a
 keyed slot is not a numbered element, so the conflated dep set
 cannot say which slot the call invokes.
+A `map[K]func` call result admits through the same gate:
+`lib.Mk(x)["k"]()` runs the keyed element as an opaque call on
+the container's slot — which value a map key holds is as
+unknowable as a slice index, and map literals never reach the
+fragment, so only call results produce these containers. A
+computed key evaluates like an argument (`lib.Mk(x)[k]()` folds
+the key's deps); binding the map to a local (`fm := lib.Mk(x)`)
+still stays closed because a map-typed local has no dep model
+yet.
 A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
 inner callee resolves) admits as an opaque indirect call: Go
 evaluates the callee expression before the arguments, so the

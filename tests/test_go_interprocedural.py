@@ -22087,3 +22087,104 @@ def test_func_arg_opaque_callback_writes_back_escaped(
     assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
+
+
+def test_map_func_result_index_call_admitted(go_types_helper):
+    # `lib.Mk(x)["k"]()` — a `map[string]func` call result indexes
+    # and calls the element: the callee runs opaque on the
+    # container's slot like a `[]func` result does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.Mk(x)[\"k\"]() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) map[string]func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_map_func_result_computed_index_call_admitted(go_types_helper):
+    # `lib.Mk(x)[k]()` — a computed key evaluates like an argument:
+    # its deps join the callee's read set.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, k int64) int64 { return lib.Mk(x)[k]() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) map[int64]func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_map_func_bound_container_stays_closed(go_types_helper):
+    # `fm := lib.Mk(x)` — a map-typed local is not a fragment
+    # binding (map literals never reach the model), so the bound
+    # container stays closed until a func-element map bind slice.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { fm := lib.Mk(x); return fm[\"k\"]() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) map[string]func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_map_scalar_result_stays_closed(go_types_helper):
+    # `lib.Mk(x)` returning `map[string]int64` — a scalar-element
+    # map is no func-element collection: the composite result keeps
+    # the `external_or_bodyless` closure.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(len(lib.Mk(x))) }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) map[string]int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
