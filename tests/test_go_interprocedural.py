@@ -25157,6 +25157,35 @@ def test_len_call_result_scalar_callee(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_len_call_result_dot_import(go_types_helper):
+    # `import . "lib"; len(G(x))` — a dot-imported callee has no
+    # selector, so the member resolves through the identifier's
+    # import reference instead.
+    files = {
+        "a.go": "package p\n"
+        'import . "lib"\n'
+        "func F(x int64) int64 {\n"
+        "\tn := int64(len(G(x)))\n"
+        "\treturn n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(y int64) []int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_len_call_result_chan_arg_promotes(go_types_helper):
     # `len(lib.G(q))` — the opaque callee may send on `q`: the
     # argument's queue promotes external so a later `<-q` observes

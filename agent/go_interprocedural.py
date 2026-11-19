@@ -3972,6 +3972,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and callee_node.type == "selector_expression"
             else None
         )
+        if (
+            candidate is None
+            and callee_node is not None
+            and callee_node.type == "identifier"
+        ):
+            # `import . "lib"; G(x)` — a dot-imported callee resolves
+            # through the identifier's reference instead of a
+            # selector. The member name must still match so a local
+            # `G` shadowing the import cannot claim its result type.
+            ref = self.references.get(self.node_key(callee_node))
+            if ref is not None and ref.kind == "import":
+                member = self.members.get(ref.binding_id)
+                if (
+                    member is not None
+                    and member.name.encode("utf-8") == callee_node.text
+                ):
+                    candidate = member
         call_node = self.calls.get(self.node_key(node))
         if (
             candidate is not None
