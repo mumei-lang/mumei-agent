@@ -193,9 +193,9 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         "func F(x int64) int64 { var s []int64; _ = s; return x }",
         # A channel is resource state — `nil` has no binding either.
         "func G(c chan int64) int64 { return <-c }; func F(x int64) int64 { return G(nil) }",
-        # Reading a function NAME as a value (`h := G`) is a
-        # non-parameter reference — the alias stays closed.
-        "func G(v int64) int64 { return v }; func F(x int64) int64 { h := G; return h(x) }",
+        # A parenthesized function name is outside the store-RHS
+        # position the alias admits — `h := (G)` stays closed.
+        "func G(v int64) int64 { return v }; func F(x int64) int64 { h := (G); return h(x) }",
     ],
 )
 def test_interprocedural_alias_and_resource_state_stay_unsupported(
@@ -16392,3 +16392,106 @@ def test_imported_func_typed_var_member_loads(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_name_alias_resolves_callee_summary(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; func F(x int64) int64 { h := G; return h(x) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    # `h(x)` records G's own binding — the alias resolves like a
+    # direct_local call, so G's redeclaration flags this summary.
+    assert [c.target for c in result.calls] == [
+        named(source, snapshot, summaries, "G").binding_id
+    ]
+    assert result.effects != "unknown"
+
+
+def test_func_name_alias_var_spec_and_chain(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(a, b int64) int64 { return a + b }; "
+        "func F(x, y int64) int64 { var h = G; h2 := h; return h2(x, y) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+    assert [c.target for c in result.calls] == [
+        named(source, snapshot, summaries, "G").binding_id
+    ]
+
+
+def test_func_name_alias_assignment_and_param(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func F(f func(int64) int64, x int64) int64 { "
+        "var h func(int64) int64; h = G; f = G; return h(x) + f(x) }",
+    )
+    result = named(source, snapshot, summaries)
+    # Unconditional `f = G` resolves f's caller-supplied value away —
+    # every path now calls G, so the summary carries only x's deps.
+    assert result.available and result.return_dependencies == frozenset({1})
+    g_id = named(source, snapshot, summaries, "G").binding_id
+    assert [c.target for c in result.calls] == [g_id, g_id]
+
+
+def test_conditional_func_alias_on_param_stays_external(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(v int64) int64 { return v }; "
+            "func F(b bool, f func(int64) int64, x int64) int64 { "
+            "if b { f = G }; return f(x) }",
+        )
+    )
+    # The untaken path keeps the caller's own callback — the callee
+    # stays the opaque external model, not G's summary.
+    assert result.available and result.return_dependencies == frozenset(
+        {1, 2}
+    )
+    assert result.effects == "unknown"
+
+
+def test_conditional_literal_over_alias_stays_external(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(v int64) int64 { return v }; "
+            "func F(b bool, x int64) int64 { "
+            "h := G; if b { h = func(v int64) int64 { return 0 } }; return h(x) }",
+        )
+    )
+    # `h` may be G or the literal — neither model alone is sound, so
+    # the call falls back to the opaque external callee.
+    assert result.available and result.effects == "unknown"
+
+
+def test_func_name_in_other_positions_stays_closed(go_types_helper):
+    # `return G` — a function name outside the store-RHS position.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(v int64) int64 { return v }; "
+            "func F(x int64) func(int64) int64 { return G }",
+        )
+    )
+    assert not result.available
+
+
+def test_alias_result_pins_callee_signature(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type N int64; func G(v N) N { return v }; "
+        "func F(x int64) int64 { var n N; h := G; h(n); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    n_id = next(
+        b.id
+        for b in snapshot.bindings
+        if b.kind == "type"
+        and source.encode()[b.span.start : b.span.end] == b"N"
+    )
+    assert n_id in result.pinned

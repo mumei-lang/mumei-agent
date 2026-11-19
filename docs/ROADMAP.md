@@ -2685,9 +2685,22 @@ named/alias type identities on the binding's
 `signature_type_ids` — the func type fact itself carries
 none — and they pin at the declaring function's own
 signature, at resolved local callees and at external calls
-alike. Calls or writes inside the literal, selector/computed
-callees and reading a function name as a value (`h := G`)
-stay closed),
+alike. A function name bound in a store's RHS position —
+`h := G`, `h = G`, `var h = G`, including copies through
+tuple binds (`h2 := h`) — records a function-name alias, and
+`h(args)` resolves through G's own summary exactly like a
+`direct_local` call (argument evaluation, folded
+`return_dependencies`, signature pinning, the callee's
+effect opacity and its transfer on G's identity). A
+maybe-skipped rebind that could leave the name's value
+path-dependent — a different function, a literal, or a
+param still carrying the caller's callback — drops the
+alias so the call falls back to the opaque external model;
+a package-level `var Alias = Id` keeps the opaque external
+model since any caller may reassign it. Calls or writes
+inside the literal, selector/computed callees and a
+function name read in any non-store position (argument,
+return, operand) stay closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies
