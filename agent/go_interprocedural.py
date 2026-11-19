@@ -9132,6 +9132,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if self._scalar_chan_binding(binding.id):
                                 chan_write_targets.add(len(refs))
+                            # The var's contents are external state
+                            # like `VA[i] = v` — the stored value's
+                            # deps broadcast so a later `VA`/`VA[i]`
+                            # read observes them.
+                            external_write_targets.add(len(refs))
                             refs.append(None)
                             continue
                         member, extras, _ = member_write
@@ -9141,6 +9146,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if self._scalar_chan_fact(member.type):
                             chan_write_targets.add(len(refs))
+                        external_write_targets.add(len(refs))
                         refs.append(None)
                         continue
                     refs.append(ref)
