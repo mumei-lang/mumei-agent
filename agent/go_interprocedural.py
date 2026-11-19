@@ -9174,7 +9174,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         append_members = (
                             groups_after_eval.get(append_cont, set())
                             | {append_cont}
-                        ) - func_elem_reseated - {ref.binding_id}
+                        ) - {ref.binding_id}
+                        # A member reseated in this statement only
+                        # leaves the operand's backing when its NEW
+                        # name is not grouped with that backing:
+                        # `a, c = a2, append(a, z)` reseats `a` onto
+                        # `a2`'s — the same — backing, so `a`'s
+                        # later element writes still land in `c`.
+                        for member_id in set(append_members):
+                            if (
+                                member_id in func_elem_reseated
+                                and not (
+                                    self._func_elem_groups.get(
+                                        member_id, set()
+                                    )
+                                    & (append_members - {member_id})
+                                )
+                            ):
+                                append_members.discard(member_id)
                         for member_id in append_members:
                             self._func_elem_share(
                                 ref.binding_id, member_id

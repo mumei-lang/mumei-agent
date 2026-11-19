@@ -23122,13 +23122,35 @@ def test_func_elem_parallel_append_result_group(go_types_helper):
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
-        "    a := []func() int64{}\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
         "    a2 := a\n"
         "    b := []func() int64{}\n"
         "    z := func() int64 { return 0 }\n"
         "    var c []func() int64\n"
         "    a, c = append(b, z), append(a, z)\n"
         "    a2[0] = func() int64 { return x }\n"
+        "    _ = a2\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_append_same_backing(go_types_helper):
+    # `a2 := a` then `a, c = a2, append(a, z)` — `a` reseats onto
+    # `a2`'s backing, which IS the operand's backing, so a later
+    # `a[0]` write still lands in the slice `c` returned.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, c = a2, append(a, z)\n"
+        "    a[0] = func() int64 { return x }\n"
         "    _ = a2\n"
         "    return c[0]()\n"
         "}",
