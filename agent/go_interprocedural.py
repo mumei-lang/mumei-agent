@@ -9165,44 +9165,50 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and target.receiver is not None
                     and target.receiver.type.kind == "pointer"
                 ):
-                    rop = receiver_operand
-                    while (
-                        rop is not None
-                        and rop.type == "parenthesized_expression"
-                    ):
-                        rop = next(
-                            (
-                                c
-                                for c in rop.named_children
-                                if c.type != "comment"
-                            ),
-                            None,
-                        )
-                    rref = (
-                        self.references.get(self.node_key(rop))
-                        if rop is not None and rop.type == "identifier"
-                        else None
-                    )
+                    # Resolve the operand's ROOT identifier — `st.M()`
+                    # gives `st`, `s.A.Set(x)` gives `s` (a field
+                    # receiver auto-takes `&s.A`, whose stores land in
+                    # the root's conflated set), `(*p).M()` gives `p`.
+                    rref = self._receiver_root_ref(receiver_operand)
                     rbinding = (
                         self.bindings.get(rref.binding_id)
                         if rref is not None
                         else None
                     )
-                    if (
-                        rref is not None
-                        and rbinding is not None
-                        and rbinding.type.kind != "pointer"
-                        and (
-                            rref.binding_id in locals_
-                            or rref.binding_id in params
-                        )
+                    if rref is not None and rbinding is not None and (
+                        rref.binding_id in locals_
+                        or rref.binding_id in params
                     ):
-                        base = (
-                            locals_.get(rref.binding_id)
-                            if rref.binding_id in locals_
-                            else frozenset({params[rref.binding_id]})
-                        )
-                        locals_[rref.binding_id] = base | stored
+                        if rbinding.type.kind == "pointer":
+                            # `(*p).Set(x)` / `p.Set(x)` writes through
+                            # the pointer — pointee memory, broadcast
+                            # into `indirect_writes` like `*p = v`,
+                            # plus every escaped binding it may aim at.
+                            self.indirect_writes |= stored
+                            for escaped_id in self.escaped:
+                                if (
+                                    escaped_id in locals_
+                                    or escaped_id in params
+                                ):
+                                    esc_base = (
+                                        locals_.get(escaped_id)
+                                        if escaped_id in locals_
+                                        else frozenset(
+                                            {params[escaped_id]}
+                                        )
+                                    )
+                                    locals_[escaped_id] = (
+                                        esc_base | stored
+                                    )
+                        else:
+                            base = (
+                                locals_.get(rref.binding_id)
+                                if rref.binding_id in locals_
+                                else frozenset(
+                                    {params[rref.binding_id]}
+                                )
+                            )
+                            locals_[rref.binding_id] = base | stored
                 # A callee's ops on an external channel — `GC <- x`,
                 # `<-lib.VC` — mutate a queue the caller shares:
                 # `G(ch)`'s sends already broadcast through the arg
