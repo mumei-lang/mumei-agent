@@ -12136,6 +12136,23 @@ def test_immediate_func_literal_chan_arg_recv_external(
     assert result.effects == "unknown"
 
 
+def test_immediate_func_literal_unused_chan_arg_no_effect(
+    go_types_helper,
+):
+    # `func(ch) { return x }(q)` — the channel argument is never
+    # received on, so it carries no external effect: the summary
+    # must not mark the call unknown.
+    data = unit(
+        go_types_helper,
+        "func F(x int64, q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return x }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_immediate_func_literal_internal_call_closed(
     go_types_helper,
 ):

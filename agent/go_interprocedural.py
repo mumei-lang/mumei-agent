@@ -11240,29 +11240,67 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ),
             None,
         )
-        # `<-ch` inside the literal (a unary receive, not a statement)
-        # may pull from an external queue — one captured by name, or
-        # one passed in as an argument (`func(ch) { <-ch }(q)`).
+        # `<-ch` inside the literal (a unary receive, or a range over
+        # the channel) may pull from an external queue — one captured
+        # by name, or one passed in as an argument
+        # (`func(ch) { <-ch }(q)`). A channel operand only carries the
+        # effect when the body actually RECEIVES on it: `func(ch)
+        # { return x }(q)` never touches the queue, so recording the
+        # op would mark the summary `unknown` and fold phantom
+        # write-throughs into the caller's deps.
+        lit_param_ids: list[str | None] = []
+        plist = literal.child_by_field_name("parameters")
+        if plist is not None:
+            for decl in plist.named_children:
+                if decl.type != "parameter_declaration":
+                    continue
+                for c in decl.named_children:
+                    if c.type == "identifier":
+                        pb = self.bindings_by_span.get(self.node_key(c))
+                        lit_param_ids.append(
+                            pb.id if pb is not None else None
+                        )
+        recv_bids: set[str] = set()
+        stack = [literal]
+        while stack:
+            cur = stack.pop()
+            operand = None
+            if cur.type == "unary_expression":
+                op = cur.child_by_field_name("operator")
+                if op is not None and op.type == "<-":
+                    operand = cur.child_by_field_name("operand")
+            elif cur.type == "range_clause":
+                operand = cur.child_by_field_name("right")
+            if operand is not None and operand.type == "identifier":
+                rr = self.references.get(self.node_key(operand))
+                if rr is not None:
+                    recv_bids.add(rr.binding_id)
+            stack.extend(_children(cur))
         external_chans: set[str] = set()
         for cbid in captured:
-            if self._scalar_chan_binding(cbid):
+            if self._scalar_chan_binding(cbid) and cbid in recv_bids:
                 root = self._chan_root(cbid)
                 if (
                     root in params
                     or root in self.external_chan_locals
                 ):
                     external_chans.add(root)
-        for arg in arguments:
+        for i, arg in enumerate(arguments):
+            param_bid = (
+                lit_param_ids[i] if i < len(lit_param_ids) else None
+            )
+            if param_bid is None or param_bid not in recv_bids:
+                continue
             cb = self._chan_binding(arg, locals_, params)
             root = cb.id if cb is not None else None
             if root is not None and (
                 root in params or root in self.external_chan_locals
             ):
                 external_chans.add(root)
-            else:
-                ext = self._external_chan_operand(arg)
-                if ext is not None:
-                    external_chans.add(ext[0])
+                continue
+            ext = self._external_chan_operand(arg)
+            if ext is not None:
+                external_chans.add(ext[0])
         if captures_pointer:
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
