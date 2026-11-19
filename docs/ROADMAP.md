@@ -5625,9 +5625,37 @@ doc and `binding-eval` binds it on the same carrier.
 
 This is a declared registry, not a key directory: who signs,
 distributes and revokes the registry itself (out-of-band attestation
-is the memo's deferred Option D), and `envelope_freshness` — which
-needs `produced_at` on the envelope's closed five-field shape — stay
-separate later slices; C11/C02 stay partial.
+is the memo's deferred Option D) stays a separate later slice;
+`envelope_freshness` landed below; C11/C02 stay partial.
+
+### C02 signature-envelope freshness fold
+
+`produced_at` joins the `mumei.producer-signature/v1` envelope as its
+only optional field (the stamp itself landed on Core's
+`--produced-at`, [mumei#1136](https://github.com/mumei-lang/mumei/pull/1136)):
+both signature folds admit it in the closed field set when it is a
+string — a non-string stamp still breaks `envelope_match`, and any
+other extra field still does — while never requiring it, so stamped
+and unstamped envelopes both match.
+
+`--max-age-seconds N` on `signature-eval`/`signature-verify`
+requires `--reference-time` and emits `envelope_fresh`, folding the
+stamp with the same conservative (low, high) bounds as
+`evaluate_freshness`: the claim must not postdate the declared
+reference and `produced_at + N` must reach it. An absent or
+unparseable stamp fails closed — it cannot prove freshness —
+matching `freshness_claimed` on the record fold. `--reference-time`
+now requires a declared consumer (`--key-registry` or
+`--max-age-seconds`); the clock stays declared, never read.
+
+`_CHECK_PERFORMERS` names both folds' `envelope_fresh` bound through
+`subject_digest`, so `recovery-eval` recovers a record's
+`envelope_freshness` from a bound eval/verify doc — the same carrier
+convention `key_revocation` and `key_authenticity` use. The stamp is
+declared, not signed (the signature covers the digest alone, like
+`producer_key_id`), so `producer_time_authenticity` — a timestamp
+inside the signed payload — and `clock_authenticity` stay
+not-performed by design.
 
 ### C11 declared unperformed-check recovery
 

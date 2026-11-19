@@ -96,8 +96,18 @@ def build_verify_parser(parser: argparse.ArgumentParser) -> None:
         metavar="RFC3339",
         help="The caller's declared reference time (RFC 3339 with "
         "timezone, e.g. 2026-11-18T00:00:00Z) the registry windows "
-        "are compared against. The fold never reads the system "
-        "clock. Required with --key-registry.",
+        "and the envelope's produced_at stamp are compared against. "
+        "The fold never reads the system clock. Required with "
+        "--key-registry or --max-age-seconds.",
+    )
+    parser.add_argument(
+        "--max-age-seconds",
+        metavar="N",
+        type=int,
+        help="Declared freshness window in seconds: the envelope's "
+        "optional produced_at stamp must be no older than "
+        "reference_time minus N seconds. Requires --reference-time. "
+        "When supplied the evaluation emits envelope_fresh.",
     )
     parser.add_argument(
         "--output",
@@ -199,6 +209,7 @@ def main_verify(args: argparse.Namespace | None = None) -> int:
             revoked_keys,
             key_registry,
             getattr(args, "reference_time", None),
+            getattr(args, "max_age_seconds", None),
         )
         text = json.dumps(verification, indent=2) + "\n"
         if output_path is None:

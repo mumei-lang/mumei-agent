@@ -510,3 +510,67 @@ def test_key_registry_unhashable_key_id_reports_false():
             reference_time=_REFERENCE,
         )
         assert verification["key_authentic"] is False
+
+
+def test_envelope_freshness_via_max_age():
+    stamped = _envelope(produced_at="2026-01-01T00:00:00Z")
+    verification = verify_signature_envelope(
+        stamped,
+        _PUBLIC_KEY_HEX,
+        reference_time=_REFERENCE,
+        max_age_seconds=3600,
+    )
+    assert verification["envelope_match"] is True
+    assert verification["envelope_fresh"] is True
+    assert "envelope_freshness" not in verification[
+        "checks_not_performed"
+    ]
+
+    for stamp, expected in (
+        ("2025-01-01T00:00:00Z", False),   # stale
+        ("2027-01-01T00:00:00Z", False),   # postdated
+        ("yesterday", False),              # unparseable
+    ):
+        assert (
+            verify_signature_envelope(
+                _envelope(produced_at=stamp),
+                _PUBLIC_KEY_HEX,
+                reference_time=_REFERENCE,
+                max_age_seconds=3600,
+            )["envelope_fresh"]
+            is expected
+        )
+    # Unstamped envelopes cannot prove freshness but still match.
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        reference_time=_REFERENCE,
+        max_age_seconds=3600,
+    )
+    assert verification["envelope_match"] is True
+    assert verification["envelope_fresh"] is False
+    # A non-string stamp breaks the closed match shape.
+    assert (
+        verify_signature_envelope(
+            _envelope(produced_at=42),
+            _PUBLIC_KEY_HEX,
+            reference_time=_REFERENCE,
+            max_age_seconds=3600,
+        )["envelope_match"]
+        is False
+    )
+
+
+def test_max_age_requires_reference_time():
+    import pytest
+
+    with pytest.raises(ValueError, match="max age requires"):
+        verify_signature_envelope(
+            _envelope(), _PUBLIC_KEY_HEX, max_age_seconds=60
+        )
+    with pytest.raises(
+        ValueError, match="reference time requires a key registry"
+    ):
+        verify_signature_envelope(
+            _envelope(), _PUBLIC_KEY_HEX, reference_time=_REFERENCE
+        )

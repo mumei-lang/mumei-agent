@@ -432,6 +432,12 @@ _PRODUCER_SIGNATURE_REQUIRED_FIELDS = frozenset(
     }
 )
 
+# ``produced_at`` is the family's only optional field: a declared
+# production timestamp the consumer's `envelope_fresh` fold reads —
+# declared like `producer_key_id`, never signed (the signature covers
+# the digest alone).
+_PRODUCER_SIGNATURE_OPTIONAL_FIELDS = frozenset({"produced_at"})
+
 # The only algorithm the closed family admits — no negotiation.
 _PRODUCER_SIGNATURE_ALGORITHM = "ed25519"
 # ed25519 signatures are 64 bytes.
@@ -578,6 +584,7 @@ def evaluate_signature_envelope(
     revoked_keys: frozenset | None = None,
     key_registry: dict | None = None,
     reference_time: str | None = None,
+    max_age_seconds: int | None = None,
 ) -> dict:
     """Fold a declared producer-signature envelope into an evaluation.
 
@@ -628,14 +635,28 @@ def evaluate_signature_envelope(
         reference = _parse_rfc3339(reference_time)
         if reference is None:
             raise ValueError("invalid reference time")
+    if max_age_seconds is not None:
+        if type(max_age_seconds) is not int or max_age_seconds < 0:
+            raise ValueError("invalid max age")
+        if reference is None:
+            raise ValueError("max age requires a reference time")
     if key_registry is not None:
         if reference is None:
             raise ValueError("key registry requires a reference time")
-    elif reference is not None:
-        raise ValueError("reference time requires a key registry")
+    elif reference is not None and max_age_seconds is None:
+        raise ValueError(
+            "reference time requires a key registry or max age"
+        )
     fields = frozenset(envelope)
     match = (
-        fields == _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        <= fields
+        <= _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        | _PRODUCER_SIGNATURE_OPTIONAL_FIELDS
+        and (
+            "produced_at" not in envelope
+            or type(envelope["produced_at"]) is str
+        )
         and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
         and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
         and _is_fingerprint(envelope["subject_digest"])
@@ -704,6 +725,22 @@ def evaluate_signature_envelope(
             and _registry_entry_current(entry, reference)
         )
         evaluation["checks_not_performed"].remove("key_authenticity")
+    if max_age_seconds is not None:
+        # Same conservative (low, high) bounds as `evaluate_freshness`:
+        # a stamp that could postdate the reference or sit barely
+        # outside the window fails closed. An absent or unparseable
+        # `produced_at` simply cannot prove freshness.
+        from datetime import timedelta
+
+        produced = _parse_rfc3339(envelope.get("produced_at"))
+        evaluation["envelope_fresh"] = (
+            match
+            and produced is not None
+            and produced[1] <= reference[0]
+            and produced[0] + timedelta(seconds=max_age_seconds)
+            >= reference[1]
+        )
+        evaluation["checks_not_performed"].remove("envelope_freshness")
     return evaluation
 
 
@@ -721,6 +758,7 @@ def verify_signature_envelope(
     revoked_keys: frozenset | None = None,
     key_registry: dict | None = None,
     reference_time: str | None = None,
+    max_age_seconds: int | None = None,
 ) -> dict:
     """Verify a declared producer-signature envelope's ed25519 signature.
 
@@ -766,14 +804,28 @@ def verify_signature_envelope(
         reference = _parse_rfc3339(reference_time)
         if reference is None:
             raise ValueError("invalid reference time")
+    if max_age_seconds is not None:
+        if type(max_age_seconds) is not int or max_age_seconds < 0:
+            raise ValueError("invalid max age")
+        if reference is None:
+            raise ValueError("max age requires a reference time")
     if key_registry is not None:
         if reference is None:
             raise ValueError("key registry requires a reference time")
-    elif reference is not None:
-        raise ValueError("reference time requires a key registry")
+    elif reference is not None and max_age_seconds is None:
+        raise ValueError(
+            "reference time requires a key registry or max age"
+        )
     fields = frozenset(envelope)
     match = (
-        fields == _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        <= fields
+        <= _PRODUCER_SIGNATURE_REQUIRED_FIELDS
+        | _PRODUCER_SIGNATURE_OPTIONAL_FIELDS
+        and (
+            "produced_at" not in envelope
+            or type(envelope["produced_at"]) is str
+        )
         and envelope["schema_version"] == PRODUCER_SIGNATURE_SCHEMA
         and envelope["algorithm"] == _PRODUCER_SIGNATURE_ALGORITHM
         and _is_fingerprint(envelope["subject_digest"])
@@ -850,6 +902,18 @@ def verify_signature_envelope(
             and _registry_entry_current(entry, reference)
         )
         verification["checks_not_performed"].remove("key_authenticity")
+    if max_age_seconds is not None:
+        from datetime import timedelta
+
+        produced = _parse_rfc3339(envelope.get("produced_at"))
+        verification["envelope_fresh"] = (
+            match
+            and produced is not None
+            and produced[1] <= reference[0]
+            and produced[0] + timedelta(seconds=max_age_seconds)
+            >= reference[1]
+        )
+        verification["checks_not_performed"].remove("envelope_freshness")
     return verification
 
 
@@ -1047,8 +1111,23 @@ _CHECK_PERFORMERS: dict = {
             "subject_digest",
         ),
     ],
+    # A signature fold's `envelope_fresh` performs `envelope_freshness`
+    # for the envelope's covered record — bound via the echoed
+    # `subject_digest` carrier, like `key_revocation`/`key_authenticity`.
     "envelope_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
+        (
+            "mumei.signature-envelope-evaluation/v1",
+            "envelope_fresh",
+            True,
+            "subject_digest",
+        ),
+        (
+            "mumei.signature-verification/v1",
+            "envelope_fresh",
+            True,
+            "subject_digest",
+        ),
     ],
     "descriptor_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
