@@ -15077,3 +15077,25 @@ def test_bound_field_channel_store_through_alias(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_field_channel_tuple_store_uses_prestate_queue(
+    go_types_helper,
+):
+    # `a, p.C = b, a` — the field records the queue `a` named BEFORE
+    # its store, so a send through a still-aliased name reaches
+    # `<-p.C`.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, b chan int64, x int64) int64 {\n"
+            "\ta := make(chan int64)\n"
+            "\tkeep := a\n"
+            "\ta, p.C = b, a\n"
+            "\tkeep <- x\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})

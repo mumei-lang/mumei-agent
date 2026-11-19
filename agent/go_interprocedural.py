@@ -5372,6 +5372,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(refs))
             ]
+            # A `p.C = rhs` field store's queue tokens resolve
+            # against the pre-state too — `a, p.C = b, a` must
+            # record the queue `a` named BEFORE `a`'s store, not
+            # the one the reseat redirects it to.
+            field_chan_tokens = {
+                i: self._chan_queue_tokens(rights[i], locals_, params)
+                for i in field_chan_lhs
+                if len(lefts) == len(rights) and i < len(rights)
+            }
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in chan_write_targets:
@@ -5522,9 +5531,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and i < len(rights)
                     and len(lefts) == len(rights)
                 ):
-                    tokens = self._chan_queue_tokens(
-                        rights[i], locals_, params
-                    )
+                    tokens = field_chan_tokens.get(i)
                     if tokens is not None:
                         # `p.C = ch` — the field may now name ch's
                         # queue. Union into the member's may-set
