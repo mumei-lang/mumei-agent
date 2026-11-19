@@ -20746,13 +20746,82 @@ def test_func_element_result_chan_receiver_joins_external_queue(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_func_element_bound_container_call_stays_closed(go_types_helper):
-    # `fs := mk(x); fs[0]()` — binding the func-element container
-    # itself is outside this slice; the indexed call stays closed.
+def test_func_element_bound_container_call_admitted(go_types_helper):
+    # `fs := mk(x); fs[0]()` — a `[]func`/`[N]func` local binds like
+    # a composite: one conflated dep set carries the call result's
+    # deps, and `fs[0]()` calls opaque on the container's slot.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk(x int64) []func() int64 {\n"
         "    return []func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64) int64 { fs := mk(x); return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert any(t.imported for t in result.calls)
+
+
+def test_func_element_bound_container_var_and_assign_forms(
+    go_types_helper,
+):
+    # `var fs = mk(x)` and `var fs []func() T; fs = mk(x)` bind the
+    # container the same way.
+    for decl in (
+        "var fs = mk(x)",
+        "var fs []func() int64; fs = mk(x)",
+        "fs := mk(x); gs := fs; fs = gs",
+    ):
+        source, snapshot, summaries = unit(
+            go_types_helper,
+            "func mk(x int64) []func() int64 {\n"
+            "    return []func() int64{func() int64 { return x }}\n"
+            "}\n"
+            f"func F(x int64) int64 {{ {decl}; return fs[0]() }}",
+        )
+        result = named(source, snapshot, summaries)
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_bound_container_variable_index(go_types_helper):
+    # `fs[k]()` — a computed index evaluates like an argument.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) []func() int64 {\n"
+        "    return []func() int64{func() int64 { return x }}\n"
+        "}\n"
+        "func F(x int64, k int) int64 { fs := mk(x); return fs[k]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_element_bound_container_literal_admitted(go_types_helper):
+    # `fs := []func(){func(){...x...}}; fs[0]()` — a composite
+    # literal binds the same conflated dep set.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    fs := []func() int64{func() int64 { return x }}\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_map_container_stays_closed(go_types_helper):
+    # `map[int]func` — a keyed container is not a numbered slot: the
+    # conflated dep set cannot say which slot `fs[k]()` invokes, so
+    # it stays closed like other unmodelled composites.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) map[int]func() int64 {\n"
+        "    return map[int]func() int64{0: func() int64 { return x }}\n"
         "}\n"
         "func F(x int64) int64 { fs := mk(x); return fs[0]() }",
     )

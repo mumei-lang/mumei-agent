@@ -2841,8 +2841,13 @@ at the same gate: the caller's `mk(x)[0]()` runs the indexed
 element as an opaque call on the container's slot (the producing
 call's `chan` arguments join the external model exactly like the
 `f := mk(ch)` capture, so `mk(ch)[0](x)` can send `x` into `ch`'s
-queue). Binding the container itself (`fs := mk(x); fs[0]()`)
-and `map[K]func` results stay closed.
+queue). A `[]func`/`[N]func` local binds the same conflated way
+(`fs := mk(x)`, `var fs = mk(x)`, `var fs []func() T; fs = mk(x)`),
+and `fs[k]()` then calls opaque on the container's slot — the
+callee read is the container's dep set and a computed index
+evaluates like an argument. `map[K]func` results stay closed: a
+keyed slot is not a numbered element, so the conflated dep set
+cannot say which slot the call invokes.
 
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.

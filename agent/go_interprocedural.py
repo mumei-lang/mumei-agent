@@ -1066,6 +1066,19 @@ class _Builder:
             self.pinned.add(binding.type.type_id)
         return composite
 
+    def _func_elem_collection(self, fact: Any) -> bool:
+        """A `[]func`/`[N]func` container — a slice or array whose
+        elements are function values. It binds like a composite
+        local: one conflated dep set carries every element's
+        captured state, and `fs[k]()` then calls opaque on the
+        container's slot like an imported member's element does."""
+        return (
+            fact is not None
+            and fact.kind in {"slice", "array"}
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind == "function"
+        )
+
     def _field_identity(self, field_ref: Any) -> Any | None:
         """The field a selector's `field` reference declares — an
         imported `var` member or a local `variable` binding."""
@@ -5965,8 +5978,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         "chan",
                     }
                     # `st := P{...}` — a named composite local carries
-                    # one conflated dep set for every field.
+                    # one conflated dep set for every field, and
+                    # `fs := mk()` a `[]func`/`[N]func` container
+                    # whose `fs[k]()` calls opaque on it.
                     and not self._is_local_composite(binding)
+                    and not self._func_elem_collection(binding.type)
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
@@ -6444,7 +6460,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # the make(chan) form.
                             "chan",
                         }
+                        # `var fs = mk()` / `var fs []func() T` — a
+                        # `[]func`/`[N]func` container like the
+                        # short-decl form.
                         and not self._is_local_composite(binding)
+                        and not self._func_elem_collection(binding.type)
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
