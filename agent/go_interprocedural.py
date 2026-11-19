@@ -3048,7 +3048,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             "map_type",
             "channel_type",
         }:
-            children = tuple(node.named_children)
+            children = tuple(
+                c for c in node.named_children if c.type != "comment"
+            )
             if node.type == "array_type":
                 # `[2]T` — the length is not a type expression; only
                 # the element contributes pinnable identities.
@@ -3064,7 +3066,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._pin_type_node(elem) for elem in children
             )
         if node.type in {"type_elem", "parenthesized_type"}:
-            inner = next(iter(node.named_children), None)
+            inner = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
             return inner is not None and self._pin_type_node(inner)
         if node.type == "qualified_type":
             member = self._qualified_type_member(node)
@@ -3082,6 +3091,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return all(
                 self._pin_type_node(elem)
                 for elem in type_args.named_children
+                if elem.type != "comment"
             )
         if node.type == "type_identifier":
             ref = self.references.get(self.node_key(node))
@@ -3108,6 +3118,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self.pinned.add(binding.type.type_id)
             return True
         return False
+
+    def _pin_struct_fields(self, node: Any) -> bool:
+        """Pin the declared type of every field a `struct{...}`
+        literal lists — `new(struct{...})` admits only when each
+        field pins cleanly, so a nested literal, a signature field
+        or an unresolvable name keeps the call closed through the
+        ordinary `_pin_type_node` gate."""
+        decls = next(
+            (
+                c
+                for c in node.named_children
+                if c.type == "field_declaration_list"
+            ),
+            None,
+        )
+        if decls is None:
+            return False
+        return all(
+            self._pin_type_node(field.child_by_field_name("type"))
+            for field in decls.named_children
+            if field.type == "field_declaration"
+        )
 
     def result(
         self,
@@ -13566,12 +13598,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # transfer records. Pinning the argument's named
                     # identities keeps `stale_dependents` honest; the
                     # pointer's own use-site gates (`*p`, `(*p)[i]`)
-                    # classify what the pointee admits. `make` stays
+                    # classify what the pointee admits. A `struct{...}`
+                    # literal names no `type` identity, so pinning
+                    # reduces to each field's declared type — the
+                    # pointee gates then resolve `p.F`/`(*p).F` like
+                    # `var p *struct{...}` does. `make` stays
                     # opaque — its result is a composite value, which
                     # the fragment's binding model cannot hold.
-                    if len(arguments) != 1 or not self._pin_type_node(
-                        arguments[0]
+                    arg = arguments[0] if len(arguments) == 1 else None
+                    while (
+                        arg is not None
+                        and arg.type
+                        in {"parenthesized_expression", "parenthesized_type"}
                     ):
+                        arg = next(
+                            (
+                                c
+                                for c in arg.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    pinned = (
+                        self._pin_struct_fields(arg)
+                        if arg is not None and arg.type == "struct_type"
+                        else arg is not None and self._pin_type_node(arg)
+                    )
+                    if not pinned:
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )

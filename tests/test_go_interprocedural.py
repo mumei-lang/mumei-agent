@@ -12510,6 +12510,151 @@ def test_builtin_new_pointer_arg_propagates_callee_writes(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_builtin_new_anonymous_struct_pointee_field(
+    go_types_helper,
+):
+    # `p := new(struct{ V int64 })` — the anonymous pointee names no
+    # `type` member, so pinning reduces to each field's declared
+    # type; `p.V` resolves its field binding like `var p *struct{...}`
+    # does.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tp := new(struct{ V int64 })\n"
+        "\tp.V = a\n"
+        "\treturn p.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_anonymous_struct_pointee_deref(
+    go_types_helper,
+):
+    # `(*p).V` — the explicit dereference reads and writes the same
+    # anonymous pointee the auto-deref sugar names.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tp := new(struct{ V int64 })\n"
+        "\t(*p).V = a\n"
+        "\treturn (*p).V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_anonymous_struct_assignment_and_copy(
+    go_types_helper,
+):
+    # `p = new(struct{...})` binds the fresh pointer through the
+    # ordinary assignment path; `q := p` aliases the same pointee, so
+    # a store before the copy is visible through either name.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tvar p *struct{ V int64 }\n"
+        "\tp = new(struct{ V int64 })\n"
+        "\tp.V = a\n"
+        "\tq := p\n"
+        "\treturn q.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_anonymous_struct_multiple_fields(
+    go_types_helper,
+):
+    # Stores and reads through two fields union their deps — the
+    # result depends on both writes through the conflated pointee.
+    data = unit(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\tp := new(struct{ V int64; W int64 })\n"
+        "\tp.V = a\n"
+        "\tp.W = b\n"
+        "\treturn p.V + p.W\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_builtin_new_anonymous_struct_parenthesized(
+    go_types_helper,
+):
+    # `new((struct{...}))` — parens wrap the same literal; the
+    # allocation still binds an anonymous-struct pointee.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tp := new((struct{ V int64 }))\n"
+        "\tp.V = a\n"
+        "\treturn p.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_anonymous_struct_field_comment(
+    go_types_helper,
+):
+    # A comment inside a field's type carries no identity — pinning
+    # must skip it instead of classifying it as a type.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tp := new(struct{ W * /* optional */ int64; V int64 })\n"
+        "\tp.V = a\n"
+        "\treturn p.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_generic_type_arg_comment(
+    go_types_helper,
+):
+    # A comment inside a generic type argument (`map[ /*c*/ K]V`)
+    # is skipped the same way — the map type still pins cleanly.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tm := new(map[ /* key */ string]int64)\n"
+        "\t(*m)[\"k\"] = a\n"
+        "\treturn (*m)[\"k\"]\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_anonymous_struct_conditional_write(
+    go_types_helper,
+):
+    # A branch-conditional store keeps the pointee's deps folded —
+    # `p.V` may read the pre-branch value, so the write's deps join
+    # the result.
+    data = unit(
+        go_types_helper,
+        "func F(a int64, c bool) int64 {\n"
+        "\tp := new(struct{ V int64 })\n"
+        "\tif c {\n"
+        "\t\tp.V = a\n"
+        "\t}\n"
+        "\treturn p.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_bound_closure_call(go_types_helper):
     # `h := func(a int64) int64 { return a + x }; h(x)` — the
     # literal's deps are its captured free variables; calling it
