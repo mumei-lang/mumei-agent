@@ -15984,3 +15984,35 @@ def test_select_send_eval_reaches_earlier_case_body(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_select_receive_multi_lhs_extras_evaluate_pre_state(
+    go_types_helper,
+):
+    # `i, GA[Set(r, i)] = <-ch` — Go evaluates every LHS operand
+    # before any assignment, so `Set`'s argument must read the OLD
+    # `i` (dep {1}), not the just-received value (dep {0}).
+    files = {
+        "a.go": "package p\n"
+        "var GB [2]bool\n"
+        "func Set(r *int64, v int64) int64 { *r = v; return v }\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\ti := x\n"
+        "\tvar r int64\n"
+        "\tselect {\n"
+        "\tcase i, GB[Set(&r, i)] = <-ch:\n"
+        "\t\treturn r\n"
+        "\tdefault:\n"
+        "\t\treturn i\n"
+        "\t}\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    # With the pre-state evaluation the case return carries only
+    # the OLD `i`'s deps that `Set` folded into `r`; the default
+    # path keeps `i`'s own {1}. Post-state evaluation would feed
+    # `Set` the received deps {0} and pollute the result to {0,1}.
+    assert result.return_dependencies == frozenset({1})

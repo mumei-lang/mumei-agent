@@ -2893,24 +2893,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
         received deps drop. A composite local's field (`s.V = <-ch`)
         stays closed.
         """
+        # Go evaluates every LHS operand — index and call arguments
+        # inside a composite write target — before any assignment
+        # lands, so `i, GB[Set(&r, i)] = <-ch` must read the OLD `i`
+        # inside `Set`'s arguments. Resolve every target and evaluate
+        # its extras first, then perform the stores.
+        pending: list[Any] = []
         for lhs in lefts:
             if lhs.text == b"_":
+                pending.append(None)
                 continue
             package_write = self._package_var_write(lhs)
             if package_write is not None:
                 binding, extras, _ = package_write
-                self._record_package_write(
-                    lhs, binding, extras, fn, params, locals_,
-                    transfers, count,
+                self._eval_write_extras(
+                    extras, fn, params, locals_, transfers, count
                 )
+                pending.append(("package", lhs, binding, extras))
                 continue
             member_write = self._imported_member_write(lhs)
             if member_write is not None:
                 member, extras, _ = member_write
-                self._record_member_write(
-                    lhs, member, extras, fn, params, locals_,
-                    transfers, count,
+                self._eval_write_extras(
+                    extras, fn, params, locals_, transfers, count
                 )
+                pending.append(("member", lhs, member, extras))
                 continue
             if lhs.type != "identifier":
                 raise _Unsupported("unsupported_statement", _span(node))
@@ -2925,13 +2932,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 "pointer",
             }:
                 raise _Unsupported("binding_unavailable", _span(node))
-            # `:=` binds fresh names (and a reused one keeps the
-            # skipped path's value under `conditional`), `=` stores
-            # into the existing binding — `_store` already gives the
-            # may-skip union semantics both need inside a case.
-            self._store(
-                locals_, params, binding.id, recv_deps, conditional
-            )
+            pending.append(("local", binding))
+        for entry in pending:
+            if entry is None:
+                continue
+            if entry[0] == "package":
+                _, lhs, binding, extras = entry
+                self._record_package_write(
+                    lhs, binding, extras, fn, params, locals_,
+                    transfers, count, eval_extras=False,
+                )
+            elif entry[0] == "member":
+                _, lhs, member, extras = entry
+                self._record_member_write(
+                    lhs, member, extras, fn, params, locals_,
+                    transfers, count, eval_extras=False,
+                )
+            else:
+                _, binding = entry
+                # `:=` binds fresh names (and a reused one keeps the
+                # skipped path's value under `conditional`), `=`
+                # stores into the existing binding — `_store` already
+                # gives the may-skip union semantics both need inside
+                # a case.
+                self._store(
+                    locals_, params, binding.id, recv_deps, conditional
+                )
 
     def _is_chan_binding(self, binding_id: str) -> bool:
         """The bound name's declared type is a channel."""
@@ -3595,6 +3621,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
+        eval_extras: bool = True,
     ) -> None:
         """Record an imported member write's mutation and index calls."""
         if member.kind != "var":
@@ -3629,6 +3656,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 imported=True,
             )
         )
+        if eval_extras:
+            self._eval_write_extras(
+                extras, fn, params, locals_, transfers, count
+            )
+
+    def _eval_write_extras(
+        self,
+        extras: tuple[Any, ...],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+    ) -> None:
         # Extras were collected outermost-first while descending the
         # operand chain; Go evaluates indices inside-out — the inner
         # index of `lib.V2[f()][g()]` runs before `g()` — so a write
@@ -3659,6 +3700,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
+        eval_extras: bool = True,
     ) -> None:
         """Record a package-level `var` write's mutation + index calls.
 
@@ -3679,16 +3721,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 imported=True,
             )
         )
-        for extra in reversed(extras):
+        if eval_extras:
             # Same rule as `_record_member_write`: indices evaluate
             # inside-out, literals skip, and the read's dependencies
             # attribute to the statement.
-            if extra.type in _INDEX_LITERALS:
-                continue
-            self._record_read(
-                self.expression(
-                    extra, fn, params, locals_, transfers, count, 0
-                )
+            self._eval_write_extras(
+                extras, fn, params, locals_, transfers, count
             )
 
     def _opaque_write_target(
@@ -7339,6 +7377,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 sub, fn, params, locals_, transfers,
                                 count, deps, saw_return, conditional,
                             )
+                # Every clause is an alternative starting from the
+                # entry scope — joining one before evaluating the
+                # next would leak the earlier case's stores into it
+                # (`case i = <-ch:` must not change what `i` means
+                # inside `default:`). Merge all branches into a
+                # single environment and join it once.
+                joined: dict[str, frozenset[int]] = {}
+                joined_ptr: dict[str, frozenset[int]] = {}
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
                     ptr_branch = dict(self._ptr_deps)
@@ -7362,8 +7408,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
                     )
-                    self._join(locals_, branch, params)
-                    self._join_ptr(ptr_branch, params)
+                    for bid, bdeps in branch.items():
+                        joined[bid] = joined.get(
+                            bid, frozenset()
+                        ) | bdeps
+                    for bid, bdeps in ptr_branch.items():
+                        joined_ptr[bid] = joined_ptr.get(
+                            bid, frozenset()
+                        ) | bdeps
+                self._join(locals_, joined, params)
+                self._join_ptr(joined_ptr, params)
             finally:
                 self.frames.pop()
             return

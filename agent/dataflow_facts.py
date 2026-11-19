@@ -1750,10 +1750,11 @@ class _Walker:
                 self._check_uninit_text(value, case.start, base)
                 self._check_transition_text(value, case.start, base)
                 self._note_output_args(value, base)
-            if not case.values:
+            if not case.values or statement.operator == "select":
                 # ``select`` comm clauses (``case <-ch:`` / ``case ch <- v:``)
-                # carry no ``values`` — scan the clause text for closed
-                # transitions (``name <-`` sends are checked inside).
+                # split channel and value into ``values`` — the send's
+                # ``name <-`` operator only survives whole in the clause
+                # text, so scan it for closed transitions too.
                 clause = re.match(r"^\s*case\s+(.+?)\s*:", case.text)
                 if clause:
                     self._check_transition_text(clause.group(1), case.start, base)
