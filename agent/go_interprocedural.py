@@ -8902,8 +8902,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             func_elem_targets: set[int] = set()
             # `s[i] = v` — an element store into a bound opaque
             # container (`s := lib.G(a)`) unions the stored value's
-            # deps into every name sharing the backing.
-            opaque_elem_targets: dict[int, str] = {}
+            # deps into every name sharing the backing. The sharer
+            # set resolves at LHS-eval like the destination operand
+            # itself — `s, s[0] = t, b` writes the slice `s` named
+            # BEFORE its own store, so the pre-state members are
+            # snapshotted here — and the index's deps join the
+            # stored value like a read's.
+            opaque_elem_targets: dict[int, frozenset[str]] = {}
+            opaque_elem_index_deps: dict[int, frozenset[int]] = {}
             # An element store's holder set resolves like the
             # destination operand itself — against the pre-state —
             # but a name an earlier parallel store re-shared
@@ -9238,20 +9244,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if opaque_elem_lhs is not None:
                     oref, oindex = opaque_elem_lhs
+                    refs.append(oref)
+                    ri = len(refs) - 1
+                    opaque_elem_targets[ri] = frozenset(
+                        self._opaque_container_sharers(
+                            oref.binding_id
+                        )
+                    )
+                    opaque_elem_index_deps[ri] = frozenset()
                     if (
                         oindex is not None
                         and oindex.type not in _INDEX_LITERALS
                     ):
-                        self._record_read(
-                            self.expression(
-                                oindex, fn, params, locals_,
-                                transfers, count, 0,
-                            )
+                        opaque_elem_index_deps[ri] = self.expression(
+                            oindex, fn, params, locals_,
+                            transfers, count, 0,
                         )
-                    refs.append(oref)
-                    opaque_elem_targets[len(refs) - 1] = (
-                        oref.binding_id
-                    )
+                        self._record_read(
+                            opaque_elem_index_deps[ri]
+                        )
                     continue
                 func_elem_lhs = self._func_elem_index_target(
                     lhs, locals_
@@ -10057,12 +10068,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `s[i] = v` — the stored value's deps join every
                     # sharer's conflated set: a store through one
                     # alias lands in the backing all of them read.
-                    for holder_id in self._opaque_container_sharers(
-                        opaque_elem_targets[i]
-                    ):
+                    # The index's deps join too — whether the write
+                    # landed on the element a later `s[k]` reads
+                    # depended on `i`. The union also enters
+                    # `indirect_writes`: the backing may alias
+                    # escaped memory, so a `*p` read or a range
+                    # element's per-pass re-join observes the store.
+                    elem_value = (
+                        value
+                        | opaque_elem_index_deps.get(i, frozenset())
+                    )
+                    for holder_id in opaque_elem_targets[i]:
                         self._store(
-                            locals_, params, holder_id, value, True
+                            locals_, params, holder_id, elem_value,
+                            True,
                         )
+                    self.indirect_writes |= elem_value
                 if i in func_elem_targets:
                     # Resolution-time sharers plus landing-time
                     # group — a parallel reseat (`a, a[0] = b, f`)
