@@ -5664,16 +5664,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding.type.kind == "chan"
                         and (
                             not self._scalar_chan_binding(binding.id)
-                            # `var _, ch = G(q)` — a multi-valued
-                            # call's slot produces a channel the dep
-                            # model cannot carry; stays closed like
-                            # the short-decl form.
+                            # `var ch, n = G(q)` — a multi-valued
+                            # call admits per slot like the
+                            # short-decl form when the callee's
+                            # declared signature puts a scalar chan
+                            # at this name's position.
                             or (
                                 value_nodes
                                 and len(names) != len(value_nodes)
+                                and not (
+                                    len(value_nodes) == 1
+                                    and self._chan_result_call_at(
+                                        value_nodes[0], i
+                                    )
+                                    is not None
+                                )
                             )
                             or (
                                 value_nodes
+                                and len(value_nodes) == len(names)
                                 and not self._is_make_chan_call(
                                     value_nodes[i]
                                 )
@@ -5699,6 +5708,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "binding_unavailable", _span(spec)
                         )
                     if (
+                        binding.type.kind == "chan"
+                        and value_nodes
+                        and len(value_nodes) == 1
+                        and len(names) > 1
+                    ):
+                        # `var ch, n = G(q)` — the chan-typed slot
+                        # binds the callee's passthrough queue when
+                        # it returns an argument unchanged, else a
+                        # fresh external one.
+                        target = self._chan_result_passthrough(
+                            value_nodes[0], locals_, params, i
+                        )
+                        if target is not None:
+                            self.chan_aliases[binding.id] = target.id
+                    elif (
                         binding.type.kind == "chan"
                         and value_nodes
                         and not self._is_make_chan_call(value_nodes[i])
