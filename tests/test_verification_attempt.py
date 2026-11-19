@@ -35,6 +35,7 @@ from agent.verification_attempt import (
     AttemptRecord,
     AttemptSequence,
     AttemptSequenceStore,
+    FileAttemptSequenceStore,
 )
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
@@ -4072,3 +4073,97 @@ def test_normalized_result_from_dict_requires_exit_code_on_exited():
     del data["exit_code"]
     with pytest.raises(ValueError):
         AttemptNormalizedResult.from_dict(data)
+
+
+def _file_store(tmp_path) -> FileAttemptSequenceStore:
+    return FileAttemptSequenceStore(str(tmp_path / "canonical.json"))
+
+
+def test_file_store_starts_empty(tmp_path):
+    assert _file_store(tmp_path).current is None
+
+
+def test_file_store_publish_persists_across_instances(tmp_path):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    first = _file_store(tmp_path)
+    assert first.publish(sequence) is sequence
+    restored = _file_store(tmp_path)
+    assert restored.current == sequence
+    # An equal re-publication on a fresh reader is an idempotent no-op.
+    assert restored.publish(sequence) == sequence
+
+
+def test_file_store_publish_rejects_conflict(tmp_path):
+    store = _file_store(tmp_path)
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(stored)
+    other = AttemptSequence("b" * 64, 10, ())
+    with pytest.raises(
+        ValueError, match="^canonical sequence publication conflict$"
+    ):
+        store.publish(other)
+    assert store.current == stored
+
+
+def test_file_store_publish_rejects_non_sequences(tmp_path):
+    store = _file_store(tmp_path)
+    for value in (None, True, {}, "FAKE_PRIVATE_RESULT"):
+        with pytest.raises(
+            ValueError, match="^canonical publication requires an attempt sequence$"
+        ):
+            store.publish(value)
+    assert store.current is None
+
+
+def test_file_store_compare_and_set_persists_extension(tmp_path):
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store = _file_store(tmp_path)
+    store.publish(stored)
+    extended = AttemptSequence(
+        FINGERPRINT, 10, (*stored.attempts, sequence_record("running", 2))
+    )
+    assert store.compare_and_set(stored, extended) == extended
+    assert _file_store(tmp_path).current == extended
+
+
+def test_file_store_compare_and_set_detects_expected_mismatch(tmp_path):
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store = _file_store(tmp_path)
+    store.publish(stored)
+    stale = AttemptSequence(FINGERPRINT, 10, ())
+    with pytest.raises(ValueError, match="^canonical sequence compare failed$"):
+        store.compare_and_set(stale, stale)
+    assert store.current == stored
+
+
+def test_file_store_compare_and_set_rejects_non_extension(tmp_path):
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store = _file_store(tmp_path)
+    store.publish(stored)
+    other = AttemptSequence(FINGERPRINT, 10, (sequence_record("failed"),))
+    with pytest.raises(
+        ValueError,
+        match="^updated sequence does not extend the canonical lineage$",
+    ):
+        store.compare_and_set(stored, other)
+    assert store.current == stored
+
+
+def test_file_store_malformed_file_fails_closed(tmp_path):
+    path = tmp_path / "canonical.json"
+    path.write_text("not json", encoding="utf-8")
+    store = _file_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.current
+    path.write_text(json.dumps({"schema_version": "foreign/v9"}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        store.current
+
+
+def test_file_store_creates_missing_parent_directory(tmp_path):
+    store = FileAttemptSequenceStore(
+        str(tmp_path / "deep" / "nested" / "canonical.json")
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    assert store.current == sequence

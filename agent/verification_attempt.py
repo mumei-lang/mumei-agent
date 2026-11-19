@@ -6,10 +6,14 @@ a process was stopped. No default verification path consumes these records.
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Context, Decimal
+from pathlib import Path
 
 from agent.verification_planner import PreparedSourceRequest
 
@@ -727,6 +731,129 @@ class AttemptSequenceStore:
                     "updated sequence does not extend the canonical lineage"
                 )
             return self._current
+
+
+class FileAttemptSequenceStore:
+    """File-backed canonical publication point for one lineage (opt-in).
+
+    Same contract as `AttemptSequenceStore` — `publish` is first-wins and
+    `compare_and_set` only accepts a lineage extension — but the canonical
+    value persists as `mumei.verifier-attempt-sequence/v1` JSON so a host
+    reinstates its own lineage across restarts via the same declared parse
+    boundary `AttemptSequence.from_dict` enforces.
+
+    Writers serialize on a sibling ``<path>.lock``: `fcntl.flock` on POSIX
+    (same host, cross-process) or a process-local lock where `fcntl` is not
+    available. Writes are atomic (temp file in the same directory plus
+    `os.replace`), so a crash mid-write cannot leave a partial snapshot; a
+    missing file reads as unpublished and a malformed one fails closed.
+
+    Still host duties, unchanged: which file is the canonical one, locking
+    across hosts, freshness, authentication, backup policy and every
+    result/Evidence decision. The store holds values, never source or
+    stdout bodies.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._lock_path = self._path.with_name(self._path.name + ".lock")
+        self._local_lock = threading.Lock()
+
+    @property
+    def current(self) -> AttemptSequence | None:
+        """The last published canonical value, or None before publication."""
+        return self._read()
+
+    def publish(self, sequence: AttemptSequence) -> AttemptSequence:
+        """Publish the first canonical value; equal re-publication is a no-op."""
+        if type(sequence) is not AttemptSequence:
+            raise ValueError("canonical publication requires an attempt sequence")
+        with self._locked():
+            current = self._read()
+            if current is None:
+                self._write(sequence)
+                return sequence
+            if current != sequence:
+                raise ValueError("canonical sequence publication conflict")
+            return current
+
+    def compare_and_set(
+        self, expected: AttemptSequence, updated: AttemptSequence
+    ) -> AttemptSequence:
+        """Atomically replace the canonical value with a lineage extension.
+
+        Same rules as the in-process store: `expected` must equal the stored
+        value and `updated` must preserve the lineage. Equal updates are
+        idempotent.
+        """
+        if (
+            type(expected) is not AttemptSequence
+            or type(updated) is not AttemptSequence
+        ):
+            raise ValueError(
+                "canonical compare-and-set requires attempt sequences"
+            )
+        with self._locked():
+            current = self._read()
+            if current != expected:
+                raise ValueError("canonical sequence compare failed")
+            if updated != expected and not _is_lineage_extension(
+                expected, updated
+            ):
+                raise ValueError(
+                    "updated sequence does not extend the canonical lineage"
+                )
+            if updated != expected:
+                self._write(updated)
+            return updated if updated != expected else current
+
+    def _read(self) -> AttemptSequence | None:
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        return AttemptSequence.from_dict(json.loads(raw))
+
+    def _write(self, sequence: AttemptSequence) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=self._path.parent,
+            prefix=self._path.name + ".",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    sequence.to_dict(),
+                    handle,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    @contextmanager
+    def _locked(self):
+        with self._local_lock:
+            try:
+                import fcntl
+            except ImportError:
+                yield
+                return
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
