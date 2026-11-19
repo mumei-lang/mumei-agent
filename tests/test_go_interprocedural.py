@@ -24626,18 +24626,18 @@ def test_func_value_chan_result_var_decl_admitted(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_func_value_chan_result_index_callee_stays_closed(
+def test_func_value_chan_result_index_multi_slot_stays_closed(
     go_types_helper,
 ):
-    # `ch := fs[0](x)` — an index-expression callee is not an
-    # identifier bound to a func value; the declared-`chan` LHS
-    # still requires a resolvable callee arm, so it stays closed.
+    # `ch, n := fs[0](x)` — a multi-result index callee has no
+    # per-slot signature for the element, so it stays closed like
+    # the `g()` multi-result arm does.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func F(x int64, fs []func(int64) chan int64) int64 {\n"
-        "    ch := fs[0](x)\n"
+        "func F(x int64, fs []func(int64) (chan int64, int64)) int64 {\n"
+        "    ch, n := fs[0](x)\n"
         "    ch <- x\n"
-        "    return <-ch\n"
+        "    return <-ch + n\n"
         "}",
     )
     result = named(source, snapshot, summaries)
@@ -24916,3 +24916,128 @@ def test_imported_call_pkgvar_chan_arg_write_side(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_chan_result_literal_index(go_types_helper):
+    # `ch := fs[0](x)` — the func-elem collection's element
+    # declares a scalar `chan` result in its signature; the bound
+    # name's declared `chan` type (resolved by go-types) carries
+    # the fact, so `ch` binds an external queue like `ch := g(x)`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, fs []func(int64) chan int64) int64 {\n"
+        "    ch := fs[0](x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_chan_result_computed_index(go_types_helper):
+    # `ch := fs[k](x)` — the index-call shape parses as a
+    # generic-instantiation conversion; go-types records the
+    # semantic call on the span and the `type_identifier` resolves
+    # to the collection binding.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, k int, fs []func(int64) chan int64) int64 {\n"
+        "    ch := fs[k](x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_elem_chan_result_map_key(go_types_helper):
+    # `ch := fm["k"](x)` — a `map[K]func` element callee admits
+    # the same way.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        'func F(x int64, fm map[string]func(int64) chan int64) int64 {\n'
+        '    ch := fm["k"](x)\n'
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_chan_result_arg_promoted(go_types_helper):
+    # `ch := fs[0](q)` — the element's opaque body may return the
+    # queue it received; `q` promotes external like a `g(q)` arg.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(q chan int64, fs []func(chan int64) chan int64, y int64) int64 {\n"
+        "    q <- y\n"
+        "    ch := fs[0](q)\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_func_elem_chan_result_nested_index_closed(go_types_helper):
+    # `ch := fm["k"][0](x)` — a nested index callee's operand is
+    # not an identifier, so the declared-`chan` LHS stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        'func F(x int64, fm map[string][]func(int64) chan int64) int64 {\n'
+        '    ch := fm["k"][0](x)\n'
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_chan_result_call_result_callee_closed(
+    go_types_helper,
+):
+    # `ch := mk(x)(x)` — a call-result callee is not an
+    # identifier; stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, mk func(int64) func(int64) chan int64) int64 {\n"
+        "    ch := mk(x)(x)\n"
+        "    ch <- x\n"
+        "    return <-ch\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_elem_chan_result_conversion_arg_promotes(go_types_helper):
+    # `ch := fs[k](q)` — the conversion-form element call carries its
+    # argument in the `operand` field, not `argument_list`: the chan
+    # argument must still promote so a queue the element hands back
+    # observes later sends (`q <- x` reaches `<-ch`).
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, fs []func(chan int64) chan int64, k int) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tch := fs[k](q)\n"
+        "\tq <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies

@@ -2763,11 +2763,16 @@ external since the opaque body may hand it back
 (`ch := g(q)` seeds `ch`'s slot with `q`'s
 contents). A func value declaring `chan chan T`
 admits through the `chan chan` arm on the declared
-LHS type. Only a plain-identifier callee resolves —
-`mk(x)()` and `fs[i]()` stay closed — and a
-multi-result func-value callee stays closed since
-no signature record verifies the per-slot `chan`
-fact. One level of channel-of-channels admits under the
+LHS type. The callee must resolve to a name bound
+to a func-typed value or a func-element collection:
+`fs[k](x)` / `fm["k"](x)` — which parse as a
+generic-instantiation conversion — run the
+collection's element opaque on its declared-`chan`
+result like `g(x)` does, while a call-result callee
+(`mk(x)()`) and a nested index (`fm["k"][0](x)`)
+stay closed, and a multi-result func-value callee
+stays closed since no signature record verifies the
+per-slot `chan` fact. One level of channel-of-channels admits under the
 external queue model: a `chan chan T` parameter or
 result (local or imported), a package-level `var cc
 chan chan T`, or a `cc := G()` / `cc, n := G()`

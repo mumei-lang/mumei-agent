@@ -4848,7 +4848,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
-        if inner is None or inner.type != "call_expression":
+        if inner is None or inner.type not in (
+            "call_expression",
+            # `fs[k](x)` — the index-call shape parses as a
+            # generic-instantiation conversion (`generic_type`
+            # `fs[k]` applied to operand `x`); go-types records
+            # the semantic call on the same span.
+            "type_conversion_expression",
+        ):
             return None
         call = self.calls.get(self.node_key(inner))
         if call is None:
@@ -4877,14 +4884,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # type from `g`'s signature, so the LHS gate
             # (`_scalar_chan_binding` / `_chan_chan_fact`) already
             # carries the result fact `pred` would check on a known
-            # callee. Only a plain identifier callee admits —
-            # `mk(x)()` and `fs[i]()` stay closed. The opaque body
-            # may hand a caller queue back, so the bound name joins
-            # the external model like an imported result.
-            function_node = inner.child_by_field_name("function")
+            # callee. A plain identifier or an index into a
+            # func-elem collection (`fs[i](x)`) admits — `mk(x)()`
+            # stays closed. The opaque body may hand a caller
+            # queue back, so the bound name joins the external
+            # model like an imported result.
+            if inner.type == "type_conversion_expression":
+                # `fs[k](x)` — the `generic_type` `fs[k]`'s
+                # `type_identifier` names the collection; the
+                # element signature's `chan` fact rides the LHS
+                # type gate like the identifier form.
+                generic = inner.child_by_field_name("type")
+                function_node = (
+                    next(
+                        (
+                            c
+                            for c in generic.named_children
+                            if c.type == "type_identifier"
+                        ),
+                        None,
+                    )
+                    if generic is not None
+                    and generic.type == "generic_type"
+                    else None
+                )
+            else:
+                function_node = inner.child_by_field_name("function")
+            if function_node is not None and function_node.type == (
+                "index_expression"
+            ):
+                # `ch := fs[i](x)` — the element of a func-elem
+                # collection parameter or bound container declares
+                # the scalar `chan` result in its signature; the
+                # LHS type gate carries the fact identically.
+                operand = function_node.child_by_field_name(
+                    "operand"
+                )
+                function_node = (
+                    operand
+                    if operand is not None
+                    and operand.type == "identifier"
+                    else None
+                )
             if (
                 function_node is None
-                or function_node.type != "identifier"
+                or function_node.type
+                # `type_identifier` is the name form inside a
+                # `generic_type` (`fs[k]` parsed as a conversion).
+                not in ("identifier", "type_identifier")
             ):
                 return None
             ref = self.references.get(self.node_key(function_node))
@@ -4892,6 +4939,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 return None
             binding = self.bindings.get(ref.binding_id)
             if binding is None or binding.type.kind != "function":
+                if binding is not None and self._func_elem_collection(
+                    binding.type
+                ):
+                    return binding
                 return None
             return binding
         return None
@@ -4946,7 +4997,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
-        if inner is None or inner.type != "call_expression":
+        if inner is None or inner.type not in (
+            "call_expression",
+            # `fs[k](x)` — the index-call shape parses as a
+            # generic-instantiation conversion.
+            "type_conversion_expression",
+        ):
             return ()
         call = self.calls.get(self.node_key(inner))
         if call is None or call.kind not in (
@@ -4973,17 +5029,52 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `function` type, and the LHS declared `chan` type
             # carries the result fact the member check verifies on
             # an imported call.
-            function_node = inner.child_by_field_name("function")
+            if inner.type == "type_conversion_expression":
+                generic = inner.child_by_field_name("type")
+                function_node = (
+                    next(
+                        (
+                            c
+                            for c in generic.named_children
+                            if c.type == "type_identifier"
+                        ),
+                        None,
+                    )
+                    if generic is not None
+                    and generic.type == "generic_type"
+                    else None
+                )
+            else:
+                function_node = inner.child_by_field_name("function")
+            if function_node is not None and function_node.type == (
+                "index_expression"
+            ):
+                # `ch := fs[i](q)` — the func-elem collection's
+                # element may hand `q` back through its opaque
+                # body, same as `g(q)`.
+                operand = function_node.child_by_field_name(
+                    "operand"
+                )
+                function_node = (
+                    operand
+                    if operand is not None
+                    and operand.type == "identifier"
+                    else None
+                )
             if (
                 function_node is None
-                or function_node.type != "identifier"
+                or function_node.type
+                not in ("identifier", "type_identifier")
             ):
                 return ()
             ref = self.references.get(self.node_key(function_node))
             if ref is None:
                 return ()
             fb = self.bindings.get(ref.binding_id)
-            if fb is None or fb.type.kind != "function":
+            if fb is None or (
+                fb.type.kind != "function"
+                and not self._func_elem_collection(fb.type)
+            ):
                 return ()
             capture_roots = ()
             # `f := func() chan T { return q }; ch := f()` — the
@@ -5004,10 +5095,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ),
             None,
         )
-        if arg_list is None:
-            return capture_roots
+        if arg_list is not None:
+            arg_nodes = arg_list.named_children
+        else:
+            # `fs[k](q)` — the conversion form carries no
+            # `argument_list`: the single argument lives in the
+            # `operand` field. Skipping it left the chan argument
+            # unpromoted, so a queue the element hands back lost
+            # every later send (`q <- x` after `ch := fs[k](q)`
+            # never reached `<-ch`).
+            conv_operand = (
+                inner.child_by_field_name("operand")
+                if inner.type == "type_conversion_expression"
+                else None
+            )
+            if conv_operand is None:
+                return capture_roots
+            arg_nodes = (conv_operand,)
         roots = []
-        for arg in arg_list.named_children:
+        for arg in arg_nodes:
             if arg.type == "comment":
                 continue
             while arg.type == "parenthesized_expression":
