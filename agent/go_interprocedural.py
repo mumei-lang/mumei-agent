@@ -1005,6 +1005,35 @@ class _Builder:
             return binding
         return None
 
+    def _promoted_field_pointer(
+        self, container_type: Any | None, ident: Any
+    ) -> Any | None:
+        """The embedded `*Q` a promoted field read crosses, if any.
+
+        `g(q).P` on `type S struct{ *Q; ... }` resolves `P` to its
+        own declaring type `Q` — the syntactic chain names no
+        pointer, but the read dereferences the embedded one. `P`
+        is a DIRECT field when it appears in the container type's
+        source-order window; otherwise the read promotes, and a
+        pointer-typed direct field in that window is the crossing.
+        Returns None for direct fields and for promotions through
+        value embedding (`type S struct{ Q }` — no deref)."""
+        if container_type is None or container_type.kind != "struct":
+            return None
+        type_id = container_type.type_id
+        type_binding = self._pointee_type(type_id) if type_id else None
+        span = getattr(type_binding, "span", None)
+        if span is None:
+            return None
+        window = self._fields_declared_after(span)
+        if ident.id in {f.id for f in window}:
+            return None
+        for f in window:
+            ftype = getattr(f, "type", None)
+            if ftype is not None and ftype.kind == "pointer":
+                return ftype
+        return None
+
     def _local_field(self, field_ref: Any) -> Any | None:
         """The struct field a `kind == \"local\"` reference names — a
         `variable` binding with `scope is None` (the field marker:
@@ -10269,6 +10298,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             and result_type.kind == "pointer"
                             else None
                         )
+                        if ptr_type is None:
+                            # `g(q).P` where `P` promotes through an
+                            # embedded `*Q` — the syntactic chain
+                            # names no pointer, but the read crosses
+                            # one into caller memory. The terminal
+                            # field's container is its own parent
+                            # level's type, or the call result's.
+                            container = (
+                                getattr(
+                                    field_idents[1], "type", None
+                                )
+                                if len(field_idents) > 1
+                                else result_type
+                            )
+                            ptr_type = (
+                                self._promoted_field_pointer(
+                                    container, field_idents[0]
+                                )
+                            )
                         if ptr_type is None:
                             # `field_idents[0]` is the terminal field
                             # read — `g().P` with `P *Q` yields the
