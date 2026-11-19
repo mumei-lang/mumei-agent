@@ -924,3 +924,46 @@ def test_key_authenticity_recovers_via_bound_registry_eval():
         [doc],
     )
     assert report["checks"]["key_authenticity"] == "evidence_failed"
+
+
+def test_envelope_freshness_recovers_through_bound_fold_docs():
+    digest = "a" * 64
+    record = _record("envelope_freshness")
+    for schema in (
+        "mumei.signature-envelope-evaluation/v1",
+        "mumei.signature-verification/v1",
+    ):
+        doc = _doc(
+            schema,
+            envelope_match=True,
+            envelope_fresh=True,
+            subject_digest=digest,
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert evaluation["checks"]["envelope_freshness"] == "recovered"
+
+    # Stale envelopes report evidence_failed, and a doc bound to
+    # other bytes never performs this record's check.
+    for doc in (
+        _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            envelope_fresh=False,
+            subject_digest=digest,
+        ),
+        _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            envelope_fresh=True,
+            subject_digest="b" * 64,
+        ),
+    ):
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert (
+            evaluation["checks"]["envelope_freshness"]
+            == "evidence_failed"
+        )

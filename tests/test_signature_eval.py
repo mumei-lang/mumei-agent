@@ -61,6 +61,8 @@ def test_well_formed_envelope_matches():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "producer_time_authenticity",
+        "clock_authenticity",
     }
 
 
@@ -568,3 +570,106 @@ def test_key_registry_unhashable_key_id_reports_false():
         assert evaluation["envelope_match"] is False
         assert evaluation["key_authentic"] is False
         assert "key_authenticity" not in evaluation["checks_not_performed"]
+
+
+def test_envelope_freshness_via_max_age():
+    stamped = _envelope(produced_at="2026-01-01T00:00:00Z")
+    evaluation = evaluate_signature_envelope(
+        stamped, reference_time=_REFERENCE, max_age_seconds=3600
+    )
+    assert evaluation["envelope_match"] is True
+    assert evaluation["envelope_fresh"] is True
+    assert "envelope_freshness" not in evaluation[
+        "checks_not_performed"
+    ]
+
+    # Stale and postdated stamps fail closed.
+    assert (
+        evaluate_signature_envelope(
+            _envelope(produced_at="2025-01-01T00:00:00Z"),
+            reference_time=_REFERENCE,
+            max_age_seconds=3600,
+        )["envelope_fresh"]
+        is False
+    )
+    assert (
+        evaluate_signature_envelope(
+            _envelope(produced_at="2027-01-01T00:00:00Z"),
+            reference_time=_REFERENCE,
+            max_age_seconds=3600 * 24 * 400,
+        )["envelope_fresh"]
+        is False
+    )
+    # Absent or unparseable stamps cannot prove freshness.
+    for bad in (None, "yesterday", 42):
+        envelope = _envelope()
+        if bad is not None:
+            envelope["produced_at"] = bad
+        assert (
+            evaluate_signature_envelope(
+                envelope,
+                reference_time=_REFERENCE,
+                max_age_seconds=3600,
+            )["envelope_fresh"]
+            is False
+        )
+    # A non-string stamp breaks the closed match shape.
+    assert (
+        evaluate_signature_envelope(
+            _envelope(produced_at=42),
+            reference_time=_REFERENCE,
+            max_age_seconds=3600,
+        )["envelope_match"]
+        is False
+    )
+    # An unrecognized extra field still breaks match.
+    assert (
+        evaluate_signature_envelope(_envelope(unknown=1))[
+            "envelope_match"
+        ]
+        is False
+    )
+
+
+def test_max_age_requires_reference_time():
+    import pytest
+
+    with pytest.raises(ValueError, match="max age requires"):
+        evaluate_signature_envelope(_envelope(), max_age_seconds=60)
+    with pytest.raises(
+        ValueError, match="reference time requires a key registry"
+    ):
+        evaluate_signature_envelope(
+            _envelope(), reference_time=_REFERENCE
+        )
+    with pytest.raises(ValueError, match="invalid max age"):
+        evaluate_signature_envelope(
+            _envelope(), reference_time=_REFERENCE, max_age_seconds=-1
+        )
+
+
+def test_route_envelope_freshness(tmp_path, capsys):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(
+        json.dumps(_envelope(produced_at="2026-01-01T00:00:00Z"))
+    )
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(
+            _args(
+                parser,
+                envelope,
+                "--reference-time",
+                _REFERENCE,
+                "--max-age-seconds",
+                "3600",
+            )
+        )
+        == 0
+    )
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["envelope_fresh"] is True
+    assert "envelope_freshness" not in doc["checks_not_performed"]
