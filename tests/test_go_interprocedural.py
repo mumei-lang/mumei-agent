@@ -24717,3 +24717,33 @@ def test_call_result_range_parenthesized_callee(go_types_helper):
     assert result.available
     assert 0 in result.return_dependencies
     assert all(t.target for t in result.calls)
+
+
+def test_call_result_range_parens_slice_callee(go_types_helper):
+    # `for range (lib.G)(a)` — a parenthesized selector callee
+    # returning a slice resolves the member through
+    # `_call_result_fact`, so the range admits like the bare
+    # `lib.G(a)` form.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range (lib.G)(a) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies

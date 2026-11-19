@@ -3966,6 +3966,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if node.type != "call_expression":
             return None, None
         callee_node = node.child_by_field_name("function")
+        while (
+            callee_node is not None
+            and callee_node.type == "parenthesized_expression"
+        ):
+            callee_node = next(
+                (
+                    c
+                    for c in callee_node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
         candidate = (
             self._package_member(callee_node)
             if callee_node is not None
