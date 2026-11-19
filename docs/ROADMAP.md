@@ -1537,6 +1537,33 @@ audit/CLI/MCP route is added. C11 stays partial; Core meaning and
 acceptance, C12's demand gate and existing assurance/Lean/native/LLVM/
 deferred-WASM policies are unchanged.
 
+### C11 cross-lineage reconciliation
+
+`AttemptSequence.reconcile(incoming)` arbitrates between the value a host
+holds and an independently-published candidate for the same request. Two
+callers that each extended an older common prefix can diverge — atomic
+publication serializes writes, not the histories behind them — so the
+declared arbitration is lineage order only: an identical or prefix-shorter
+candidate keeps the current value, a strict extension returns the
+candidate, and every true fork fails closed.
+
+```python
+canonical = sequence.reconcile(published_candidate)
+```
+
+Divergent records at a shared ordinal, competing selected results and
+foreign request bindings all raise static errors, and so does a candidate
+that both diverges and regresses the report stamp; a candidate that only
+carries an older stamp on an identical history is stale and loses silently.
+Neither input is mutated. This arbitrates between VALUES only — which
+side was the canonical store's own value, authority, freshness and
+authentication stay host duties, and a fork still needs a human or a
+host-declared rule to pick a winner. No runner/scheduler, stream
+collection, execution/cancellation, Evidence normalization/acceptance,
+external verifier, dependency or default audit/CLI/MCP route is added.
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 canonical result selection for sequential attempts
 
 `AttemptSequence.select_result(output)` declares one bound `AttemptOutput` the
