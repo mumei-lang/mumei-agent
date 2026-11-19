@@ -438,9 +438,12 @@ class AttemptSequence:
         declared arbitration is lineage order only: an identical or
         prefix-shorter candidate keeps this value, a strict extension
         returns the candidate, and every true fork — different records at a
-        shared ordinal, competing selected results, a stamp regression or a
-        foreign request binding — fails closed. This arbitrates between
-        VALUES; which side was the canonical store's own stays a host duty.
+        shared ordinal, competing selected results, a stamp regression on a
+        diverging candidate or a foreign request binding — fails closed. A
+        candidate that only carries an older stamp on identical history is
+        stale, not regressed: it loses silently rather than raising. This
+        arbitrates between VALUES; which side was the canonical store's own
+        stays a host duty.
         """
         if type(incoming) is not AttemptSequence:
             raise ValueError(

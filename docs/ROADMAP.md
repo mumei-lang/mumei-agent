@@ -1551,9 +1551,11 @@ candidate, and every true fork fails closed.
 canonical = sequence.reconcile(published_candidate)
 ```
 
-Divergent records at a shared ordinal, competing selected results, report
-stamp regressions and foreign request bindings all raise static errors;
-neither input is mutated. This arbitrates between VALUES only — which
+Divergent records at a shared ordinal, competing selected results and
+foreign request bindings all raise static errors, and so does a candidate
+that both diverges and regresses the report stamp; a candidate that only
+carries an older stamp on an identical history is stale and loses silently.
+Neither input is mutated. This arbitrates between VALUES only — which
 side was the canonical store's own value, authority, freshness and
 authentication stay host duties, and a fork still needs a human or a
 host-declared rule to pick a winner. No runner/scheduler, stream
