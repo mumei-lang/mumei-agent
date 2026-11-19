@@ -12618,6 +12618,23 @@ def test_builtin_new_anonymous_struct_field_comment(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_builtin_new_generic_type_arg_comment(
+    go_types_helper,
+):
+    # A comment inside a generic type argument (`map[ /*c*/ K]V`)
+    # is skipped the same way — the map type still pins cleanly.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tm := new(map[ /* key */ string]int64)\n"
+        "\t(*m)[\"k\"] = a\n"
+        "\treturn (*m)[\"k\"]\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_builtin_new_anonymous_struct_conditional_write(
     go_types_helper,
 ):
