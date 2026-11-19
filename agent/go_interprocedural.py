@@ -9227,15 +9227,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dest_deps = dest_deps | self.indirect_writes
                     self._record_read(dest_deps)
                     self._pin_fact_identities(fact)
+                    map_key_deps = frozenset()
                     for extra in reversed(extras):
                         if extra.type in _INDEX_LITERALS:
                             continue
-                        self._record_read(
-                            self.expression(
-                                extra, fn, params, locals_,
-                                transfers, count, 0,
-                            )
+                        extra_deps = self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
                         )
+                        self._record_read(extra_deps)
+                        if fact.kind == "map":
+                            # A map key is stored data —
+                            # `(*p)[b] = 1` stores `b`'s value, so a
+                            # later key read (`for k := range *p`)
+                            # must observe `b`'s deps through the
+                            # broadcast.
+                            map_key_deps |= extra_deps
+                    self.indirect_writes |= map_key_deps
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -12402,15 +12410,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     | self.indirect_writes
                 )
                 self._pin_fact_identities(fact)
+                map_key_deps = frozenset()
                 for extra in reversed(extras):
                     if extra.type in _INDEX_LITERALS:
                         continue
-                    self._record_read(
-                        self.expression(
-                            extra, fn, params, locals_,
-                            transfers, count, 0,
-                        )
+                    extra_deps = self.expression(
+                        extra, fn, params, locals_,
+                        transfers, count, 0,
                     )
+                    self._record_read(extra_deps)
+                    if fact.kind == "map":
+                        # `(*p)[b]++` stores `b`'s value as the
+                        # entry's key — a later key read must
+                        # observe `b`'s deps through the broadcast.
+                        map_key_deps |= extra_deps
+                self.indirect_writes |= map_key_deps
                 transfers.append(
                     CallTransfer(
                         FileSpan(
