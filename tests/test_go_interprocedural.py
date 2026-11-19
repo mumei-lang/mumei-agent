@@ -24363,6 +24363,8 @@ def _opaque_composite_lib():
             "func GA(x int64) [4]int64 { return [4]int64{x} }\n"
             "func GG(x, y int64) []int64 {\n"
             "\treturn []int64{x, y}\n}\n"
+            "func Id(s []int64) []int64 { return s }\n"
+            "func U(s []int64, b int64) {}\n"
             "var VA []int64\n"
         }
     }
@@ -25274,3 +25276,174 @@ def test_func_elem_chan_result_conversion_arg_promotes(go_types_helper):
     )
     assert result.available
     assert 0 in result.return_dependencies
+
+
+def test_opaque_composite_conditional_reseat_keeps_old_sharers(
+    go_types_helper,
+):
+    # `if c { s = lib.G(t) }; s[0] = b` — the untaken path keeps
+    # `s` on its old backing, so the write still reaches `u`.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, t, c, b int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\tu := s\n"
+        "\tif c > 0 {\n"
+        "\t\ts = lib.G(t)\n"
+        "\t}\n"
+        "\ts[0] = b\n"
+        "\treturn u[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 3})
+
+
+def test_opaque_composite_parallel_reseat_writes_old_backing(
+    go_types_helper,
+):
+    # `s, s[0] = t, b` — Go evaluates the element operand BEFORE
+    # the stores run, so `b` lands in the slice `s` named at eval
+    # time — `u`'s backing — not `t`'s.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, t2, b int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\tt := lib.G(t2)\n"
+        "\tu := s\n"
+        "\ts, s[0] = t, b\n"
+        "\treturn u[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_opaque_composite_element_write_index_deps(go_types_helper):
+    # `s[i] = v` — whether the write lands on the element a later
+    # `s[k]` reads depended on `i`, so the index's deps join the
+    # stored value's like an index read's do.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, i int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\ts[i] = 1\n"
+        "\treturn s[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_result_may_alias_container_arg(
+    go_types_helper,
+):
+    # `t := lib.Id(s)` — an opaque callee may return a slice
+    # aliasing a container argument, so the result's backing may-set
+    # unions the arg's tokens: `t[0] = b` lands in `s`'s read too.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\tt := lib.Id(s)\n"
+        "\tt[0] = b\n"
+        "\treturn s[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_element_pointer_write(go_types_helper):
+    # `p := &s[0]; s[0] = b; return *p` — the element store lands
+    # in shared (possibly escaped) backing, so it broadcasts into
+    # the indirect writes a pointer read observes.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\tp := &s[0]\n"
+        "\ts[0] = b\n"
+        "\treturn *p\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_callee_writes_container_arg(
+    go_types_helper,
+):
+    # `lib.U(s, b)` — the opaque callee's `q[0] = b` writes land in
+    # the shared backing every sharer reads.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\tlib.U(s, b)\n"
+        "\treturn s[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_range_rejoins_body_writes(go_types_helper):
+    # `for _, v := range s { r = v; s[1] = b }` — the second
+    # iteration's element read observes the first's store, because
+    # the element name re-joins the container deps every pass.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.G(a)\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range s {\n"
+        "\t\tr = v\n"
+        "\t\ts[1] = b\n"
+        "\t}\n"
+        "\treturn r\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_range_map_key_carries_deps(go_types_helper):
+    # `for k := range m` — a map's key is stored data like the
+    # element: the callee-produced map's key carries the call deps.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tm := lib.GM(a)\n"
+        "\tvar r int64\n"
+        "\tfor k := range m {\n"
+        "\t\tr = k\n"
+        "\t}\n"
+        "\treturn r\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_composite_parenthesized_bind(go_types_helper):
+    # `s := (lib.G(a))` — parens unwrap like every other operand
+    # shape; the name binds the call's backing.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\ts := (lib.G(a))\n"
+        "\treturn s[0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_composite_comma_ok_map_read(go_types_helper):
+    # `v, ok := m[k]` on a bound opaque map — the value carries the
+    # container's conflated deps plus the key's, like the
+    # imported-member comma-ok.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, k int64) int64 {\n"
+        "\tm := lib.GM(a)\n"
+        "\tv, ok := m[k]\n"
+        "\tif ok {\n"
+        "\t\treturn v\n"
+        "\t}\n"
+        "\treturn 0\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
