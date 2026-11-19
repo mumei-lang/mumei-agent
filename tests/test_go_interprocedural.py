@@ -20038,6 +20038,67 @@ def test_call_result_intermediate_pointer_field_dereferences(
     assert result.effects == "unknown"
 
 
+def test_call_result_promoted_field_through_pointer_reads_external(
+    go_types_helper,
+):
+    # `g(q).P` on `type S struct{ *Q }` — `P` promotes through the
+    # embedded pointer: the syntactic chain names no `*`, but the
+    # read dereferences caller memory, so it records an external
+    # effect and joins escaped deps like `g().P.V` does.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P *int64 }\n"
+        "type S struct{ *Q }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    b := q\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    v := g(q).P\n"
+        "    return *v\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_call_result_promoted_field_through_value_stays_local(
+    go_types_helper,
+):
+    # `g(q).P` on `type S struct{ Q }` — promotion through VALUE
+    # embedding reads copied data, not caller memory: no external
+    # record beyond the call's own.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ P int64 }\n"
+        "type S struct{ Q }\n"
+        "func g(q int64) S { return S{} }\n"
+        "func F(q int64) int64 {\n"
+        "    _ = g(q).P\n"
+        "    return 0\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "none_in_supported_fragment"
+
+
 def test_call_result_index_stays_closed(go_types_helper):
     # `g(a)[0]` — the callee's array result is already closed at
     # the signature gate, so the caller fails closed too.
