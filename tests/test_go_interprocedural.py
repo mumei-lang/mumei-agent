@@ -11990,9 +11990,10 @@ def test_bound_closure_alias_call(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
-def test_bound_closure_computed_callee_closed(go_types_helper):
-    # `(h)()` — only a bare-identifier callee admits; a
-    # parenthesized or computed callee stays closed.
+def test_bound_closure_parenthesized_callee_admitted(
+    go_types_helper,
+):
+    # `(h)()` unwraps to the same bare-identifier callee `h()` admits.
     data = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
@@ -12000,7 +12001,69 @@ def test_bound_closure_computed_callee_closed(go_types_helper):
         "\treturn (h)()\n}",
     )
     result = named(*data)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_selector_func_field_call_opaque(go_types_helper):
+    # `p.f(a)` — `f` is a func-typed field on a `*S` parameter:
+    # which function it holds is unknowable, so the call runs
+    # opaque like a func-typed parameter — deps(p) ∪ deps(a) —
+    # and records an external transfer on the field member.
+    files = {
+        "a.go": "package p\n"
+        "type S struct { f func(int64) int64; v int64 }\n"
+        "func F(p *S, a int64) int64 {\n"
+        "\treturn p.f(a)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_local_struct_func_field_call_opaque(go_types_helper):
+    # `s.f(a)` — `f` is a func-typed field on a local composite:
+    # the callee is unknowable, so the call unions the operand
+    # deps (s) and the argument, opaquely, recording the effect on
+    # the field member.
+    files = {
+        "a.go": "package p\n"
+        "type S struct { f func(int64) int64; v int64 }\n"
+        "func F(x int64, a int64) int64 {\n"
+        "\ts := S{v: x}\n"
+        "\treturn s.f(a)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_selector_func_field_call_writes_back(go_types_helper):
+    # `p.f(&x)` — the opaque callee may write `*p`-style through the
+    # pointer argument, so the write fold reaches the escaped `x`.
+    files = {
+        "a.go": "package p\n"
+        "type S struct { f func(*int64) int64 }\n"
+        "func F(p *S, x int64) int64 {\n"
+        "\tq := &x\n"
+        "\tp.f(q)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
 
 
 def test_bound_closure_var_declaration(go_types_helper):

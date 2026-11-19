@@ -10031,9 +10031,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         """`h(args)` where `h` names a bound function literal.
 
         Only a bare-identifier callee whose binding is
-        function-typed admits — selector callees (`s.f()`) and
-        computed values keep the `indirect_or_selector` record
-        closed. The result resolves the literal's captured bindings
+        function-typed resolves through a bound literal — a
+        parenthesized callee unwraps to the same shape, while a
+        selector (`s.f()`) or computed (`m[k]()`) callee runs as an
+        opaque external call like a func-typed parameter does. The
+        result resolves the literal's captured bindings
         at the CALL site — `closure_captures` keeps the binding ids
         so a captured local reassigned after the literal reports
         its current deps — plus the argument's own evaluation; it
@@ -10045,9 +10047,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
         bind site does not record which literals do).
         """
         callee = node.child_by_field_name("function")
+        while (
+            callee is not None
+            and callee.type == "parenthesized_expression"
+        ):
+            callee = next(
+                (
+                    c
+                    for c in callee.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if callee is not None and callee.type != "identifier":
+            # `s.f(args)` / `m[k](args)` — the callee is read through
+            # a field or an index, so which function it holds is
+            # unknowable here: opaque external call like a
+            # func-typed parameter, except the callee's own read is
+            # the operand expression's deps.
+            return self._opaque_indirect_call(
+                node, callee, arguments, fn, params, locals_,
+                transfers, count, depth,
+            )
         ref = (
             self.references.get(self.node_key(callee))
-            if callee is not None and callee.type == "identifier"
+            if callee is not None
             else None
         )
         binding = (
@@ -10213,6 +10237,123 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._store(
                     locals_, params, escaped_id, write_deps, True
                 )
+        return deps
+
+    def _opaque_indirect_call(
+        self,
+        node: Any,
+        callee_node: Any,
+        arguments: list[Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[Any],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """`s.f(args)` / `m[k](args)` — an `indirect_or_selector`
+        call whose callee is read through a field or an index.
+
+        Which function value the slot holds is unknowable here, so
+        the call runs opaque like a func-typed parameter or a
+        package `var`: the result unions the callee operand's own
+        read deps, the arguments, `indirect_writes` and every
+        escaped binding, and the call may write through pointer or
+        channel arguments — the same write-back fold an external
+        callee gets. The external effect records on the field
+        member's identity for `s.f` (its `func` type pins) or on
+        the container's root binding for `m[k]`; an operand that
+        resolves to neither stays closed."""
+        target_id: str | None = None
+        pin_fact: Any = None
+        callee_deps: frozenset[int] = frozenset()
+        if callee_node.type == "selector_expression":
+            operand = callee_node.child_by_field_name("operand")
+            field = callee_node.child_by_field_name("field")
+            if operand is not None and field is not None:
+                field_ref = self.references.get(self.node_key(field))
+                member = (
+                    self.members.get(field_ref.binding_id)
+                    if field_ref is not None
+                    and field_ref.kind == "import"
+                    else self._local_field(field_ref)
+                )
+                if (
+                    member is not None
+                    and member.name.encode("utf-8") == field.text
+                    and member.kind in {"var", "variable"}
+                    and member.type is not None
+                    and member.type.kind == "function"
+                ):
+                    target_id = member.id
+                    pin_fact = member.type
+                # `s.f` reads `s` — the operand's deps are the
+                # callee's own read set (a `func` field itself has
+                # no dep model).
+                callee_deps = self.expression(
+                    operand, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+        elif callee_node.type == "index_expression":
+            operand = callee_node.child_by_field_name("operand")
+            index = callee_node.child_by_field_name("index")
+            root_ref = self._receiver_root_ref(operand)
+            if root_ref is not None and root_ref.binding_id:
+                target_id = root_ref.binding_id
+            for part in (operand, index):
+                if part is not None:
+                    callee_deps |= self.expression(
+                        part, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
+        if target_id is None:
+            raise _Unsupported("unsupported_expression", _span(node))
+        deps = callee_deps | self.indirect_writes
+        # The callee may read caller memory through captured or
+        # reached state — union every escaped binding's deps like
+        # the external-callee path does.
+        for escaped_id in self.escaped:
+            if escaped_id in locals_:
+                deps |= locals_[escaped_id]
+            elif escaped_id in params:
+                deps |= frozenset({params[escaped_id]})
+        if pin_fact is not None:
+            self._pin_fact_identities(pin_fact)
+            member_or_binding = self.members.get(
+                target_id
+            ) or self.bindings.get(target_id)
+            if member_or_binding is not None:
+                self.pinned.update(
+                    member_or_binding.signature_type_ids
+                )
+        transfers.append(
+            CallTransfer(
+                FileSpan(
+                    self.current_file,
+                    node.start_byte,
+                    node.end_byte,
+                ),
+                target_id,
+                (),
+                frozenset(),
+                imported=True,
+            )
+        )
+        arg_deps: frozenset[int] = frozenset()
+        for arg in arguments:
+            arg_deps |= self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+        deps |= arg_deps
+        # The callee may write `*p = y` or send `y` through an
+        # argument — the same escaped/indirect fold every opaque
+        # call does.
+        write_deps = arg_deps | callee_deps
+        self.indirect_writes |= write_deps
+        for escaped_id in self.escaped:
+            self._store(
+                locals_, params, escaped_id, write_deps, True
+            )
         return deps
 
     def _direct_import_call(
