@@ -18562,8 +18562,8 @@ def test_range_over_slice_result_index_stays_dep_free(
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
         "\tvar r int64\n"
-        "\tfor i, v := range lib.G(x) {\n"
-        "\t\tr = int64(i) + v\n"
+        "\tfor i, _ := range lib.G(x) {\n"
+        "\t\tr = int64(i) + 1\n"
         "\t}\n"
         "\treturn r\n}\n"
     }
@@ -18582,8 +18582,9 @@ def test_range_over_slice_result_index_stays_dep_free(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    # `v` carries the call dep {0}; `i` stays dep-free.
-    assert result.return_dependencies == frozenset({0})
+    # Only `i` feeds the return — a wrong index dep set would
+    # leak the call's arg into it.
+    assert result.return_dependencies == frozenset()
 
 
 def test_range_over_bound_map_key_tracks_mid_iteration_writes(
