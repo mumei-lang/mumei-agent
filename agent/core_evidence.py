@@ -676,6 +676,12 @@ def evaluate_signature_envelope(
             "key_authenticity",
             "envelope_freshness",
             "key_revocation",
+            # The stamp is declared, not signed, and the reference is
+            # the caller's trusted clock — neither fold performs the
+            # producer's time authenticity nor the clock's, matching
+            # `evaluate_freshness`' declared set.
+            "producer_time_authenticity",
+            "clock_authenticity",
         ],
     }
     if match:
@@ -863,6 +869,12 @@ def verify_signature_envelope(
             "key_authenticity",
             "envelope_freshness",
             "key_revocation",
+            # The stamp is declared, not signed, and the reference is
+            # the caller's trusted clock — neither fold performs the
+            # producer's time authenticity nor the clock's, matching
+            # `evaluate_freshness`' declared set.
+            "producer_time_authenticity",
+            "clock_authenticity",
         ],
     }
     if match:

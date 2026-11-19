@@ -92,6 +92,8 @@ def test_valid_signature_verifies():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "producer_time_authenticity",
+        "clock_authenticity",
     }
 
 

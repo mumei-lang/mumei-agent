@@ -61,6 +61,8 @@ def test_well_formed_envelope_matches():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "producer_time_authenticity",
+        "clock_authenticity",
     }
 
 
