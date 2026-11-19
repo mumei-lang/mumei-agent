@@ -285,17 +285,26 @@ func chanChanElemOK(t types.Type) bool {
 	return scalarChanElemOK(outer.Elem())
 }
 
+// funcResultOK: a `func` result — the value carries no scalar deps;
+// the consumer binds the name as an opaque func value whose calls
+// resolve through the func-value path, like a `func` parameter does.
+func funcResultOK(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Signature)
+	return ok
+}
+
 // importedResultsOK admits a signature when every result is
-// scalar/pointer or a scalar-element `chan` — a multi-result callee
-// like `func G() (chan int64, int64)` whose chan slot the consumer
-// binds as an external queue like `ch := lib.G()`. A `chan chan T`
-// result admits one level deep too — deeper nesting and other
+// scalar/pointer, a scalar-element `chan`, a `chan chan T` one
+// level deep, or a `func` type — a multi-result callee like
+// `func G() (chan int64, int64)` whose chan slot the consumer binds
+// as an external queue like `ch := lib.G()`, or whose func slot binds
+// an opaque func value like `f := lib.Mk()`. Deeper nesting and other
 // composites stay `external_or_bodyless` at any position.
 func importedResultsOK(sig *types.Signature) bool {
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
 		t := res.At(i).Type()
-		if !scalarResultOK(t) && !scalarChanElemOK(t) && !chanChanElemOK(t) {
+		if !scalarResultOK(t) && !scalarChanElemOK(t) && !funcResultOK(t) && !chanChanElemOK(t) {
 			return false
 		}
 	}

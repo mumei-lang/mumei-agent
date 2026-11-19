@@ -2832,10 +2832,10 @@ deps ride the result's dep set — so `f := mk(x)` binds an opaque
 func value whose calls resolve through the ordinary func-value
 path (`var f = mk()` and `f = mk()` admit identically, and a
 multi-result signature with a func slot unpacks the same way).
-`return nil` and a call-result callee (`mk()()`) stay closed,
-and an imported func-result callee (`lib.Mk()`) stays
-`external_or_bodyless` at the producer's call classification —
-no `direct_import` record names it.
+`return nil` and a call-result callee (`mk()()`) stay closed.
+An imported func-result callee (`f := lib.Mk()`) records
+`direct_import` and binds an opaque func value the same way —
+see the C06 imported-callee section below.
 
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
@@ -3312,7 +3312,15 @@ is therefore not a gap a resolved report emits. `direct_import` is only
 classified for callees whose results are all scalar — a composite
 result at any arity stays `external_or_bodyless` and fails closed (a
 `range` over a composite operand would break the integer-only range
-model). A multi-valued scalar callee is admitted and declares its
+model). A `func`-typed result admits the same way a `func` parameter
+does: `f := lib.Mk()` binds an opaque func value whose calls resolve
+through the func-value path, and a multi-result signature carrying a
+func slot (`f, n := lib.Mk()`) binds the slot opaquely beside the
+conflated scalar results. A generic callee still rejects the same
+way an instantiated generic always has — `lib.Mk[int64]()` (explicit
+type arguments) and inferred instantiations fail the
+generic-instantiation gate regardless of the result's kind, func or
+scalar. A multi-valued scalar callee is admitted and declares its
 arity on the call record; see the C06 multi-valued imported results
 slice below. A variadic callee (`lib.W(x, y)`, `WV(x, y)`) admits the
 same way — every argument is an independent expression whose

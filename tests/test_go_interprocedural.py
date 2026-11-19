@@ -13207,6 +13207,92 @@ def test_bound_closure_conditional_rebind_unions_captures(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_conditional_rebind_literal_write_sees_new_deps(
+    go_types_helper,
+):
+    # `if b { f = func() { w = z } }` may keep the OLD literal — its
+    # write to `w` still lands, resolving the captured `x` at call
+    # time. Popping the record on the rebind would report `w` with
+    # only its initialization deps and lose {1, 2} entirely.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, x, z int64) int64 {\n"
+        "\tw := int64(0)\n"
+        "\tf := func() { w = x }\n"
+        "\tif b { f = func() { w = z } }\n"
+        "\tf()\n"
+        "\treturn w\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_conditional_rebind_return_expr_sees_captured_deps(
+    go_types_helper,
+):
+    # `return f` after a conditional literal rebind resolves each
+    # alternative's captures at the return site — both `y` (→x) and
+    # `z` appear in the result's dep set.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, x, z int64) func() int64 {\n"
+        "\ty := x\n"
+        "\tf := func() int64 { return y }\n"
+        "\tif b { f = func() int64 { return z } }\n"
+        "\treturn f\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_conditional_rebind_local_chan_alias_capture(
+    go_types_helper,
+):
+    # `c2 := ch` captured by the old literal — the conditional
+    # rebind keeps the record, so `f()` still resolves the queue
+    # root's deps (the `ch <- x` send) instead of the alias's own
+    # empty set.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, x int64) int64 {\n"
+        "\tch := make(chan int64, 2)\n"
+        "\tc2 := ch\n"
+        "\tf := func() { <-c2 }\n"
+        "\tch <- x\n"
+        "\tif b { f = func() {} }\n"
+        "\tf()\n"
+        "\treturn <-ch\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_conditional_rebind_does_not_escape_read_only_captures(
+    go_types_helper,
+):
+    # `a` is only READ by the old literal — escaping it on the
+    # conditional rebind would let a later opaque call (`cb(x)`)
+    # fold `x`'s deps into `a` though no path writes it. `return a`
+    # must report only `a0`'s dep.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, cb func(int64), a0, x int64) int64 {\n"
+        "\ta := a0\n"
+        "\tf := func() int64 { return a }\n"
+        "\tif b { f = func() int64 { return 0 } }\n"
+        "\tcb(x)\n"
+        "\tf()\n"
+        "\treturn a\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({2})
+    assert result.effects == "unknown"
+
+
 def test_bound_closure_param_reassign_resolves_at_call(
     go_types_helper,
 ):
@@ -13271,6 +13357,100 @@ def test_bound_closure_tuple_swap(go_types_helper):
     result = named(*data)
     assert result.available
     assert result.return_dependencies == frozenset({1})
+
+
+def test_passed_func_value_invocation_folds_literal_writes(
+    go_types_helper,
+):
+    # `P(h, x)` — the callee may invoke `h`, which may still be the
+    # literal that writes `a = v` (the conditional `h = cb` keeps
+    # both alternatives live). The literal's named write target must
+    # land: `return a` reports x's dep — the generic indirect_writes
+    # broadcast alone misses `a`, which never escaped.
+    files = {
+        "f.go": "package p\n"
+        "func P(f func(int64), v int64) { f(v) }\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\th := func(v int64) { a = v }\n"
+        "\tif b { h = cb }\n"
+        "\tP(h, x)\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
+def test_loop_opaque_mark_change_forces_another_pass(go_types_helper):
+    # `h = cb` at the loop body's END changes only the opaque mark —
+    # no dep set grows — but the NEXT pass's `h(x)` must still fold
+    # the callback-invocable effects: escaped `a` gains `x`'s dep
+    # through the opaque write-back, and `cb`'s own index joins.
+    files = {
+        "f.go": "package p\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\tp := &a\n"
+        "\th := func(v int64) {}\n"
+        "\tfor i := 0; i < 3; i++ {\n"
+        "\t\th(x)\n"
+        "\t\tif b { h = cb }\n"
+        "\t}\n"
+        "\t_ = p\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
+def test_loop_redeclared_literal_drops_stale_opaque_mark(
+    go_types_helper,
+):
+    # Inside the loop `h` is ALWAYS the fresh literal at call time —
+    # the trailing `h = cb` must not leak its opaque mark into the
+    # next iteration's redeclaration, or `h(x)` would fold callback
+    # writes that cannot run.
+    files = {
+        "f.go": "package p\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\tfor i := 0; i < 3; i++ {\n"
+        "\t\th := func(v int64) {}\n"
+        "\t\th(x)\n"
+        "\t\tif b { h = cb }\n"
+        "\t}\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({3})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_conditional_rebind_mixed_literal_and_callback(go_types_helper):
+    # `f := cb` then a conditional literal store: the name resolves
+    # to EITHER callee — the call folds the literal's write target
+    # AND the external callback's deps, not just one alternative.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\tf := cb\n"
+        "\tif b { f = func(v int64) { a = v } }\n"
+        "\tf(x)\n"
+        "\treturn a\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
 
 
 def test_double_pointer_read(
@@ -20357,6 +20537,7 @@ def test_defer_indirect_callee_arg_deps_reach_named_result(
     assert 0 in result.return_dependencies
 
 
+
 def test_func_result_return_named_admitted(go_types_helper):
     # `func mk() func() int64 { return G }` — a func-typed result
     # carries no scalar deps; the name reads dep-free.
@@ -20468,9 +20649,10 @@ def test_func_result_direct_call_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_func_result_imported_stays_closed(go_types_helper):
-    # `f := lib.Mk()` — the producer classifies a func-result callee
-    # as `external_or_bodyless`, so the call stays closed.
+def test_func_result_imported_admitted(go_types_helper):
+    # `f := lib.Mk()` — the producer now records `direct_import` for
+    # a func-result callee, so the name binds an opaque func value
+    # and `f()` resolves through the func-value path.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { f := lib.Mk(); return f() }\n"
@@ -20488,7 +20670,7 @@ def test_func_result_imported_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset()
 
 
 def test_func_result_capture_updated_before_return(go_types_helper):
@@ -20542,3 +20724,370 @@ def test_func_result_captured_chan_send_after_bind(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.return_dependencies == frozenset({0})
+
+
+
+def test_imported_func_result_binds_opaque(go_types_helper):
+    # `f := lib.Mk()` — a func-typed imported result records
+    # `direct_import` and the name binds an opaque func value;
+    # `f()` resolves through the func-value path.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(); return f() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\nfunc Mk() func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    call = snapshot.calls[0]
+    assert call.kind == "direct_import"
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_imported_func_result_args_fold(go_types_helper):
+    # `f := lib.Mk(); f(x)` — the opaque call unions its args.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(); return f(x) }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\nfunc Mk() func(int64) int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_func_result_multi_slot(go_types_helper):
+    # `f, n := lib.Mk()` — the func slot binds opaque beside the
+    # conflated scalar slot, like the local multi-result unpack.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f, n := lib.Mk(); return f() + n }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk() (func() int64, int64) { return nil, 7 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+
+def test_func_result_rebind_drops_stale_closure(go_types_helper):
+    # `f := func() int64 { return y }; f, n := mk2()` — the
+    # multi-valued RHS rebind must drop f's stale closure records,
+    # not resolve `f()` back through the literal's captures.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    y := x\n"
+        "    f := func() int64 { return y }\n"
+        "    f, n := lib.Mk2()\n"
+        "    _ = n\n"
+        "    return f()\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk2() (func() int64, int64) { return nil, 7 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset()
+    )
+
+
+def test_func_result_var_rebind_drops_stale_closure(go_types_helper):
+    # `var f = func() int64 { return y }; f, n = mk2()` — the
+    # multi-valued var RHS drops f's stale closure records the same
+    # way; `f` already declared makes `=` the legal rebind.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    y := x\n"
+        "    var f = func() int64 { return y }\n"
+        "    var n = int64(0)\n"
+        "    f, n = lib.Mk2()\n"
+        "    return f() + n\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk2() (func() int64, int64) { return nil, 7 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset()
+    )
+
+
+def test_func_iterator_range_joins_indirect_writes(go_types_helper):
+    # `for v := range lib.Iter(&a)` — the opaque iterator reads (and
+    # writes through `&a`) caller memory each iteration, so `v`
+    # re-joins every indirect store like an external queue's.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    a := int64(0)\n"
+        "    s := int64(0)\n"
+        "    for v := range lib.Iter(&a) { a = x; s = v }\n"
+        "    return s\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Iter(p *int64) func(func(int64) bool) { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset({0})
+    )
+
+
+def test_func_iterator_range_integer_bound_unaffected(go_types_helper):
+    # `for i := range count(x)` — an integer-result call operand is
+    # an index range, not a func iterator: no indirect_writes join.
+    # A misclassified integer range would union the escaped `a`'s
+    # current deps into the element, so the body writes `a = x`
+    # through an escaped binding and `s` reads only `i`: a false
+    # func-iterator verdict would leak {x} into the result.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "    a := int64(0)\n"
+        "    p := &a\n"
+        "    _ = p\n"
+        "    s := int64(0)\n"
+        "    for i := range lib.Count(1) { a = x; s = i }\n"
+        "    return s\n"
+        "}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Count(x int64) int64 { return 0 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset()
+    )
+
+
+def test_func_result_conditional_literal_rebind_keeps_param(
+    go_types_helper,
+):
+    # `f := cb` then `if c { f = func(){...} }` — the untaken path
+    # still calls `cb`, so `f()` must keep the parameter's dep: the
+    # name resolves as an opaque may-either callee, not the literal
+    # alone.
+    files = {
+        "a.go": "package p\n"
+        "func F(cb func() int64, b int64, c bool) int64 {\n"
+        "    f := cb\n"
+        "    if c { f = func() int64 { return b } }\n"
+        "    return f()\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert {0, 1}.issubset(result.return_dependencies)
+
+
+def test_func_result_conditional_rebind_escapes_old_writes(
+    go_types_helper,
+):
+    # `f := func() { b = x; return b }` then `if c { f = mk(x) }` —
+    # the untaken path still runs the writing literal, so the write
+    # target `b` escapes and `f()` folds the write dep back into
+    # `return b`.
+    files = {
+        "a.go": "package p\n"
+        "func mk(x int64) func() int64 {\n"
+        "    return func() int64 { return x }\n"
+        "}\n"
+        "func F(x int64, c bool) int64 {\n"
+        "    var b int64\n"
+        "    f := func() int64 { b = x; return b }\n"
+        "    if c { f = mk(x) }\n"
+        "    f()\n"
+        "    return b\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_func_result_arg_capture(go_types_helper):
+    # `f := lib.Mk(x)` — the captured argument's deps fold into the
+    # opaque func value the same way a call's arguments do.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(x); return f() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func Mk(a int64) func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert (
+        result.available
+        and result.return_dependencies == frozenset({0})
+    )
+
+
+def test_func_arg_parenthesized_invocation_queued(go_types_helper):
+    # `P((h), x)` — a parenthesized func-value argument must queue
+    # the same callback invocation as the bare `P(h, x)` form:
+    # without the paren unwrap the arg list contains no queued node
+    # and the literal's write `a = v` never lands on `return a`.
+    files = {
+        "f.go": "package p\n"
+        "func P(f func(int64), v int64) { f(v) }\n"
+        "func F(b bool, cb func(int64), x, a0 int64) int64 {\n"
+        "\ta := a0\n"
+        "\th := func(v int64) { a = v }\n"
+        "\tif b { h = cb }\n"
+        "\tP((h), x)\n"
+        "\treturn a\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2, 3})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_alias_resolves_like_function_name(go_types_helper):
+    # `h := Id; P(h, x)` resolves identically to `P(Id, x)`: the
+    # bounded pure callee keeps its own effects instead of the
+    # opaque-arg broadcast. Both forms agree here — the alias used
+    # to mark `h` opaque and over-report `x` on the receive.
+    files = {
+        "f.go": "package p\n"
+        "var Hold func(int64)\n"
+        "func Id(v int64) {}\n"
+        "func P(f func(int64), v int64) { Hold = f }\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\th := Id\n"
+        "\tP(h, x)\n"
+        "\treturn <-q\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_opaque_callback_writes_back_escaped(
+    go_types_helper,
+):
+    # `P(h, x)` with `h` an opaque param: the unknown callback may
+    # write through any captured pointer — escaped `b` (`p := &b`)
+    # must gain the call's deps. Without the unbounded write-back
+    # `return b` missed `x` entirely — an under-approximation.
+    files = {
+        "f.go": "package p\n"
+        "func P(f func(int64), v int64) { f(v) }\n"
+        "func F(x int64, h func(int64)) int64 {\n"
+        "\tb := int64(0)\n"
+        "\tp := &b\n"
+        "\t_ = p\n"
+        "\tP(h, x)\n"
+        "\treturn b\n}",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
