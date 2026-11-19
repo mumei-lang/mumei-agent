@@ -1715,7 +1715,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if ref is not None and self._scalar_chan_binding(
                 ref.binding_id
             ):
-                return frozenset({ref.binding_id})
+                # `alias := ch; p.C = alias` — the field may hold the
+                # queue `alias` resolves to, not `alias` itself:
+                # record the alias root so a later `ch <- x` is
+                # observed by `<-p.C`.
+                return frozenset({self._chan_root(ref.binding_id)})
             return None
         external = self._external_chan_operand(inner)
         if external is not None:

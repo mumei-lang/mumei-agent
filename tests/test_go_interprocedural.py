@@ -15057,3 +15057,23 @@ def test_named_pointer_underlying_imported_named_pointer_var(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_field_channel_store_through_alias(go_types_helper):
+    # `alias := ch; p.C = alias` — the field records the queue the
+    # alias resolves to (ch itself), not the alias's binding, so a
+    # later `ch <- x` is observed by `<-p.C`.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\talias := ch\n"
+            "\tp.C = alias\n"
+            "\tch <- x\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
