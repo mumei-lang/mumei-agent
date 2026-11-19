@@ -20006,3 +20006,56 @@ def test_func_result_imported_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_func_result_capture_updated_before_return(go_types_helper):
+    # `cl` captured `y` when it was const — but `y = x` before
+    # `return cl` means the closure observes x: the return must
+    # re-resolve captured bindings, not the literal's frozen deps.
+    files = {
+        "a.go": "package p\n"
+        "func mk(x int64) func() int64 {\n"
+        "    y := int64(0)\n"
+        "    cl := func() int64 { return y }\n"
+        "    y = x\n"
+        "    return cl\n"
+        "}\n"
+        "func F(a int64) int64 { f := mk(a); return f() }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    mk = named_package(files, snapshot, summaries, "mk")
+    f = named_package(files, snapshot, summaries, "F")
+    assert mk.available and mk.return_dependencies == frozenset({0})
+    assert f.available and f.return_dependencies == frozenset({0})
+
+
+def test_func_result_captured_chan_send_after_bind(go_types_helper):
+    # `f := mk(ch)` — the returned closure may capture `ch`, so the
+    # queue escapes: `ch <- x` after the call broadcasts into the
+    # shared model and `f()` observes x.
+    files = {
+        "a.go": "package p\n"
+        "func mk(ch chan int64) func() int64 {\n"
+        "    return func() int64 { return <-ch }\n"
+        "}\n"
+        "func F(x int64) int64 {\n"
+        "    ch := make(chan int64)\n"
+        "    f := mk(ch)\n"
+        "    ch <- x\n"
+        "    return f()\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
