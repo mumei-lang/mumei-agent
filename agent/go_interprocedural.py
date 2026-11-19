@@ -845,6 +845,15 @@ class _Builder:
         # The receiver id re-resolves at call time, so a `s = …`
         # reseat between the two tracks the current dep set.
         self.bound_method_values: dict[str, tuple[str, str]] = {}
+        # Function-name aliases — `h := G` / `h = G` / `var h = G`
+        # binds the name to a DECLARED function: `h(x)` resolves
+        # through G's own summary exactly like a `direct_local`
+        # call. The map holds a target only while every path to the
+        # call binds that one function — a literal rebind, a
+        # maybe-skipped rebind to a different target, or a store
+        # whose RHS is not a known function clears it and the call
+        # falls back to the opaque external callee model.
+        self.func_aliases: dict[str, str] = {}
         # Channel aliases — `ch2 := ch` / `var ch2 = ch` / `ch2 = x`
         # copies one queue's name, not its contents, so sends through
         # the alias must land in the SOURCE binding's dep set. The
@@ -4657,7 +4666,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # any other signature type.
             or any(
                 p.type.kind
-                not in {"integer", "boolean", "pointer", "struct"}
+                not in {"integer", "boolean", "pointer", "struct",
+                        "function"}
                 and not (
                     # A `chan T` parameter admits under the
                     # external sync-resource model: the queue is
@@ -4790,6 +4800,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # fact, so redeclaring the element type still flags
             # this summary stale.
             self._pin_fact_identities(p.type)
+            # A func-typed slot (`f func(N) int64`) declares its inner
+            # named types on the binding record — the func fact tree
+            # holds none.
+            pb = self.bindings.get(p.binding_id)
+            if pb is not None:
+                self.pinned.update(pb.signature_type_ids)
         try:
             self._sequence(
                 statements, fn, params, locals_, transfers, count, deps,
@@ -5035,6 +5051,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # reads the maps as they were BEFORE any store landed.
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
+            aliases_before = dict(self.func_aliases)
             # Identifier-RHS pointer provenance reads the pre-state
             # too — `p, r := q, p` hands r the OLD p's pointer.
             rhs_ptrs: list = []
@@ -5190,6 +5207,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.bound_method_values[binding.id] = src_mv
                     else:
                         self.bound_method_values.pop(binding.id, None)
+                    # `h := G` binds a declared function name; `h2 :=
+                    # h` inherits the alias h recorded.
+                    self._propagate_func_alias(
+                        binding.id, src_id, aliases_before, params,
+                        conditional,
+                    )
                 elif (
                     len(lefts) == len(rights)
                     and rights[i].type == "selector_expression"
@@ -5202,10 +5225,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.bound_method_values[binding.id] = mv
                     else:
                         self.bound_method_values.pop(binding.id, None)
+                    # A selector RHS stores a value the alias model
+                    # cannot resolve — any earlier alias drops.
+                    self.func_aliases.pop(binding.id, None)
                 elif len(lefts) == len(rights):
                     # Any other RHS clears a bound-method record an
-                    # earlier bind left on the reused name.
+                    # earlier bind left on the reused name, and any
+                    # earlier function alias.
                     self.bound_method_values.pop(binding.id, None)
+                    self.func_aliases.pop(binding.id, None)
+                else:
+                    # A multi-valued RHS resolves to no single
+                    # function either — the alias drops like a
+                    # non-identifier rebind.
+                    self.func_aliases.pop(binding.id, None)
                 # `cp := st` — a copied anonymous struct shares st's
                 # declared type, so cp's fields follow st's anchor,
                 # not cp's own name. `p := G(x)` declares its fields
@@ -5350,6 +5383,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # capture maps as they were before any store.
                 captures_before = dict(self.closure_captures)
                 pointee_before = set(self.pointee_closures)
+                aliases_before = dict(self.func_aliases)
                 rhs_ptrs = []
                 for i in range(len(names)):
                     src_ref = (
@@ -5506,6 +5540,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.pointee_closures.add(binding.id)
                         else:
                             self.pointee_closures.discard(binding.id)
+                        self._propagate_func_alias(
+                            binding.id, src_id, aliases_before,
+                            params, conditional,
+                        )
                         # `var cp = st` — a copied anonymous struct
                         # shares st's anchor, like `cp := st`. An
                         # explicit `struct{...}` type on the spec
@@ -5564,8 +5602,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.bound_method_values.pop(
                                 binding.id, None
                             )
+                        # Non-identifier RHS — any earlier alias drops.
+                        self.func_aliases.pop(binding.id, None)
                     elif not multi and value_nodes:
                         self.bound_method_values.pop(binding.id, None)
+                        self.func_aliases.pop(binding.id, None)
+                    else:
+                        # `var h = (f)` / `var h = f()` — same
+                        # non-identifier drop the `:=` path applies.
+                        self.func_aliases.pop(binding.id, None)
                     # `var p = G(x)` — an anonymous-struct result's
                     # fields live inside G's signature literal, like
                     # `p := G(x)`; anchor the field window there.
@@ -6167,6 +6212,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # propagation below reads the maps from BEFORE any store.
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
+            aliases_before = dict(self.func_aliases)
             # Channel alias targets resolve against the pre-state
             # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
             # RHS's root must be read before any element's store
@@ -6454,6 +6500,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.pointee_closures.add(ref.binding_id)
                     else:
                         self.pointee_closures.discard(ref.binding_id)
+                    # `h = G` binds a declared function name; `h2 =
+                    # h` inherits the alias h recorded.
+                    self._propagate_func_alias(
+                        ref.binding_id, src_id, aliases_before,
+                        params, conditional,
+                    )
                 elif (
                     not compound
                     and len(lefts) == len(rights)
@@ -6472,8 +6524,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.bound_method_values.pop(
                             ref.binding_id, None
                         )
+                    self.func_aliases.pop(ref.binding_id, None)
                 elif not compound and ref is not None:
                     self.bound_method_values.pop(ref.binding_id, None)
+                    self.func_aliases.pop(ref.binding_id, None)
+                else:
+                    # `h = (f)` / `h = f()` — a non-identifier RHS
+                    # leaves the name holding a value the alias
+                    # cannot resolve; an unconditional store loses
+                    # the target outright and a maybe-skipped one
+                    # leaves it path-dependent, so the alias drops
+                    # either way.
+                    self.func_aliases.pop(ref.binding_id, None)
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
@@ -7204,6 +7266,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # universe; the pass cap is a defensive analysis limit.
             passes = 0
             frame = {"kind": "loop", "exited": False}
+            # Resolution-table snapshots seen at pass boundaries. The
+            # tables are rewritten, not unioned, so a store like
+            # `f, g = g, f` (two closures capturing different locals)
+            # can oscillate between snapshots forever while dep sets
+            # stay put — a repeated snapshot breaks the cycle by
+            # dropping the oscillating entries below.
+            seen_resolutions: set = set()
             self.frames.append(frame)
             try:
                 while True:
@@ -7238,6 +7307,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # sees no change and stops before the element
                     # re-join above can observe the send.
                     iw_before = self.indirect_writes
+                    # Alias/capture resolution tables sit outside
+                    # `inner` too: a body pass that drops `h`'s
+                    # function alias (or a literal's capture record)
+                    # changes what `h(x)` resolves to without growing
+                    # any dep set, so compare them like
+                    # `indirect_writes`.
+                    resolution_before = (
+                        dict(self.func_aliases),
+                        dict(self.closure_captures),
+                        set(self.pointee_closures),
+                    )
+                    resolution_changed = False
                     self._branch_sequence(
                         _children(body_node), fn, params, inner, transfers,
                         count, deps, saw_return, conditional,
@@ -7251,7 +7332,120 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             update, fn, params, inner, transfers, count,
                             deps, saw_return, conditional,
                         )
-                    changed = self.indirect_writes != iw_before
+                    resolution_after = (
+                        dict(self.func_aliases),
+                        dict(self.closure_captures),
+                        set(self.pointee_closures),
+                    )
+                    if resolution_after != resolution_before:
+                        resolution_changed = True
+                        snapshot = (
+                            frozenset(resolution_after[0].items()),
+                            frozenset(resolution_after[1].items()),
+                            frozenset(resolution_after[2]),
+                        )
+                        if snapshot in seen_resolutions:
+                            # An oscillating resolution (`f, g = g, f`
+                            # swapping capture records) never converges
+                            # — the entries alternate between states
+                            # already seen. Break the cycle
+                            # conservatively: function-alias targets are
+                            # identities, not sets, so drop the moved
+                            # aliases (the calls they fed resolve
+                            # through the opaque external model), but
+                            # UNION the moved capture records —
+                            # deleting a capture list makes the call
+                            # fall back to the name's literal-time dep
+                            # set, which under-approximates a captured
+                            # local re-seated inside the loop
+                            # (`x = a` before `f()`). The union keeps
+                            # every binding either state captured, so
+                            # the call site resolves each one's
+                            # CURRENT deps; convergence holds because
+                            # the swap's `h = k` copy then writes the
+                            # same union back. `pointee_closures`
+                            # membership joins the same way — a name
+                            # marked pointee-capturing in either state
+                            # keeps the pointer-write model.
+                            prev_a, prev_c, prev_p = resolution_before
+                            cur_a, cur_c, cur_p = resolution_after
+                            for key in cur_a.keys() | prev_a.keys():
+                                if cur_a.get(key) != prev_a.get(key):
+                                    self.func_aliases.pop(key, None)
+                            for key in cur_c.keys() | prev_c.keys():
+                                if cur_c.get(key) != prev_c.get(key):
+                                    if key not in cur_c or key not in prev_c:
+                                        # Absent in one alternating
+                                        # state means the name also
+                                        # binds a NON-literal callee
+                                        # (`g := cb` for a param
+                                        # callback): unioning the
+                                        # record in would model the
+                                        # call as a resolved closure
+                                        # call and hide the external
+                                        # callee's deps and effects —
+                                        # drop it so the call keeps
+                                        # the opaque external model.
+                                        # The dropped list's captured
+                                        # bindings join the name's own
+                                        # dep set resolved NOW: the
+                                        # literal possibility still
+                                        # reads them, and the external
+                                        # fallback's name deps carry
+                                        # the update (`x = a` in the
+                                        # body) the record tracked.
+                                        popped = (
+                                            prev_c.get(key) or frozenset()
+                                        ) | (
+                                            cur_c.get(key) or frozenset()
+                                        )
+                                        extra: frozenset = frozenset()
+                                        for cbid in popped:
+                                            root = (
+                                                self._chan_root(cbid)
+                                                if self._is_chan_binding(
+                                                    cbid
+                                                )
+                                                else cbid
+                                            )
+                                            if root in inner:
+                                                extra |= inner[root]
+                                                if (
+                                                    root
+                                                    in self.external_chan_locals
+                                                ):
+                                                    extra |= (
+                                                        self.indirect_writes
+                                                    )
+                                            elif root in params:
+                                                extra |= frozenset(
+                                                    {params[root]}
+                                                )
+                                        if extra:
+                                            inner[key] = (
+                                                inner.get(key, frozenset())
+                                                | extra
+                                            )
+                                        self.closure_captures.pop(key, None)
+                                    else:
+                                        # Present in both states —
+                                        # union keeps every binding
+                                        # either literal captured, so
+                                        # the call site resolves each
+                                        # one's CURRENT deps and a
+                                        # name-RHS copy writes the
+                                        # same union back.
+                                        self.closure_captures[key] = (
+                                            cur_c[key] | prev_c[key]
+                                        )
+                            for key in cur_p ^ prev_p:
+                                self.pointee_closures.add(key)
+                        else:
+                            seen_resolutions.add(snapshot)
+                    changed = (
+                        self.indirect_writes != iw_before
+                        or resolution_changed
+                    )
                     for binding_id, binding_deps in inner.items():
                         if binding_id in scope:
                             if not binding_deps <= scope[binding_id]:
@@ -7266,8 +7460,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         break
                     # Keep only the last pass's transfers: argument
                     # dependency sets widen across passes and earlier
-                    # copies are stale.
-                    del transfers[mark:]
+                    # copies are stale. A pass that changed the
+                    # resolution tables is different — its records can
+                    # name a target no later pass reaches (an effectful
+                    # alias resolved before a `h = pureLit` rebind), so
+                    # dropping them would lose those effects.
+                    if not resolution_changed:
+                        del transfers[mark:]
                     passes += 1
                     # `indirect_writes` is a tracked slot outside
                     # `scope` — a body-only `GC <- x`/`p <- x` send
@@ -8227,6 +8426,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     return frozenset()
                 if binding.kind == "constant":
                     raise _Unsupported("binding_unavailable", _span(node))
+                if binding.kind == "function":
+                    # A declared function name reads as a value only
+                    # in a store's RHS position (`h := G`, `h = G`,
+                    # `var h = G`) — the store records the alias and
+                    # `h()` resolves through G's summary. Any other
+                    # use (argument, return, operand) stays closed.
+                    return self._func_alias_bind(node)
                 if (
                     binding.kind == "variable"
                     and self._package_level(binding)
@@ -8815,6 +9021,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ref.binding_id in locals_ or ref.binding_id in params
                 ):
                     self.escaped.add(ref.binding_id)
+                    # `&h` hands the callee a writable alias — after
+                    # `mutate(&h)` the name may hold a function the
+                    # alias record never saw, so `h(x)` can no
+                    # longer resolve through it.
+                    self.func_aliases.pop(ref.binding_id, None)
             deps: frozenset[int] = frozenset()
             for child in children:
                 deps |= self.expression(
@@ -9302,242 +9513,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     call, arguments, fn, params, locals_, transfers,
                     count, depth, receiver=receiver,
                 )
-            target = self.functions.get(call.target)
-            if target is None:
-                raise _Unsupported("callee_unavailable", _span(node), call.target)
-            receiver_deps: frozenset[int] | None = None
-            receiver_node = None
-            if call.method:
-                # `st.M(args)` — the receiver operand sits on the
-                # selector's `operand` field and is evaluated like an
-                # argument (first, per Go's call order); its deps bind
-                # the callee's leading receiver parameter.
-                function_node = node.child_by_field_name("function")
-                while (
-                    function_node is not None
-                    and function_node.type == "parenthesized_expression"
-                ):
-                    function_node = next(
-                        iter(function_node.named_children), None
-                    )
-                if (
-                    function_node is None
-                    or function_node.type != "selector_expression"
-                ):
-                    raise _Unsupported(
-                        "call_mapping_unavailable",
-                        _span(node),
-                        call.target,
-                    )
-                receiver_node = function_node.child_by_field_name("operand")
-                if receiver_node is None:
-                    raise _Unsupported(
-                        "call_mapping_unavailable",
-                        _span(node),
-                        call.target,
-                    )
-                receiver_deps = self.expression(
-                    receiver_node, fn, params, locals_,
-                    transfers, count, depth + 1,
-                )
-                if (
-                    target.receiver is not None
-                    and target.receiver.type.kind != "pointer"
-                ):
-                    root = self._receiver_root_ref(receiver_node)
-                    root_binding = (
-                        self.bindings.get(root.binding_id)
-                        if root is not None
-                        else None
-                    )
-                    if (
-                        root_binding is not None
-                        and root_binding.type.kind == "pointer"
-                    ):
-                        # `p.Value()` on a value receiver
-                        # auto-derefs — the callee reads pointee
-                        # memory, and a `*p = x` store broadcasts
-                        # into `indirect_writes`, not `p`'s own set.
-                        receiver_deps |= self.indirect_writes
-                arity = len(target.parameters)
-            elif call.method_expr:
-                # `T.M(st, args)` — the leading argument already IS the
-                # receiver, so arity counts it.
-                arity = len(target.parameters) + 1
-            else:
-                arity = len(target.parameters)
-            if len(arguments) != arity:
-                raise _Unsupported("callee_unavailable", _span(node), call.target)
-            # Even unused arguments are evaluated and must have supported effects.
-            actual = tuple(
-                self.expression(
-                    arg, fn, params, locals_, transfers, count, depth + 1
-                )
-                for arg in arguments
+            return self._direct_local_call(
+                node, call.span, call.target, arguments, fn, params,
+                locals_, transfers, count, depth, call=call,
             )
-            if receiver_deps is not None:
-                actual = (receiver_deps, *actual)
-            elif (
-                call.method_expr
-                and arguments
-                and target.receiver is not None
-                and target.receiver.type.kind != "pointer"
-            ):
-                # `T.M(p, args)` on a value receiver auto-derefs `p`
-                # like `p.Value()` — the pointee contents broadcast
-                # into `indirect_writes`, not `p`'s own set.
-                root = self._receiver_root_ref(arguments[0])
-                root_binding = (
-                    self.bindings.get(root.binding_id)
-                    if root is not None
-                    else None
-                )
-                if (
-                    root_binding is not None
-                    and root_binding.type.kind == "pointer"
-                ):
-                    actual = (
-                        actual[0] | self.indirect_writes,
-                        *actual[1:],
-                    )
-            callee = self.summarize(call.target)
-            if not callee.available:
-                reason = (
-                    "recursive_call_graph"
-                    if any(g.reason == "recursive_call_graph" for g in callee.gaps)
-                    else "callee_unsupported"
-                )
-                raise _Unsupported(reason, _span(node), call.target)
-            assert callee.return_dependencies is not None
-            result = frozenset(
-                i for parameter in callee.return_dependencies for i in actual[parameter]
-            )
-            # The callee's declared named-type signature identities pin
-            # exactly like an imported callee's: a local type's identity
-            # already churns with its declaring file, while an imported one
-            # (a local `func G(y lib.T)` parameter) would otherwise leave
-            # this summary looking current after `T` is redeclared.
-            for p in (
-                *((target.receiver,) if target.receiver is not None else ()),
-                *target.parameters,
-                *target.results,
-            ):
-                if p.type.type_id:
-                    self.pinned.add(p.type.type_id)
-                    # `p PP` on `type PP *T` — PP's member carries the
-                    # pointee identity in its `elem`, which pins with
-                    # it exactly like the imported signature_type_ids
-                    # the producer now emits for the same param.
-                    named = self._pointee_type(p.type.type_id)
-                    if named is not None and named.type.kind == "pointer":
-                        self._pin_fact_identities(named.type)
-            # The callee's effect opacity propagates: a local callee that
-            # itself performs imported transfers leaves this caller's
-            # effects unbounded the same way a direct_import does.
-            transfers.append(
-                CallTransfer(
-                    call.span,
-                    call.target,
-                    actual,
-                    result,
-                    imported=callee.effects == "unknown",
-                )
-            )
-            if callee.effects == "unknown":
-                # An effectful local callee may store through an `&x`
-                # argument — its `*p = v` writes land in memory no
-                # binding points back at, so `x` conservatively gains
-                # every argument's deps like an imported call's.
-                stored = (
-                    frozenset().union(*actual)
-                    if actual
-                    else frozenset()
-                )
-                write_args = list(arguments)
-                if receiver_node is not None:
-                    # `st.M()` hands the callee `&st` under a `*T`
-                    # receiver — stores inside `M` land in the
-                    # caller's `st` like an `&x` argument's do.
-                    write_args.append(receiver_node)
-                self._store_call_writes(
-                    write_args, stored, locals_, params
-                )
-                # `st.M()` on a VALUE var auto-takes `&st`, so the
-                # operand node isn't `&st`-shaped for
-                # `_store_call_writes` to find — fold the write deps
-                # into the receiver binding directly when the callee's
-                # receiver is a pointer. `T.M(st, args)` auto-refs the
-                # same way through argument 0.
-                receiver_operand = (
-                    receiver_node
-                    if receiver_node is not None
-                    else (
-                        arguments[0]
-                        if call.method_expr and arguments
-                        else None
-                    )
-                )
-                if (
-                    receiver_operand is not None
-                    and target.receiver is not None
-                    and target.receiver.type.kind == "pointer"
-                ):
-                    # Resolve the operand's ROOT identifier — `st.M()`
-                    # gives `st`, `s.A.Set(x)` gives `s` (a field
-                    # receiver auto-takes `&s.A`, whose stores land in
-                    # the root's conflated set), `(*p).M()` gives `p`.
-                    rref = self._receiver_root_ref(receiver_operand)
-                    rbinding = (
-                        self.bindings.get(rref.binding_id)
-                        if rref is not None
-                        else None
-                    )
-                    if rref is not None and rbinding is not None and (
-                        rref.binding_id in locals_
-                        or rref.binding_id in params
-                    ):
-                        if rbinding.type.kind == "pointer":
-                            # `(*p).Set(x)` / `p.Set(x)` writes through
-                            # the pointer — pointee memory, broadcast
-                            # into `indirect_writes` like `*p = v`,
-                            # plus every escaped binding it may aim at.
-                            self.indirect_writes |= stored
-                            for escaped_id in self.escaped:
-                                if (
-                                    escaped_id in locals_
-                                    or escaped_id in params
-                                ):
-                                    esc_base = (
-                                        locals_.get(escaped_id)
-                                        if escaped_id in locals_
-                                        else frozenset(
-                                            {params[escaped_id]}
-                                        )
-                                    )
-                                    locals_[escaped_id] = (
-                                        esc_base | stored
-                                    )
-                        else:
-                            base = (
-                                locals_.get(rref.binding_id)
-                                if rref.binding_id in locals_
-                                else frozenset(
-                                    {params[rref.binding_id]}
-                                )
-                            )
-                            locals_[rref.binding_id] = base | stored
-                # A callee's ops on an external channel — `GC <- x`,
-                # `<-lib.VC` — mutate a queue the caller shares:
-                # `G(ch)`'s sends already broadcast through the arg
-                # binding, but `GC` is no argument, so the call's
-                # deps broadcast into `indirect_writes` for a later
-                # `<-GC`/`range GC` to observe.
-                if any(
-                    self._external_chan_id(c.target)
-                    for c in callee.calls
-                ):
-                    self.indirect_writes |= stored
-            return result
         if kind == "type_conversion_expression":
             # tree-sitter parses `lib.G[T](args)` — an explicit
             # instantiation of an imported generic function — in a
@@ -9605,6 +9584,378 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 depth + 1,
             )
         raise _Unsupported("unsupported_expression", _span(node))
+
+    def _direct_local_call(
+        self,
+        node: Any,
+        span: FileSpan,
+        target_id: str,
+        arguments: list[Any],
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+        call: Any | None = None,
+    ) -> frozenset[int]:
+        """`G(args)` resolved against a declared same-package function —
+        shared by the `direct_local` record, a function-name alias
+        call (`h := G; h(args)`), and the same-package method-call
+        records (`call.method` / `call.method_expr`), which carry
+        G's own summary too. A `call` flagged `method` evaluates the
+        selector operand as the receiver and binds it at actual
+        index 0; `method_expr` takes the receiver as argument 0 so
+        arity is `parameters + 1`."""
+        target = self.functions.get(target_id)
+        if target is None:
+            raise _Unsupported("callee_unavailable", _span(node), target_id)
+        receiver_deps: frozenset[int] | None = None
+        receiver_node = None
+        if call is not None and call.method:
+            # `st.M(args)` — the receiver operand sits on the
+            # selector's `operand` field and is evaluated like an
+            # argument (first, per Go's call order); its deps bind
+            # the callee's leading receiver parameter.
+            function_node = node.child_by_field_name("function")
+            while (
+                function_node is not None
+                and function_node.type == "parenthesized_expression"
+            ):
+                function_node = next(
+                    iter(function_node.named_children), None
+                )
+            if (
+                function_node is None
+                or function_node.type != "selector_expression"
+            ):
+                raise _Unsupported(
+                    "call_mapping_unavailable",
+                    _span(node),
+                    call.target,
+                )
+            receiver_node = function_node.child_by_field_name("operand")
+            if receiver_node is None:
+                raise _Unsupported(
+                    "call_mapping_unavailable",
+                    _span(node),
+                    call.target,
+                )
+            receiver_deps = self.expression(
+                receiver_node, fn, params, locals_,
+                transfers, count, depth + 1,
+            )
+            if (
+                target.receiver is not None
+                and target.receiver.type.kind != "pointer"
+            ):
+                root = self._receiver_root_ref(receiver_node)
+                root_binding = (
+                    self.bindings.get(root.binding_id)
+                    if root is not None
+                    else None
+                )
+                if (
+                    root_binding is not None
+                    and root_binding.type.kind == "pointer"
+                ):
+                    # `p.Value()` on a value receiver
+                    # auto-derefs — the callee reads pointee
+                    # memory, and a `*p = x` store broadcasts
+                    # into `indirect_writes`, not `p`'s own set.
+                    receiver_deps |= self.indirect_writes
+            arity = len(target.parameters)
+        elif call is not None and call.method_expr:
+            # `T.M(st, args)` — the leading argument already IS the
+            # receiver, so arity counts it.
+            arity = len(target.parameters) + 1
+        else:
+            arity = len(target.parameters)
+        if len(arguments) != arity:
+            raise _Unsupported("callee_unavailable", _span(node), target_id)
+        # Even unused arguments are evaluated and must have supported effects.
+        actual = tuple(
+            self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+            for arg in arguments
+        )
+        if receiver_deps is not None:
+            actual = (receiver_deps, *actual)
+        elif (
+            call is not None
+            and call.method_expr
+            and arguments
+            and target.receiver is not None
+            and target.receiver.type.kind != "pointer"
+        ):
+            # `T.M(p, args)` on a value receiver auto-derefs `p`
+            # like `p.Value()` — the pointee contents broadcast
+            # into `indirect_writes`, not `p`'s own set.
+            root = self._receiver_root_ref(arguments[0])
+            root_binding = (
+                self.bindings.get(root.binding_id)
+                if root is not None
+                else None
+            )
+            if (
+                root_binding is not None
+                and root_binding.type.kind == "pointer"
+            ):
+                actual = (
+                    actual[0] | self.indirect_writes,
+                    *actual[1:],
+                )
+        callee = self.summarize(target_id)
+        if not callee.available:
+            reason = (
+                "recursive_call_graph"
+                if any(g.reason == "recursive_call_graph" for g in callee.gaps)
+                else "callee_unsupported"
+            )
+            raise _Unsupported(reason, _span(node), target_id)
+        assert callee.return_dependencies is not None
+        result = frozenset(
+            i for parameter in callee.return_dependencies for i in actual[parameter]
+        )
+        # The callee's declared named-type signature identities pin
+        # exactly like an imported callee's: a local type's identity
+        # already churns with its declaring file, while an imported one
+        # (a local `func G(y lib.T)` parameter) would otherwise leave
+        # this summary looking current after `T` is redeclared. A
+        # method's receiver type pins the same way.
+        for p in (
+            *((target.receiver,) if target.receiver is not None else ()),
+            *target.parameters,
+            *target.results,
+        ):
+            pb = self.bindings.get(p.binding_id)
+            if pb is not None:
+                # Func-typed signature slots (`f func(N) int64`)
+                # declare their inner named types on the callee's
+                # binding record, like signature_type_ids does for
+                # an imported member.
+                self.pinned.update(pb.signature_type_ids)
+            if p.type.type_id:
+                self.pinned.add(p.type.type_id)
+                # `p PP` on `type PP *T` — PP's member carries the
+                # pointee identity in its `elem`, which pins with
+                # it exactly like the imported signature_type_ids
+                # the producer now emits for the same param.
+                named = self._pointee_type(p.type.type_id)
+                if named is not None and named.type.kind == "pointer":
+                    self._pin_fact_identities(named.type)
+        # The callee's effect opacity propagates: a local callee that
+        # itself performs imported transfers leaves this caller's
+        # effects unbounded the same way a direct_import does.
+        transfers.append(
+            CallTransfer(
+                span,
+                target_id,
+                actual,
+                result,
+                imported=callee.effects == "unknown",
+            )
+        )
+        if callee.effects == "unknown":
+            # An effectful local callee may store through an `&x`
+            # argument — its `*p = v` writes land in memory no
+            # binding points back at, so `x` conservatively gains
+            # every argument's deps like an imported call's.
+            stored = (
+                frozenset().union(*actual)
+                if actual
+                else frozenset()
+            )
+            write_args = list(arguments)
+            if receiver_node is not None:
+                # `st.M()` hands the callee `&st` under a `*T`
+                # receiver — stores inside `M` land in the
+                # caller's `st` like an `&x` argument's do.
+                write_args.append(receiver_node)
+            self._store_call_writes(
+                write_args, stored, locals_, params
+            )
+            # `st.M()` on a VALUE var auto-takes `&st`, so the
+            # operand node isn't `&st`-shaped for
+            # `_store_call_writes` to find — fold the write deps
+            # into the receiver binding directly when the callee's
+            # receiver is a pointer. `T.M(st, args)` auto-refs the
+            # same way through argument 0.
+            receiver_operand = (
+                receiver_node
+                if receiver_node is not None
+                else (
+                    arguments[0]
+                    if call is not None
+                    and call.method_expr
+                    and arguments
+                    else None
+                )
+            )
+            if (
+                receiver_operand is not None
+                and target.receiver is not None
+                and target.receiver.type.kind == "pointer"
+            ):
+                # Resolve the operand's ROOT identifier — `st.M()`
+                # gives `st`, `s.A.Set(x)` gives `s` (a field
+                # receiver auto-takes `&s.A`, whose stores land in
+                # the root's conflated set), `(*p).M()` gives `p`.
+                rref = self._receiver_root_ref(receiver_operand)
+                rbinding = (
+                    self.bindings.get(rref.binding_id)
+                    if rref is not None
+                    else None
+                )
+                if rref is not None and rbinding is not None and (
+                    rref.binding_id in locals_
+                    or rref.binding_id in params
+                ):
+                    if rbinding.type.kind == "pointer":
+                        # `(*p).Set(x)` / `p.Set(x)` writes through
+                        # the pointer — pointee memory, broadcast
+                        # into `indirect_writes` like `*p = v`,
+                        # plus every escaped binding it may aim at.
+                        self.indirect_writes |= stored
+                        for escaped_id in self.escaped:
+                            if (
+                                escaped_id in locals_
+                                or escaped_id in params
+                            ):
+                                esc_base = (
+                                    locals_.get(escaped_id)
+                                    if escaped_id in locals_
+                                    else frozenset(
+                                        {params[escaped_id]}
+                                    )
+                                )
+                                locals_[escaped_id] = (
+                                    esc_base | stored
+                                )
+                    else:
+                        base = (
+                            locals_.get(rref.binding_id)
+                            if rref.binding_id in locals_
+                            else frozenset(
+                                {params[rref.binding_id]}
+                            )
+                        )
+                        locals_[rref.binding_id] = base | stored
+            # A callee's ops on an external channel — `GC <- x`,
+            # `<-lib.VC` — mutate a queue the caller shares:
+            # `G(ch)`'s sends already broadcast through the arg
+            # binding, but `GC` is no argument, so the call's
+            # deps broadcast into `indirect_writes` for a later
+            # `<-GC`/`range GC` to observe.
+            if any(
+                self._external_chan_id(c.target)
+                for c in callee.calls
+            ):
+                self.indirect_writes |= stored
+        return result
+
+    def _propagate_func_alias(
+        self,
+        dest_id: str,
+        src_id: str | None,
+        aliases_before: dict[str, str],
+        params: dict[str, int],
+        conditional: bool,
+    ) -> None:
+        """Identifier-RHS store bookkeeping for function-name aliases:
+        `h := G` binds a declared function, `h2 := h` inherits a
+        recorded alias, and any other RHS clears one. A maybe-skipped
+        store can only record an alias when the name already resolves
+        to the same target — otherwise both models clear and the call
+        falls back to the opaque external callee."""
+        dest_binding = self.bindings.get(dest_id)
+        if dest_binding is not None and self._package_level(
+            dest_binding
+        ):
+            # A package-level `var Alias = Id` is mutable by any
+            # caller — its call stays the opaque external model.
+            return
+        src_binding = (
+            self.bindings.get(src_id) if src_id is not None else None
+        )
+        target = (
+            src_id
+            if (
+                src_binding is not None
+                and src_binding.kind == "function"
+            )
+            else (
+                aliases_before.get(src_id)
+                if src_id is not None
+                else None
+            )
+        )
+        if target is None:
+            self.func_aliases.pop(dest_id, None)
+            return
+        ambiguous = (conditional or self._may_skip > 0) and (
+            self.func_aliases.get(dest_id) != target
+            or dest_id in self.closure_captures
+            or dest_id in self.pointee_closures
+            or dest_id in params
+        )
+        if ambiguous:
+            self.func_aliases.pop(dest_id, None)
+            self.closure_captures.pop(dest_id, None)
+            self.pointee_closures.discard(dest_id)
+        else:
+            self.func_aliases[dest_id] = target
+            self.closure_captures.pop(dest_id, None)
+            self.pointee_closures.discard(dest_id)
+
+    def _func_alias_bind(self, node: Any) -> frozenset[int]:
+        """`h := G` / `h = G` / `var h = G` — a declared function
+        name read as a store value.
+
+        Only a function-name identifier sitting in the value
+        position of a name binding admits; the store's identifier-RHS
+        propagation records `func_aliases[bound] = G` so `h(...)`
+        resolves through G's own summary like a `direct_local` call.
+        Any other use of a function name as a value — an argument,
+        a return, a computed operand — stays closed.
+        """
+        parent = node.parent
+        while parent is not None and parent.type == "expression_list":
+            parent = parent.parent
+        name_node = None
+        if parent is not None and parent.type in {
+            "short_var_declaration",
+            "assignment_statement",
+        }:
+            left = parent.child_by_field_name("left")
+            right = parent.child_by_field_name("right")
+            if left is not None and right is not None:
+                names = _children(left)
+                values = _children(right)
+                index = next(
+                    (i for i, v in enumerate(values) if v == node),
+                    None,
+                )
+                if index is not None and index < len(names):
+                    name_node = names[index]
+        elif parent is not None and parent.type == "var_spec":
+            names = []
+            values = []
+            for i, c in enumerate(parent.children):
+                field = parent.field_name_for_child(i)
+                if field == "name":
+                    names.append(c)
+                elif field == "value":
+                    values.extend(_children(c))
+            index = next(
+                (i for i, v in enumerate(values) if v == node), None
+            )
+            if index is not None and index < len(names):
+                name_node = names[index]
+        if name_node is None or name_node.type != "identifier":
+            raise _Unsupported("non_parameter_reference", _span(node))
+        return frozenset()
 
     def _func_literal(
         self,
@@ -9743,7 +10094,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if bound_id is not None:
                 may_skip = self._conditional or self._may_skip > 0
-                if may_skip and bound_id in self.closure_captures:
+                if may_skip and bound_id in self.func_aliases:
+                    # A literal on a maybe-taken path over a
+                    # function-name alias leaves the callee's value
+                    # path-dependent — the literal's captures
+                    # describe only the literal, so drop BOTH
+                    # records and let `h()` fall back to the opaque
+                    # external callee model.
+                    self.func_aliases.pop(bound_id, None)
+                    self.closure_captures.pop(bound_id, None)
+                    self.pointee_closures.discard(bound_id)
+                elif may_skip and bound_id in self.closure_captures:
                     # A maybe-skipped rebind keeps the old literal's
                     # captures on the path that does not run it —
                     # union like `_store` unions the binding's deps.
@@ -9753,6 +10114,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 else:
                     self.closure_captures[bound_id] = frozenset(captured)
+                    # An unconditional literal bind resolves the name
+                    # to this literal — a function alias an earlier
+                    # `h = G` left behind no longer applies.
+                    self.func_aliases.pop(bound_id, None)
                 if captures_pointer:
                     self.pointee_closures.add(bound_id)
                 elif not may_skip:
@@ -9800,18 +10165,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.bindings.get(ref.binding_id)
             if ref is not None else None
         )
+        package_var = (
+            binding is not None
+            and binding.kind == "variable"
+            and self._package_level(binding)
+        )
         if (
             binding is None
             or binding.type.kind != "function"
             or (
                 ref.binding_id not in locals_
                 and ref.binding_id not in params
+                and not package_var
             )
         ):
-            # Only a function-local callee admits: a package-level
-            # `var Alias = Id` can be reassigned by any caller, so
-            # invoking it is an opaque external call — it keeps the
-            # `indirect_or_selector` record closed like before.
+            # Only a function-local callee or a package-level `var`
+            # admits: a package-level `var Alias = Id` can be
+            # reassigned by any caller, so invoking it is an opaque
+            # external call below — a function-typed package var
+            # reads external state dep-free like a member read and
+            # always records the external effect (its callee is
+            # unknown to the caller).
             raise _Unsupported("unsupported_expression", _span(node))
         bound_mv = self.bound_method_values.get(ref.binding_id)
         if bound_mv is not None:
@@ -9819,7 +10193,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 node, arguments, bound_mv, fn, params, locals_,
                 transfers, count, depth,
             )
+        alias_target = self.func_aliases.get(ref.binding_id)
+        if alias_target is not None:
+            # `h := G` / `h = G` bound this name to a declared
+            # function — `h(args)` resolves through G's own summary
+            # exactly like a `direct_local` call record does.
+            alias_call = self.calls.get(self.node_key(node))
+            return self._direct_local_call(
+                node,
+                alias_call.span if alias_call is not None
+                else FileSpan(
+                    self.current_file,
+                    node.start_byte,
+                    node.end_byte,
+                ),
+                alias_target, arguments, fn, params, locals_,
+                transfers, count, depth,
+            )
         captured = self.closure_captures.get(ref.binding_id)
+        # The callee is opaque when it has no captured literal OR when
+        # it is a parameter: a branch-bound literal under a param
+        # (`if b { f = func()... }`) still leaves the caller's own
+        # callback on the untaken path, so a param callee is always
+        # external-capable.
+        external = captured is None or ref.binding_id in params
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
             # reassignments between the literal and the call move
@@ -9844,11 +10241,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 elif root in params:
                     resolved |= frozenset({params[root]})
             deps = resolved
-        elif ref.binding_id in params:
-            deps = frozenset({params[ref.binding_id]})
         else:
-            deps = locals_.get(ref.binding_id, frozenset())
-        deps |= self.indirect_writes
+            deps = frozenset()
+        # The callee name itself reads its CURRENT deps — `f = g`
+        # reseats `f` to g's dep set, and a branch-bound literal keeps
+        # the parameter ordinal in the joined set. (A local
+        # literal-bound callee skips this: `locals_[h]` holds the
+        # literal-time dep set, which the captured resolution above
+        # already supersedes with the CURRENT ones.)
+        callee_deps: frozenset[int] = frozenset()
+        if external:
+            if ref.binding_id in locals_:
+                callee_deps = locals_[ref.binding_id]
+            elif ref.binding_id in params:
+                callee_deps = frozenset({params[ref.binding_id]})
+        deps |= callee_deps | self.indirect_writes
         # A literal that captures a `chan` parameter may `<-ch` inside —
         # receiving consumes a queue the caller shares, an external
         # effect just like a captured pointer's deref. (A captured
@@ -9865,15 +10272,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and self._scalar_chan_binding(cbid)
             for cbid in (captured or ())
         )
-        if ref.binding_id in self.pointee_closures:
-            # The literal captures a pointer — calling it reads caller
-            # memory like a `*p` read: union the escaped bindings'
-            # current deps exactly as a `*p` read does (the pointer
-            # may alias any `&x`-escaped binding — `p := &a; a = y;
-            # h()` observes `y`), then record the external read on
-            # the closure's own binding identity (a real id in
-            # `known`, so `stale_dependents` stays honest) and mark
-            # effects unknown.
+        if ref.binding_id in self.pointee_closures or external:
+            # The call may read caller memory — a pointer-captured
+            # literal through its capture, an opaque external callee
+            # through a pointer argument — so it reads like a `*p`
+            # read: union the escaped bindings' current deps (the
+            # pointer may alias any `&x`-escaped binding — `p := &a;
+            # a = y; h()` observes `y`).
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
                     deps |= locals_[escaped_id]
@@ -9882,6 +10287,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if (
             ref.binding_id in self.pointee_closures
             or chan_captured_external
+            or external
         ):
             transfers.append(
                 CallTransfer(
@@ -9896,10 +10302,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     imported=True,
                 )
             )
+        if external and binding.type is not None:
+            # An external callee's DECLARED type identity pins like
+            # any signature type: `type MyFn func(...)` in another
+            # file must flag the caller when it regenerates, same
+            # as the var's own binding identity does. Its inner
+            # signature types (`func(N) int64`) ride on the binding's
+            # signature_type_ids — the func fact itself holds none.
+            self._pin_fact_identities(binding.type)
+            self.pinned.update(binding.signature_type_ids)
+        arg_deps: frozenset[int] = frozenset()
         for arg in arguments:
-            deps |= self.expression(
+            arg_deps |= self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
+        deps |= arg_deps
+        if external:
+            # The callee is unknown: it may write `*p = y` through a
+            # pointer argument or send `y` on a channel argument —
+            # fold every argument's deps AND the callee's own read
+            # set (it may write through captured state too) into the
+            # escaped bindings an opaque write could reach and into
+            # indirect writes, like `_ALIAS_FOLD` does.
+            write_deps = arg_deps | callee_deps
+            self.indirect_writes |= write_deps
+            for escaped_id in self.escaped:
+                self._store(
+                    locals_, params, escaped_id, write_deps, True
+                )
         return deps
 
     def _bound_method_call(
