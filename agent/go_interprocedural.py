@@ -6253,7 +6253,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # writes the untaken path delivered there.
                         if fresh_make and (
                             ref.binding_id not in self.chan_aliases
+                            and ref.binding_id
+                            not in self.chan_aliases.values()
                         ):
+                            # No alias resolves THROUGH this name and
+                            # none names its slot — overwriting the
+                            # slot with the fresh queue drops nothing
+                            # a surviving alias still reads.
                             pass
                         else:
                             passthrough = (
@@ -6274,6 +6280,49 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 raise _Unsupported(
                                     "binding_unavailable", _span(node)
                                 )
+                            if call_result:
+                                # `ch = g(q)` — `g` may hand `q`'s
+                                # own queue back through a local
+                                # alias (`r := q; return r`) the
+                                # passthrough probe cannot see, so
+                                # every `chan` argument's root is a
+                                # queue the result may mean: promote
+                                # each to external and union its
+                                # contents into the name's slot like
+                                # `target` below.
+                                call_args = rights[i].child_by_field_name(
+                                    "arguments"
+                                )
+                                if call_args is not None:
+                                    for arg in call_args.named_children:
+                                        if arg.type == "comment":
+                                            continue
+                                        arg_root = (
+                                            self._chan_alias_target(
+                                                arg, locals_, params
+                                            )
+                                        )
+                                        if (
+                                            arg_root is not None
+                                            and arg_root.id
+                                            != ref.binding_id
+                                        ):
+                                            self.external_chan_locals.add(
+                                                arg_root.id
+                                            )
+                                            arg_slot = locals_.get(
+                                                arg_root.id
+                                            )
+                                            if (
+                                                arg_slot is None
+                                                and arg_root.id in params
+                                            ):
+                                                arg_slot = frozenset(
+                                                    {params[arg_root.id]}
+                                                )
+                                            value = value | (
+                                                arg_slot or frozenset()
+                                            )
                             root_before = self._chan_root(
                                 ref.binding_id
                             )
@@ -7207,7 +7256,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # carries that growth back through `scope`.
                         elem_id, elem_base, elem_chan = range_elem
                         extra = (
-                            inner.get(elem_chan, frozenset())
+                            (
+                                inner.get(elem_chan, frozenset())
+                                | (
+                                    self.indirect_writes
+                                    if (
+                                        elem_chan
+                                        in self.external_chan_locals
+                                        or elem_chan in params
+                                    )
+                                    else frozenset()
+                                )
+                            )
                             if elem_chan is not None
                             else self.indirect_writes
                         )
@@ -7233,6 +7293,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dict(self.func_aliases),
                         dict(self.closure_captures),
                         set(self.pointee_closures),
+                        dict(self.chan_aliases),
+                        set(self.external_chan_locals),
                     )
                     resolution_changed = False
                     self._branch_sequence(
@@ -7252,6 +7314,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dict(self.func_aliases),
                         dict(self.closure_captures),
                         set(self.pointee_closures),
+                        dict(self.chan_aliases),
+                        set(self.external_chan_locals),
                     )
                     if resolution_after != resolution_before:
                         resolution_changed = True
@@ -7259,6 +7323,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             frozenset(resolution_after[0].items()),
                             frozenset(resolution_after[1].items()),
                             frozenset(resolution_after[2]),
+                            frozenset(resolution_after[3].items()),
+                            frozenset(resolution_after[4]),
                         )
                         if snapshot in seen_resolutions:
                             # An oscillating resolution (`f, g = g, f`
@@ -7283,8 +7349,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # membership joins the same way — a name
                             # marked pointee-capturing in either state
                             # keeps the pointer-write model.
-                            prev_a, prev_c, prev_p = resolution_before
-                            cur_a, cur_c, cur_p = resolution_after
+                            prev_a, prev_c, prev_p = resolution_before[:3]
+                            cur_a, cur_c, cur_p = resolution_after[:3]
                             for key in cur_a.keys() | prev_a.keys():
                                 if cur_a.get(key) != prev_a.get(key):
                                     self.func_aliases.pop(key, None)
@@ -7356,6 +7422,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         )
                             for key in cur_p ^ prev_p:
                                 self.pointee_closures.add(key)
+                            prev_ca, prev_ce = (
+                                resolution_before[3],
+                                resolution_before[4],
+                            )
+                            cur_ca, cur_ce = (
+                                resolution_after[3],
+                                resolution_after[4],
+                            )
+                            for key in cur_ca.keys() | prev_ca.keys():
+                                if cur_ca.get(key) != prev_ca.get(key):
+                                    # An alternating channel alias
+                                    # means the name may hold either
+                                    # queue — detach to the external
+                                    # union like a conditional
+                                    # rebind does.
+                                    self.chan_aliases.pop(key, None)
+                                    self.external_chan_locals.add(
+                                        key
+                                    )
+                            self.external_chan_locals |= (
+                                cur_ce | prev_ce
+                            )
                         else:
                             seen_resolutions.add(snapshot)
                     changed = (
@@ -7825,13 +7913,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 joined: dict[str, frozenset[int]] = {}
                 joined_ptr: dict[str, frozenset[int]] = {}
                 ptr_entry = dict(self._ptr_deps)
+                chan_alias_entry = dict(self.chan_aliases)
+                chan_external_entry = set(self.external_chan_locals)
+                clause_aliases: list[dict] = []
+                clause_externals: list[set] = []
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
                     # `_branch_sequence` rewrites the shared
                     # `_ptr_deps` map in place — swap in a fresh
                     # entry copy per clause or one alternative's
                     # pointer stores (`p = q`) leak into the next.
+                    # The channel resolution maps mutate the same
+                    # way — a rebind in `case A` must not detach
+                    # `<-ch` inside `case B`.
                     self._ptr_deps = dict(ptr_entry)
+                    self.chan_aliases = dict(chan_alias_entry)
+                    self.external_chan_locals = set(chan_external_entry)
                     if receive is not None:
                         lefts, recv, recv_deps = receive
                         self._select_receive_store(
@@ -7860,7 +7957,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         joined_ptr[bid] = joined_ptr.get(
                             bid, frozenset()
                         ) | bdeps
+                    clause_aliases.append(dict(self.chan_aliases))
+                    clause_externals.append(
+                        set(self.external_chan_locals)
+                    )
+                # Post-join a channel name keeps its alias only where
+                # every clause's map agrees; a disagreement means it
+                # may hold either queue — the same "either queue"
+                # union a conditional rebind resolves to external.
+                self.external_chan_locals = set(chan_external_entry)
+                for ext in clause_externals:
+                    self.external_chan_locals |= ext
+                detached_queues: dict[str, set] = {}
+                self.chan_aliases = {}
+                for bid in {
+                    k for m in clause_aliases for k in m
+                } | set(chan_alias_entry):
+                    alias_values = {m.get(bid) for m in clause_aliases}
+                    if len(alias_values) == 1:
+                        only = alias_values.pop()
+                        if only is not None:
+                            self.chan_aliases[bid] = only
+                    else:
+                        self.external_chan_locals.add(bid)
+                        detached_queues[bid] = {
+                            v for v in alias_values if v is not None
+                        }
                 self._join(locals_, joined, params)
+                # A maybe-detached name's slot also unions every
+                # queue it could still mean — a case that kept the
+                # old alias sees that queue's contents on a later
+                # receive.
+                for bid, tgts in detached_queues.items():
+                    for tgt in tgts:
+                        locals_[bid] = (
+                            locals_.get(bid, frozenset())
+                            | joined.get(tgt, frozenset())
+                        )
                 for bid, bdeps in joined_ptr.items():
                     base = ptr_entry.get(bid)
                     if base is None:
@@ -8847,16 +8980,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 imported=True,
                             )
                         )
-                        return (
-                            (
+                        slot = locals_.get(binding.id)
+                        if slot is None:
+                            # A rebound name keeps its merged queue
+                            # set in `locals_` (`if c { ch = q }` —
+                            # either queue may serve the receive);
+                            # only a never-rebound param reads its
+                            # bare ordinal.
+                            slot = (
                                 frozenset({params[binding.id]})
                                 if binding.id in params
-                                else locals_.get(
-                                    binding.id, frozenset()
-                                )
+                                else frozenset()
                             )
-                            | self.indirect_writes
-                        )
+                        return slot | self.indirect_writes
                     return locals_.get(binding.id, frozenset())
                 raise _Unsupported("unsupported_operator", _span(node))
             if kind == "unary_expression" and operator.type == "&":
