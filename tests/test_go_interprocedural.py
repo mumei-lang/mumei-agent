@@ -17127,3 +17127,27 @@ def test_computed_func_call_constant_index_is_dep_free(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_func_field_stored_literal_resolves_captures_at_call(
+    go_types_helper,
+):
+    # `s.f = func() int64 { return x }; x = y; s.f()` — the slot's
+    # stored literal re-resolves its captured binding at the CALL
+    # site, so the result carries y's deps, not just the frozen
+    # bind-time set.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ f func() int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\ts := S{}\n"
+        "\ts.f = func() int64 { return x }\n"
+        "\tx = y\n"
+        "\treturn s.f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})

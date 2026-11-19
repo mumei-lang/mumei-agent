@@ -9968,6 +9968,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if index is not None and index < len(names):
                 name_node = names[index]
+        bound_id: str | None = None
         if name_node is not None and name_node.type == "identifier":
             binding = self.bindings_by_span.get(
                 self.node_key(name_node)
@@ -9981,40 +9982,56 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else None
                 )
             )
-            if bound_id is not None:
-                may_skip = self._conditional or self._may_skip > 0
-                if may_skip and bound_id in self.func_aliases:
-                    # A literal on a maybe-taken path over a
-                    # function-name alias leaves the callee's value
-                    # path-dependent — the literal's captures
-                    # describe only the literal, so drop BOTH
-                    # records and let `h()` fall back to the opaque
-                    # external callee model.
-                    self.func_aliases.pop(bound_id, None)
-                    self.closure_captures.pop(bound_id, None)
-                    self.pointee_closures.discard(bound_id)
-                elif may_skip and bound_id in self.closure_captures:
-                    # A maybe-skipped rebind keeps the old literal's
-                    # captures on the path that does not run it —
-                    # union like `_store` unions the binding's deps.
-                    self.closure_captures[bound_id] = (
-                        self.closure_captures[bound_id]
-                        | frozenset(captured)
-                    )
-                else:
-                    self.closure_captures[bound_id] = frozenset(captured)
-                    # An unconditional literal bind resolves the name
-                    # to this literal — a function alias an earlier
-                    # `h = G` left behind no longer applies.
-                    self.func_aliases.pop(bound_id, None)
-                if captures_pointer:
-                    self.pointee_closures.add(bound_id)
-                elif not may_skip:
-                    # Rebinding `h` to a literal that captures no
-                    # pointer clears the flag the earlier literal set
-                    # — a conditional rebind keeps it for the path
-                    # that keeps the old literal.
-                    self.pointee_closures.discard(bound_id)
+        elif (
+            name_node is not None
+            and name_node.type == "selector_expression"
+        ):
+            # `s.f = func() { …x… }` stores the literal into a
+            # func-typed FIELD — record under the field member's
+            # identity so the opaque `s.f(...)` call can re-resolve
+            # the captures at call time.
+            member = self._field_member(name_node)
+            if (
+                member is not None
+                and member.kind in {"var", "variable"}
+                and member.type is not None
+                and member.type.kind == "function"
+            ):
+                bound_id = member.id
+        if bound_id is not None:
+            may_skip = self._conditional or self._may_skip > 0
+            if may_skip and bound_id in self.func_aliases:
+                # A literal on a maybe-taken path over a
+                # function-name alias leaves the callee's value
+                # path-dependent — the literal's captures
+                # describe only the literal, so drop BOTH
+                # records and let `h()` fall back to the opaque
+                # external callee model.
+                self.func_aliases.pop(bound_id, None)
+                self.closure_captures.pop(bound_id, None)
+                self.pointee_closures.discard(bound_id)
+            elif may_skip and bound_id in self.closure_captures:
+                # A maybe-skipped rebind keeps the old literal's
+                # captures on the path that does not run it —
+                # union like `_store` unions the binding's deps.
+                self.closure_captures[bound_id] = (
+                    self.closure_captures[bound_id]
+                    | frozenset(captured)
+                )
+            else:
+                self.closure_captures[bound_id] = frozenset(captured)
+                # An unconditional literal bind resolves the name
+                # to this literal — a function alias an earlier
+                # `h = G` left behind no longer applies.
+                self.func_aliases.pop(bound_id, None)
+            if captures_pointer:
+                self.pointee_closures.add(bound_id)
+            elif not may_skip:
+                # Rebinding `h` to a literal that captures no
+                # pointer clears the flag the earlier literal set
+                # — a conditional rebind keeps it for the path
+                # that keeps the old literal.
+                self.pointee_closures.discard(bound_id)
         return deps
 
     def _bound_closure_call(
@@ -10399,6 +10416,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 deps |= locals_[escaped_id]
             elif escaped_id in params:
                 deps |= frozenset({params[escaped_id]})
+        captured = self.closure_captures.get(target_id)
+        if captured is not None:
+            # `s.f = func() { …x… }` stored a literal into this slot
+            # — re-resolve each captured binding at the CALL site so
+            # a `x = y` reseat between the store and `s.f()` reaches
+            # the result (the frozen bind-time set would report the
+            # old deps). Union rather than replace: the field may
+            # hold another value along paths this summary cannot
+            # see.
+            for cbid in captured:
+                root = (
+                    self._chan_root(cbid)
+                    if self._is_chan_binding(cbid)
+                    else cbid
+                )
+                if root in locals_:
+                    deps |= locals_[root]
+                    if root in self.external_chan_locals:
+                        deps |= self.indirect_writes
+                elif root in params:
+                    deps |= frozenset({params[root]})
         if pin_fact is not None:
             self._pin_fact_identities(pin_fact)
             member_or_binding = self.members.get(
