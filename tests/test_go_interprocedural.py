@@ -16495,3 +16495,25 @@ def test_alias_result_pins_callee_signature(go_types_helper):
         and source.encode()[b.span.start : b.span.end] == b"N"
     )
     assert n_id in result.pinned
+
+
+def test_func_alias_cleared_by_non_identifier_rhs(go_types_helper):
+    # `h = (f)` rebinds h to a value the alias cannot resolve —
+    # the call falls back to the opaque external model instead of
+    # resolving through the stale G target.
+    files = {
+        "a.go": "package p\n"
+        "func G(v int64) int64 { return v }\n"
+        "var f func(int64) int64\n"
+        "func F(x int64) int64 {\n"
+        "\th := G\n"
+        "\th = (f)\n"
+        "\treturn h(x)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})

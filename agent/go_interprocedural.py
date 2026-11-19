@@ -5110,6 +5110,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding.id, src_id, aliases_before, params,
                         conditional,
                     )
+                else:
+                    # A non-identifier RHS (`h := (f)`, `h := f()`)
+                    # stores a value the alias model cannot resolve —
+                    # the declared-function target no longer holds on
+                    # every path, so any earlier alias on a reused
+                    # name drops. Captures/pointee stay: keeping them
+                    # only widens the external model, never narrows
+                    # it.
+                    self.func_aliases.pop(binding.id, None)
                 # `cp := st` — a copied anonymous struct shares st's
                 # declared type, so cp's fields follow st's anchor,
                 # not cp's own name. `p := G(x)` declares its fields
@@ -5444,6 +5453,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.anon_struct_field_names.pop(
                                     binding.id, None
                                 )
+                    else:
+                        # `var h = (f)` / `var h = f()` — same
+                        # non-identifier drop the `:=` path applies.
+                        self.func_aliases.pop(binding.id, None)
                     # `var p = G(x)` — an anonymous-struct result's
                     # fields live inside G's signature literal, like
                     # `p := G(x)`; anchor the field window there.
@@ -6326,6 +6339,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         ref.binding_id, src_id, aliases_before,
                         params, conditional,
                     )
+                else:
+                    # `h = (f)` / `h = f()` — a non-identifier RHS
+                    # leaves the name holding a value the alias
+                    # cannot resolve; an unconditional store loses
+                    # the target outright and a maybe-skipped one
+                    # leaves it path-dependent, so the alias drops
+                    # either way.
+                    self.func_aliases.pop(ref.binding_id, None)
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
