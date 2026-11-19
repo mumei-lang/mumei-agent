@@ -12120,6 +12120,22 @@ def test_immediate_func_literal_capture_resolves_after_arg_writes(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_immediate_func_literal_chan_arg_recv_external(
+    go_types_helper,
+):
+    # `func(ch) { <-ch }(q)` — a receive on a channel passed as an
+    # argument reads an external queue the caller shares: records
+    # the same imported effect a captured channel would.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64) int64 {\n"
+        "\treturn func(ch chan int64) int64 { return <-ch }(q)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.effects == "unknown"
+
+
 def test_immediate_func_literal_internal_call_closed(
     go_types_helper,
 ):

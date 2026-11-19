@@ -11240,26 +11240,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ),
             None,
         )
-        chan_external = next(
-            (
-                cbid
-                for cbid in captured
-                if self._scalar_chan_binding(cbid)
-                and (
-                    self._chan_root(cbid) in params
-                    or self._chan_root(cbid)
-                    in self.external_chan_locals
-                )
-            ),
-            None,
-        )
+        # `<-ch` inside the literal (a unary receive, not a statement)
+        # may pull from an external queue — one captured by name, or
+        # one passed in as an argument (`func(ch) { <-ch }(q)`).
+        external_chans: set[str] = set()
+        for cbid in captured:
+            if self._scalar_chan_binding(cbid):
+                root = self._chan_root(cbid)
+                if (
+                    root in params
+                    or root in self.external_chan_locals
+                ):
+                    external_chans.add(root)
+        for arg in arguments:
+            cb = self._chan_binding(arg, locals_, params)
+            root = cb.id if cb is not None else None
+            if root is not None and (
+                root in params or root in self.external_chan_locals
+            ):
+                external_chans.add(root)
+            else:
+                ext = self._external_chan_operand(arg)
+                if ext is not None:
+                    external_chans.add(ext[0])
         if captures_pointer:
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
                     deps |= locals_[escaped_id]
                 elif escaped_id in params:
                     deps |= frozenset({params[escaped_id]})
-        if captures_pointer or chan_external is not None:
+        for target in (
+            ([pointer_capture] if captures_pointer else [])
+            + sorted(external_chans)
+        ):
             transfers.append(
                 CallTransfer(
                     FileSpan(
@@ -11267,19 +11280,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         node.start_byte,
                         node.end_byte,
                     ),
-                    (
-                        self._chan_root(chan_external)
-                        if chan_external is not None
-                        else pointer_capture
-                    ),
+                    target,
                     (),
                     frozenset(),
                     imported=True,
                 )
-            )
-        for arg in arguments:
-            deps |= self.expression(
-                arg, fn, params, locals_, transfers, count, depth + 1
             )
         return deps
 
