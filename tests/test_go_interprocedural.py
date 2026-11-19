@@ -24946,7 +24946,7 @@ def test_range_over_pointer_to_array_pair_rejoins_writes(
         "func F(b int64, p *[4]int64) int64 {\n"
         "\tvar r int64\n"
         "\tfor _, v := range p {\n"
-        "\t\t(*p)[0] = b\n"
+        "\t\t(*p)[1] = b\n"
         "\t\tr += v\n"
         "\t}\n"
         "\treturn r\n}\n"
@@ -25038,4 +25038,31 @@ def test_nested_map_write_outer_index_is_not_stored_key(
     )
     assert result.available
     assert result.return_dependencies == frozenset({1, 3})
+
+def test_range_over_deref_pointer_to_array_reads_copy(
+    go_types_helper,
+):
+    # `for _, v := range *p` evaluates `*p` once — a start-time
+    # COPY — so a mid-iteration store through the same pointer
+    # never reaches `v` (unlike the live `range p` sugar).
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
