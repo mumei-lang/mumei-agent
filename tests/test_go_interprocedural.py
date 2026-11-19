@@ -16016,3 +16016,40 @@ def test_select_receive_multi_lhs_extras_evaluate_pre_state(
     # path keeps `i`'s own {1}. Post-state evaluation would feed
     # `Set` the received deps {0} and pollute the result to {0,1}.
     assert result.return_dependencies == frozenset({1})
+
+
+def test_select_pointer_store_does_not_leak_into_later_clause(
+    go_types_helper,
+):
+    # `p = q` inside one case reseats p only on that alternative —
+    # `_branch_sequence` rewrites the shared `_ptr_deps` in place,
+    # so the map must be swapped back for the next clause or
+    # `p.V = 0` in `default:` resolves p against q's deps.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        "func F(p *S, q *S, ch chan int64) int64 {\n"
+        "\tselect {\n"
+        "\tcase <-ch:\n"
+        "\t\tp = q\n"
+        "\tdefault:\n"
+        "\t\tp.V = 0\n"
+        "\t\treturn p.V\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # The `p.V = 0` store inside `default:` attributes p's OWN dep
+    # {0} — pre-fix it resolved the leaked `p = q` reseat to {1}.
+    store_start = files["a.go"].index("p.V = 0")
+    store_read = next(
+        r for r in result.statement_reads
+        if r.span.start == store_start
+    )
+    assert store_read.deps == frozenset({0})
+    assert result.return_dependencies == frozenset({0})

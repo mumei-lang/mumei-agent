@@ -7385,9 +7385,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # single environment and join it once.
                 joined: dict[str, frozenset[int]] = {}
                 joined_ptr: dict[str, frozenset[int]] = {}
+                ptr_entry = dict(self._ptr_deps)
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
-                    ptr_branch = dict(self._ptr_deps)
+                    # `_branch_sequence` rewrites the shared
+                    # `_ptr_deps` map in place — swap in a fresh
+                    # entry copy per clause or one alternative's
+                    # pointer stores (`p = q`) leak into the next.
+                    self._ptr_deps = dict(ptr_entry)
                     if receive is not None:
                         lefts, recv, recv_deps = receive
                         self._select_receive_store(
@@ -7412,12 +7417,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         joined[bid] = joined.get(
                             bid, frozenset()
                         ) | bdeps
-                    for bid, bdeps in ptr_branch.items():
+                    for bid, bdeps in self._ptr_deps.items():
                         joined_ptr[bid] = joined_ptr.get(
                             bid, frozenset()
                         ) | bdeps
                 self._join(locals_, joined, params)
-                self._join_ptr(joined_ptr, params)
+                for bid, bdeps in joined_ptr.items():
+                    base = ptr_entry.get(bid)
+                    if base is None:
+                        base = (
+                            frozenset({params[bid]})
+                            if bid in params
+                            else frozenset()
+                        )
+                    ptr_entry[bid] = base | bdeps
+                self._ptr_deps = ptr_entry
             finally:
                 self.frames.pop()
             return
