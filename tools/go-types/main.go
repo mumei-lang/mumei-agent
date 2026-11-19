@@ -284,16 +284,39 @@ func scalarChanElemOK(t types.Type) bool {
 	return ok && (b.Info()&types.IsInteger != 0 || b.Kind() == types.Bool)
 }
 
+// chanChanElemOK: `chan (chan T)` whose inner element T is scalar —
+// a channel-of-channels one level deep. The consumer treats the outer
+// queue as external state: ops on it record imported effects, a sent
+// channel is promoted external, and a received channel binds an
+// external name. Deeper nesting (`chan chan chan T`) stays closed.
+func chanChanElemOK(t types.Type) bool {
+	outer, ok := t.Underlying().(*types.Chan)
+	if !ok {
+		return false
+	}
+	return scalarChanElemOK(outer.Elem())
+}
+
+// funcResultOK: a `func` result — the value carries no scalar deps;
+// the consumer binds the name as an opaque func value whose calls
+// resolve through the func-value path, like a `func` parameter does.
+func funcResultOK(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Signature)
+	return ok
+}
+
 // importedResultsOK admits a signature when every result is
-// scalar/pointer or a scalar-element `chan` — a multi-result callee
-// like `func G() (chan int64, int64)` whose chan slot the consumer
-// binds as an external queue like `ch := lib.G()`. `chan chan T` and
-// other composites stay `external_or_bodyless` at any position.
+// scalar/pointer, a scalar-element `chan`, a `chan chan T` one
+// level deep, or a `func` type — a multi-result callee like
+// `func G() (chan int64, int64)` whose chan slot the consumer binds
+// as an external queue like `ch := lib.G()`, or whose func slot binds
+// an opaque func value like `f := lib.Mk()`. Deeper nesting and other
+// composites stay `external_or_bodyless` at any position.
 func importedResultsOK(sig *types.Signature) bool {
 	res := sig.Results()
 	for i := 0; i < res.Len(); i++ {
 		t := res.At(i).Type()
-		if !scalarResultOK(t) && !scalarChanElemOK(t) {
+		if !scalarResultOK(t) && !scalarChanElemOK(t) && !funcResultOK(t) && !chanChanElemOK(t) {
 			return false
 		}
 	}
@@ -303,7 +326,7 @@ func importedResultsOK(sig *types.Signature) bool {
 // singleScalarChanResult admits a signature whose single result is a
 // `chan T` with a scalar (integer/boolean) element — `ch := lib.G()`
 // binds a callee-produced queue the consumer models like the local
-// `ch := g()` case. `chan chan T` and multi-result tuples carrying a
+// `ch := g()` case. Deeper nesting and multi-result tuples carrying a
 // channel stay closed.
 func singleScalarChanResult(sig *types.Signature) bool {
 	res := sig.Results()

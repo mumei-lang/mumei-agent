@@ -2677,12 +2677,40 @@ the chan name's position binds an external queue,
 and the call's `chan` arguments join the external
 model since the opaque callee may return one — the
 `var` and plain-assignment forms admit identically,
-while a `chan chan T` or other non-scalar result at
-any position stays closed. An imported method
-declares the same way: `ch := st.M()` or `ch, n :=
-st.M()` admits when `M`'s signature carries a
-scalar-element `chan` at the bound slot (the call
-records `direct_import` marked `method`). Still
+while a non-scalar element other than
+`chan chan T` at any position stays closed. An
+imported method declares the same way: `ch := st.M()`
+or `ch, n := st.M()` admits when `M`'s signature
+carries a scalar-element `chan` at the bound slot
+(the call records `direct_import` marked `method`).
+One level of channel-of-channels admits under the
+external queue model: a `chan chan T` parameter or
+result (local or imported), a package-level `var cc
+chan chan T`, or a `cc := G()` / `cc, n := G()`
+bound name joins the external model — `cc <- ch`
+records an imported effect and promotes the sent
+channel's queue external, `c := <-cc` binds the
+received channel as an external name (dep-free like
+any external receive), and `close(cc)` records the
+same imported effect as on a scalar `chan`
+parameter. The follow-on forms admit identically:
+`cc = G()` reseats a `chan chan` name to the
+callee-produced external queue (conditional or not
+— the unioned slot covers either meaning), `var cc
+= G()` and `var cc, n = G()` bind like the
+short-decl forms, `for c := range cc` (and `for c =
+range cc` over an existing scalar-`chan` name)
+binds each element as an external channel like `c
+:= <-cc`, and the comma-ok receives `c, ok :=
+<-cc`, `var c, ok = <-cc` and `c, _ = <-cc` reseat
+or bind the value slot to the received external
+queue. Deeper nesting (`chan chan chan T`), a
+local `make(chan chan T)` or `var cc chan chan T`,
+a `chan chan` alias reseat (`cc = q`), and a
+`make(chan chan T)` rebind all stay closed — a
+channel value flowing between two local queues
+would alias queues the conflated dep set cannot
+track. Still
 closed: non-scalar elements — while `select` now
 admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
@@ -2786,7 +2814,8 @@ that target a shared queue stay closed. A function name
 read in a call's argument list admits dep-free (the
 possible invocation folds through the call's own record);
 a name in any other non-store position
-(return, operand) stays closed),
+(operand) stays closed — while a `return` of a function
+name admits dep-free under the func-result signature below),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies
@@ -2795,6 +2824,19 @@ beyond the TS-style host-declared resolver contract — Rust resolves
 `summarize_*(source, resolver, source_path)`/`--resolve-modules`
 shape; existing function-local dataflow stays
 authoritative.
+A `func`-typed *result* now admits at the signature gate like a
+`func` parameter: the value carries no scalar deps, `return G` on
+a declared function reads dep-free, and a literal return
+(`return func() int64 { return x }`) lets the literal's captured
+deps ride the result's dep set — so `f := mk(x)` binds an opaque
+func value whose calls resolve through the ordinary func-value
+path (`var f = mk()` and `f = mk()` admit identically, and a
+multi-result signature with a func slot unpacks the same way).
+`return nil` and a call-result callee (`mk()()`) stay closed.
+An imported func-result callee (`f := lib.Mk()`) records
+`direct_import` and binds an opaque func value the same way —
+see the C06 imported-callee section below.
+
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
 
@@ -3270,7 +3312,15 @@ is therefore not a gap a resolved report emits. `direct_import` is only
 classified for callees whose results are all scalar — a composite
 result at any arity stays `external_or_bodyless` and fails closed (a
 `range` over a composite operand would break the integer-only range
-model). A multi-valued scalar callee is admitted and declares its
+model). A `func`-typed result admits the same way a `func` parameter
+does: `f := lib.Mk()` binds an opaque func value whose calls resolve
+through the func-value path, and a multi-result signature carrying a
+func slot (`f, n := lib.Mk()`) binds the slot opaquely beside the
+conflated scalar results. A generic callee still rejects the same
+way an instantiated generic always has — `lib.Mk[int64]()` (explicit
+type arguments) and inferred instantiations fail the
+generic-instantiation gate regardless of the result's kind, func or
+scalar. A multi-valued scalar callee is admitted and declares its
 arity on the call record; see the C06 multi-valued imported results
 slice below. A variadic callee (`lib.W(x, y)`, `WV(x, y)`) admits the
 same way — every argument is an independent expression whose
