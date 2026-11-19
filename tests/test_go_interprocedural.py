@@ -16573,3 +16573,27 @@ def test_func_alias_invalidation_reshapes_loop_fixed_point(
     # carry them beside {x} and the loop's own writes.
     assert 0 in result.return_dependencies
     assert 4 in result.return_dependencies
+
+
+def test_loop_keeps_effects_from_alias_resolved_pass(go_types_helper):
+    # Pass 1 resolves `h(ch, x)` through the effectful callee E; the
+    # `h = pure-literal` rebind then changes resolution, so a second
+    # pass resolves a different (pure) target. The pass-join must not
+    # drop pass 1's effectful call record — the loop really can run E.
+    files = {
+        "a.go": "package p\n"
+        "func E(ch chan int64, v int64) int64 { ch <- v; return v }\n"
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\th := E\n"
+        "\tfor i := int64(0); i < 1; i = i + 1 {\n"
+        "\t\th(ch, x)\n"
+        "\t\th = func(c chan int64, b int64) int64 { return b }\n"
+        "\t}\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"

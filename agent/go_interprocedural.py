@@ -6994,11 +6994,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             update, fn, params, inner, transfers, count,
                             deps, saw_return, conditional,
                         )
-                    changed = self.indirect_writes != iw_before
-                    changed = changed or resolution_before != (
+                    resolution_after = (
                         dict(self.func_aliases),
                         dict(self.closure_captures),
                         set(self.pointee_closures),
+                    )
+                    resolution_changed = (
+                        resolution_after != resolution_before
+                    )
+                    changed = (
+                        self.indirect_writes != iw_before
+                        or resolution_changed
                     )
                     for binding_id, binding_deps in inner.items():
                         if binding_id in scope:
@@ -7014,8 +7020,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         break
                     # Keep only the last pass's transfers: argument
                     # dependency sets widen across passes and earlier
-                    # copies are stale.
-                    del transfers[mark:]
+                    # copies are stale. A pass that changed the
+                    # resolution tables is different — its records can
+                    # name a target no later pass reaches (an effectful
+                    # alias resolved before a `h = pureLit` rebind), so
+                    # dropping them would lose those effects.
+                    if not resolution_changed:
+                        del transfers[mark:]
                     passes += 1
                     # `indirect_writes` is a tracked slot outside
                     # `scope` — a body-only `GC <- x`/`p <- x` send
