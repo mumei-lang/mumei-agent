@@ -15567,7 +15567,8 @@ def test_struct_argument_observes_callee_writes(go_types_helper):
 def test_anonymous_struct_rebind_keeps_field_window(go_types_helper):
     # `cp, z := struct{ V int64 }{...}, int64(0)` — identical anon
     # literals unify in the type checker, so `cp.V` resolves to the
-    # first literal's field; the window's name match keeps it direct.
+    # first literal's field; the anchored literal's direct names
+    # keep it direct.
     result = named(
         *unit(
             go_types_helper,
@@ -15597,3 +15598,21 @@ def test_anonymous_struct_var_rebind_keeps_field_window(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_promoted_name_not_direct(go_types_helper):
+    # `s.V` on `struct{ A struct{ V int64 }; *Q }` resolves to Q's
+    # promoted V — it shares its name with the NESTED literal's
+    # field, but the direct-name set of the outer literal is
+    # {"A", "Q"}, so the write stays closed instead of folding into
+    # caller-visible locals.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Q struct{ V int64 }\n"
+            "func F(x int64, s struct{ A struct{ V int64 }; *Q }) int64 {\n"
+            "\ts.V = x\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert not result.available
