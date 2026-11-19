@@ -7695,6 +7695,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # container's name; the store loop unions rather than
             # copying like a plain rebind would.
             func_elem_targets: set[int] = set()
+            # An element store's holder set resolves like the
+            # destination operand itself — against the pre-state —
+            # but a name an earlier parallel store re-shared
+            # (`a2, a[0] = a, f`) joins the group only at store
+            # landing time. Snapshot the resolution-time members;
+            # the store unions them with the landing-time group so
+            # both `a, a[0] = b, f` (old sharers keep the written
+            # array) and the re-share case reach the right names.
+            func_elem_holders: dict[int, frozenset[str]] = {}
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -8019,6 +8028,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     refs.append((ref, True, False))
                     func_elem_targets.add(len(refs) - 1)
+                    func_elem_holders[len(refs) - 1] = frozenset(
+                        {ref.binding_id}
+                        | self._func_elem_groups.get(
+                            ref.binding_id, set()
+                        )
+                    )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
             # Go assignments run in two phases — destination operands
@@ -8702,12 +8717,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # stored value's deps join each sharer's set like
                 # the container's own store did.
                 if i in func_elem_targets:
-                    for holder_id in self._func_elem_groups.get(
+                    # Resolution-time sharers plus landing-time
+                    # group — a parallel reseat (`a, a[0] = b, f`)
+                    # detaches `a` from the aliases the write still
+                    # reaches, and a parallel copy (`a2, a[0] = a,
+                    # f`) shares `a` only after the LHS resolved.
+                    elem_holders = func_elem_holders.get(
+                        i, frozenset({ref.binding_id})
+                    ) | self._func_elem_groups.get(
                         ref.binding_id, set()
-                    ):
+                    )
+                    for holder_id in elem_holders:
+                        # Accumulate like the container's own
+                        # element store — replacing would wipe the
+                        # deps `append` elements already landed.
                         self._store(
-                            locals_, params, holder_id, value,
-                            conditional,
+                            locals_, params, holder_id, value, True
                         )
                 # `fs[i] = f` — a store into a func-element
                 # container unions the stored value's records into
@@ -8752,12 +8777,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # Names sharing the container's backing
                         # (`fs2 := fs`) read the same elements —
                         # the store lands in every sharer's records.
-                        for holder_id in (
-                            {ref.binding_id}
-                            | self._func_elem_groups.get(
-                                ref.binding_id, set()
-                            )
-                        ):
+                        for holder_id in elem_holders:
                             if src_id in captures_before:
                                 self.closure_captures[holder_id] = (
                                     self.closure_captures.get(
@@ -8789,9 +8809,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and len(lefts) == len(rights)
                     and rights[i].type == "func_literal"
                 ):
-                    for holder_id in self._func_elem_groups.get(
-                        ref.binding_id, set()
-                    ):
+                    for holder_id in elem_holders:
                         self._adopt_element_records(
                             ref.binding_id, holder_id
                         )
