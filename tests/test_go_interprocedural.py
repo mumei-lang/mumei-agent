@@ -24747,3 +24747,35 @@ def test_call_result_range_parens_slice_callee(go_types_helper):
     )
     assert result.available
     assert 0 in result.return_dependencies
+
+
+def test_call_result_index_read_comma_ok_parens_callee(go_types_helper):
+    # `v, ok := (lib.M)(a)["k"]` — the parenthesized selector callee
+    # resolves through `_call_result_fact`, so the comma-ok pair binds
+    # like the bare form and the callee identity is recorded.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tv, ok := (lib.M)(a)[\"k\"]\n"
+        "\t_ = ok\n"
+        "\treturn v\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(x int64) map[string]int64 {\n"
+            "\treturn map[string]int64{\"k\": x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+    assert all(t.target for t in result.calls)
