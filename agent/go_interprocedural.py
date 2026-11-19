@@ -1819,6 +1819,18 @@ class _Builder:
                 if arg is not None and arg.type == "identifier":
                     arg_ref = self.references.get(self.node_key(arg))
                     if arg_ref is not None:
+                        arg_binding = self.bindings.get(
+                            arg_ref.binding_id
+                        )
+                        if (
+                            arg_binding is not None
+                            and arg_binding.type is not None
+                            and arg_binding.type.kind == "array"
+                        ):
+                            # An array argument copies into the
+                            # callee's parameter — the result can
+                            # never alias `a`'s backing.
+                            continue
                         toks |= self._opaque_container_tokens.get(
                             arg_ref.binding_id, frozenset()
                         )
@@ -1827,17 +1839,36 @@ class _Builder:
             ref = self.references.get(self.node_key(rhs))
             if ref is None or ref.binding_id is None:
                 return None
-            toks = self._opaque_container_tokens.get(ref.binding_id)
-            if not toks:
-                return None
             binding = self.bindings.get(ref.binding_id)
             if (
-                binding is not None
-                and binding.type is not None
-                and binding.type.kind in {"slice", "map"}
+                binding is None
+                or binding.type is None
+                or binding.type.kind not in {"slice", "array", "map"}
             ):
+                return None
+            elem = getattr(binding.type, "elem", None)
+            if elem is not None and elem.kind in {
+                "function",
+                "chan",
+            }:
+                # Func-element and channel containers have their own
+                # backing models — never mint an opaque token for one.
+                return None
+            if binding.type.kind == "array":
+                # `s = a` copies the array — the reseat never
+                # aliases `a`'s backing, so the destination mints
+                # its own token.
+                return frozenset({self.node_key(rhs)})
+            toks = self._opaque_container_tokens.get(ref.binding_id)
+            if toks:
                 return toks
-            return frozenset({self.node_key(rhs)})
+            # `s = u` where `u` binds a plain local container: the
+            # two names now share `u`'s backing, so mint a backing
+            # token and hand it to `u` as well — element stores
+            # through either name reach the other like `s2 := s`.
+            fresh = frozenset({self.node_key(rhs)})
+            self._opaque_container_tokens[ref.binding_id] = fresh
+            return fresh
         return None
 
     def _opaque_call_container(
@@ -18141,12 +18172,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ref is not None
                     and ref.binding_id
                     in self._opaque_container_tokens
+                    and (
+                        self.bindings.get(ref.binding_id) is None
+                        or self.bindings.get(
+                            ref.binding_id
+                        ).type.kind
+                        != "array"
+                    )
                 ):
                     # `lib.Update(s, b)` — a tracked opaque
                     # container's backing shares caller memory with
                     # the callee: `q[0] = b` inside it lands in
                     # every sharer's set like a caller-side `s[i] =
                     # b`, and broadcasts like escaped memory does.
+                    # An array-typed name is excluded — the callee
+                    # receives a copy, so its writes cannot reach
+                    # the caller's `a`.
                     for holder_id in self._opaque_container_sharers(
                         ref.binding_id
                     ):
