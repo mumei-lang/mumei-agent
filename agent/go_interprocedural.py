@@ -3242,6 +3242,55 @@ member, or one explicit dereference of one (`(*t).F` — the same
         member = self.members.get(target_id)
         return member is not None and self._scalar_chan_fact(member.type)
 
+    def _chan_call_args(self, node: Any) -> Any | None:
+        """The call's `argument_list` node, unwrapping parens —
+        `ch, _ = (g(q))` must still see `q`."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        return inner.child_by_field_name("arguments")
+
+    def _promote_chan_call_args(
+        self,
+        call_node: Any,
+        exclude_id: str,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> frozenset[int]:
+        """Promote every chan-typed argument's root queue to
+        external and return the union of their contents — the
+        callee may hand one of them back through a local alias
+        (`r := q; return r`) the passthrough probe cannot see, so
+        sends on the result name broadcast into those queues."""
+        call_args = self._chan_call_args(call_node)
+        deps: frozenset[int] = frozenset()
+        if call_args is not None:
+            for arg in call_args.named_children:
+                if arg.type == "comment":
+                    continue
+                arg_root = self._chan_alias_target(arg, locals_, params)
+                if (
+                    arg_root is not None
+                    and arg_root.id != exclude_id
+                ):
+                    self.external_chan_locals.add(arg_root.id)
+                    arg_slot = locals_.get(arg_root.id)
+                    if (
+                        arg_slot is None
+                        and arg_root.id in params
+                    ):
+                        arg_slot = frozenset({params[arg_root.id]})
+                    deps = deps | (arg_slot or frozenset())
+        return deps
+
     def _chan_result_call(self, node: Any) -> Any:
         """The callee `node` calls when `ch := f()` binds a
         callee-produced queue — `f` declares one scalar-element
@@ -6729,43 +6778,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # each to external and union its
                                 # contents into the name's slot like
                                 # `target` below.
-                                call_args = (
-                                    rights[i]
-                                    if len(lefts) == len(rights)
-                                    else rights[0]
-                                ).child_by_field_name(
-                                    "arguments"
+                                value = value | (
+                                    self._promote_chan_call_args(
+                                        rights[i]
+                                        if len(lefts) == len(rights)
+                                        else rights[0],
+                                        ref.binding_id,
+                                        locals_,
+                                        params,
+                                    )
                                 )
-                                if call_args is not None:
-                                    for arg in call_args.named_children:
-                                        if arg.type == "comment":
-                                            continue
-                                        arg_root = (
-                                            self._chan_alias_target(
-                                                arg, locals_, params
-                                            )
-                                        )
-                                        if (
-                                            arg_root is not None
-                                            and arg_root.id
-                                            != ref.binding_id
-                                        ):
-                                            self.external_chan_locals.add(
-                                                arg_root.id
-                                            )
-                                            arg_slot = locals_.get(
-                                                arg_root.id
-                                            )
-                                            if (
-                                                arg_slot is None
-                                                and arg_root.id in params
-                                            ):
-                                                arg_slot = frozenset(
-                                                    {params[arg_root.id]}
-                                                )
-                                            value = value | (
-                                                arg_slot or frozenset()
-                                            )
                             root_before = self._chan_root(
                                 ref.binding_id
                             )
@@ -6839,7 +6861,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # contents (other aliases still read
                             # them) AND the callee-produced
                             # dependencies — `g(x)`'s result can
-                            # carry `x`, so `<-ch` must see it.
+                            # carry `x`, so `<-ch` must see it. The
+                            # callee may hand a `chan` argument's
+                            # own queue back through a local alias
+                            # the probe cannot see (`r := q; return
+                            # r, 0`), so those roots go external and
+                            # their contents fold in like the
+                            # conditional arm above.
+                            value = value | (
+                                self._promote_chan_call_args(
+                                    rights[i]
+                                    if len(lefts) == len(rights)
+                                    else rights[0],
+                                    ref.binding_id,
+                                    locals_,
+                                    params,
+                                )
+                            )
                             base = locals_.get(ref.binding_id)
                             if (
                                 base is None
@@ -6878,6 +6916,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
+                        if ref.binding_id in self.chan_aliases.values():
+                            # Other names still aim at this name's
+                            # queue (`ch = q` before `q = make`) —
+                            # the fresh queue must carry the old
+                            # one's contents so reads through them
+                            # stay reachable.
+                            old_slot = locals_.get(ref.binding_id)
+                            if (
+                                old_slot is None
+                                and ref.binding_id in params
+                            ):
+                                old_slot = frozenset(
+                                    {params[ref.binding_id]}
+                                )
+                            value = (old_slot or frozenset()) | value
                 if not accumulating:
                     # A plain store replaces what the pointer itself
                     # depends on — pointee folds stay in `locals_`

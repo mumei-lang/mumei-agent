@@ -3026,11 +3026,14 @@ def test_assign_multi_result_chan_slot_reseats(
 ):
     # `ch, n = g(q)` — the assignment form of the multi-result
     # chan slot: the chan name reseats to the callee's
-    # passthrough queue like `ch = g(q)` does.
+    # passthrough queue like `ch = g(q)` does. `q` is a buffered
+    # LOCAL channel, so a shared-broadcast model cannot reach
+    # `{0}` — only the resolved alias carries the send back.
     files = {
         "a.go": "package p\n"
         "func g(q chan int64) (chan int64, int64) { return q, 0 }\n"
-        "func F(q chan int64, x int64) int64 {\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
         "\tvar ch chan int64\n"
         "\tch = make(chan int64)\n"
         "\tvar n int64\n"
@@ -3043,7 +3046,92 @@ def test_assign_multi_result_chan_slot_reseats(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({0, 1})
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_assign_multi_result_chan_local_alias_broadcasts(
+    go_types_helper,
+):
+    # `ch, n = g(q)` where `g` hands `q`'s queue back through a
+    # callee-local alias (`r := q; return r, 0`) — the passthrough
+    # probe cannot see it, so `ch` binds external AND the arg's
+    # root queue promotes external: `ch <- x` reaches `<-q`.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) {\n"
+        "\tr := q\n"
+        "\treturn r, 0\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tvar ch chan int64\n"
+        "\tch = make(chan int64)\n"
+        "\tvar n int64\n"
+        "\tch, n = g(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_assign_multi_result_chan_paren_call_args(
+    go_types_helper,
+):
+    # `ch, n = (g(q))` — the parenthesized call still sees `q`:
+    # `g` may hand `q`'s queue back through a local alias, so the
+    # arg's root promotes external like the unwrapped form.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) {\n"
+        "\tr := q\n"
+        "\treturn r, 0\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tvar ch chan int64\n"
+        "\tch = make(chan int64)\n"
+        "\tvar n int64\n"
+        "\tch, n = (g(q))\n"
+        "\tch <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_assign_chan_alias_survives_arg_reseat_to_make(
+    go_types_helper,
+):
+    # `ch, _ = g(q)` aliases ch to q's queue; `q = make(...)` then
+    # reseats the NAME — `ch` still means the old queue, so a send
+    # queued before the reseat stays reachable through `<-ch`.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) { return q, 0 }\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tq <- x\n"
+        "\tvar ch chan int64\n"
+        "\tch = make(chan int64)\n"
+        "\tvar n int64\n"
+        "\tch, n = g(q)\n"
+        "\tq = make(chan int64)\n"
+        "\t_ = n\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_assign_multi_result_chan_wrong_slot_closed(
