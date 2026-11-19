@@ -3134,6 +3134,37 @@ def test_assign_chan_alias_survives_arg_reseat_to_make(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_assign_reseat_to_make_drops_old_queue_deps(
+    go_types_helper,
+):
+    # `ch, _ = g(q)` aliases ch to q's queue; `q = make(...)` then
+    # reseats the NAME to a fresh queue — `<-q` reads only the new
+    # queue, so a send queued to the OLD one before the reseat must
+    # not appear in the new queue's contents.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) { return q, 0 }\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tq <- x\n"
+        "\tvar ch chan int64\n"
+        "\tch = make(chan int64)\n"
+        "\tvar n int64\n"
+        "\tch, n = g(q)\n"
+        "\tq = make(chan int64, 1)\n"
+        "\tq <- 0\n"
+        "\t_ = ch\n"
+        "\t_ = n\n"
+        "\treturn <-q\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
 def test_assign_multi_result_chan_wrong_slot_closed(
     go_types_helper,
 ):

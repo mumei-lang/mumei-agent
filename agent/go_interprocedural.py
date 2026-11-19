@@ -6916,21 +6916,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
-                        if ref.binding_id in self.chan_aliases.values():
-                            # Other names still aim at this name's
-                            # queue (`ch = q` before `q = make`) —
-                            # the fresh queue must carry the old
-                            # one's contents so reads through them
-                            # stay reachable.
-                            old_slot = locals_.get(ref.binding_id)
+                        # A `make` reseat leaves earlier aliases
+                        # pointing at the OLD queue — it still
+                        # exists for them (`ch = q; q = make(...)`).
+                        # Copy the old queue's contents onto each
+                        # alias's own slot and detach it: `<-ch`
+                        # keeps the queued sends while `<-q` reads
+                        # only the fresh queue.
+                        for alias_id, target in list(
+                            self.chan_aliases.items()
+                        ):
+                            if target != ref.binding_id:
+                                continue
+                            del self.chan_aliases[alias_id]
+                            old_queue = locals_.get(ref.binding_id)
                             if (
-                                old_slot is None
+                                old_queue is None
                                 and ref.binding_id in params
                             ):
-                                old_slot = frozenset(
+                                old_queue = frozenset(
                                     {params[ref.binding_id]}
                                 )
-                            value = (old_slot or frozenset()) | value
+                            alias_slot = locals_.get(alias_id)
+                            if (
+                                alias_slot is None
+                                and alias_id in params
+                            ):
+                                alias_slot = frozenset(
+                                    {params[alias_id]}
+                                )
+                            locals_[alias_id] = (
+                                alias_slot or frozenset()
+                            ) | (old_queue or frozenset())
                 if not accumulating:
                     # A plain store replaces what the pointer itself
                     # depends on — pointee folds stay in `locals_`
