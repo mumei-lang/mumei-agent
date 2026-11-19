@@ -862,6 +862,16 @@ class _Builder:
         self._declared_seen: set[str] = set()
         self._modeled_spans: set[tuple[int, int, int]] = set()
         self._opaque_spans: set[tuple[int, int, int]] = set()
+        # `s := lib.G(a)` — a container-typed call result binds a
+        # local whose single dep set conflates every element, like a
+        # named composite does. `_opaque_container_tokens` records
+        # the backing instances each such name may point at (the
+        # producing call's node key is the fresh backing) so
+        # slice/map aliases share element writes while array copies
+        # and scalar rebinds do not.
+        self._opaque_container_tokens: dict[
+            str, frozenset[tuple[int, int, int]]
+        ] = {}
         self.bindings = {b.id: b for b in snapshot.bindings}
         # Package reports may declare the imported objects the unit
         # referenced; single-file snapshots never have them.
@@ -1590,6 +1600,32 @@ class _Builder:
         if src in self.closure_inner_calls:
             self.closure_inner_calls.add(bound_id)
 
+    def _opaque_container_index_target(
+        self, lhs: Any
+    ) -> tuple[Any, Any | None] | None:
+        """`s[i]` as an element-store LHS whose operand names a bound
+        opaque container (`s := lib.G(a)`). Returns the operand's
+        reference and the index node — one level only: a nested
+        `s[i][j]` operand is an index expression, not an identifier."""
+        if lhs is None or lhs.type != "index_expression":
+            return None
+        operand = lhs.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = operand.child_by_field_name("operand")
+        if operand is None or operand.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(operand))
+        if (
+            ref is None
+            or ref.binding_id is None
+            or ref.binding_id not in self._opaque_container_tokens
+        ):
+            return None
+        return ref, lhs.child_by_field_name("index")
+
     def _func_elem_index_target(
         self, lhs: Any, locals_: dict[str, frozenset[int]]
     ) -> tuple[Any, Any | None, Any | None] | None:
@@ -1686,6 +1722,262 @@ class _Builder:
         if bound is None or not self._func_elem_collection(bound.type):
             return None
         return ref.binding_id
+
+    def _opaque_container_sharers(self, binding_id: str) -> set[str]:
+        """Every name whose backing set intersects `binding_id`'s —
+        `s2 := s` between slice/map containers shares the backing,
+        so element stores through either name union into both."""
+        toks = self._opaque_container_tokens.get(
+            binding_id, frozenset()
+        )
+        return {
+            member_id
+            for member_id, member_toks
+            in self._opaque_container_tokens.items()
+            if member_toks & toks
+        } | {binding_id}
+
+    def _opaque_container_deps(
+        self, binding_id: str, locals_: dict[str, frozenset[int]]
+    ) -> frozenset[int]:
+        """The conflated element-provenance of a bound opaque
+        container — every sharer's dep set, since a store through
+        one name lands in memory all of them read."""
+        deps = locals_.get(binding_id, frozenset())
+        for member_id in self._opaque_container_sharers(binding_id):
+            deps = deps | locals_.get(member_id, frozenset())
+        return deps
+
+    def _opaque_container_fact(self, fact: Any) -> bool:
+        """A `[]T`/`[N]T`/`map[K]T` local bound from a call result —
+        the conflated dep set needs no element gate (the same set
+        covers every element), but the declared identities pin like
+        a named composite's do."""
+        if (
+            fact is None
+            or fact.kind not in {"slice", "array", "map"}
+        ):
+            return False
+        self._pin_fact_identities(fact)
+        return True
+
+    def _array_arg_shares_memory(self, t) -> bool:
+        # `[N][]T`, `[N]*T`, `[N]map[K]T`, `[N]chan T`,
+        # `[N]func()` args copy the array header but their
+        # elements still aim at caller-shared memory — the
+        # callee's `p[i][j] = x` lands in the caller's slice
+        # backing. Only a scalar-element array isolates the
+        # callee's writes.
+        elem = getattr(t, "elem", None)
+        return elem is not None and elem.kind in {
+            "slice",
+            "map",
+            "chan",
+            "function",
+            "pointer",
+            "struct",
+        }
+
+    def _opaque_container_bind(
+        self, rhs: Any
+    ) -> frozenset[tuple[int, int, int]] | None:
+        """Backing tokens for `s := rhs` — a container-typed call
+        result mints a fresh backing (keyed on the call node), an
+        identifier naming a bound opaque container shares it for a
+        slice/map (shared memory) or mints a fresh one for an array
+        (a value copy)."""
+        if rhs is None:
+            return None
+        while rhs.type == "parenthesized_expression":
+            rhs = next(
+                (
+                    c
+                    for c in rhs.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+            if rhs is None:
+                return None
+        if rhs.type == "call_expression":
+            call = self.calls.get(self.node_key(rhs))
+            if call is None or call.kind != "external_or_bodyless":
+                return None
+            _member, fact = self._call_result_fact(rhs)
+            if fact is None or fact.kind not in {
+                "slice",
+                "array",
+                "map",
+            }:
+                return None
+            toks = {self.node_key(rhs)}
+            # `t := lib.Id(s)` — an opaque callee may hand back a
+            # slice aliasing a container argument, so the result's
+            # backing may-set unions every container arg's tokens
+            # like the dep set unions their deps.
+            arguments_node = rhs.child_by_field_name("arguments")
+            for arg in (
+                _children(arguments_node)
+                if arguments_node is not None
+                else ()
+            ):
+                while (
+                    arg is not None
+                    and arg.type == "parenthesized_expression"
+                ):
+                    arg = next(
+                        (
+                            c
+                            for c in arg.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if arg is not None and arg.type == "identifier":
+                    arg_ref = self.references.get(self.node_key(arg))
+                    if arg_ref is not None:
+                        arg_binding = self.bindings.get(
+                            arg_ref.binding_id
+                        )
+                        if (
+                            arg_binding is not None
+                            and arg_binding.type is not None
+                            and arg_binding.type.kind == "array"
+                            and not self._array_arg_shares_memory(
+                                arg_binding.type
+                            )
+                        ):
+                            # A scalar-element array argument
+                            # copies cleanly into the callee's
+                            # parameter — the result can never
+                            # alias `a`'s backing. An array of
+                            # slices/maps/pointers still shares
+                            # the elements' memory, so it folds.
+                            continue
+                        toks |= self._opaque_container_tokens.get(
+                            arg_ref.binding_id, frozenset()
+                        )
+            return frozenset(toks)
+        if rhs.type == "identifier":
+            ref = self.references.get(self.node_key(rhs))
+            if ref is None or ref.binding_id is None:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            if (
+                binding is None
+                or binding.type is None
+                or binding.type.kind not in {"slice", "array", "map"}
+            ):
+                return None
+            elem = getattr(binding.type, "elem", None)
+            if elem is not None and elem.kind in {
+                "function",
+                "chan",
+            }:
+                # Func-element and channel containers have their own
+                # backing models — never mint an opaque token for one.
+                return None
+            if binding.type.kind == "array":
+                # `s = a` copies the array — the reseat never
+                # aliases `a`'s backing, so the destination mints
+                # its own token.
+                return frozenset({self.node_key(rhs)})
+            toks = self._opaque_container_tokens.get(ref.binding_id)
+            if toks:
+                return toks
+            # `s = u` where `u` binds a plain local container: the
+            # two names now share `u`'s backing, so mint a backing
+            # token and hand it to `u` as well — element stores
+            # through either name reach the other like `s2 := s`.
+            fresh = frozenset({self.node_key(rhs)})
+            self._opaque_container_tokens[ref.binding_id] = fresh
+            return fresh
+        return None
+
+    def _opaque_call_container(
+        self, node: Any, call: Any
+    ) -> tuple[Any, Any] | None:
+        """`lib.G(a)` — the member + container fact of an opaque
+        imported call whose declared single result is a
+        `[]T`/`[N]T`/`map[K]T`. The result is callee-produced
+        memory: it carries the call's own dep set like an index
+        read on the same result does."""
+        _member, fact = self._call_result_fact(node)
+        if fact is None or fact.kind not in {
+            "slice",
+            "array",
+            "map",
+        }:
+            return None
+        return _member, fact
+
+    def _opaque_container_call(
+        self,
+        node: Any,
+        call: Any,
+        container: tuple[Any, Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[Any],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        """Fold `lib.G(a)`'s opaque composite result — the same
+        minimal fold `len(lib.G(a))` uses: argument deps unioned,
+        func-arg invocations drained, chan arguments promoted,
+        writes stored, and a transfer recorded on the callee. The
+        container's provenance is the call's dep set; a bind
+        (`s := lib.G(a)`) keys the fresh backing on this node."""
+        call_member, _fact = container
+        arguments_node = node.child_by_field_name("arguments")
+        inner_args = (
+            _children(arguments_node)
+            if arguments_node is not None
+            else []
+        )
+        if tuple(self.node_key(a) for a in inner_args) != tuple(
+            _key3(a) for a in call.arguments
+        ):
+            raise _Unsupported(
+                "call_mapping_unavailable", _span(node), call.target
+            )
+        computed_args = tuple(
+            self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+            for arg in inner_args
+        )
+        self._fold_func_arg_invocations(
+            node, params, locals_, transfers
+        )
+        self.pinned.update(
+            getattr(call_member, "signature_type_ids", ()) or ()
+        )
+        self._opaque_spans.add(_key3(call.span))
+        self._promote_chan_call_args(node, "", locals_, params)
+        result_deps = (
+            frozenset().union(*computed_args)
+            if computed_args
+            else frozenset()
+        )
+        self._store_call_writes(
+            list(inner_args), result_deps, locals_, params
+        )
+        second_target = call.target or (
+            call_member.id if call_member is not None else ""
+        )
+        if second_target:
+            transfers.append(
+                CallTransfer(
+                    call.span,
+                    second_target,
+                    computed_args,
+                    frozenset(),
+                    imported=True,
+                )
+            )
+        return result_deps
 
     def _func_elem_share(
         self,
@@ -3371,6 +3663,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         call_operand = None
         call_fact = None
         call_member = None
+        opaque_composite = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)
         elif inner is not None and inner.type in (
@@ -3452,6 +3745,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         package_pointee = (
                             self._package_container_pointee(inner)
                         )
+                        if (
+                            package_pointee is None
+                            and ref.binding_id
+                            in self._opaque_container_tokens
+                        ):
+                            # `s[i]` on `s := lib.G(a)` — the
+                            # element carries the bound container's
+                            # conflated dep set plus the index's
+                            # own, like a field on `st := P{...}`.
+                            opaque_composite = ref.binding_id
         # Descend one `elem` fact per extra index level — `[][]T`
         # yields `[]T` then `T`. Every container's own named identity
         # pins at its level (a named `[]T` element, a map key).
@@ -3471,7 +3774,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         else (
                             call_fact
                             if call_operand is not None
-                            else None
+                            else (
+                                self.bindings[opaque_composite].type
+                                if opaque_composite is not None
+                                else None
+                            )
                         )
                     )
                 )
@@ -3504,6 +3811,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and bound_pointer is None
                 and package_pointee is None
                 and call_operand is None
+                and opaque_composite is None
             )
             or (member is not None and member.kind != "var")
             or fact is None
@@ -3526,6 +3834,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `g(a)[i]` — the declared result container/element
             # identities pin so a signature change flags the caller.
             self._pin_fact_identities(call_fact)
+        elif opaque_composite is not None:
+            self._pin_fact_identities(
+                self.bindings[opaque_composite].type
+            )
         else:
             # `(*GP)[i]` — same pins on the pointee container fact;
             # the var's own identity is the transfer target below.
@@ -3540,7 +3852,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         key = fact.key
         if key is not None and key.type_id:
             self.pinned.add(key.type_id)
-        if call_operand is None:
+        if call_operand is None and opaque_composite is None:
             transfers.append(
                 CallTransfer(
                     FileSpan(self.current_file, node.start_byte, node.end_byte),
@@ -3644,6 +3956,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 call_operand, fn, params, locals_, transfers, count,
                 depth + 1,
             )
+        if opaque_composite is not None:
+            # `s[i]` — the element's provenance is the bound
+            # container's conflated set across every sharer (a store
+            # through any alias reaches this memory).
+            deps |= self._opaque_container_deps(
+                opaque_composite, locals_
+            )
         for idx in reversed(indexes):
             if idx is None:
                 raise _Unsupported(
@@ -3681,6 +4000,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 depth + 1,
             )
             deps |= base | self.indirect_writes
+        elif (
+            member is not None
+            or package_var is not None
+            or package_pointee is not None
+        ):
+            # `lib.VA[i]`/`VA[i]`/`(*GP)[i]` — member and
+            # package-var element memory is external state: a
+            # store that reached it through an alias (`s := VA;
+            # s[0] = b`), a pointer or the member's own write
+            # (`lib.VA[0] = b`) joins the external-write set a
+            # later element read observes, like `(*p)[i]`.
+            deps |= self.indirect_writes
         return deps
 
     def _imported_container_member(
@@ -3952,6 +4283,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if fact is None or fact.kind != "map":
             return None
         return node
+
+    def _comma_ok_opaque_map(self, node: Any, width: int) -> bool:
+        """`v, ok := m[k]` on a bound opaque map (`m := lib.M(a)`).
+
+        Same two-name shape as the imported-member comma-ok: the
+        read flows through `_imported_index_read`'s bound-container
+        arm, so the value carries the container's conflated deps
+        plus the key's; the flag conservatively takes them too."""
+        if width != 2 or node is None or node.type != "index_expression":
+            return False
+        operand = node.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = next(
+                (
+                    c
+                    for c in operand.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if operand is None or operand.type != "identifier":
+            return False
+        ref = self.references.get(self.node_key(operand))
+        if (
+            ref is None
+            or ref.binding_id not in self._opaque_container_tokens
+        ):
+            return False
+        binding = self.bindings.get(ref.binding_id)
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "map"
+        )
 
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
         """(member, single-result fact) for a call operand.
@@ -7344,6 +7712,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is None
                     and self._comma_ok_map_index(rights[0], len(lefts))
                     is None
+                    and not self._comma_ok_opaque_map(
+                        rights[0], len(lefts)
+                    )
                     and not self._is_chan_recv(rights[0], len(lefts))
                 ):
                     raise _Unsupported("unsupported_statement", _span(node))
@@ -7432,7 +7803,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ref = self.references.get(self.node_key(lhs))
                     if ref is not None and ref.binding_id:
                         binding = self.bindings.get(ref.binding_id)
-                if binding is None or (
+                if binding is None:
+                    raise _Unsupported("binding_unavailable", _span(node))
+                # `s := lib.G(a)` — a container-typed call result
+                # binds a local whose single dep set conflates every
+                # element; the fresh backing keys on the call node.
+                # `s2 := s` aliases it (shared backing for slice/map,
+                # a copy for array).
+                opaque_toks = (
+                    self._opaque_container_bind(rights[i])
+                    if len(lefts) == len(rights)
+                    else None
+                )
+                if binding.type.kind in {
+                    "slice",
+                    "array",
+                    "map",
+                } and not (
+                    self._is_local_composite(binding)
+                    or self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
+                ):
+                    if opaque_toks is None or not (
+                        self._opaque_container_fact(binding.type)
+                    ):
+                        raise _Unsupported(
+                            "binding_unavailable", _span(node)
+                        )
+                    self._opaque_container_tokens[binding.id] = (
+                        opaque_toks
+                    )
+                elif (
                     binding.type.kind
                     not in {
                         "integer",
@@ -7917,6 +8318,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             value_nodes[0], len(names)
                         )
                         is not None
+                        or self._comma_ok_opaque_map(
+                            value_nodes[0], len(names)
+                        )
                         or self._is_chan_recv(
                             value_nodes[0], len(names)
                         )
@@ -7983,7 +8387,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if name.text == b"_":
                         continue
                     binding = self.bindings_by_span.get(self.node_key(name))
-                    if binding is None or (
+                    if binding is None:
+                        raise _Unsupported(
+                            "binding_unavailable", _span(spec)
+                        )
+                    # `var s = lib.G(a)` — a bare composite binding
+                    # admits only a backed source like `s := lib.G(a)`:
+                    # a container-returning call (fresh backing) or
+                    # another bound container (share/copy).
+                    opaque_toks = (
+                        self._opaque_container_bind(value_nodes[i])
+                        if len(names) == len(value_nodes)
+                        else None
+                    )
+                    if binding.type.kind in {
+                        "slice",
+                        "array",
+                        "map",
+                    } and not (
+                        self._is_local_composite(binding)
+                        or self._func_elem_collection(binding.type)
+                        or self._func_elem_nested_collection(
+                            binding.type
+                        )
+                    ):
+                        if opaque_toks is None or not (
+                            self._opaque_container_fact(binding.type)
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(spec)
+                            )
+                        self._opaque_container_tokens[binding.id] = (
+                            opaque_toks
+                        )
+                    elif (
                         binding.type.kind
                         not in {
                             "integer",
@@ -8615,6 +9052,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is not None
                     or self._comma_ok_map_index(rights[0], len(lefts))
                     is not None
+                    or self._comma_ok_opaque_map(rights[0], len(lefts))
                     or self._is_chan_recv(rights[0], len(lefts))
                 )
             )
@@ -8636,6 +9074,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # into `indirect_writes` (like a send does) for a later
             # `<-GC`/`range GC` read to observe.
             chan_write_targets: set[int] = set()
+            # `lib.V = v`/`VA[i] = v` — member and package-var
+            # writes mutate external state: the stored value's
+            # deps join `indirect_writes` at apply time so a later
+            # element read (`lib.VA[k]`) observes them like a
+            # `(*p)[i]` store does. Ref indices collect here
+            # because the RHS values evaluate after the LHS pass.
+            external_write_targets: set[int] = set()
             # `p.C = ch` reseats which queue the field names: index →
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
@@ -8645,6 +9090,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # container's name; the store loop unions rather than
             # copying like a plain rebind would.
             func_elem_targets: set[int] = set()
+            # `s[i] = v` — an element store into a bound opaque
+            # container (`s := lib.G(a)`) unions the stored value's
+            # deps into every name sharing the backing. The sharer
+            # set resolves at LHS-eval like the destination operand
+            # itself — `s, s[0] = t, b` writes the slice `s` named
+            # BEFORE its own store, so the pre-state members are
+            # snapshotted here — and the index's deps join the
+            # stored value like a read's.
+            opaque_elem_targets: dict[int, frozenset[str]] = {}
+            opaque_elem_index_deps: dict[int, frozenset[int]] = {}
             # An element store's holder set resolves like the
             # destination operand itself — against the pre-state —
             # but a name an earlier parallel store re-shared
@@ -8708,6 +9163,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if self._scalar_chan_binding(binding.id):
                                 chan_write_targets.add(len(refs))
+                            # The var's contents are external state
+                            # like `VA[i] = v` — the stored value's
+                            # deps broadcast so a later `VA`/`VA[i]`
+                            # read observes them.
+                            external_write_targets.add(len(refs))
                             refs.append(None)
                             continue
                         member, extras, _ = member_write
@@ -8717,6 +9177,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if self._scalar_chan_fact(member.type):
                             chan_write_targets.add(len(refs))
+                        external_write_targets.add(len(refs))
                         refs.append(None)
                         continue
                     refs.append(ref)
@@ -8798,6 +9259,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # slot so the store loop unions the stored value's
                     # dependencies into every escaped binding.
                     refs.append(_ALIAS_FOLD if saw_deref else None)
+                    external_write_targets.add(len(refs) - 1)
                     if (
                         not saw_deref
                         and self._scalar_chan_fact(member.type)
@@ -8819,6 +9281,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         fn, params, locals_, transfers, count,
                     )
                     refs.append(_ALIAS_FOLD if saw_deref else None)
+                    external_write_targets.add(len(refs) - 1)
                     if (
                         not saw_deref
                         and self._scalar_chan_binding(binding.id)
@@ -8993,6 +9456,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # resolves every element through the one slot. A
                 # param container's elements live in caller memory —
                 # that external mutation stays closed here.
+                opaque_elem_lhs = self._opaque_container_index_target(
+                    lhs
+                )
+                if opaque_elem_lhs is not None:
+                    oref, oindex = opaque_elem_lhs
+                    refs.append(oref)
+                    ri = len(refs) - 1
+                    opaque_elem_targets[ri] = frozenset(
+                        self._opaque_container_sharers(
+                            oref.binding_id
+                        )
+                    )
+                    opaque_elem_index_deps[ri] = frozenset()
+                    if (
+                        oindex is not None
+                        and oindex.type not in _INDEX_LITERALS
+                    ):
+                        opaque_elem_index_deps[ri] = self.expression(
+                            oindex, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                        self._record_read(
+                            opaque_elem_index_deps[ri]
+                        )
+                    continue
                 func_elem_lhs = self._func_elem_index_target(
                     lhs, locals_
                 )
@@ -9150,6 +9638,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for rhs in rights
                 ]
             )
+            # The stored map keys' deps join the external-write set
+            # only now — the store lands after every RHS read.
+            self.indirect_writes |= pending_map_key_deps
             # Func-element append operands also resolve against the
             # post-eval state: `a, c = append(b, z), append(a, z)`
             # reads `a`'s backing BEFORE `a`'s own store, so the
@@ -9232,7 +9723,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             }
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
-                    if i in chan_write_targets:
+                    if i in external_write_targets:
+                        # The member/package-var store landed in
+                        # external memory — its value's deps join
+                        # the external-write set a later member or
+                        # pointee element read observes.
+                        self.indirect_writes |= value
+                    elif i in chan_write_targets:
                         # `GC = ch` — the RHS read evaluated to the
                         # queue's contents; reseating the external
                         # operand to it broadcasts those contents so
@@ -9723,9 +10220,55 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # Reassignment replaces the binding's dependencies; it never
                 # declares a new variable. Inside a branch the caller's join
                 # unions the new value back as a may-assignment.
-                self._store(
-                    locals_, params, ref.binding_id, value, conditional,
-                )
+                # An element target (`s[i]`) isn't a container rebind —
+                # the sharer union below lands the store instead.
+                if i not in opaque_elem_targets:
+                    self._store(
+                        locals_, params, ref.binding_id, value,
+                        conditional,
+                    )
+                    bound = self.bindings.get(ref.binding_id)
+                    if bound is not None and bound.type.kind in {
+                        "slice",
+                        "array",
+                        "map",
+                    } and not (
+                        self._is_local_composite(bound)
+                        or self._func_elem_collection(bound.type)
+                        or self._func_elem_nested_collection(bound.type)
+                    ):
+                        # `s = lib.G(b)`/`s = t` re-targets the
+                        # backing like `:=` does; a non-container
+                        # RHS drops the token so `s[i]` closes.
+                        new_toks = (
+                            self._opaque_container_bind(rights[i])
+                            if len(lefts) == len(rights)
+                            else None
+                        )
+                        if conditional or self._may_skip > 0:
+                            # `if c { s = t }` — the untaken path
+                            # keeps `s` aimed at its old backing, so
+                            # the reseat unions the new tokens like
+                            # the dep-set join does (a scalar RHS
+                            # likewise leaves the old backing a
+                            # candidate — never pop).
+                            if new_toks:
+                                self._opaque_container_tokens[
+                                    ref.binding_id
+                                ] = (
+                                    self._opaque_container_tokens.get(
+                                        ref.binding_id, frozenset()
+                                    )
+                                    | new_toks
+                                )
+                        elif new_toks is not None:
+                            self._opaque_container_tokens[
+                                ref.binding_id
+                            ] = new_toks
+                        else:
+                            self._opaque_container_tokens.pop(
+                                ref.binding_id, None
+                            )
                 if broadcast:
                     self.indirect_writes |= value
                 member = field_chan_lhs.get(i)
@@ -9750,6 +10293,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # name sharing the backing (`fs2 := fs`) — the
                 # stored value's deps join each sharer's set like
                 # the container's own store did.
+                if i in opaque_elem_targets:
+                    # `s[i] = v` — the stored value's deps join every
+                    # sharer's conflated set: a store through one
+                    # alias lands in the backing all of them read.
+                    # The index's deps join too — whether the write
+                    # landed on the element a later `s[k]` reads
+                    # depended on `i`. The union also enters
+                    # `indirect_writes`: the backing may alias
+                    # escaped memory, so a `*p` read or a range
+                    # element's per-pass re-join observes the store.
+                    elem_value = (
+                        value
+                        | opaque_elem_index_deps.get(i, frozenset())
+                    )
+                    for holder_id in opaque_elem_targets[i]:
+                        self._store(
+                            locals_, params, holder_id, elem_value,
+                            True,
+                        )
+                    self.indirect_writes |= elem_value
                 if i in func_elem_targets:
                     # Resolution-time sharers plus landing-time
                     # group — a parallel reseat (`a, a[0] = b, f`)
@@ -10538,6 +11101,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # iterate a start-time copy — `range_static` keys on
                 # this distinction.
                 computed_pointer_result = False
+                opaque_range = None
                 if (
                     right is not None
                     and member is None
@@ -10698,6 +11262,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     range_ident
                                 )
                             )
+                        if bound is None and package_pointee is None:
+                            range_ref = self.references.get(
+                                self.node_key(range_ident)
+                            )
+                            if (
+                                range_ref is not None
+                                and range_ref.binding_id
+                                in self._opaque_container_tokens
+                            ):
+                                # `for range s` on `s := lib.G(a)`
+                                # — the elements carry the bound
+                                # container's conflated deps.
+                                opaque_range = range_ref.binding_id
                         # `for range p` auto-derefs only a
                         # pointer-to-array — the producer never
                         # emits the slice/map shape, and the gate
@@ -10716,6 +11293,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or bound is not None
                     or package_pointee is not None
                     or computed is not None
+                    or opaque_range is not None
                 ):
                     # Ranging a container in external state — an
                     # imported member (`lib.VA`, `lib.VM`), the
@@ -10741,6 +11319,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         bound is not None
                         or package_pointee is not None
                         or computed is not None
+                        or opaque_range is not None
                     ):
                         fact = (
                             bound[2]
@@ -10748,7 +11327,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else (
                                 package_pointee[1]
                                 if package_pointee is not None
-                                else computed[1]
+                                else (
+                                    computed[1]
+                                    if computed is not None
+                                    else self.bindings[
+                                        opaque_range
+                                    ].type
+                                )
                             )
                         )
                         target = (
@@ -10757,7 +11342,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else (
                                 package_pointee[0]
                                 if package_pointee is not None
-                                else computed[2]
+                                else (
+                                    computed[2]
+                                    if computed is not None
+                                    else opaque_range
+                                )
                             )
                         )
                         self._pin_fact_identities(fact)
@@ -11058,6 +11647,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 )
                             )
                     value_deps = frozenset()
+                    if opaque_range is not None:
+                        # `for range s` — each element (and a map's
+                        # key, when only one name binds) carries the
+                        # bound container's conflated set across
+                        # every sharer, like `s[i]`.
+                        value_deps = self._opaque_container_deps(
+                            opaque_range, scope
+                        )
                     if bound is not None:
                         if (
                             bound[2].kind == "array"
@@ -11067,21 +11664,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # *p` never evaluate the operand: Go
                             # skips the range expression when at
                             # most one iteration variable is
-                            # present and `len(x)` is constant.
-                            # The pointer write is not observed
-                            # and no element binds at all (the
-                            # index is dep-free), so nothing
-                            # carries `p`'s deps.
+                            # present and `len(x)` is constant —
+                            # `p` is not read at all.
                             pass
                         else:
-                            # `for range *p` — each element (and a
-                            # map's key, when only one name
-                            # binds) is caller memory the
-                            # pointer's aim selects, so the bound
-                            # name carries the pointer's own deps
-                            # and every earlier indirect store,
-                            # the same union `(*p)[i]`'s read
-                            # reports.
+                            # `for range *p` — each element is
+                            # caller memory the pointer's aim
+                            # selects, so the bound name carries
+                            # the pointer's own deps and every
+                            # earlier indirect store, the same
+                            # union `(*p)[i]`'s read reports.
                             value_deps = self.expression(
                                 range_ident, fn, params, scope,
                                 transfers, count, 0,
@@ -11124,7 +11716,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         ),
                     )
                     if (
-                        (bound is not None or computed is not None)
+                        (
+                            bound is not None
+                            or computed is not None
+                            or opaque_range is not None
+                        )
                         and fact is not None
                         and len(lefts) >= 1
                         and len(lefts) <= 2
@@ -12110,15 +12706,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     | self.indirect_writes
                 )
                 self._pin_fact_identities(fact)
+                map_key_deps = frozenset()
                 for extra in reversed(extras):
                     if extra.type in _INDEX_LITERALS:
                         continue
-                    self._record_read(
-                        self.expression(
-                            extra, fn, params, locals_,
-                            transfers, count, 0,
-                        )
+                    extra_deps = self.expression(
+                        extra, fn, params, locals_,
+                        transfers, count, 0,
                     )
+                    self._record_read(extra_deps)
+                    if fact.kind == "map":
+                        # `(*p)[b]++` stores `b`'s value as the
+                        # entry's key — a later key read must
+                        # observe `b`'s deps through the broadcast.
+                        map_key_deps |= extra_deps
+                self.indirect_writes |= map_key_deps
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -14123,6 +14725,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     "interface_dispatch",
                 }
             ):
+                if (
+                    call is not None
+                    and call.kind == "external_or_bodyless"
+                    and call.owner == fn.binding_id
+                ):
+                    container = self._opaque_call_container(
+                        node, call
+                    )
+                    if container is not None:
+                        return self._opaque_container_call(
+                            node, call, container,
+                            fn, params, locals_, transfers,
+                            count, depth,
+                        )
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
             arguments_node = node.child_by_field_name("arguments")
             arguments = _children(arguments_node) if arguments_node is not None else []
@@ -14578,6 +15194,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 ),
                                 None,
                             )
+                        if (
+                            operand is not None
+                            and operand.type == "identifier"
+                        ):
+                            # `len(s)`/`cap(s)` on `s := lib.G(a)` —
+                            # like `len(lib.G(a))`, the container's
+                            # provenance is the call's dep set plus
+                            # any element stores through a sharer.
+                            len_ref = self.references.get(
+                                self.node_key(operand)
+                            )
+                            if (
+                                len_ref is not None
+                                and len_ref.binding_id
+                                in self._opaque_container_tokens
+                            ):
+                                len_fact = self.bindings[
+                                    len_ref.binding_id
+                                ].type
+                                if (
+                                    len_fact is not None
+                                    and len_fact.kind
+                                    in {"slice", "array", "map"}
+                                ):
+                                    self._pin_fact_identities(len_fact)
+                                    return self._opaque_container_deps(
+                                        len_ref.binding_id, locals_
+                                    )
                         if (
                             operand is not None
                             and operand.type == "call_expression"
@@ -17956,6 +18600,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # field VALUES stay by-value — the callee cannot
                     # reseat `s` or its fields — so `locals_[s]`
                     # correctly keeps its pre-call set.
+                    self.indirect_writes |= stored
+                elif (
+                    ref is not None
+                    and ref.binding_id
+                    in self._opaque_container_tokens
+                    and (
+                        self.bindings.get(ref.binding_id) is None
+                        or self.bindings.get(
+                            ref.binding_id
+                        ).type.kind
+                        != "array"
+                        or self._array_arg_shares_memory(
+                            self.bindings.get(ref.binding_id).type
+                        )
+                    )
+                ):
+                    # `lib.Update(s, b)` — a tracked opaque
+                    # container's backing shares caller memory with
+                    # the callee: `q[0] = b` inside it lands in
+                    # every sharer's set like a caller-side `s[i] =
+                    # b`, and broadcasts like escaped memory does.
+                    # An array-typed name is excluded — the callee
+                    # receives a copy, so its writes cannot reach
+                    # the caller's `a`.
+                    for holder_id in self._opaque_container_sharers(
+                        ref.binding_id
+                    ):
+                        self._store(
+                            locals_, params, holder_id, stored, True
+                        )
                     self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state

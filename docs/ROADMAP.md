@@ -3933,10 +3933,27 @@ is the call's own dep set plus each index's deps, with the
 container/element/key identities pinned. An imported callee whose
 composite result stays `external_or_bodyless` still admits through
 the index (the member's `result_types` carry the fact) — the call
-folds through the minimal opaque-argument union — while the bare
-composite binding (`s := lib.G(a)`) stays closed, as do struct
+folds through the minimal opaque-argument union — while struct
 elements, multi-result calls and local callees whose composite
-result is not summarizable.
+result is not summarizable stay closed.
+A bare composite binding — `s := lib.G(a)` or `var s = lib.G(a)` —
+now admits when the callee's declared single result is a slice,
+array or map: the name binds one conflated dep set (the call's own
+dep set, matching the `len(lib.G(a))` convention that a
+callee-produced container's provenance is its call's) plus a
+backing token keyed on the call node. `s[i]`/`s[k]` element reads
+carry the sharers' union plus each index's deps (scalar elements
+only); `s[i] = v` unions the stored value's deps into every name
+sharing the backing — `s2 := s` shares it for slice and map (an
+aliased store lands in both reads) and copies for an array (`[N]T`
+keeps the value copy). `for range s`, `len(s)`/`cap(s)` and a
+rebind `s = lib.G(b)`/`s = t` retarget or drop the backing token —
+a non-container RHS detaches the name so `s[i]` fails closed
+again. Literals, multi-result calls, package container vars and
+non-scalar elements stay closed, as do `param` containers.
+Multi-level index READS (`s[i][j]`) admit one `elem` descent per
+level like the imported-member read; element WRITES stay
+one-level (`s[i] = v` only).
 A range over a call result — `for _, v := range lib.G(a)` and the
 explicit `for range *lib.P(a)` deref — admits on the same shape:
 the imported member's `result_types` carry the container (or
@@ -3956,8 +3973,9 @@ promoted onto the external queue, writes stored, and a transfer
 recorded on the member). A resolvable callee — local or
 `direct_import` — evaluates through `expression` for its effects
 only, so `len(lib.S(x))` on a string result admits too. The
-pointer operand (`len(*lib.P(x))`), `len` on a bound local, and
-index/field chains keep the existing closure.
+pointer operand (`len(*lib.P(x))`), `len` on a bound local other
+than the bare composite binding above, and index/field chains keep
+the existing closure.
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.
