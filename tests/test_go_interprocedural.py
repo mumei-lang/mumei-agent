@@ -12569,8 +12569,8 @@ def test_builtin_new_anonymous_struct_assignment_and_copy(
 def test_builtin_new_anonymous_struct_multiple_fields(
     go_types_helper,
 ):
-    # Stores land per field — a read of `p.V` observes only what the
-    # pointee's `V` slot holds, so the result depends on both writes.
+    # Stores and reads through two fields union their deps — the
+    # result depends on both writes through the conflated pointee.
     data = unit(
         go_types_helper,
         "func F(a, b int64) int64 {\n"
@@ -12582,6 +12582,40 @@ def test_builtin_new_anonymous_struct_multiple_fields(
     result = named(*data)
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_builtin_new_anonymous_struct_parenthesized(
+    go_types_helper,
+):
+    # `new((struct{...}))` — parens wrap the same literal; the
+    # allocation still binds an anonymous-struct pointee.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tp := new((struct{ V int64 }))\n"
+        "\tp.V = a\n"
+        "\treturn p.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_builtin_new_anonymous_struct_field_comment(
+    go_types_helper,
+):
+    # A comment inside a field's type carries no identity — pinning
+    # must skip it instead of classifying it as a type.
+    data = unit(
+        go_types_helper,
+        "func F(a int64) int64 {\n"
+        "\tp := new(struct{ W * /* optional */ int64; V int64 })\n"
+        "\tp.V = a\n"
+        "\treturn p.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_builtin_new_anonymous_struct_conditional_write(

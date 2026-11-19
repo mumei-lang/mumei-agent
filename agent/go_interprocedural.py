@@ -3048,7 +3048,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             "map_type",
             "channel_type",
         }:
-            children = tuple(node.named_children)
+            children = tuple(
+                c for c in node.named_children if c.type != "comment"
+            )
             if node.type == "array_type":
                 # `[2]T` — the length is not a type expression; only
                 # the element contributes pinnable identities.
@@ -3064,7 +3066,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._pin_type_node(elem) for elem in children
             )
         if node.type in {"type_elem", "parenthesized_type"}:
-            inner = next(iter(node.named_children), None)
+            inner = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
             return inner is not None and self._pin_type_node(inner)
         if node.type == "qualified_type":
             member = self._qualified_type_member(node)
@@ -3082,6 +3091,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return all(
                 self._pin_type_node(elem)
                 for elem in type_args.named_children
+                if elem.type != "comment"
             )
         if node.type == "type_identifier":
             ref = self.references.get(self.node_key(node))
@@ -13595,12 +13605,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `var p *struct{...}` does. `make` stays
                     # opaque — its result is a composite value, which
                     # the fragment's binding model cannot hold.
+                    arg = arguments[0] if len(arguments) == 1 else None
+                    while (
+                        arg is not None
+                        and arg.type
+                        in {"parenthesized_expression", "parenthesized_type"}
+                    ):
+                        arg = next(
+                            (
+                                c
+                                for c in arg.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
                     pinned = (
-                        self._pin_struct_fields(arguments[0])
-                        if len(arguments) == 1
-                        and arguments[0].type == "struct_type"
-                        else len(arguments) == 1
-                        and self._pin_type_node(arguments[0])
+                        self._pin_struct_fields(arg)
+                        if arg is not None and arg.type == "struct_type"
+                        else arg is not None and self._pin_type_node(arg)
                     )
                     if not pinned:
                         raise _Unsupported(
