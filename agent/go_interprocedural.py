@@ -5919,6 +5919,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and self._chan_result_call_at(rights[0], i)
                                 is not None
                             )
+                            # `c, ok := <-cc` — the value slot of a
+                            # comma-ok receive out of an external
+                            # `chan chan` queue binds an external
+                            # name like `c := <-cc` does.
+                            or (
+                                len(rights) == 1
+                                and self._is_chan_recv(
+                                    rights[0], len(lefts)
+                                )
+                                and self._chan_chan_receive(
+                                    rights[0], params
+                                )
+                            )
                         )
                     )
                     # `cc := G()` / `cc, n := G()` binding a
@@ -6316,10 +6329,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
+                    chan_chan_declared = self._chan_chan_fact(
+                        binding.type
+                    ) and bool(value_nodes) and (
+                        (
+                            len(value_nodes) == len(names)
+                            and self._chan_result_call(
+                                value_nodes[i], self._chan_chan_fact
+                            )
+                            is not None
+                        )
+                        or (
+                            len(value_nodes) == 1
+                            and len(names) > 1
+                            and self._chan_result_call_at(
+                                value_nodes[0], i, self._chan_chan_fact
+                            )
+                            is not None
+                        )
+                    )
                     if (
                         binding.type.kind == "chan"
                         and (
-                            not self._scalar_chan_binding(binding.id)
+                            (
+                                not self._scalar_chan_binding(binding.id)
+                                # `var cc = G()` — a `chan chan T`
+                                # binding admits only a callee-declared
+                                # `chan chan` result, like `cc := G()`.
+                                and not chan_chan_declared
+                            )
                             # `var ch, n = G(q)` — a multi-valued
                             # call admits per slot like the
                             # short-decl form when the callee's
@@ -6335,6 +6373,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     )
                                     is not None
                                 )
+                                and not (
+                                    len(value_nodes) == 1
+                                    and self._is_chan_recv(
+                                        value_nodes[0], len(names)
+                                    )
+                                    and self._chan_chan_receive(
+                                        value_nodes[0], params
+                                    )
+                                )
+                                and not chan_chan_declared
                             )
                             or (
                                 value_nodes
@@ -6350,6 +6398,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     value_nodes[i]
                                 )
                                 is None
+                                and not chan_chan_declared
                             )
                         )
                     ):
@@ -6411,6 +6460,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if chan_alias is not None:
                             self.chan_aliases[binding.id] = chan_alias.id
+                        elif self._chan_chan_fact(binding.type):
+                            # `var cc = G()` — a callee-declared
+                            # `chan chan` result binds an external
+                            # queue like `cc := G()` does.
+                            self.external_chan_locals.add(binding.id)
                         elif self._chan_result_call(value_nodes[i]) is not None:
                             passthrough = self._chan_result_passthrough(
                                 value_nodes[i], locals_, params
@@ -7383,14 +7437,97 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._chan_result_call_at(rights[0], i)
                         is not None
                     )
+                    chan_chan_result = self._chan_chan_fact(
+                        self.bindings[ref.binding_id].type
+                    ) and (
+                        (
+                            len(lefts) == len(rights)
+                            and self._chan_result_call(
+                                rights[i], self._chan_chan_fact
+                            )
+                            is not None
+                        ) or (
+                            len(rights) == 1
+                            and len(lefts) > 1
+                            and self._chan_result_call_at(
+                                rights[0], i, self._chan_chan_fact
+                            )
+                            is not None
+                        )
+                    )
+                    if chan_chan_result:
+                        # `cc = G()` reseats a `chan chan` name to the
+                        # callee-produced external queue like `cc :=
+                        # G()` binds it — the name is already modelled
+                        # externally (parameter or callee result), so
+                        # the slot just gains the call's folded deps
+                        # whether or not the store can be skipped.
+                        self.chan_aliases.pop(ref.binding_id, None)
+                        self.external_chan_locals.add(
+                            ref.binding_id
+                        )
+                        base = locals_.get(ref.binding_id)
+                        if (
+                            base is None
+                            and ref.binding_id in params
+                        ):
+                            base = frozenset(
+                                {params[ref.binding_id]}
+                            )
+                        locals_[ref.binding_id] = (
+                            base or frozenset()
+                        ) | value
+                        continue
+                    chan_recv = (
+                        (
+                            len(lefts) == len(rights)
+                            and self._chan_chan_receive(
+                                rights[i], params
+                            )
+                        )
+                        or (
+                            len(rights) == 1
+                            and len(lefts) > 1
+                            and self._is_chan_recv(
+                                rights[0], len(lefts)
+                            )
+                            and self._chan_chan_receive(
+                                rights[0], params
+                            )
+                        )
+                    )
                     if not self._scalar_chan_binding(ref.binding_id) or (
                         not fresh_make
                         and chan_alias is None
                         and not call_result
+                        and not chan_recv
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
                         )
+                    if chan_recv:
+                        # `c = <-cc` / `c, _ = <-cc` — the received
+                        # channel reseats the name to an external
+                        # queue like `c := <-cc` binds it. The slot
+                        # unions the old contents with the received
+                        # deps, so a maybe-skipped store keeps both
+                        # queue meanings' coverage.
+                        self.chan_aliases.pop(ref.binding_id, None)
+                        self.external_chan_locals.add(
+                            ref.binding_id
+                        )
+                        base = locals_.get(ref.binding_id)
+                        if (
+                            base is None
+                            and ref.binding_id in params
+                        ):
+                            base = frozenset(
+                                {params[ref.binding_id]}
+                            )
+                        locals_[ref.binding_id] = (
+                            base or frozenset()
+                        ) | value
+                        continue
                     if conditional or self._may_skip > 0:
                         # A maybe-skipped rebind can leave the name
                         # meaning EITHER its old queue or the new
@@ -8661,11 +8798,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if lefts and lefts[0].text != b"_":
                         binding = self.bindings_by_span.get(self.node_key(lefts[0]))
                         if binding is not None:
-                            if binding.type.kind not in {"integer", "boolean", "pointer"}:
+                            chan_elem = (
+                                binding.type.kind == "chan"
+                                and self._scalar_chan_binding(binding.id)
+                                and chan is not None
+                                and self._chan_chan_fact(chan.type)
+                            )
+                            if (
+                                binding.type.kind
+                                not in {"integer", "boolean", "pointer"}
+                                and not chan_elem
+                            ):
                                 raise _Unsupported(
                                     "binding_unavailable", _span(lefts[0])
                                 )
                             scope[binding.id] = rdeps
+                            if chan_elem:
+                                # `for c := range cc` — each element
+                                # is a channel received out of the
+                                # external `chan chan` queue, binding
+                                # an external name like `c := <-cc`.
+                                self.external_chan_locals.add(
+                                    binding.id
+                                )
                             if chan is not None:
                                 # `for v := range ch` — the element
                                 # name re-joins the queue's widened
@@ -8694,9 +8849,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 raise _Unsupported(
                                     "binding_unavailable", _span(lefts[0])
                                 )
+                            ref_binding = self.bindings.get(
+                                ref.binding_id
+                            )
+                            chan_elem = (
+                                ref_binding is not None
+                                and ref_binding.type.kind == "chan"
+                                and self._scalar_chan_binding(
+                                    ref.binding_id
+                                )
+                                and chan is not None
+                                and self._chan_chan_fact(chan.type)
+                            )
                             self._store(
                                 scope, params, ref.binding_id, rdeps, conditional,
                             )
+                            if chan_elem:
+                                # `for c = range cc` over an existing
+                                # scalar-`chan` name — same external
+                                # element binding as the `:=` form.
+                                self.external_chan_locals.add(
+                                    ref.binding_id
+                                )
                             if chan is not None:
                                 range_elem = (
                                     ref.binding_id,
