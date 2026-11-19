@@ -10490,6 +10490,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 transfers, count, depth + 1,
             )
             recv_binding = None
+            elem_type_id = target.receiver.type.type_id
+            if target.receiver.type.kind == "pointer":
+                # `f := P.M; f(p, v)` — the callee reads and writes
+                # `*recv`, pointee memory outside the pointer's own
+                # dep set, so union the broadcast writes like
+                # `p.V()`'s auto-deref does.
+                recv_deps |= self.indirect_writes
+                elem = self._pointee_type(elem_type_id)
+                if elem is not None:
+                    elem_type_id = elem.type.type_id
+            if (
+                operand_type_id is not None
+                and elem_type_id is not None
+                and operand_type_id != elem_type_id
+            ):
+                # Promoted method expression — `f := Outer.Get`
+                # where the callee's receiver is `Outer`'s embedded
+                # `*Inner`: reads and writes reach the embeddee's
+                # pointee, not `outer`'s own fields. Union the
+                # broadcast write set so `f(outer)` sees updates
+                # made through `outer.Inner` after the struct was
+                # built.
+                recv_deps |= self.indirect_writes
             if target.receiver.type.kind != "pointer":
                 root_ref = self._receiver_root_ref(arguments[0])
                 if (

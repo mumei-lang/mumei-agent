@@ -17279,3 +17279,28 @@ def test_method_expr_value_pins_type_operand_identity(go_types_helper):
         if b.kind == "type" and b.name == "Wrap"
     )
     assert wrap.type.type_id in result.pinned
+
+
+def test_method_expr_value_promoted_receiver_reads_pointee_writes(
+    go_types_helper,
+):
+    # `f := Outer.Get` where `Outer` embeds `*Inner` — `Get` reads
+    # `outer.Inner`'s pointee, so updates made through `inner` after
+    # the struct was built must reach the call's receiver deps.
+    files = {
+        "a.go": "package p\n"
+        "type Inner struct{ X int64 }\n"
+        "func (i Inner) Get() int64 { return i.X }\n"
+        "type Outer struct{ *Inner }\n"
+        "func F(a int64, v int64) int64 {\n"
+        "\tinner := new(Inner)\n"
+        "\tinner.X = a\n"
+        "\ts := Outer{Inner: inner}\n"
+        "\tf := Outer.Get\n"
+        "\tinner.X = v\n"
+        "\treturn f(s)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
