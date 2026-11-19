@@ -791,9 +791,15 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 	seen := map[string]bool{}
 	// Two instantiations of one generic declaration share its id
 	// (`Q[A]`, `Q[B]`) but carry different element types, so the
-	// recursion guard keys on the whole instantiated type — the
-	// `seen` map above only dedupes the emitted ids.
-	seenType := map[string]bool{}
+	// recursion guard keys on the type's identity — go/types
+	// canonicalizes a named type (and each instantiation) to one
+	// object, while a function-local `type T` shadowing a package
+	// `type T` stays a distinct object despite sharing
+	// `Type.String()`'s "p.T". A string key would stop the walk on
+	// the second decl and drop its emitted id. Anonymous composite
+	// types (`chan T`, `func(...)`) can't be self-referential
+	// without a named anchor, so identity dedupe still terminates.
+	seenType := map[types.Type]bool{}
 	var ids []string
 	var add func(t types.Type)
 	add = func(t types.Type) {
@@ -807,11 +813,10 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		// func(F)`) recurses back onto itself through the
 		// chan/signature walk below, and only an already-marked entry
 		// terminates it.
-		key := t.String()
-		if seenType[key] {
+		if seenType[t] {
 			return
 		}
-		seenType[key] = true
+		seenType[t] = true
 		var obj *types.TypeName
 		switch typ := t.(type) {
 		case *types.Named:

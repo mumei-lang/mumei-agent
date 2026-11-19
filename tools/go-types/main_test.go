@@ -598,6 +598,38 @@ func TestGenericChanInstantiationsPinEachElementType(t *testing.T) {
 	}
 }
 
+func TestLocalTypeShadowingPackageTypePinsBoth(t *testing.T) {
+	// A function-local `type T` shadows the package `type T`, yet
+	// `types.Type.String()` reports both as "p.T" — a guard keyed
+	// on that string would walk only the first decl and drop the
+	// other's emitted id. `var g func(x T, h Gn)` references the
+	// local T directly and the package T through Gn's signature.
+	unit := []namedSource{{"a.go", "package p\n" +
+		"type T chan int64\n" +
+		"type Gn func(y T) T\n" +
+		"func F() {\n" +
+		"\ttype T chan bool\n" +
+		"\tvar g func(x T, h Gn) int64\n" +
+		"\t_ = g\n" +
+		"}"}}
+	out := analyze(request{Sources: unit, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var gb binding
+	for _, b := range named(out, "g") {
+		if b.Kind == "variable" {
+			gb = b
+		}
+	}
+	if gb.ID == "" {
+		t.Fatalf("g missing from snapshot")
+	}
+	if len(gb.SignatureTypeIDs) != 3 {
+		t.Fatalf("g should pin the local T, Gn, and the package T it names, got %v", gb.SignatureTypeIDs)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {
