@@ -19973,6 +19973,71 @@ def test_call_result_field_read_pointer_result_joins_escaped(
     assert {0, 1}.issubset(result.return_dependencies)
 
 
+def test_call_result_terminal_pointer_field_is_not_a_deref(
+    go_types_helper,
+):
+    # `g(x).P` with `P *Q` terminal reads the pointer VALUE — nothing
+    # dereferences, so no escaped/indirect union and no external
+    # transfer beyond the call's own.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "type S struct{ P *Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    _ = g(x).P\n"
+        "    return 0\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "none_in_supported_fragment"
+    (transfer,) = result.calls
+    assert not transfer.imported
+
+
+def test_call_result_intermediate_pointer_field_dereferences(
+    go_types_helper,
+):
+    # `g(x).P.V` crosses the `*Q` in field `P` — the read
+    # dereferences memory aliases may have written, so the escaped
+    # binding's deps union in like a `*p` read.
+    files = {
+        "a.go": "package p\n"
+        "type Q struct{ V int64 }\n"
+        "type S struct{ P *Q }\n"
+        "func g(x int64) S { return S{} }\n"
+        "func F(x int64) int64 {\n"
+        "    b := x\n"
+        "    p := &b\n"
+        "    _ = p\n"
+        "    return g(x).P.V\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_call_result_index_stays_closed(go_types_helper):
     # `g(a)[0]` — the callee's array result is already closed at
     # the signature gate, so the caller fails closed too.

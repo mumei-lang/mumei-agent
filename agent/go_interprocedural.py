@@ -10253,13 +10253,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and ident_type.type_id
                             ):
                                 self.pinned.add(ident_type.type_id)
-                        # A pointer anywhere on the path — a `*S`
+                        # A pointer CROSSED by the read — a `*S`
                         # call result or an intermediate `*Q` field —
                         # means the read dereferences memory aliases
                         # may have written, so it reads like `*p`:
                         # escaped bindings' current deps and indirect
                         # writes union in, and the read is recorded
-                        # as an external effect.
+                        # as an external effect. A TERMINAL pointer
+                        # field (`g().P` with `P *Q`) reads only the
+                        # pointer value — no deref, no union.
                         result_type = self._call_result_type(sel_base)
                         ptr_type = (
                             result_type
@@ -10268,7 +10270,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else None
                         )
                         if ptr_type is None:
-                            for ident in field_idents:
+                            # `field_idents[0]` is the terminal field
+                            # read — `g().P` with `P *Q` yields the
+                            # pointer VALUE without dereferencing.
+                            # Only a pointer an earlier level crosses
+                            # (`g().P.V`) dereferences.
+                            for ident in field_idents[1:]:
                                 ident_type = getattr(
                                     ident, "type", None
                                 )
