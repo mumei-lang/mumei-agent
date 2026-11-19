@@ -3950,8 +3950,10 @@ keeps the value copy). `for range s`, `len(s)`/`cap(s)` and a
 rebind `s = lib.G(b)`/`s = t` retarget or drop the backing token —
 a non-container RHS detaches the name so `s[i]` fails closed
 again. Literals, multi-result calls, package container vars and
-non-scalar elements stay closed, as do `s[i][j]` and `param`
-containers.
+non-scalar elements stay closed, as do `param` containers.
+Multi-level index READS (`s[i][j]`) admit one `elem` descent per
+level like the imported-member read; element WRITES stay
+one-level (`s[i] = v` only).
 Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.
