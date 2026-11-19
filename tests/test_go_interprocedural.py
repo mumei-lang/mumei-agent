@@ -15405,3 +15405,251 @@ def test_chan_result_passthrough_capture_marks_effects(go_types_helper):
     assert result.effects == "unknown"
     assert result.return_dependencies == frozenset({0})
     assert any(t.imported for t in result.calls)
+
+
+def test_struct_parameter_field_store_and_read(go_types_helper):
+    # `s.V = x; return s.V` — a `struct` parameter carries one
+    # conflated dep set like a composite local.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct{ V int64 }\n"
+            "func F(s P, x int64) int64 {\n"
+            "\ts.V = x\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_struct_parameter_anonymous(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(s struct{ V int64 }, x int64) int64 {\n"
+            "\ts.V = x\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_struct_parameter_nested_field(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Q struct{ W int64 }\n"
+            "type P struct{ A Q }\n"
+            "func F(s P, x int64) int64 {\n"
+            "\ts.A.W = x\n"
+            "\treturn s.A.W\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_struct_result_binds_as_composite(go_types_helper):
+    # `p := G(x)` where G returns a struct — the bound name is a
+    # composite local; field reads carry the callee's deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct{ V int64 }\n"
+            "func G(x int64) P {\n"
+            "\treturn P{V: x}\n}\n"
+            "func F(x int64) int64 {\n"
+            "\tp := G(x)\n"
+            "\treturn p.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_parameter_argument_carries_deps(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct{ V int64 }\n"
+            "func G(s P) int64 {\n"
+            "\treturn s.V\n}\n"
+            "func F(s P) int64 {\n"
+            "\treturn G(s)\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_parameter_boundaries_stay_closed(go_types_helper):
+    # Pointer-intermediate field traversal, embedded-pointer
+    # promotion, and map/slice field mutation stay closed.
+    for decls in (
+        "type Q struct{ W int64 }\ntype P struct{ A *Q }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\ts.A.W = x\n"
+        "\treturn s.A.W\n}\n",
+        "type Q struct{ W int64 }\ntype P struct{ *Q }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\treturn s.W\n}\n",
+        "type P struct{ M map[string]int64 }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\ts.M[\"k\"] = x\n"
+        "\treturn s.M[\"k\"]\n}\n",
+        "type P struct{ A []int64 }\n"
+        "func F(s P, x int64) int64 {\n"
+        "\ts.A[0] = x\n"
+        "\treturn s.A[0]\n}\n",
+        "type I interface{ M() }\n"
+        "func F(s I, x int64) int64 {\n"
+        "\treturn x\n}\n",
+    ):
+        result = named(*unit(go_types_helper, decls))
+        assert not result.available
+
+
+def test_struct_parameter_multiple_names(go_types_helper):
+    # `s, t struct{...}` — each name's fields resolve through the
+    # signature literal's anchor.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64, s, t struct{ V int64 }) int64 {\n"
+            "\treturn s.V + t.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_anonymous_struct_result_field_read(go_types_helper):
+    # `p := G(x)` where G returns an anonymous struct — p's field
+    # window anchors at the result signature literal.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(x int64) struct{ V int64 } {\n"
+            "\treturn struct{ V int64 }{V: x}\n}\n"
+            "func F(x int64) int64 {\n"
+            "\tp := G(x)\n"
+            "\treturn p.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_argument_observes_callee_writes(go_types_helper):
+    # `G(s, w)` where G stores `w` through `s.P` — the struct arg's
+    # fields are by-value, but the shared pointee memory makes the
+    # callee's stored deps observable at the caller's `*q` read.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(s struct{ P *int64 }, x int64) int64 {\n"
+            "\tq := s.P\n"
+            "\t*q = x\n"
+            "\treturn x\n}\n"
+            "func F(v int64, w int64) int64 {\n"
+            "\ts := struct{ P *int64 }{P: &v}\n"
+            "\tG(s, w)\n"
+            "\tq := s.P\n"
+            "\treturn *q\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_anonymous_struct_rebind_keeps_field_window(go_types_helper):
+    # `cp, z := struct{ V int64 }{...}, int64(0)` — identical anon
+    # literals unify in the type checker, so `cp.V` resolves to the
+    # first literal's field; the anchored literal's direct names
+    # keep it direct.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(y int64) int64 {\n"
+            "\tst := struct{ V int64 }{V: y}\n"
+            "\tcp := st\n"
+            "\tcp, z := struct{ V int64 }{V: y}, int64(0)\n"
+            "\t_ = z\n"
+            "\treturn cp.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_var_rebind_keeps_field_window(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(y int64) int64 {\n"
+            "\tvar cp = struct{ V int64 }{V: y}\n"
+            "\tcp = struct{ V int64 }{V: y}\n"
+            "\treturn cp.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_promoted_name_not_direct(go_types_helper):
+    # `s.V` on `struct{ A struct{ V int64 }; *Q }` resolves to Q's
+    # promoted V — it shares its name with the NESTED literal's
+    # field, but the direct-name set of the outer literal is
+    # {"A", "Q"}, so the write stays closed instead of folding into
+    # caller-visible locals.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Q struct{ V int64 }\n"
+            "func F(x int64, s struct{ A struct{ V int64 }; *Q }) int64 {\n"
+            "\ts.V = x\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert not result.available
+
+
+def test_anonymous_struct_var_single_name_unified(go_types_helper):
+    # `var s struct{ V int64 }` after an identical literal — s.V
+    # resolves to the earlier literal's field binding, outside s's
+    # own window; the recorded direct names admit it.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tst := struct{ V int64 }{V: x}\n"
+            "\tvar s struct{ V int64 }\n"
+            "\ts.V = x\n"
+            "\treturn s.V + st.V\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_struct_embedded_name_admitted(go_types_helper):
+    # `struct{ *Q }` declares the embedded field as Q — a
+    # `type_identifier`, not `identifier` — so `s.Q` (the promoted
+    # field's own name) is a direct name of the literal.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Q struct{ W int64 }\n"
+            "func F(x int64, r *Q) int64 {\n"
+            "\tst := struct{ *Q }{Q: r}\n"
+            "\tvar s struct{ *Q }\n"
+            "\ts.Q = st.Q\n"
+            "\treturn x\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
