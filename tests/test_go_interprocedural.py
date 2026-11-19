@@ -16225,11 +16225,12 @@ def test_bound_method_value_call_resolves_through_summary(go_types_helper):
     assert result.effects == "none_in_supported_fragment"
 
 
-def test_bound_method_value_receiver_resolves_at_call_site(
+def test_bound_method_value_receiver_freezes_at_bind(
     go_types_helper,
 ):
-    # `s` reseats between the bind and the call — the receiver's deps
-    # re-resolve where `f` is invoked, like a closure capture.
+    # A Go method value COPIES its receiver at bind time — `s = …`
+    # after `f := s.M` does not change which receiver `f(2)` calls:
+    # the deps stay the ORIGINAL receiver's ({0}), not the reseat's.
     files = {
         "a.go": "package p\n"
         "type St struct { V int64 }\n"
@@ -16243,7 +16244,7 @@ def test_bound_method_value_receiver_resolves_at_call_site(
     _, snapshot, summaries = _method_unit(go_types_helper, files)
     result = named_package(files, snapshot, summaries, "F")
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_method_value_copy_propagates(go_types_helper):
@@ -16342,6 +16343,81 @@ def test_bound_method_value_conditional_rebind_stays_closed(
         "\t\tf = t.M\n"
         "\t}\n"
         "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_parallel_swap_uses_prestate(
+    go_types_helper,
+):
+    # `f, g = g, f` swaps two bound method values — the copy reads
+    # the map from BEFORE either store, so `g(2)` resolves f's OLD
+    # (method, receiver) pair, receiver deps {0} not {1}.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tt := St{V: b}\n"
+        "\tf := s.M\n"
+        "\tg := t.M\n"
+        "\tf, g = g, f\n"
+        "\treturn g(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_method_value_conditional_rebind_drops_captures(
+    go_types_helper,
+):
+    # A conditional `f = s.M` over a literal-bound `f` leaves BOTH
+    # callees possible — the captures must drop with the record so
+    # the call runs opaque and unions every alternative's deps.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64, c int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := func(x int64) int64 { return b }\n"
+        "\tif c > 0 {\n"
+        "\t\tf = s.M\n"
+        "\t}\n"
+        "\treturn f(2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_conditional_rebind_escapes_receiver(
+    go_types_helper,
+):
+    # A conditional method switch drops the record — but the OLD
+    # `*T`-receiver method may still run on the untaken path, so its
+    # writes must still fold into the receiver binding. `s.V` after
+    # the opaque call observes the callee's stored deps.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st *St) Set(v int64) { st.V = v }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tt := St{V: b}\n"
+        "\tf := s.Set\n"
+        "\tif b > 0 {\n"
+        "\t\tf = t.Set\n"
+        "\t}\n"
+        "\tf(b)\n"
+        "\treturn s.V\n}\n"
     }
     _, snapshot, summaries = _method_unit(go_types_helper, files)
     result = named_package(files, snapshot, summaries, "F")
