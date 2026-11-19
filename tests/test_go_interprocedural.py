@@ -13398,20 +13398,9 @@ def test_channel_len_through_alias(go_types_helper):
 
 
 def test_channel_boundaries_stay_closed(go_types_helper):
-    # A send through a selector (`p.C <- x`) and `make([]T)` stay
-    # opaque; `select` cannot build a CFG. (`chan` parameters admit
-    # under the external sync-resource model — the admit tests
-    # below cover them.)
-    files = {
-        "a.go": "package p\n"
-        "type Q struct{ C chan int64 }\n"
-        "func F(p *Q, x int64) int64 { p.C <- x; return 0 }\n"
-    }
-    snapshot = _snapshot_for(go_types_helper, files)
-    selector = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert not selector.available
+    # A send through a selector (`p.C <- x`) admits under the same
+    # external model a `chan` parameter or package var uses; only
+    # `make([]T)` and `select` (no CFG) stay opaque here.
     slice_make = named(
         *unit(
             go_types_helper,
@@ -13685,7 +13674,9 @@ def test_external_channel_boundaries_stay_closed(go_types_helper):
         for name in ("Str", "Field")
     }
     assert not results["Str"].available
-    assert not results["Field"].available
+    # `p.C <- x` admits: a bound pointer's scalar-element `chan`
+    # field is the same caller-memory queue the param model admits.
+    assert results["Field"].available
 
 
 def test_package_channel_range_rejoins_body_send(go_types_helper):
@@ -13783,6 +13774,169 @@ def test_dot_imported_channel_member_admits(go_types_helper):
     assert result.return_dependencies == frozenset({0})
     members = {m.name: m for m in snapshot.imported_members}
     assert all(t.target == members["VC"].id for t in result.calls)
+
+
+def test_bound_field_channel_send_recv_close_admitted(go_types_helper):
+    # `p.C` — a `chan` field of a bound pointer's pointee — is an
+    # external queue like a `chan` parameter's: the send broadcasts,
+    # the recv observes deps(p) ∪ indirect_writes, `close` records
+    # on the field member's identity.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tp.C <- x\n"
+            "\tclose(p.C)\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    assert all(t.imported for t in result.calls)
+
+
+def test_bound_field_channel_nested_pointer_admitted(go_types_helper):
+    # `p.W.C` — a `chan` field a pointer-typed field deeper — admits
+    # through the same pointee-chain resolution `t.W.N` uses.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W2 struct{ C chan int64 }\n"
+            "type S struct{ W *W2 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tp.W.C <- x\n"
+            "\treturn <-p.W.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_field_channel_range_rejoins_sends(go_types_helper):
+    # `for v := range p.C` re-joins the caller-memory queue each
+    # fixed-point pass like `range GC` — deps(p) ride the read.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\ts := int64(0)\n"
+            "\tfor v := range p.C {\n"
+            "\t\ts += v\n"
+            "\t\tp.C <- x\n"
+            "\t}\n"
+            "\treturn s\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_callee_send_to_field_channel_reaches_caller(go_types_helper):
+    # A callee's `q.C <- x` records on the scope-less field member —
+    # `_external_chan_id` catches it, broadcasting the call's deps
+    # for the caller's `<-p.C` to observe.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func Send(q *S, x int64) int64 {\n"
+            "\tq.C <- x\n"
+            "\treturn x\n}\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\t_ = Send(p, x)\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert 1 in result.return_dependencies
+
+
+def test_bound_field_channel_reseat_to_local_queue(go_types_helper):
+    # `p.C = ch` makes the field name ch's queue: a later `ch <- x`
+    # is a send into it, so `<-p.C` observes x (and `p.C <- y`
+    # would reach `<-ch` the same way).
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\tp.C = ch\n"
+            "\tch <- x\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_caller_send_to_field_channel_reaches_callee(go_types_helper):
+    # The caller's `p.C <- x` folds into p's tracked deps like a
+    # field store, so `g(p)` — whose `return <-p.C` depends on p —
+    # carries the sent value.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func Recv(q *S) int64 {\n"
+            "\treturn <-q.C\n}\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tp.C <- x\n"
+            "\treturn Recv(p)\n}\n",
+        )
+    )
+    assert result.available
+    assert 1 in result.return_dependencies
+
+
+def test_bound_field_channel_close_records_operand_read(go_types_helper):
+    # `close(p.C)` resolves the operand — the statement read
+    # carries the pointer's deps plus earlier indirect stores.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tp.C <- x\n"
+            "\tclose(p.C)\n"
+            "\treturn x\n}\n",
+        )
+    )
+    assert result.available
+    # `close(p.C)` is the 10-byte statement between the send and
+    # the return.
+    close_read = next(
+        r for r in result.statement_reads
+        if r.span.end - r.span.start == len("close(p.C)")
+    )
+    assert close_read.deps == frozenset({0, 1})
+
+
+def test_bound_field_channel_boundaries_stay_closed(go_types_helper):
+    # A non-scalar `chan string` field and a computed base
+    # (`arr[i].C`) stay closed.
+    files = {
+        "a.go": "package p\n"
+        "type SS struct{ C chan string }\n"
+        "type SC struct{ C chan int64 }\n"
+        "func Str(p *SS, x string) string {\n"
+        "\tp.C <- x\n"
+        "\treturn x\n}\n"
+        "func Arr(arr []SC, x int64) int64 {\n"
+        "\tarr[0].C <- x\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in ("Str", "Arr")
+    }
+    assert not results["Str"].available
+    assert not results["Arr"].available
 
 
 def test_chan_argument_propagates_queue_contents(go_types_helper):
@@ -14903,3 +15057,45 @@ def test_named_pointer_underlying_imported_named_pointer_var(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_field_channel_store_through_alias(go_types_helper):
+    # `alias := ch; p.C = alias` — the field records the queue the
+    # alias resolves to (ch itself), not the alias's binding, so a
+    # later `ch <- x` is observed by `<-p.C`.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tch := make(chan int64)\n"
+            "\talias := ch\n"
+            "\tp.C = alias\n"
+            "\tch <- x\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_field_channel_tuple_store_uses_prestate_queue(
+    go_types_helper,
+):
+    # `a, p.C = b, a` — the field records the queue `a` named BEFORE
+    # its store, so a send through a still-aliased name reaches
+    # `<-p.C`.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct{ C chan int64 }\n"
+            "func F(p *S, b chan int64, x int64) int64 {\n"
+            "\ta := make(chan int64)\n"
+            "\tkeep := a\n"
+            "\ta, p.C = b, a\n"
+            "\tkeep <- x\n"
+            "\treturn <-p.C\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 2})
