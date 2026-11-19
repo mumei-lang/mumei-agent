@@ -14776,8 +14776,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # the span stands in for the anonymous slot, and
                     # the call's `chan` arguments join the external
                     # model like a `f := mk(ch)` capture (an element
-                    # may hold a closure that sends on it).
-                    target_id = self._immediate_span_id(operand)
+                    # may hold a closure that sends on it). An
+                    # `append(fs, …)` operand names the container's
+                    # binding instead — the appended literal
+                    # recorded under `fs`, not under the span.
+                    append_cont = self._func_elem_append_target(
+                        operand, locals_
+                    )
+                    target_id = (
+                        append_cont
+                        if append_cont is not None
+                        else self._immediate_span_id(operand)
+                    )
                     callee_deps |= self._func_result_chan_args(
                         operand, locals_, params
                     )
