@@ -2786,7 +2786,8 @@ that target a shared queue stay closed. A function name
 read in a call's argument list admits dep-free (the
 possible invocation folds through the call's own record);
 a name in any other non-store position
-(return, operand) stays closed),
+(operand) stays closed — while a `return` of a function
+name admits dep-free under the func-result signature below),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies
@@ -2795,6 +2796,19 @@ beyond the TS-style host-declared resolver contract — Rust resolves
 `summarize_*(source, resolver, source_path)`/`--resolve-modules`
 shape; existing function-local dataflow stays
 authoritative.
+A `func`-typed *result* now admits at the signature gate like a
+`func` parameter: the value carries no scalar deps, `return G` on
+a declared function reads dep-free, and a literal return
+(`return func() int64 { return x }`) lets the literal's captured
+deps ride the result's dep set — so `f := mk(x)` binds an opaque
+func value whose calls resolve through the ordinary func-value
+path (`var f = mk()` and `f = mk()` admit identically, and a
+multi-result signature with a func slot unpacks the same way).
+`return nil` and a call-result callee (`mk()()`) stay closed,
+and an imported func-result callee (`lib.Mk()`) stays
+`external_or_bodyless` at the producer's call classification —
+no `direct_import` record names it.
+
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
 

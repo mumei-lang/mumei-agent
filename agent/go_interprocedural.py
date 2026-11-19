@@ -3541,6 +3541,88 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     deps = deps | (arg_slot or frozenset())
         return deps
 
+    def _captured_current_deps(
+        self,
+        captured: frozenset[str],
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        """Resolve each captured binding's deps NOW — reassignments
+        between the literal and the read move what a bound closure
+        actually observes (`p := &a; h := func(){*p}; p = &b; h()`
+        reads `b`, not `a`). `locals_` wins over the parameter index:
+        `x = y` stores the param's current value under its binding id."""
+        resolved: frozenset[int] = frozenset()
+        for cbid in captured:
+            # A captured channel name may have been reseated
+            # between the literal and the read (`ch = ch2`) —
+            # resolve the queue it names NOW, not the one its
+            # own slot still holds.
+            root = (
+                self._chan_root(cbid)
+                if self._is_chan_binding(cbid)
+                else cbid
+            )
+            if root in locals_:
+                resolved |= locals_[root]
+                if root in self.external_chan_locals:
+                    resolved |= self.indirect_writes
+            elif root in params:
+                resolved |= frozenset({params[root]})
+        return resolved
+
+    def _return_expr_deps(
+        self,
+        expr: Any,
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[Any],
+        count: list[int],
+    ) -> frozenset[int]:
+        """One `return` expression's deps. A bound closure name re-
+        resolves its captured bindings at the return — a captured local
+        reassigned between the literal and the `return cl` reads the
+        CURRENT value (`y = x` after `cl := func(){return y}` hands x's
+        deps to the caller, not the empty set the literal captured)."""
+        deps = self.expression(
+            expr, fn, params, locals_, transfers, count, 0
+        )
+        if expr.type == "identifier":
+            ref = self.references.get(self.node_key(expr))
+            if ref is not None and ref.binding_id:
+                extra = self._captured_current_deps(
+                    self.closure_captures.get(
+                        ref.binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
+                )
+                deps |= extra
+                self._record_read(extra)
+        return deps
+
+    def _func_result_chan_args(
+        self,
+        rhs_node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> frozenset[int]:
+        """`f := mk(ch)` — a call bound under a `func`-typed name
+        may return a closure capturing the queue it received, so
+        the arg's queue joins the external model like a `chan`
+        argument to an interface call does: a later `ch <- x`
+        broadcasts into `indirect_writes`, which the opaque `f()`
+        call then observes. Non-call RHS nodes promote nothing."""
+        if (
+            rhs_node is not None
+            and rhs_node.type == "call_expression"
+        ):
+            return self._promote_chan_call_args(
+                rhs_node, "", locals_, params
+            )
+        return frozenset()
+
     def _chan_result_call(self, node: Any) -> Any:
         """The callee `node` calls when `ch := f()` binds a
         callee-produced queue — `f` declares one scalar-element
@@ -5173,7 +5255,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # type's identity pins like any other signature type.
             or any(
                 r.type.kind
-                not in {"integer", "boolean", "pointer", "struct"}
+                not in {"integer", "boolean", "pointer", "struct",
+                        # A `func` result admits like a `func` parameter:
+                        # the value carries no scalar deps — `return G`
+                        # on a declared function reads dep-free — and the
+                        # caller binds the name as an opaque func value
+                        # whose calls resolve through the func-value path.
+                        "function"}
                 and not (
                     # A scalar-element `chan T` result admits under
                     # the same external sync-resource model a `chan`
@@ -5518,8 +5606,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 deps[0] |= result_deps
                 self._record_read(result_deps)
             elif len(expressions) == 1:
-                deps[0] |= self.expression(
-                    expressions[0], fn, params, locals_, transfers, count, 0
+                deps[0] |= self._return_expr_deps(
+                    expressions[0], fn, params, locals_, transfers, count
                 )
             elif len(expressions) == len(fn.results):
                 # `return a, b` — every expression's deps fold into the
@@ -5528,8 +5616,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # over-approximation the imported multi-result unpack
                 # uses).
                 for e in expressions:
-                    deps[0] |= self.expression(
-                        e, fn, params, locals_, transfers, count, 0
+                    deps[0] |= self._return_expr_deps(
+                        e, fn, params, locals_, transfers, count
                     )
             else:
                 raise _Unsupported("unsupported_return", _span(node))
@@ -5744,6 +5832,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     else frozenset()
                                 ),
                             )
+                if binding.type.kind == "function":
+                    # `f := mk(ch)` — the returned closure may
+                    # capture the queue it received, so the call's
+                    # `chan` arguments join the external model: a
+                    # later `ch <- x` broadcasts into
+                    # `indirect_writes`, which the opaque `f()`
+                    # call then observes.
+                    value = value | self._func_result_chan_args(
+                        chan_rhs, locals_, params
+                    )
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]
@@ -6176,6 +6274,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                             else frozenset()
                                         ),
                                     )
+                    if (
+                        binding.type.kind == "function"
+                        and value_nodes
+                    ):
+                        # `var f = mk(ch)` — like the short-decl
+                        # form, a returned closure may capture the
+                        # call's `chan` arguments.
+                        value = value | self._func_result_chan_args(
+                            (
+                                value_nodes[i]
+                                if len(names) == len(value_nodes)
+                                else value_nodes[0]
+                            ),
+                            locals_,
+                            params,
+                        )
                     if not conditional:
                         self._ptr_deps[binding.id] = (
                             rhs_ptrs[i]
@@ -7344,6 +7458,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_[alias_id] = (
                                 alias_slot or frozenset()
                             ) | (old_queue or frozenset())
+                if not compound and ref is not None:
+                    bound = self.bindings.get(ref.binding_id)
+                    if (
+                        bound is not None
+                        and bound.type.kind == "function"
+                    ):
+                        # `f = mk(ch)` — like the declaration
+                        # forms, the returned closure may capture
+                        # the call's `chan` arguments.
+                        value = value | self._func_result_chan_args(
+                            (
+                                rights[i]
+                                if len(lefts) == len(rights)
+                                else rights[0]
+                            ),
+                            locals_,
+                            params,
+                        )
                 if not accumulating:
                     # A plain store replaces what the pointer itself
                     # depends on — pointee folds stay in `locals_`
@@ -11502,6 +11634,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 name_node = names[index]
         if name_node is not None and name_node.type == "identifier":
             return frozenset()
+        # `return G` — a func-typed result hands the declared
+        # function back to the caller: the read is dep-free like the
+        # store positions, and the caller binds the result name as
+        # an opaque func value whose calls resolve through the
+        # func-value path (the result's identity does not ride the
+        # summary, so no pin records here).
+        if parent is not None and parent.type == "return_statement":
+            return frozenset()
         # `H(G, args)` — the name sits in a call's argument list.
         # The call record's span is the `call_expression` parent of
         # the argument list, so the record itself proves the
@@ -12204,27 +12344,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
             # reassignments between the literal and the call move
-            # what the call actually reads. `locals_` wins over the
-            # parameter index: `x = y` stores the param's current
-            # value under its binding id.
-            resolved: frozenset[int] = frozenset()
-            for cbid in captured:
-                # A captured channel name may have been reseated
-                # between the literal and the call (`ch = ch2`) —
-                # resolve the queue it names NOW, not the one its
-                # own slot still holds.
-                root = (
-                    self._chan_root(cbid)
-                    if self._is_chan_binding(cbid)
-                    else cbid
-                )
-                if root in locals_:
-                    resolved |= locals_[root]
-                    if root in self.external_chan_locals:
-                        resolved |= self.indirect_writes
-                elif root in params:
-                    resolved |= frozenset({params[root]})
-            deps = resolved
+            # what the call actually reads.
+            deps = self._captured_current_deps(captured, params, locals_)
         else:
             deps = frozenset()
         # The callee name itself reads its CURRENT deps — `f = g`

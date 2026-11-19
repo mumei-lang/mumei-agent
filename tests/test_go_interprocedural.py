@@ -18569,7 +18569,10 @@ def test_conditional_literal_over_alias_stays_external(go_types_helper):
 
 
 def test_func_name_in_other_positions_stays_closed(go_types_helper):
-    # `return G` — a function name outside the store-RHS position.
+    # `return G` on a func-typed result now admits dep-free — a
+    # function name in a genuinely non-value position still has no
+    # admitted shape: `G > 0` is not legal Go, and a comparison or
+    # operand position never reaches evaluation.
     result = named(
         *unit(
             go_types_helper,
@@ -18577,7 +18580,7 @@ def test_func_name_in_other_positions_stays_closed(go_types_helper):
             "func F(x int64) func(int64) int64 { return G }",
         )
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset()
 
 
 def test_alias_result_pins_callee_signature(go_types_helper):
@@ -19869,3 +19872,190 @@ def test_defer_indirect_callee_arg_deps_reach_named_result(
     result = named(source, snapshot, summaries)
     assert result.available
     assert 0 in result.return_dependencies
+
+
+def test_func_result_return_named_admitted(go_types_helper):
+    # `func mk() func() int64 { return G }` — a func-typed result
+    # carries no scalar deps; the name reads dep-free.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G() int64 { return 1 }; "
+        "func mk() func() int64 { return G }; "
+        "func F(x int64) int64 { f := mk(); return f() }",
+    )
+    mk = named(source, snapshot, summaries, "mk")
+    assert mk.available and mk.return_dependencies == frozenset()
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_func_result_opaque_call_args(go_types_helper):
+    # `f := mk(); f(x)` — the bound name resolves through the
+    # func-value path: the call is opaque and its args fold.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(v int64) int64 { return v }; "
+        "func mk() func(int64) int64 { return G }; "
+        "func F(x int64) int64 { f := mk(); return f(x) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_result_closure_capture_deps(go_types_helper):
+    # `return func() int64 { return x }` — the literal's captured
+    # deps ride the result's dep set, so `f := mk(x); f()` still
+    # carries x through the opaque call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(x int64) func() int64 { return func() int64 { return x } }; "
+        "func F(x int64) int64 { f := mk(x); return f() }",
+    )
+    mk = named(source, snapshot, summaries, "mk")
+    assert mk.available and mk.return_dependencies == frozenset({0})
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_result_return_param_passthrough(go_types_helper):
+    # `id(g) = return g` — the func result claims the parameter's
+    # index; a dep-free argument hands the bound name nothing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func id(g func(int64) int64) func(int64) int64 { return g }; "
+        "func G(v int64) int64 { return v }; "
+        "func F(x int64) int64 { f := id(G); return f(x) }",
+    )
+    id_fn = named(source, snapshot, summaries, "id")
+    assert id_fn.available and id_fn.return_dependencies == frozenset({0})
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_result_var_and_assignment_forms(go_types_helper):
+    # `var f = mk()` and `var f func() int64; f = mk()` admit like
+    # `f := mk()` — the name binds an opaque func value.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G() int64 { return 1 }; "
+        "func mk() func() int64 { return G }; "
+        "func F(x int64) int64 { var f = mk(); return f() }; "
+        "func H(x int64) int64 { var f func() int64; f = mk(); return f() }",
+    )
+    f_ = named(source, snapshot, summaries, "F")
+    h_ = named(source, snapshot, summaries, "H")
+    assert f_.available and h_.available
+
+
+def test_func_result_multi_slot_unpacks(go_types_helper):
+    # `f, n := mk()` — the func slot binds opaque and the scalar
+    # slot conflates the shared result deps like any multi-result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G() int64 { return 1 }; "
+        "func mk() (func() int64, int64) { return G, 7 }; "
+        "func F(x int64) int64 { f, n := mk(); return f() + n }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+
+
+def test_func_result_nil_stays_closed(go_types_helper):
+    # `return nil` on a func result — nil is not an admitted value
+    # expression, so the callee stays closed and its callers follow.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() func() int64 { return nil }; "
+        "func F(x int64) int64 { f := mk(); return f() }",
+    )
+    mk = named(source, snapshot, summaries, "mk")
+    assert not mk.available
+
+
+def test_func_result_direct_call_stays_closed(go_types_helper):
+    # `mk()()` — a call result as the callee operand is a computed
+    # base the func-value path cannot bind; stays closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() func() int64 { return G }; "
+        "func G() int64 { return 1 }; "
+        "func F(x int64) int64 { return mk()() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_func_result_imported_stays_closed(go_types_helper):
+    # `f := lib.Mk()` — the producer classifies a func-result callee
+    # as `external_or_bodyless`, so the call stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { f := lib.Mk(); return f() }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\nfunc Mk() func() int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_func_result_capture_updated_before_return(go_types_helper):
+    # `cl` captured `y` when it was const — but `y = x` before
+    # `return cl` means the closure observes x: the return must
+    # re-resolve captured bindings, not the literal's frozen deps.
+    files = {
+        "a.go": "package p\n"
+        "func mk(x int64) func() int64 {\n"
+        "    y := int64(0)\n"
+        "    cl := func() int64 { return y }\n"
+        "    y = x\n"
+        "    return cl\n"
+        "}\n"
+        "func F(a int64) int64 { f := mk(a); return f() }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    mk = named_package(files, snapshot, summaries, "mk")
+    f = named_package(files, snapshot, summaries, "F")
+    assert mk.available and mk.return_dependencies == frozenset({0})
+    assert f.available and f.return_dependencies == frozenset({0})
+
+
+def test_func_result_captured_chan_send_after_bind(go_types_helper):
+    # `f := mk(ch)` — the returned closure may capture `ch`, so the
+    # queue escapes: `ch <- x` after the call broadcasts into the
+    # shared model and `f()` observes x.
+    files = {
+        "a.go": "package p\n"
+        "func mk(ch chan int64) func() int64 {\n"
+        "    return func() int64 { return <-ch }\n"
+        "}\n"
+        "func F(x int64) int64 {\n"
+        "    ch := make(chan int64)\n"
+        "    f := mk(ch)\n"
+        "    ch <- x\n"
+        "    return f()\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
