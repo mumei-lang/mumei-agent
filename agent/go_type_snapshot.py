@@ -944,9 +944,13 @@ def load_go_package_snapshot(
                 )
             )
             # A `type MyFn func(N) int64` member declares its inner
-            # ids exactly like a `func` member does.
+            # ids exactly like a `func` member does, and a func-typed
+            # `var` member (`var F func(N)`, an imported struct's
+            # `F func(N)` field) publishes them for the consumer's
+            # opaque `s.f(args)` pin.
             _require(
                 kind in {"function", "type"}
+                or (kind == "var" and t.kind == "function")
                 or "signature_type_ids" not in m
             )
             sig_ids_raw = _list(m.get("signature_type_ids", []))

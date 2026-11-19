@@ -11986,9 +11986,10 @@ def test_bound_closure_alias_call(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
-def test_bound_closure_computed_callee_closed(go_types_helper):
-    # `(h)()` — only a bare-identifier callee admits; a
-    # parenthesized or computed callee stays closed.
+def test_bound_closure_parenthesized_callee_admitted(
+    go_types_helper,
+):
+    # `(h)()` unwraps to the same bare-identifier callee `h()` admits.
     data = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
@@ -11996,7 +11997,69 @@ def test_bound_closure_computed_callee_closed(go_types_helper):
         "\treturn (h)()\n}",
     )
     result = named(*data)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_selector_func_field_call_opaque(go_types_helper):
+    # `p.f(a)` — `f` is a func-typed field on a `*S` parameter:
+    # which function it holds is unknowable, so the call runs
+    # opaque like a func-typed parameter — deps(p) ∪ deps(a) —
+    # and records an external transfer on the field member.
+    files = {
+        "a.go": "package p\n"
+        "type S struct { f func(int64) int64; v int64 }\n"
+        "func F(p *S, a int64) int64 {\n"
+        "\treturn p.f(a)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_local_struct_func_field_call_opaque(go_types_helper):
+    # `s.f(a)` — `f` is a func-typed field on a local composite:
+    # the callee is unknowable, so the call unions the operand
+    # deps (s) and the argument, opaquely, recording the effect on
+    # the field member.
+    files = {
+        "a.go": "package p\n"
+        "type S struct { f func(int64) int64; v int64 }\n"
+        "func F(x int64, a int64) int64 {\n"
+        "\ts := S{v: x}\n"
+        "\treturn s.f(a)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_selector_func_field_call_writes_back(go_types_helper):
+    # `p.f(&x)` — the opaque callee may write `*p`-style through the
+    # pointer argument, so the write fold reaches the escaped `x`.
+    files = {
+        "a.go": "package p\n"
+        "type S struct { f func(*int64) int64 }\n"
+        "func F(p *S, x int64) int64 {\n"
+        "\tq := &x\n"
+        "\tp.f(q)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
 
 
 def test_bound_closure_var_declaration(go_types_helper):
@@ -17112,7 +17175,10 @@ def test_imported_func_typed_var_member_loads(go_types_helper):
     member = next(
         m for m in report["imported_members"] if m["name"] == "Callback"
     )
-    assert "signature_type_ids" not in member
+    # A func-typed `var` member publishes its signature's type
+    # identities like a function member does — an opaque `Callback`
+    # call pins them so a redeclared `N` flags `stale_dependents`.
+    assert len(member["signature_type_ids"]) == 1
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
         files,
@@ -17434,6 +17500,91 @@ def test_loop_closure_callback_swap_keeps_updated_capture_deps(
     )
     assert result.available
     assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_func_field_member_pins_signature_type_ids(
+    go_types_helper,
+):
+    # `lib.VS.F(n)` — an imported struct's func-typed field member
+    # publishes its signature's type identities, so the opaque call
+    # pins `N` and a redeclared `N` flags `stale_dependents`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(n lib.N) int64 { return lib.VS.F(n) + 1 }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type N int64\n"
+            "type S struct{ F func(N) int64 }\n"
+            "var VS S\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    n_member = next(
+        m for m in snapshot.imported_members if m.name == "N"
+    )
+    assert n_member.id in result.pinned
+
+
+def test_computed_func_call_constant_index_is_dep_free(
+    go_types_helper,
+):
+    # `lib.VMF["id"](x)` — a constant index names the same slot class
+    # as a computed key and contributes no deps; only the container's
+    # read and the arguments flow into the result.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.VMF[\"id\"](x) }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "var VMF map[string]func(int64) int64\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_func_field_stored_literal_resolves_captures_at_call(
+    go_types_helper,
+):
+    # `s.f = func() int64 { return x }; x = y; s.f()` — the slot's
+    # stored literal re-resolves its captured binding at the CALL
+    # site, so the result carries y's deps, not just the frozen
+    # bind-time set.
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ f func() int64 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\ts := S{}\n"
+        "\ts.f = func() int64 { return x }\n"
+        "\tx = y\n"
+        "\treturn s.f()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
     assert result.return_dependencies == frozenset({0, 1})
 
 

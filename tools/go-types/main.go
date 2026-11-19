@@ -619,17 +619,15 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 	m := member{
 		ID: id, Name: obj.Name(), Kind: kind, Type: ix.typeOf(obj.Type()),
 	}
-	if kind == "function" || kind == "type" {
+	if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
 		// `func G(...)` declares them, and so does a named function
 		// type member (`type MyFn func(N) int64`): a `var f MyFn`
 		// binding's func fact carries no inner ids, so the member
 		// must publish what MyFn's signature names. A func-typed
-		// `var` member stays unpublished — no consumer path pins
-		// member signature ids for var reads today, and the
-		// snapshot schema does not carry the field there.
-		if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
-			m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
-		}
+		// `var` member (`var F func(N) int64`, or an imported
+		// struct's `F func(N)` field) needs the same publication —
+		// the consumer's opaque `s.f(args)` call pins them.
+		m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
 	}
 	ix.importMembers[id] = m
 	if kind == "type" {
