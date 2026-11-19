@@ -6881,62 +6881,161 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     src_id = (
                         src_ref.binding_id if src_ref is not None else None
                     )
-                    if (
-                        src_id is not None
-                        and src_id in captures_before
-                    ):
-                        self.closure_captures[ref.binding_id] = (
-                            captures_before[src_id]
+                    # A maybe-skipped copy leaves the name holding
+                    # EITHER function value. When the source carries
+                    # a resolvable record the union covers both
+                    # candidates; when it carries none the may-set
+                    # includes an unresolvable value — drop the old
+                    # record too, so the call falls back to the
+                    # opaque external callee model.
+                    if conditional or self._may_skip > 0:
+                        src_known = (
+                            src_id is not None
+                            and (
+                                src_id in captures_before
+                                or src_id in writes_before
+                                or src_id in pointee_before
+                                or src_id in star_before
+                                or src_id in calls_before
+                                or src_id in aliases_before
+                            )
                         )
-                    else:
-                        self.closure_captures.pop(ref.binding_id, None)
-                    # `g = f` where f is a bound method value copies
-                    # the (method, receiver) pair AND its frozen
-                    # receiver deps — read from the pre-state so
-                    # `f, g = g, f` swaps like the capture maps.
-                    src_mv = (
-                        mv_before.get(src_id)
-                        if src_id is not None
-                        else None
-                    )
-                    if src_mv is not None and not (
-                        conditional or self._may_skip > 0
-                    ):
-                        self.bound_method_values[ref.binding_id] = src_mv
-                        if src_id in mv_deps_before:
-                            self.bound_method_receiver_deps[
-                                ref.binding_id
-                            ] = mv_deps_before[src_id]
+                        if src_known:
+                            if src_id in captures_before:
+                                self.closure_captures[
+                                    ref.binding_id
+                                ] = (
+                                    self.closure_captures.get(
+                                        ref.binding_id, frozenset()
+                                    )
+                                    | captures_before[src_id]
+                                )
+                            if src_id in writes_before:
+                                self.closure_writes[
+                                    ref.binding_id
+                                ] = (
+                                    self.closure_writes.get(
+                                        ref.binding_id, frozenset()
+                                    )
+                                    | writes_before[src_id]
+                                )
+                            if src_id in pointee_before:
+                                self.pointee_closures.add(
+                                    ref.binding_id
+                                )
+                            if src_id in star_before:
+                                self.closure_star_writes.add(
+                                    ref.binding_id
+                                )
+                            if src_id in calls_before:
+                                self.closure_inner_calls.add(
+                                    ref.binding_id
+                                )
                         else:
-                            self.bound_method_receiver_deps.pop(
+                            self.closure_captures.pop(
                                 ref.binding_id, None
                             )
+                            self.closure_writes.pop(
+                                ref.binding_id, None
+                            )
+                            self.pointee_closures.discard(
+                                ref.binding_id
+                            )
+                            self.closure_star_writes.discard(
+                                ref.binding_id
+                            )
+                            self.closure_inner_calls.discard(
+                                ref.binding_id
+                            )
+                        # A maybe-skipped `h = g` may also hand h a
+                        # bound method value — keep the resolved pair
+                        # only when both candidates name the SAME
+                        # (method, receiver); otherwise drop to the
+                        # opaque external callee model.
+                        if mv_before.get(src_id) != (
+                            self.bound_method_values.get(ref.binding_id)
+                        ):
+                            self._drop_bound_method(
+                                ref.binding_id, True
+                            )
                     else:
-                        self._drop_bound_method(
-                            ref.binding_id,
-                            conditional or self._may_skip > 0,
+                        if (
+                            src_id is not None
+                            and src_id in captures_before
+                        ):
+                            self.closure_captures[ref.binding_id] = (
+                                captures_before[src_id]
+                            )
+                        else:
+                            self.closure_captures.pop(
+                                ref.binding_id, None
+                            )
+                        # `g = f` where f is a bound method value
+                        # copies the (method, receiver) pair AND its
+                        # frozen receiver deps — read from the
+                        # pre-state so `f, g = g, f` swaps like the
+                        # capture maps.
+                        src_mv = (
+                            mv_before.get(src_id)
+                            if src_id is not None
+                            else None
                         )
-                    if (
-                        src_id is not None
-                        and src_id in pointee_before
-                    ):
-                        self.pointee_closures.add(ref.binding_id)
-                    else:
-                        self.pointee_closures.discard(ref.binding_id)
-                    if src_id is not None and src_id in writes_before:
-                        self.closure_writes[ref.binding_id] = (
-                            writes_before[src_id]
-                        )
-                    else:
-                        self.closure_writes.pop(ref.binding_id, None)
-                    if src_id is not None and src_id in star_before:
-                        self.closure_star_writes.add(ref.binding_id)
-                    else:
-                        self.closure_star_writes.discard(ref.binding_id)
-                    if src_id is not None and src_id in calls_before:
-                        self.closure_inner_calls.add(ref.binding_id)
-                    else:
-                        self.closure_inner_calls.discard(ref.binding_id)
+                        if src_mv is not None:
+                            self.bound_method_values[
+                                ref.binding_id
+                            ] = src_mv
+                            if src_id in mv_deps_before:
+                                self.bound_method_receiver_deps[
+                                    ref.binding_id
+                                ] = mv_deps_before[src_id]
+                            else:
+                                self.bound_method_receiver_deps.pop(
+                                    ref.binding_id, None
+                                )
+                        else:
+                            self._drop_bound_method(ref.binding_id)
+                        if (
+                            src_id is not None
+                            and src_id in pointee_before
+                        ):
+                            self.pointee_closures.add(ref.binding_id)
+                        else:
+                            self.pointee_closures.discard(
+                                ref.binding_id
+                            )
+                        if (
+                            src_id is not None
+                            and src_id in writes_before
+                        ):
+                            self.closure_writes[ref.binding_id] = (
+                                writes_before[src_id]
+                            )
+                        else:
+                            self.closure_writes.pop(
+                                ref.binding_id, None
+                            )
+                        if (
+                            src_id is not None
+                            and src_id in star_before
+                        ):
+                            self.closure_star_writes.add(
+                                ref.binding_id
+                            )
+                        else:
+                            self.closure_star_writes.discard(
+                                ref.binding_id
+                            )
+                        if (
+                            src_id is not None
+                            and src_id in calls_before
+                        ):
+                            self.closure_inner_calls.add(
+                                ref.binding_id
+                            )
+                        else:
+                            self.closure_inner_calls.discard(
+                                ref.binding_id
+                            )
                     # `h = G` binds a declared function name; `h2 =
                     # h` inherits the alias h recorded.
                     self._propagate_func_alias(
@@ -10723,6 +10822,173 @@ member, or one explicit dereference of one (`(*t).F` — the same
         writes: set[str] = set()
         star_write = False
         has_call = False
+        ptr_alias: dict[str, set[str]] = {}
+        # The DFS below pops children in reverse order, so a use can
+        # scan before its declaration — collect `p := &x` pointer
+        # aliases in a separate pass first. A pointee set keeps every
+        # RHS a name may hold (reassignment unions, never replaces).
+        alias_stack = [node]
+        while alias_stack:
+            cur = alias_stack.pop()
+            alias_stack.extend(_children(cur))
+            if cur.type == "var_spec":
+                vnames = [
+                    c
+                    for i, c in enumerate(cur.children)
+                    if cur.field_name_for_child(i) == "name"
+                ]
+                vvals = [
+                    c
+                    for i, c in enumerate(cur.children)
+                    if cur.field_name_for_child(i) == "value"
+                ]
+                vlefts = [n for n in vnames]
+                vrights: list[Any] = []
+                for v in vvals:
+                    vrights.extend(_children(v))
+                if len(vlefts) == len(vrights):
+                    for li, lnode in enumerate(vlefts):
+                        if lnode.type != "identifier":
+                            continue
+                        lb = self.bindings_by_span.get(
+                            self.node_key(lnode)
+                        )
+                        if lb is None:
+                            continue
+                        rnode = vrights[li]
+                        while (
+                            rnode.type == "parenthesized_expression"
+                        ):
+                            rnode = next(
+                                (
+                                    c
+                                    for c in rnode.named_children
+                                    if c.type != "comment"
+                                ),
+                                rnode,
+                            )
+                            if (
+                                rnode.type
+                                == "parenthesized_expression"
+                            ):
+                                continue
+                            break
+                        if rnode.type == "unary_expression":
+                            rop = rnode.child_by_field_name(
+                                "operator"
+                            )
+                            operand = (
+                                rnode.child_by_field_name("operand")
+                                if rop is not None
+                                and rop.type == "&"
+                                else None
+                            )
+                            while (
+                                operand is not None
+                                and operand.type
+                                == "parenthesized_expression"
+                            ):
+                                operand = next(
+                                    (
+                                        c
+                                        for c in operand.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if (
+                                operand is not None
+                                and operand.type == "identifier"
+                            ):
+                                rref = self.references.get(
+                                    self.node_key(operand)
+                                )
+                                if rref is not None:
+                                    ptr_alias.setdefault(
+                                        lb.id, set()
+                                    ).add(rref.binding_id)
+                                    self.escaped.add(
+                                        rref.binding_id
+                                    )
+                continue
+            if cur.type in {
+                "short_var_declaration",
+                "assignment_statement",
+            }:
+                left = cur.child_by_field_name("left")
+                right = cur.child_by_field_name("right")
+                if left is None or right is None:
+                    continue
+                lefts = _children(left)
+                rights = _children(right)
+                if len(lefts) != len(rights):
+                    continue
+                for li, lnode in enumerate(lefts):
+                    if lnode.type != "identifier":
+                        continue
+                    lb = self.bindings_by_span.get(
+                        self.node_key(lnode)
+                    )
+                    if lb is None:
+                        lref = self.references.get(
+                            self.node_key(lnode)
+                        )
+                        lb_id = (
+                            lref.binding_id if lref is not None else None
+                        )
+                    else:
+                        lb_id = lb.id
+                    if lb_id is None:
+                        continue
+                    rnode = rights[li]
+                    while rnode.type == "parenthesized_expression":
+                        rnode = next(
+                            (
+                                c
+                                for c in rnode.named_children
+                                if c.type != "comment"
+                            ),
+                            rnode,
+                        )
+                        if rnode.type == "parenthesized_expression":
+                            continue
+                        break
+                    if rnode.type == "unary_expression":
+                        rop = rnode.child_by_field_name("operator")
+                        if rop is not None and rop.type == "&":
+                            operand = rnode.child_by_field_name(
+                                "operand"
+                            )
+                            while (
+                                operand is not None
+                                and operand.type
+                                == "parenthesized_expression"
+                            ):
+                                operand = next(
+                                    (
+                                        c
+                                        for c in operand.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if (
+                                operand is not None
+                                and operand.type == "identifier"
+                            ):
+                                rref = self.references.get(
+                                    self.node_key(operand)
+                                )
+                                if rref is not None:
+                                    ptr_alias.setdefault(
+                                        lb_id, set()
+                                    ).add(rref.binding_id)
+                                    # `&x` inside the literal hands
+                                    # the call a pointer into
+                                    # caller memory — an inner call
+                                    # or `*p` write can reach it.
+                                    self.escaped.add(rref.binding_id)
+
         stack = [node]
         while stack:
             cur = stack.pop()
@@ -10752,7 +11018,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         None,
                     )
                 if lhs is not None:
-                    for wtarget in self._literal_write_targets(lhs):
+                    for wtarget in self._literal_write_targets(
+                        lhs, ptr_alias
+                    ):
                         writes.add(wtarget)
                     # `*p = e` / `(*p).V = e` / `(*p)++` inside the
                     # literal writes caller memory through a captured
@@ -10819,9 +11087,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "binding_unavailable", _span(cur)
                         )
             stack.extend(_children(cur))
-        return deps, captured, captures_pointer, writes, star_write, has_call
+        return (
+            deps,
+            captured,
+            captures_pointer,
+            writes,
+            star_write,
+            has_call,
+        )
 
-    def _literal_write_targets(self, lhs: Any) -> set[str]:
+    def _literal_write_targets(
+        self, lhs: Any, ptr_alias: dict[str, set[str]] | None = None
+    ) -> set[str]:
         """Enclosing-scope binding ids an assignment LHS may write.
 
         `x = e` / `x++` writes `x` itself; `s.V = e` writes the
@@ -10829,8 +11106,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
         through the operand binding. Literal-internal targets (a
         name declared inside the literal) never leave the body and
         are skipped; a `*p` unary target is reported separately by
-        the `star_write` flag, not here."""
+        the `star_write` flag — unless `ptr_alias` (a `p := &x`
+        collected before the scan) names the pointee, in which case
+        the write lands on it directly. A base identifier that is
+        itself a pointer alias (`p := &q`, then `p.V = e`) folds
+        into the aliased pointee too."""
         targets: set[str] = set()
+        alias = ptr_alias or {}
+
+        def _chase(bid: str) -> set[str]:
+            out = {bid}
+            seen = {bid}
+            frontier = list(alias.get(bid, ()))
+            while frontier:
+                cur = frontier.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                out.add(cur)
+                frontier.extend(alias.get(cur, ()))
+            return out
+
         for name in lhs.named_children:
             if name.type == "comment":
                 continue
@@ -10842,13 +11138,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
             }:
                 node = node.children[0]
             if node.type == "unary_expression":
-                # `*p = e` — handled by the star_write flag.
+                # `*p = e` — resolved through a `p := &x` alias when
+                # one exists; the star_write flag still covers the
+                # unresolvable case.
+                operand = node.child_by_field_name("operand")
+                while (
+                    operand is not None
+                    and operand.type == "parenthesized_expression"
+                ):
+                    operand = next(
+                        (
+                            c
+                            for c in operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if operand is not None and operand.type == "identifier":
+                    ref = self.references.get(self.node_key(operand))
+                    if ref is not None and ref.binding_id in alias:
+                        targets |= _chase(ref.binding_id) - {
+                            ref.binding_id
+                        }
                 continue
             if node.type != "identifier":
                 continue
             ref = self.references.get(self.node_key(node))
             if ref is not None:
-                targets.add(ref.binding_id)
+                targets |= _chase(ref.binding_id)
         return targets
 
     def _func_literal(
@@ -11255,6 +11572,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             write_deps = deps | callee_deps
             for target in writes:
                 self._store(locals_, params, target, write_deps, True)
+                # `g = func(){...}` / `g = G` inside the body
+                # rebinds the name — its old resolution went stale
+                # with the value, so later `g()` calls resolve
+                # through the fresh deps the store just folded in
+                # (the opaque external callee model).
+                self.func_aliases.pop(target, None)
+                self.closure_captures.pop(target, None)
+                self.pointee_closures.discard(target)
+                self.closure_writes.pop(target, None)
+                self.closure_star_writes.discard(target)
+                self.closure_inner_calls.discard(target)
             if star_write or inner_calls:
                 self.indirect_writes |= write_deps
                 for escaped_id in self.escaped:
@@ -12019,6 +12347,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             write_deps = deps
             for target in writes:
                 self._store(locals_, params, target, write_deps, True)
+                # Same stale-resolution drop as the bound-literal
+                # call: `g = func(){...}` in place rebinds `g`.
+                self.func_aliases.pop(target, None)
+                self.closure_captures.pop(target, None)
+                self.pointee_closures.discard(target)
+                self.closure_writes.pop(target, None)
+                self.closure_star_writes.discard(target)
+                self.closure_inner_calls.discard(target)
             if star_write or has_call:
                 self.indirect_writes |= write_deps
                 for escaped_id in self.escaped:

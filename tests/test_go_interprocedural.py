@@ -12144,6 +12144,90 @@ def test_bound_closure_writes_copy_with_name(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_bound_closure_addrof_star_write_lands_on_pointee(
+    go_types_helper,
+):
+    # `p := &x; *p = y` inside the literal writes x through the
+    # local pointer — the `p := &x` alias resolves the star target,
+    # so `return x` after `h()` reports y's dep {0}.
+    data = unit(
+        go_types_helper,
+        "func F(y int64) int64 {\n"
+        "\tx := int64(0)\n"
+        "\th := func() { p := &x; *p = y }\n"
+        "\th()\n"
+        "\treturn x\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_addrof_field_write_reaches_pointee(
+    go_types_helper,
+):
+    # `p := &q; p.V = y` writes the aggregate q through the local
+    # pointer — `return q.V` after `h()` reports y's dep {0}.
+    data = unit(
+        go_types_helper,
+        "type St struct{ V int64 }\n"
+        "func F(y int64) int64 {\n"
+        "\tq := St{V: 0}\n"
+        "\th := func() { p := &q; p.V = y }\n"
+        "\th()\n"
+        "\treturn q.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_func_rebind_drops_stale_resolution(
+    go_types_helper,
+):
+    # `g = func() { return y }` inside the literal rebinds g — the
+    # old literal's resolution goes stale, so `g()` after `h()`
+    # resolves through the deps the write folded in and `return
+    # g()` reports y's dep {0}.
+    data = unit(
+        go_types_helper,
+        "func F(y int64) int64 {\n"
+        "\tg := func() int64 { return 0 }\n"
+        "\th := func() { g = func() int64 { return y } }\n"
+        "\th()\n"
+        "\treturn g()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_conditional_copy_unions_records(
+    go_types_helper,
+):
+    # `if b { h = g }` may keep either function value — the copy
+    # must UNION h's old record with g's, not replace it, or `h()`
+    # loses `x = y` on the path that skips the branch. `return x`
+    # reports y's dep {1}.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, y int64) int64 {\n"
+        "\tx := int64(0)\n"
+        "\th := func() { x = y }\n"
+        "\tg := func() {}\n"
+        "\tif b { h = g }\n"
+        "\th()\n"
+        "\treturn x\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
 def test_bound_closure_send_inside_stays_closed(go_types_helper):
     # `q <- v` inside the literal targets a shared queue — the
     # sequencing model cannot place the send, so it stays closed.
