@@ -5571,9 +5571,14 @@ matched envelope's `subject_digest` — the same carrier the
 verification doc already emits — and
 `mumei.signature-envelope-evaluation/v1` joins `_BINDING_CARRIERS`.
 `_CHECK_PERFORMERS["key_revocation"]` names both fold docs'
-`key_not_revoked` bound through `subject_digest`, so a bound
-`key_not_revoked: true` performs `key_revocation` in
-`recovery-eval`/`binding-eval` (and `evidence_failed` otherwise).
+`key_not_revoked` bound through `subject_digest`, so
+`recovery-eval` reports `recovered` only when every bound fold doc
+for the record agrees `key_not_revoked: true` (a revoked-key
+evaluation beside a clean one for the same record stays
+`evidence_failed` — a conflicting bound observation never recovers).
+`binding-eval` only checks the carrier's digest equality — it
+reports `bound: true` for a bound doc regardless of the outcome
+field; the outcome judgement lives in `recovery-eval` alone.
 
 This is a declared list, not a revocation system: who maintains the
 list, how it is distributed and authenticated (`key_authenticity`

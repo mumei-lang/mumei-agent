@@ -1190,16 +1190,25 @@ def evaluate_unperformed_check_recovery(
             if status == "no_evidence":
                 status = "evidence_failed"
             fields = field if type(field) is tuple else (field,)
-            if any(
+            applies = [
+                doc
+                for doc in schema_to_docs[schema]
+                if _performer_document_applies(
+                    bind_path, doc, comparison_digest
+                )
+            ]
+            if applies and all(
                 all(
                     _outcome_matches(_dotted(doc, path), expected)
                     for path in fields
                 )
-                and _performer_document_applies(
-                    bind_path, doc, comparison_digest
-                )
-                for doc in schema_to_docs[schema]
+                for doc in applies
             ):
+                # Bound documents for this record agree on the
+                # outcome — a conflicting observation (a revoked-key
+                # evaluation beside a clean one for the same record)
+                # stays evidence_failed rather than letting any true
+                # mask it.
                 status = "recovered"
                 break
         checks[name] = status

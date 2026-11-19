@@ -99,13 +99,20 @@ def main_eval(args: argparse.Namespace | None = None) -> int:
         output_path = getattr(args, "output", None)
         if output_path is not None:
             out_path = Path(output_path)
-            try:
-                if Path(args.envelope).samefile(out_path):
-                    raise ValueError(
-                        "--output may not overwrite a declared input document"
-                    )
-            except FileNotFoundError:
-                pass
+            for declared_input in (
+                args.envelope,
+                getattr(args, "revocation_list", None),
+            ):
+                if declared_input is None:
+                    continue
+                try:
+                    if Path(declared_input).samefile(out_path):
+                        raise ValueError(
+                            "--output may not overwrite a declared"
+                            " input document"
+                        )
+                except FileNotFoundError:
+                    pass
         revoked_keys = None
         revocation_path = getattr(args, "revocation_list", None)
         if revocation_path is not None:

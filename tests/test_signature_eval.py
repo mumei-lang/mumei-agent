@@ -299,3 +299,27 @@ def test_route_malformed_revocation_list_fails(tmp_path, capsys):
         == 1
     )
     assert "signature-eval:" in capsys.readouterr().err
+
+
+def test_route_refuses_output_over_revocation_list(tmp_path):
+    # `--output` colliding with the declared revocation list is the
+    # same overwrite hazard as colliding with the envelope.
+    envelope = _write(tmp_path / "env.json", _envelope())
+    revoked = _write(
+        tmp_path / "revoked.json",
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": []},
+    )
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(
+            _args(parser, envelope, "--revocation-list", str(revoked),
+                  "--output", str(revoked))
+        )
+        == 1
+    )
+    # The declared input survives untouched.
+    assert json.loads(revoked.read_text())["revoked_keys"] == []

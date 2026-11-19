@@ -336,3 +336,28 @@ def test_route_revocation_list(tmp_path, capsys):
     emitted = json.loads(capsys.readouterr().out)
     assert emitted["key_not_revoked"] is True
     assert "key_revocation" not in emitted["checks_not_performed"]
+
+
+def test_route_refuses_output_over_revocation_list(tmp_path):
+    # `--output` colliding with the declared revocation list is the
+    # same overwrite hazard as colliding with the envelope or key.
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    revoked = tmp_path / "revoked.json"
+    revoked.write_text(json.dumps(
+        {"schema_version": "mumei.key-revocation-list/v1",
+         "revoked_keys": []}
+    ))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_verify_parser(parser)
+    assert (
+        main_verify(
+            _args(parser, envelope, _PUBLIC_KEY_HEX,
+                  "--revocation-list", str(revoked),
+                  "--output", str(revoked))
+        )
+        == 1
+    )
+    assert json.loads(revoked.read_text())["revoked_keys"] == []
