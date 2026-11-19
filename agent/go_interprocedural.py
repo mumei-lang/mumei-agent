@@ -9093,6 +9093,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # already held), so it stays an append sharer even
             # though no surviving member name groups with it.
             func_elem_reseat_backings: dict[str, set[str]] = {}
+            # Stored map keys' deps defer to after `values` —
+            # `(*p)[k], r = 1, (*p)[0]` reads the map's pre-state
+            # because the store lands after the RHS reads.
+            pending_map_key_deps = frozenset()
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -9287,7 +9291,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # must observe `b`'s deps through the
                             # broadcast.
                             map_key_deps |= extra_deps
-                    self.indirect_writes |= map_key_deps
+                    pending_map_key_deps |= map_key_deps
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -9593,6 +9597,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for rhs in rights
                 ]
             )
+            # The stored map keys' deps join the external-write set
+            # only now — the store lands after every RHS read.
+            self.indirect_writes |= pending_map_key_deps
             # Func-element append operands also resolve against the
             # post-eval state: `a, c = append(b, z), append(a, z)`
             # reads `a`'s backing BEFORE `a`'s own store, so the

@@ -25579,3 +25579,28 @@ def test_member_element_write_observed_by_member_read(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_map_key_write_deps_apply_after_rhs_reads(
+    go_types_helper,
+):
+    # `(*p)[k], r = 1, (*p)[0]` — the RHS reads the pre-state
+    # before any store lands, so `r` reads `(*p)[0]` without the
+    # key's deps the same statement is about to store.
+    files = {
+        "a.go": "package p\n"
+        "func F(k int64, p *map[int64]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\t(*p)[k], r = 1, (*p)[0]\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
