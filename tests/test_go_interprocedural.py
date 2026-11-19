@@ -18923,6 +18923,37 @@ def test_imported_method_chan_result_admitted(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_imported_method_chan_receiver_promoted(go_types_helper):
+    # `ch := q.Self()` — the opaque imported method may return
+    # its own channel receiver (`return c`), so `q` joins the
+    # external model and a send through the bound name reaches
+    # a later read on `q`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(q lib.C, x int64) int64 {\n"
+        "\tch := q.Self()\n"
+        "\tch <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype C chan int64\n"
+            "func (c C) Self() C {\n"
+            "\treturn c\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_imported_method_multi_result_chan_slot(go_types_helper):
     # `ch, n := st.M()` — the imported method's `(chan int64,
     # int64)` signature admits the chan slot like the plain
