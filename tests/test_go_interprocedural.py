@@ -18067,6 +18067,40 @@ def test_range_over_imported_chan_result_reads_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_range_over_imported_chan_result_carries_arg_deps(
+    go_types_helper,
+):
+    # `for v := range lib.G(x)` — the call's argument still
+    # evaluates: `G` may send `x` on the queue it returns, so the
+    # accumulated element reads carry `x`'s deps, and the write-back
+    # an opaque argument fold records marks `effects` unknown.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range lib.G(x) {\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(a int64) chan int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_imported_chan_result_named_elem_pins_identity(
     go_types_helper,
 ):

@@ -7544,6 +7544,44 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     imported=True,
                                 )
                             )
+                            # The call's own arguments still evaluate
+                            # — `lib.G(x)` reads `x`, and the callee
+                            # may send `x` on the queue it returns or
+                            # write through a pointer/channel argument
+                            # — so the deps join the read and the
+                            # escaped fold an opaque call applies.
+                            arg_node = right
+                            while (
+                                arg_node is not None
+                                and arg_node.type
+                                == "parenthesized_expression"
+                            ):
+                                arg_node = next(
+                                    (
+                                        c
+                                        for c in arg_node.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            range_args = (
+                                arg_node.child_by_field_name("arguments")
+                                if arg_node is not None
+                                else None
+                            )
+                            arg_deps: frozenset[int] = frozenset()
+                            if range_args is not None:
+                                for arg in _children(range_args):
+                                    arg_deps |= self.expression(
+                                        arg, fn, params, scope,
+                                        transfers, count, 0,
+                                    )
+                            self.indirect_writes |= arg_deps
+                            for escaped_id in self.escaped:
+                                self._store(
+                                    scope, params, escaped_id,
+                                    arg_deps, True,
+                                )
                             rdeps = self.indirect_writes
                             chan = member
                         else:
