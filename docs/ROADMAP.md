@@ -2133,8 +2133,13 @@ body hash and half-open, body-relative Unicode-codepoint spans, not byte offsets
 or resolved source-file identities. Calls are opaque, normally-returning steps;
 this is not an interprocedural, exceptional-flow or concurrency model.
 
-Unsupported switch/select, defer/go, heuristic termination, labels/goto and
-other statements return explicit source-mapped gaps **without** a partial
+A `go`/`defer` statement now admits like an expression-statement call:
+Go evaluates the callee and its arguments at the statement itself, so
+the call folds normally while its result is discarded — a `defer`d
+call runs before the function returns and a goroutine's effects may
+happen, and the union model covers both orderings. Unsupported
+switch/select, heuristic termination, labels/goto and other
+statements return explicit source-mapped gaps **without** a partial
 graph. Parse/parser unavailability also produces a gap. More language/type
 coverage, fixed-point CFG dataflow and full source provenance remain open
 C02/C05/C06 work.
@@ -2441,8 +2446,11 @@ This is not SSA, alias/value-flow analysis or cross-file cache invalidation.
 Only ordinary calls resolved to an implemented, non-method, non-generic,
 non-variadic function declaration in this unit get a `direct_local` target.
 Function variables/aliases, selectors, methods, generic/variadic calls,
-bodyless declarations, builtins, conversions, defer/go and closure/initializer
-contexts stay explicit and opaque. A direct target says nothing about purity,
+bodyless declarations, builtins, conversions and closure/initializer
+contexts stay explicit and opaque. A call inside a `go` or `defer`
+statement classifies normally and carries a `special`
+("concurrent"/"deferred") marker, since the callee resolves and its
+arguments evaluate at the statement like any other call. A direct target says nothing about purity,
 termination, recursion, argument/return/effect transfer or proof. Non-scalar
 value semantics remain explicit gaps even when declaration lookup succeeds.
 

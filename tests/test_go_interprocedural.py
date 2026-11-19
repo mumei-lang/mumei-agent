@@ -19586,3 +19586,163 @@ def test_imported_chan_result_named_elem_pins_identity(
     )
     assert result.available
     assert set(member.signature_type_ids) <= set(result.pinned)
+
+
+def test_go_statement_admitted(go_types_helper):
+    # `go g(x)`: the callee and its arguments evaluate at the
+    # statement, the goroutine's result is discarded — the call
+    # folds like a plain call whose effects may (or may not)
+    # happen.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func g(x int64) int64 { q <- x; return x }; "
+        "func F(x int64) int64 { go g(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_statement_admitted(go_types_helper):
+    # `defer g(x)`: arguments evaluate at the statement, the call
+    # runs before the function returns — its effects fold exactly
+    # like the plain call.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func g(x int64) int64 { q <- x; return x }; "
+        "func F(x int64) int64 { defer g(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_go_pure_callee_admitted(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func g(x int64) int64 { return x }; "
+        "func F(x int64) int64 { go g(x); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+    g_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "g"
+    )
+    assert any(c.target == g_id for c in result.calls)
+
+
+def test_go_func_literal_stays_closed(go_types_helper):
+    # `go func(){...}()` — the extractor classifies a func_literal
+    # callee as `closure`, which the CFG gate keeps closed.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { go func() { }(); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_defer_void_callee_stays_closed(go_types_helper):
+    # A void callee is outside the signature model — `defer s(x)`
+    # closes like the plain call on an unavailable callee does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "func s(x int64) { q <- x }; "
+        "func F(x int64) int64 { defer s(x); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert not result.available
+
+
+def test_go_statement_imported_callee(go_types_helper):
+    # `go lib.G(x)` — the `special` marker rides the package call
+    # record, and the imported callee still classifies.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { go lib.G(x); return x }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G(x int64) int64 { return x }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    call = next(c for c in snapshot.calls if c.special)
+    assert call.special == "concurrent" and call.kind == "direct_import"
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_may_write_reaches_named_result(go_types_helper):
+    # `defer set(&r,x); return 0` — the deferred store lands AFTER
+    # `r = 0` is evaluated, so F actually returns x. The dep model
+    # must carry the deferred call's argument deps into the named
+    # result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func set(p *int64, v int64) int64 { *p = v; return v }; "
+        "func F(x int64) (r int64) { defer set(&r, x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_defer_pure_callee_does_not_touch_result(go_types_helper):
+    # A deferred callee with no write capacity can't change the
+    # named result — `return 0` stays dep-free.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func logv(v int64) int64 { return v }; "
+        "func F(x int64) (r int64) { defer logv(x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_defer_argument_calls_record_once(go_types_helper):
+    # `defer G(Id(x))` evaluates the argument exactly once — Id's
+    # transfer appears once in the caller's call list, not twice.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func Id(v int64) int64 { return v }; "
+        "func G(v int64) int64 { return v }; "
+        "func F(x int64) int64 { defer G(Id(x)); return x }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    id_fn = next(
+        f for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "Id"
+    )
+    g_fn = next(
+        f for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "G"
+    )
+    assert sorted(c.target for c in result.calls) == sorted(
+        [id_fn.binding_id, g_fn.binding_id]
+    )
+
+
+def test_defer_indirect_callee_arg_deps_reach_named_result(
+    go_types_helper,
+):
+    # `defer cb(&r,x)` through an unresolvable func value — the
+    # opaque call records no argument deps on its transfer, but the
+    # deferred write can still carry x into the named result.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var cb func(*int64, int64) int64; "
+        "defer cb(&r, x); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert 0 in result.return_dependencies
