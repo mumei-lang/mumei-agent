@@ -6970,6 +6970,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # sees no change and stops before the element
                     # re-join above can observe the send.
                     iw_before = self.indirect_writes
+                    # Alias/capture resolution tables sit outside
+                    # `inner` too: a body pass that drops `h`'s
+                    # function alias (or a literal's capture record)
+                    # changes what `h(x)` resolves to without growing
+                    # any dep set, so compare them like
+                    # `indirect_writes`.
+                    resolution_before = (
+                        dict(self.func_aliases),
+                        dict(self.closure_captures),
+                        set(self.pointee_closures),
+                    )
                     self._branch_sequence(
                         _children(body_node), fn, params, inner, transfers,
                         count, deps, saw_return, conditional,
@@ -6984,6 +6995,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             deps, saw_return, conditional,
                         )
                     changed = self.indirect_writes != iw_before
+                    changed = changed or resolution_before != (
+                        dict(self.func_aliases),
+                        dict(self.closure_captures),
+                        set(self.pointee_closures),
+                    )
                     for binding_id, binding_deps in inner.items():
                         if binding_id in scope:
                             if not binding_deps <= scope[binding_id]:

@@ -16538,3 +16538,38 @@ def test_func_alias_dropped_when_address_escapes(go_types_helper):
     )
     assert result.available
     assert result.effects == "unknown"
+
+
+def test_func_alias_invalidation_reshapes_loop_fixed_point(
+    go_types_helper,
+):
+    # Pass 1 resolves `ch <- h(x)` through G; the `h = f` store then
+    # drops the alias. Without comparing the resolution tables the
+    # pass-join sees no dep growth — the queue already held {x} — and
+    # stops; pass 2's external call (which unions h's deps and the
+    # escaped bindings' deps into the send) would never run.
+    files = {
+        "a.go": "package p\n"
+        "func G(v int64) int64 { return v }\n"
+        "func F(f func(int64) int64, ch chan int64, p *int64, "
+        "y int64, x int64) int64 {\n"
+        "\t*p = y\n"
+        "\tch <- x\n"
+        "\th := G\n"
+        "\tfor i := int64(0); i < 2; i = i + 1 {\n"
+        "\t\tch <- h(x)\n"
+        "\t\th = f\n"
+        "\t}\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    # The external call folds h's deps ({f}) and the escaped p's
+    # deps ({p} param ∪ stored {y}) into the send — the queue must
+    # carry them beside {x} and the loop's own writes.
+    assert 0 in result.return_dependencies
+    assert 4 in result.return_dependencies
