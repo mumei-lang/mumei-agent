@@ -18892,6 +18892,160 @@ def test_imported_multi_result_chan_var_decl_shares_arg_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_imported_method_chan_result_admitted(go_types_helper):
+    # `ch := st.M()` — an imported method declaring a scalar-
+    # element `chan` result admits like `ch := lib.G()`: the
+    # member's `result_types` carries the chan fact and `ch`
+    # binds an external queue.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(st lib.T, x int64) int64 {\n"
+        "\tch := st.M()\n"
+        "\tch <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype T int64\n"
+            "func (t T) M() chan int64 {\n"
+            "\treturn make(chan int64)\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_method_chan_receiver_promoted(go_types_helper):
+    # `ch := q.Self()` — the opaque imported method may return
+    # its own channel receiver (`return c`), so `q` joins the
+    # external model and a send through the bound name reaches
+    # a later read on `q`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(q lib.C, x int64) int64 {\n"
+        "\tch := q.Self()\n"
+        "\tch <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype C chan int64\n"
+            "func (c C) Self() C {\n"
+            "\treturn c\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_method_chan_receiver_local_promoted(go_types_helper):
+    # Same promotion on a LOCAL channel: `var q lib.C` is not a
+    # parameter, so without promoting the receiver root the send
+    # through `ch := q.Self()` never reaches `<-q` — the receive
+    # reads a queue the model never saw an op on.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar q lib.C = make(chan int64, 1)\n"
+        "\tch := q.Self()\n"
+        "\tch <- x\n"
+        "\treturn <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype C chan int64\n"
+            "func (c C) Self() C {\n"
+            "\treturn c\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_method_multi_result_chan_slot(go_types_helper):
+    # `ch, n := st.M()` — the imported method's `(chan int64,
+    # int64)` signature admits the chan slot like the plain
+    # function form does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(st lib.T, x int64) int64 {\n"
+        "\tch, n := st.M()\n"
+        "\tch <- x\n"
+        "\treturn <-ch + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype T int64\n"
+            "func (t T) M() (chan int64, int64) {\n"
+            "\treturn make(chan int64), 0\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_method_chan_result_nonscalar_stays_closed(
+    go_types_helper,
+):
+    # `ch := st.M()` returning `chan chan int64` — a queue of
+    # queues stays out of the dep model.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(st lib.T, x int64) int64 {\n"
+        "\tch := st.M()\n"
+        "\t_ = ch\n"
+        "\treturn x\n}\n"
+    }
+    lib = {
+        "lib": {
+            "t.go": "package lib\ntype T int64\n"
+            "func (t T) M() chan chan int64 {\n"
+            "\treturn nil\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_imported_multi_result_chan_assign_second_position(
     go_types_helper,
 ):

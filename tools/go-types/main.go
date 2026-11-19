@@ -293,12 +293,14 @@ func singleScalarChanResult(sig *types.Signature) bool {
 }
 
 // directImportID admits an imported call only when it is summarizable:
-// every result must be scalar (integer/boolean), at any arity. Composite
-// results stay `external_or_bodyless` — a `range` over a composite would
+// every result must be scalar (integer/boolean), a pointer, or a
+// scalar-element `chan`, at any arity. Composite results stay
+// `external_or_bodyless` — a `range` over a composite would
 // break the fragment's integer-only range model. A multi-valued callee
 // declares its arity on the call record so the consumer can admit the
-// tuple unpacking `a, b := lib.F(x)`. A lone scalar-element `chan`
-// result admits too — the consumer binds it as an external queue.
+// tuple unpacking `a, b := lib.F(x)`. A scalar-element `chan`
+// result at any position admits too — the consumer binds that slot
+// as an external queue.
 func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 	id := ix.importedID(f)
 	if id == "" {
@@ -333,7 +335,7 @@ func (ix *indexer) directImportMethodID(f *types.Func, recv types.Type) (string,
 		return "", 0, nil, false
 	}
 	sig, ok := f.Type().(*types.Signature)
-	if !ok || sig.Recv() == nil || !allScalarResults(sig) {
+	if !ok || sig.Recv() == nil || !importedResultsOK(sig) {
 		return "", 0, nil, false
 	}
 	rt := types.Unalias(recv)

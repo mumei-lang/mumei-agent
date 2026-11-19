@@ -221,6 +221,26 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 	}
 }
 
+func TestImportedMethodChanResultAdmits(t *testing.T) {
+	// `ch, n := st.M()` — an imported method whose signature
+	// declares a scalar-element `chan` among its results records
+	// `direct_import` (marked `method`) the same way a plain
+	// function does; the member's `result_types` carries the
+	// chan slot's fact for the consumer's per-slot gate.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(st lib.T) int64 { ch, n := st.M(); ch <- n; return <-ch }"}}
+	imports := []importedUnit{{"lib", []namedSource{
+		{"t.go", "package lib\ntype T int64\nfunc (t T) M() (chan int64, int64) { return make(chan int64), 0 }"},
+	}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_import" ||
+		!out.Calls[0].Method || out.Calls[0].Results != 2 {
+		t.Fatalf("a scalar-chan method result was rejected: %+v", out.Calls)
+	}
+}
+
 func TestMultiResultChanCalleeAdmits(t *testing.T) {
 	// `ch, n := lib.G()` where `lib.G` declares `(chan int64,
 	// int64)` — the call records `direct_import` with arity 2 and

@@ -3357,7 +3357,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         argument must join the external model — the result may
         literally be that queue. `index` is the bound result slot —
         a multi-result callee admits at the slot declaring the
-        scalar `chan` (`ch, n := lib.G(q)`)."""
+        scalar `chan` (`ch, n := lib.G(q)`). A method call
+        `q.M()` promotes the receiver the same way: the opaque
+        body may `return c` its own channel receiver, so `ch :=
+        q.M()` binds a queue `q` itself still names — sends
+        through `ch` must reach reads on `q`."""
         inner = node
         while (
             inner is not None
@@ -3409,6 +3413,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             chan = self._chan_binding(arg, locals_, params)
             if chan is not None:
                 roots.append(self._chan_root(chan.id))
+        if call.method:
+            # `q.M()` — the receiver sits outside the argument
+            # list, and the opaque body may hand it straight back
+            # (`return c`), so promote its root like an argument.
+            callee = next(
+                (
+                    c
+                    for c in inner.named_children
+                    if c.type == "selector_expression"
+                ),
+                None,
+            )
+            operand = (
+                callee.child_by_field_name("operand")
+                if callee is not None
+                else None
+            )
+            if operand is not None and operand.type == "identifier":
+                chan = self._chan_binding(operand, locals_, params)
+                if chan is not None:
+                    root = self._chan_root(chan.id)
+                    if root not in roots:
+                        roots.append(root)
         return tuple(roots)
 
     def _chan_result_call_at(self, node: Any, index: int) -> Any:
