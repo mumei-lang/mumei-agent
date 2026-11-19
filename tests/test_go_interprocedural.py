@@ -25016,3 +25016,28 @@ def test_func_elem_chan_result_call_result_callee_closed(
     )
     result = named(source, snapshot, summaries)
     assert not result.available
+
+
+def test_func_elem_chan_result_conversion_arg_promotes(go_types_helper):
+    # `ch := fs[k](q)` — the conversion-form element call carries its
+    # argument in the `operand` field, not `argument_list`: the chan
+    # argument must still promote so a queue the element hands back
+    # observes later sends (`q <- x` reaches `<-ch`).
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, fs []func(chan int64) chan int64, k int) int64 {\n"
+        "\tq := make(chan int64)\n"
+        "\tch := fs[k](q)\n"
+        "\tq <- x\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies

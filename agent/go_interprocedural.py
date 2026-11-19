@@ -5095,10 +5095,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ),
             None,
         )
-        if arg_list is None:
-            return capture_roots
+        if arg_list is not None:
+            arg_nodes = arg_list.named_children
+        else:
+            # `fs[k](q)` — the conversion form carries no
+            # `argument_list`: the single argument lives in the
+            # `operand` field. Skipping it left the chan argument
+            # unpromoted, so a queue the element hands back lost
+            # every later send (`q <- x` after `ch := fs[k](q)`
+            # never reached `<-ch`).
+            conv_operand = (
+                inner.child_by_field_name("operand")
+                if inner.type == "type_conversion_expression"
+                else None
+            )
+            if conv_operand is None:
+                return capture_roots
+            arg_nodes = (conv_operand,)
         roots = []
-        for arg in arg_list.named_children:
+        for arg in arg_nodes:
             if arg.type == "comment":
                 continue
             while arg.type == "parenthesized_expression":
