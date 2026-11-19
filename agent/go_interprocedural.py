@@ -1872,7 +1872,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # observed by `<-p.C`.
                 return frozenset({self._chan_root(ref.binding_id)})
             return None
-        external = self._external_chan_operand(inner)
+        external = self._external_chan_operand(inner, params)
         if external is not None:
             return frozenset({external[0]})
         field = self._bound_field_chan(inner, locals_, params)
@@ -3395,7 +3395,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return binding
 
-    def _external_chan_operand(self, node: Any) -> Any | None:
+    def _external_chan_operand(
+        self, node: Any, params: dict
+    ) -> Any | None:
         """The (target_id, fact) for a channel operand living in
         external state — a package-level `var GC chan T` or an
         imported member `lib.GC` — whose element is scalar. Sends,
@@ -3425,18 +3427,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 binding is not None
                 and binding.kind == "variable"
                 and self._package_level(binding)
-                and self._scalar_chan_fact(fact)
+                and (
+                    self._scalar_chan_fact(fact)
+                    or self._chan_chan_fact(fact)
+                )
             ):
                 return (binding.id, fact)
             # A dot-imported member — `VC` for `import . "lib"` —
             # names no binding: it resolves through the member record
             # like `lib.VC` does.
             member = self._imported_member_operand(inner)
-            if member is not None and self._scalar_chan_fact(member.type):
+            if member is not None and (
+                self._scalar_chan_fact(member.type)
+                or self._chan_chan_fact(member.type)
+            ):
                 return (member.id, member.type)
+            # A `chan chan T` parameter or a name bound to an
+            # external `chan chan` (a callee-produced `cc := g()`)
+            # — the outer queue is caller-shared state, so ops on it
+            # record imported effects on the binding's own identity
+            # exactly like a scalar `chan` parameter's do.
+            if (
+                binding is not None
+                and self._chan_chan_fact(fact)
+                and (
+                    ref.binding_id in params
+                    or ref.binding_id in self.external_chan_locals
+                )
+            ):
+                return (binding.id, fact)
             return None
         member = self._imported_member_operand(inner)
-        if member is not None and self._scalar_chan_fact(member.type):
+        if member is not None and (
+            self._scalar_chan_fact(member.type)
+            or self._chan_chan_fact(member.type)
+        ):
             return (member.id, member.type)
         return None
 
@@ -3450,6 +3475,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and fact.elem is not None
             and fact.elem.kind in {"integer", "boolean"}
         )
+
+    def _chan_chan_fact(self, fact: Any) -> bool:
+        """The fact is a `chan (chan T)` whose inner element T is
+        scalar — a channel-of-channels exactly one level deep.
+
+        The outer queue admits only under the external model: ops
+        on a `chan chan T` parameter, a callee-produced `chan chan`
+        name or a package-level one record imported effects against
+        the operand's own identity, and a channel SENT into it
+        (`cc <- ch`) is promoted into `external_chan_locals` because
+        the queue hands `ch`'s contents to the caller's domain. A
+        received channel (`c := <-cc`) binds dep-free as an external
+        name through the same machinery. Deeper nesting
+        (`chan chan chan T`) and local `make(chan chan T)` queues
+        stay closed — a channel value flowing between two LOCAL
+        queues would alias queues the conflated dep set cannot
+        track."""
+        return (
+            fact is not None
+            and fact.kind == "chan"
+            and fact.elem is not None
+            and fact.elem.kind == "chan"
+            and fact.elem.elem is not None
+            and fact.elem.elem.kind in {"integer", "boolean"}
+        )
+
+    def _chan_chan_receive(self, node: Any, params: dict) -> bool:
+        """Whether `node` is `<-cc` receiving a channel value out of
+        a `chan chan T` queue in external state — the received name
+        binds an external queue of its own."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "unary_expression":
+            return False
+        operator = inner.child_by_field_name("operator")
+        if operator is None or operator.type != "<-":
+            return False
+        ext = self._external_chan_operand(
+            inner.child_by_field_name("operand"), params
+        )
+        return ext is not None and self._chan_chan_fact(ext[1])
 
     def _calls_touch_external_chan(
         self, calls: Iterable[CallTransfer]
@@ -3623,12 +3696,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         return frozenset()
 
-    def _chan_result_call(self, node: Any) -> Any:
+    def _chan_result_call(self, node: Any, fact_pred: Any = None) -> Any:
         """The callee `node` calls when `ch := f()` binds a
         callee-produced queue — `f` declares one scalar-element
         `chan` result. A local callee's function record carries the
         result's fact directly; an imported member declares its
         `result_types` facts so `lib.G()` admits the same way."""
+        pred = fact_pred or self._scalar_chan_fact
         inner = node
         while (
             inner is not None
@@ -3648,7 +3722,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if (
                 target is None
                 or len(target.results) != 1
-                or not self._scalar_chan_fact(target.results[0].type)
+                or not pred(target.results[0].type)
             ):
                 return None
             return target
@@ -3657,7 +3731,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if (
                 member is None
                 or len(member.result_types) != 1
-                or not self._scalar_chan_fact(member.result_types[0])
+                or not pred(member.result_types[0])
             ):
                 return None
             return member
@@ -3755,7 +3829,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         roots.append(root)
         return tuple(roots)
 
-    def _chan_result_call_at(self, node: Any, index: int) -> Any:
+    def _chan_result_call_at(
+        self, node: Any, index: int, fact_pred: Any = None
+    ) -> Any:
         """`node` calls a local callee declaring a scalar `chan` in
         result slot `index` — a multi-result callee's `ch` position
         (`ch, n := g()` where `g` returns `(chan T, int64)`).
@@ -3776,12 +3852,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         call = self.calls.get(self.node_key(inner))
         if call is None:
             return None
+        pred = fact_pred or self._scalar_chan_fact
         if call.kind == "direct_local":
             target = self.functions.get(call.target)
             if (
                 target is None
                 or index >= len(target.results)
-                or not self._scalar_chan_fact(
+                or not pred(
                     target.results[index].type
                 )
             ):
@@ -3792,7 +3869,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if (
                 member is None
                 or index >= len(member.result_types)
-                or not self._scalar_chan_fact(
+                or not pred(
                     member.result_types[index]
                 )
             ):
@@ -5243,8 +5320,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # element is modelled — a queued pointer would
                     # bind caller memory the model cannot scope.
                     p.type.kind == "chan"
-                    and p.type.elem is not None
-                    and p.type.elem.kind in {"integer", "boolean"}
+                    and (
+                        self._scalar_chan_fact(p.type)
+                        # A `chan chan T` parameter admits too: ops on
+                        # the outer queue record external effects,
+                        # and a channel received from it binds as an
+                        # external name — one level deep only.
+                        or self._chan_chan_fact(p.type)
+                    )
                 )
                 for p in fn.parameters
             )
@@ -5270,8 +5353,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # record imported effects exactly like a
                     # parameter's do.
                     r.type.kind == "chan"
-                    and r.type.elem is not None
-                    and r.type.elem.kind in {"integer", "boolean"}
+                    and (
+                        self._scalar_chan_fact(r.type)
+                        # A `chan chan T` result admits like the
+                        # parameter form: the bound name joins the
+                        # external model, so later `cc <- ch` /
+                        # `<-cc` ops record external effects.
+                        or self._chan_chan_fact(r.type)
+                    )
                 )
                 for r in fn.results
             )
@@ -5752,29 +5841,60 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
-                    self._scalar_chan_binding(binding.id)
-                    and (
-                        (
-                            len(lefts) == len(rights)
-                            and (
-                                self._is_make_chan_call(rights[i])
-                                or self._chan_alias_target(
-                                    rights[i], locals_, params
+                    (
+                        self._scalar_chan_binding(binding.id)
+                        and (
+                            (
+                                len(lefts) == len(rights)
+                                and (
+                                    self._is_make_chan_call(rights[i])
+                                    or self._chan_alias_target(
+                                        rights[i], locals_, params
+                                    )
+                                    is not None
+                                    or self._chan_result_call(rights[i])
+                                    is not None
+                                    # `c := <-cc` — a channel received
+                                    # out of an external `chan chan`
+                                    # queue binds an external name.
+                                    or self._chan_chan_receive(
+                                        rights[i], params
+                                    )
                                 )
-                                is not None
-                                or self._chan_result_call(rights[i])
+                            )
+                            # A multi-valued call's slot has no per-result
+                            # RHS node — `ch, n := g()` admits when the
+                            # callee declares a scalar `chan` in slot i;
+                            # the name binds an external queue like
+                            # `ch := g()` does.
+                            or (
+                                len(rights) == 1
+                                and self._chan_result_call_at(rights[0], i)
                                 is not None
                             )
                         )
-                        # A multi-valued call's slot has no per-result
-                        # RHS node — `ch, n := g()` admits when the
-                        # callee declares a scalar `chan` in slot i;
-                        # the name binds an external queue like
-                        # `ch := g()` does.
-                        or (
-                            len(rights) == 1
-                            and self._chan_result_call_at(rights[0], i)
-                            is not None
+                    )
+                    # `cc := G()` / `cc, n := G()` binding a
+                    # callee-declared `chan chan T` result — the name
+                    # joins the external model: later `cc <- ch` /
+                    # `<-cc` ops record imported effects on it.
+                    or (
+                        self._chan_chan_fact(binding.type)
+                        and (
+                            (
+                                len(lefts) == len(rights)
+                                and self._chan_result_call(
+                                    rights[i], self._chan_chan_fact
+                                )
+                                is not None
+                            )
+                            or (
+                                len(rights) == 1
+                                and self._chan_result_call_at(
+                                    rights[0], i, self._chan_chan_fact
+                                )
+                                is not None
+                            )
                         )
                     )
                 ):
@@ -8336,7 +8456,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     else:
                         external = (
-                            self._external_chan_operand(right)
+                            self._external_chan_operand(right, params)
                             if chan is None
                             else None
                         )
@@ -9492,7 +9612,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `p.C <- x` — a channel field of a bound pointer's
                 # pointee — mutates caller memory the same way,
                 # recorded on the field member's identity.
-                external = self._external_chan_operand(channel)
+                external = self._external_chan_operand(channel, params)
                 field_chan = (
                     self._bound_field_chan(channel, locals_, params)
                     if external is None
@@ -9517,6 +9637,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     value, fn, params, locals_, transfers, count, 0
                 )
                 self._pin_fact_identities(fact)
+                if external is not None:
+                    # `cc <- ch` — sending a channel through an
+                    # external queue hands `ch` to the caller's
+                    # domain: every later op on it (`ch <- y`,
+                    # `<-ch`, `close(ch)`) is an external effect.
+                    # Promote the sent channel's queue root so the
+                    # receive/sent sides stay connected through
+                    # `indirect_writes`.
+                    sent = self._chan_alias_target(
+                        value, locals_, params
+                    )
+                    if sent is not None:
+                        self.external_chan_locals.add(sent.id)
                 if field_chan is not None:
                     # The send's destination read — like `(*p)[i]` —
                     # observes the pointer's deps and every earlier
@@ -10489,7 +10622,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # caller-memory queue a bound pointer's field
                         # names — the pointer's own deps join like a
                         # `(*p)[i]` read's.
-                        external = self._external_chan_operand(operand)
+                        external = self._external_chan_operand(operand, params)
                         field_chan = (
                             self._bound_field_chan(
                                 operand, locals_, params
@@ -10845,7 +10978,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # a bound pointer's field names in caller
                         # memory.
                         external = self._external_chan_operand(
-                            arguments[0]
+                            arguments[0], params
                         )
                         field_chan = (
                             self._bound_field_chan(
@@ -13265,7 +13398,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 external_chans.add(root)
                 continue
-            ext = self._external_chan_operand(arg)
+            ext = self._external_chan_operand(arg, params)
             if ext is not None:
                 external_chans.add(ext[0])
                 continue

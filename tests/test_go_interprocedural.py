@@ -14573,6 +14573,174 @@ def test_channel_tuple_receive_cannot_alias(go_types_helper):
     assert not result.available
 
 
+def test_chan_chan_parameter_send_recv_chain(go_types_helper):
+    # `cc chan chan int64` — the outer queue is caller-shared state:
+    # `cc <- ch` records an imported effect and promotes the sent
+    # channel external, so `c := <-cc` binds an external name whose
+    # own receive observes the value sent through the chain.
+    files = {
+        "a.go": "package p\n"
+        "func F(cc chan chan int64, x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tcc <- ch\n"
+        "\tc := <-cc\n"
+        "\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_parameter_close_admitted(go_types_helper):
+    # `close(cc)` on a `chan chan` parameter mutates caller-shared
+    # queue state — an imported effect like `close` on a scalar
+    # `chan` parameter.
+    files = {
+        "a.go": "package p\n"
+        "func F(cc chan chan int64) int64 {\n"
+        "\tclose(cc)\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_boundaries_stay_closed(go_types_helper):
+    # Deeper nesting, a local `make(chan chan)` queue, a `chan chan`
+    # local var, and `range` over the outer queue stay closed — a
+    # channel value flowing between two LOCAL queues or iterating an
+    # external queue's element stream has no dep-set model.
+    for src in (
+        "func F(ccc chan chan chan int64) int64 {\n"
+        "\treturn 0\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64)\n"
+        "\t_ = cc\n\treturn x\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tvar cc chan chan int64\n"
+        "\t_ = cc\n\treturn x\n}\n",
+        "func F(cc chan chan int64) int64 {\n"
+        "\tfor c := range cc {\n"
+        "\t\t_ = c\n"
+        "\t}\n\treturn 0\n}\n",
+    ):
+        result = named(*unit(go_types_helper, src))
+        assert not result.available, src
+
+
+def test_chan_chan_package_var_send_admitted(go_types_helper):
+    # `GCC <- ch` on a package-level `chan chan` — the queue lives
+    # in external state, so the send records an imported effect and
+    # the sent channel is promoted external like the param form.
+    files = {
+        "a.go": "package p\n"
+        "var GCC chan chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tGCC <- ch\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_callee_result_binds_external(go_types_helper):
+    # `c2 := G(cc)` binding a callee-declared `chan chan` result —
+    # the name joins the external model: sends, receives and closes
+    # on it record imported effects, and the chain still carries
+    # the value's deps through `indirect_writes`.
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64) chan chan int64 {\n"
+        "\treturn cc\n}\n"
+        "func F(cc chan chan int64, x int64) int64 {\n"
+        "\tc2 := G(cc)\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tc2 <- ch\n"
+        "\tc := <-c2\n"
+        "\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_chan_chan_multi_result_slot_admitted(go_types_helper):
+    # `c2, n := G(cc)` where G declares `chan chan` in slot 0 —
+    # the slot binds an external queue like the single-result form.
+    files = {
+        "a.go": "package p\n"
+        "func G(a chan chan int64) (chan chan int64, int64) {\n"
+        "\treturn a, 1\n}\n"
+        "func F(cc chan chan int64, x int64) int64 {\n"
+        "\tc2, n := G(cc)\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tc2 <- ch\n"
+        "\tc := <-c2\n"
+        "\treturn <-c + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_imported_result_send_recv_chain(go_types_helper):
+    # `cc := lib.GQ()` returning `chan chan int64` — the imported
+    # callee's declared result admits the same external model:
+    # `cc <- ch` promotes the sent channel and `c := <-cc` binds
+    # an external name whose receive sees the chain's value.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := lib.GQ()\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tch <- x\n"
+        "\tcc <- ch\n"
+        "\tc := <-cc\n"
+        "\treturn <-c\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func GQ() chan chan int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_chan_parameter_send_recv_admitted(go_types_helper):
     # A `chan T` parameter is a queue shared with the caller: the
     # send's deps broadcast into indirect writes so the receive can
@@ -16438,9 +16606,8 @@ def test_multi_result_chan_other_slots_close(go_types_helper):
 
 def test_chan_result_boundaries_stay_closed(go_types_helper):
     # A non-scalar element, a non-scalar element inside a
-    # multi-result tuple, an imported function's result (whose
-    # signature carries no kind), and a nested `chan chan` element
-    # all stay closed.
+    # multi-result tuple, and a `chan` element nested deeper than
+    # one level (`chan chan chan`) all stay closed.
     for decl, body in [
         (
             "func g() (chan string, int64) {\n"
@@ -16452,8 +16619,10 @@ def test_chan_result_boundaries_stay_closed(go_types_helper):
             "ch := g()\n\t_ = ch",
         ),
         (
-            "func g() chan chan int64 {\n"
-            "\tvar ch chan chan int64\n\treturn ch\n}\n",
+            # `chan chan chan int64` — deeper than the one level of
+            # channel-of-channels the external model covers.
+            "func g() chan chan chan int64 {\n"
+            "\tvar ch chan chan chan int64\n\treturn ch\n}\n",
             "ch := g()\n\t_ = ch",
         ),
     ]:
@@ -19085,12 +19254,11 @@ def test_imported_chan_result_var_and_alias_forms(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
-def test_imported_chan_result_nonscalar_elem_stays_closed(
+def test_imported_chan_result_chan_chan_elem_admitted(
     go_types_helper,
 ):
-    # `ch := lib.GQ()` returning `chan chan int64` — the queue's
-    # elements are channels themselves, which the conflated dep set
-    # cannot model.
+    # `ch := lib.GQ()` returning `chan chan int64` — the outer queue
+    # binds an external name; ops on it record imported effects.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
@@ -19112,7 +19280,7 @@ def test_imported_chan_result_nonscalar_elem_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
 
 
 def test_imported_chan_result_passthrough_arg_shares_queue(
@@ -19244,11 +19412,11 @@ def test_imported_multi_result_chan_slot_second_position(
     assert result.return_dependencies == frozenset({0})
 
 
-def test_imported_multi_result_nonscalar_chan_stays_closed(
+def test_imported_multi_result_chan_chan_slot_admitted(
     go_types_helper,
 ):
     # `ch, n := lib.G()` with `chan chan int64` at the chan slot —
-    # a queue of queues stays out of the dep model.
+    # the name binds an external queue like the single-result form.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
@@ -19271,7 +19439,7 @@ def test_imported_multi_result_nonscalar_chan_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
 
 
 def test_imported_multi_result_chan_var_decl_shares_arg_queue(
@@ -19431,11 +19599,11 @@ def test_imported_method_multi_result_chan_slot(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_imported_method_chan_result_nonscalar_stays_closed(
+def test_imported_method_chan_result_chan_chan_admitted(
     go_types_helper,
 ):
-    # `ch := st.M()` returning `chan chan int64` — a queue of
-    # queues stays out of the dep model.
+    # `ch := st.M()` returning `chan chan int64` — the bound name is
+    # external like the single-result `ch := lib.G()` form.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(st lib.T, x int64) int64 {\n"
@@ -19458,7 +19626,7 @@ def test_imported_method_chan_result_nonscalar_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
 
 
 def test_imported_multi_result_chan_assign_second_position(
