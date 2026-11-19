@@ -5173,7 +5173,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # type's identity pins like any other signature type.
             or any(
                 r.type.kind
-                not in {"integer", "boolean", "pointer", "struct"}
+                not in {"integer", "boolean", "pointer", "struct",
+                        # A `func` result admits like a `func` parameter:
+                        # the value carries no scalar deps — `return G`
+                        # on a declared function reads dep-free — and the
+                        # caller binds the name as an opaque func value
+                        # whose calls resolve through the func-value path.
+                        "function"}
                 and not (
                     # A scalar-element `chan T` result admits under
                     # the same external sync-resource model a `chan`
@@ -11501,6 +11507,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if index is not None and index < len(names):
                 name_node = names[index]
         if name_node is not None and name_node.type == "identifier":
+            return frozenset()
+        # `return G` — a func-typed result hands the declared
+        # function back to the caller: the read is dep-free like the
+        # store positions, and the caller binds the result name as
+        # an opaque func value whose calls resolve through the
+        # func-value path (the result's identity does not ride the
+        # summary, so no pin records here).
+        if parent is not None and parent.type == "return_statement":
             return frozenset()
         # `H(G, args)` — the name sits in a call's argument list.
         # The call record's span is the `call_expression` parent of
