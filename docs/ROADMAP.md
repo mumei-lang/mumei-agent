@@ -2845,7 +2845,17 @@ queue). A `[]func`/`[N]func` local binds the same conflated way
 (`fs := mk(x)`, `var fs = mk(x)`, `var fs []func() T; fs = mk(x)`),
 and `fs[k]()` then calls opaque on the container's slot — the
 callee read is the container's dep set and a computed index
-evaluates like an argument. `map[K]func` results stay closed: a
+evaluates like an argument. Element literals inside the composite
+record their captures under the container's name (unioned, like
+other maybe-set records), so `fs := []func(){func(){ return y }}`
+followed by `y = x` resolves at the `fs[0]()` call site, and a
+captured write target gets the call's write-back fold. The
+container's `chan` arguments promote like `f := mk(ch)`: elements
+may capture the queue, so a later `ch <- x` reaches `fs[k]()` via
+`indirect_writes`. A `nil` literal admits as a dep-free value in
+every expression position (`return nil`, `G(nil)`, `f = nil`,
+`p == nil`) — a nil read on a non-nilable type cannot compile, and
+the nil queue holds nothing. `map[K]func` results stay closed: a
 keyed slot is not a numbered element, so the conflated dep set
 cannot say which slot the call invokes.
 

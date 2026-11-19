@@ -188,8 +188,6 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
         # `make` still produces non-scalar resource state.
         "func F(x int64) int64 { var s []int64; _ = s; return x }",
-        # A channel is resource state — `nil` has no binding either.
-        "func G(c chan int64) int64 { return <-c }; func F(x int64) int64 { return G(nil) }",
         # A parenthesized function name is outside the store-RHS
         # position the alias admits — `h := (G)` stays closed.
         "func G(v int64) int64 { return v }; func F(x int64) int64 { h := (G); return h(x) }",
@@ -20624,16 +20622,41 @@ def test_func_result_multi_slot_unpacks(go_types_helper):
     assert result.available
 
 
-def test_func_result_nil_stays_closed(go_types_helper):
-    # `return nil` on a func result — nil is not an admitted value
-    # expression, so the callee stays closed and its callers follow.
+def test_func_result_nil_admitted(go_types_helper):
+    # `return nil` on a func result — nil carries no deps like a
+    # literal, so the callee summarizes and `f()` runs opaque on
+    # the bound name.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func mk() func() int64 { return nil }; "
         "func F(x int64) int64 { f := mk(); return f() }",
     )
     mk = named(source, snapshot, summaries, "mk")
-    assert not mk.available
+    assert mk.available and mk.return_dependencies == frozenset()
+
+
+def test_nil_channel_argument_admitted(go_types_helper):
+    # `G(nil)` — the nil channel carries no queue deps, so the
+    # call's dep set is empty and the summary still resolves.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func G(c chan int64) int64 { return <-c }; "
+        "func F(x int64) int64 { return G(nil) }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_nil_collection_result_admitted(go_types_helper):
+    # `mk() []func` returning nil — the nil result admits, and the
+    # bound container call `fs[0]()` runs opaque on the slot.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk() []func() int64 { return nil }; "
+        "func F(x int64) int64 { fs := mk(); return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
 
 
 def test_func_result_direct_call_stays_closed(go_types_helper):
@@ -20812,6 +20835,46 @@ def test_func_element_bound_container_literal_admitted(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_element_literal_captures_reseat(go_types_helper):
+    # Element literals record captures under the container name —
+    # a `y = x` reseat between the literal and `fs[0]()` resolves
+    # at call time like a bound literal does.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 { y:=int64(0); "
+        "fs := []func() int64{func() int64 { return y }}; "
+        "y=x; return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_func_element_literal_captures_union(go_types_helper):
+    # Two elements' captures union under the conflated container.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, z int64) int64 { y:=int64(0); w:=int64(0); "
+        "fs := []func() int64{func() int64 { return y }, func() int64 { return w }}; "
+        "y=x; w=z; return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_element_container_chan_arg_promoted(go_types_helper):
+    # `fs := mk(ch)` — the container's elements may capture the
+    # queue, so the call's chan args join the external model like
+    # they do for a func-typed bind.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func mk(c chan int64) []func() int64 { return nil }; "
+        "func F(x int64) int64 { ch := make(chan int64, 1); "
+        "fs := mk(ch); ch <- x; return fs[0]() }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 def test_func_element_map_container_stays_closed(go_types_helper):
