@@ -2915,13 +2915,104 @@ def test_multi_result_chan_slot_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
-def test_multi_result_chan_slot_var_form_stays_closed(go_types_helper):
+def test_multi_result_chan_slot_var_form_admitted(go_types_helper):
+    # `var _, ch = G(q)` — the var-declaration form binds the
+    # chan-typed slot to an external queue like `_, ch := G(q)`:
+    # the receive reads the callee's passthrough of `q`.
     files = {
         "a.go": "package p\n"
         "func G(q chan int64) (int64, chan int64) { return 1, q }\n"
         "func F(q chan int64) int64 {\n"
         "\tvar _, ch = G(q)\n"
         "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_chan_slot_var_chan_first(go_types_helper):
+    # `var ch, n = G(q)` — slot 0 declares the scalar chan; the
+    # name binds the passthrough queue and the receive reads `q`.
+    files = {
+        "a.go": "package p\n"
+        "func G(q chan int64) (chan int64, int64) { return q, 0 }\n"
+        "func F(q chan int64) int64 {\n"
+        "\tvar ch, n = G(q)\n"
+        "\t_ = n\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_chan_slot_var_second_slot_admitted(
+    go_types_helper,
+):
+    # `var n, ch = G(q)` — the chan name sits at slot 1 where the
+    # callee's signature declares the scalar chan; admitted.
+    files = {
+        "a.go": "package p\n"
+        "func G(q chan int64) (int64, chan int64) { return 0, q }\n"
+        "func F(q chan int64) int64 {\n"
+        "\tvar n, ch = G(q)\n"
+        "\t_ = n\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+
+def test_multi_result_chan_slot_var_local_alias_broadcasts(
+    go_types_helper,
+):
+    # `var c, n = g(q)` where g hands q's queue back through a
+    # callee-local alias (`r := q; return r, 0`) — the passthrough
+    # probe cannot see it, so `c` binds an external queue whose
+    # sends broadcast into reads of `q`.
+    files = {
+        "a.go": "package p\n"
+        "func g(q chan int64) (chan int64, int64) {\n"
+        "\tr := q\n"
+        "\treturn r, 0\n}\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\tvar c, n = g(q)\n"
+        "\tc <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_multi_result_chan_slot_var_non_scalar_closed(
+    go_types_helper,
+):
+    # `var q, n = G()` where slot 0 declares `chan chan int64` —
+    # the bound name's element is non-scalar; stays closed.
+    files = {
+        "a.go": "package p\n"
+        "func G() (chan chan int64, int64) {\n"
+        "\treturn make(chan chan int64), 0\n}\n"
+        "func F() int64 {\n"
+        "\tvar q, n = G()\n"
+        "\t_ = n\n"
+        "\treturn <-<-q\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     result = named_package(
@@ -15716,6 +15807,7 @@ def test_multi_result_chan_slot_passthrough_aliases_arg(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
 
 
 def test_multi_result_chan_other_slots_close(go_types_helper):
