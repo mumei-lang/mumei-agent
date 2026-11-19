@@ -2937,10 +2937,22 @@ the argument list the same way. An element literal or store
 inside a branch keeps the deps of branch-local bindings it
 captures even after the merge drops them: a closure stored into
 a container still reads the value the capture held at the merge.
-A param container's elements live in caller memory, a
-scalar-element container has no func records, and a nested
-`fm[k][i]` write is a container-of-container the index model
-does not reach — all three stores stay closed.
+A param container's elements live in caller memory and a
+scalar-element container has no func records — both stores stay
+closed.
+One level of collection-of-collection admits the same conflated
+model: `fm := [][]func(){…}`, `var fm = …`, `make([][]func, n)`,
+`make(map[K][]func)` and a named `type FMM map[K][]func` bind like
+the single-level containers, `fm[k][i] = f` (literal, identifier
+or `nil` RHS) stores an element under the root binding's slot,
+`fm2 := fm` / `fm2 = fm` share the backing, and `fm[k][i]()` calls
+opaque on the root slot — both index expressions evaluate into the
+call's dep set when they are not literals. The conflation depth is
+exactly one extra level: a third index (`fm[k][i][j]`), an element
+read (`v := fm[k][i]`), an `append` into the inner collection
+(`append(fm[k], f)`), a whole-inner-container store
+(`fm[k] = sub`), a param container and a call-result nested
+container (`mk()[k][i]()`) all stay closed.
 A call-result callee (`mk(x)()` — also `lib.Mk(x)()` where the
 inner callee resolves) admits as an opaque indirect call: Go
 evaluates the callee expression before the arguments, so the

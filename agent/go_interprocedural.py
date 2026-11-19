@@ -1349,6 +1349,57 @@ class _Builder:
             self._pin_fact_identities(fact)
         return collection
 
+    def _func_elem_nested_collection(self, fact: Any) -> bool:
+        """A collection of func-element collections —
+        `map[K][]func`, `[][]func`, `[N]map[K]func`. One extra
+        nesting level only: `fm[k]` yields a container whose slots
+        conflate under the root binding like `fm[k]`'s own elements
+        do. Deeper nesting stays closed."""
+        return (
+            fact is not None
+            and fact.kind in {"slice", "array", "map"}
+            and getattr(fact, "elem", None) is not None
+            and self._func_elem_collection(fact.elem)
+        )
+
+    def _func_elem_nested_operand(
+        self, operand: Any
+    ) -> tuple[str, Any, Any | None] | None:
+        """`fm[k]` as the operand of a further index — the inner
+        operand must name a bound collection of collections.
+        Returns (root binding id, inner identifier node, inner
+        index node) for `fm[k]`, or None otherwise."""
+        if operand is None or operand.type != "index_expression":
+            return None
+        inner = operand.child_by_field_name("operand")
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (
+                    c
+                    for c in inner.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if inner is None or inner.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(inner))
+        if ref is None or not ref.binding_id:
+            return None
+        bound = self.bindings.get(ref.binding_id)
+        if bound is None or not self._func_elem_nested_collection(
+            bound.type
+        ):
+            return None
+        return (
+            ref.binding_id,
+            inner,
+            operand.child_by_field_name("index"),
+        )
+
     def _is_func_elem_composite(self, rhs_node: Any, binding_id: str) -> bool:
         """`fs := []func(){…}` — a composite literal binding to a
         func-element container. Its element literals record captures
@@ -1359,7 +1410,10 @@ class _Builder:
             rhs_node is not None
             and rhs_node.type == "composite_literal"
             and bound is not None
-            and self._func_elem_collection(bound.type)
+            and (
+                self._func_elem_collection(bound.type)
+                or self._func_elem_nested_collection(bound.type)
+            )
         )
 
     def _adopt_container_element_records(
@@ -1413,13 +1467,15 @@ class _Builder:
 
     def _func_elem_index_target(
         self, lhs: Any, locals_: dict[str, frozenset[int]]
-    ) -> tuple[Any, Any | None] | None:
+    ) -> tuple[Any, Any | None, Any | None] | None:
         """`fs[i]` — an index store whose operand names a bound
-        func-element container local. Returns (ref, index_node), or
-        None when the operand is not a local `[]func`/`[N]func`/
-        `map[K]func` binding. A param container stays closed: its
-        elements live in caller memory, which is an external
-        mutation the local model cannot track."""
+        func-element container local. Returns (ref, index_node,
+        inner_index_node), or None when the operand is not a local
+        `[]func`/`[N]func`/`map[K]func` binding — nor one level of
+        nesting (`fm[k][i]`, whose elements conflate under the root
+        `fm` binding; inner_index_node is `k` then). A param
+        container stays closed: its elements live in caller memory,
+        which is an external mutation the local model cannot track."""
         if lhs is None or lhs.type != "index_expression":
             return None
         operand = lhs.child_by_field_name("operand")
@@ -1428,15 +1484,28 @@ class _Builder:
             and operand.type == "parenthesized_expression"
         ):
             operand = operand.child_by_field_name("operand")
-        if operand is None or operand.type != "identifier":
+        if operand is None:
             return None
-        ref = self.references.get(self.node_key(operand))
-        if ref is None or ref.binding_id not in locals_:
+        if operand.type == "identifier":
+            ref = self.references.get(self.node_key(operand))
+            if ref is None or ref.binding_id not in locals_:
+                return None
+            bound = self.bindings.get(ref.binding_id)
+            if bound is None or not self._func_elem_collection(
+                bound.type
+            ):
+                return None
+            return ref, lhs.child_by_field_name("index"), None
+        nested = self._func_elem_nested_operand(operand)
+        if nested is None:
             return None
-        bound = self.bindings.get(ref.binding_id)
-        if bound is None or not self._func_elem_collection(bound.type):
+        root_id, _inner_id, inner_index = nested
+        if root_id not in locals_:
             return None
-        return ref, lhs.child_by_field_name("index")
+        ref = self.references.get(self.node_key(_inner_id))
+        if ref is None:
+            return None
+        return ref, lhs.child_by_field_name("index"), inner_index
 
     def _func_elem_append_target(
         self, node: Any, locals_: dict[str, frozenset[int]]
@@ -4892,11 +4961,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if type_arg is None:
             return False
         if type_arg.type in {"slice_type", "array_type"}:
-            elem = type_arg.child_by_field_name("element")
-            return elem is not None and elem.type == "function_type"
+            return self._func_elem_type_node(
+                type_arg.child_by_field_name("element")
+            )
         if type_arg.type == "map_type":
-            value = type_arg.child_by_field_name("value")
-            return value is not None and value.type == "function_type"
+            return self._func_elem_type_node(
+                type_arg.child_by_field_name("value")
+            )
         if type_arg.type == "type_identifier":
             ref = self.references.get(self.node_key(type_arg))
             binding = (
@@ -4907,7 +4978,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return (
                 binding is not None
                 and binding.kind == "type"
-                and self._func_elem_collection(binding.type)
+                and (
+                    self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
+                )
+            )
+        return False
+
+    def _func_elem_type_node(
+        self, node: Any, depth: int = 0
+    ) -> bool:
+        """A type expression whose element resolves to a function
+        type at one level — the `func` type itself, or a
+        slice/array/map whose element (or map value) is a func
+        element type. One extra collection level is the deepest the
+        model conflates, so `[][][]func` stays closed. A named
+        element type resolves through its declared fact."""
+        while (
+            node is not None and node.type == "parenthesized_type"
+        ):
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "function_type":
+            return True
+        if depth >= 1:
+            return False
+        if node.type in {"slice_type", "array_type"}:
+            return self._func_elem_type_node(
+                node.child_by_field_name("element"), depth + 1
+            )
+        if node.type == "map_type":
+            return self._func_elem_type_node(
+                node.child_by_field_name("value"), depth + 1
+            )
+        if node.type == "type_identifier":
+            ref = self.references.get(self.node_key(node))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            return (
+                binding is not None
+                and binding.kind == "type"
+                and (
+                    self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
+                )
             )
         return False
 
@@ -4925,18 +5043,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return False
         if node.type == "type_identifier":
             return self._pin_type_node(node)
-        if node.type == "slice_type":
-            elem = node.child_by_field_name("element")
-            return self._pin_signature_type(elem)
-        if node.type == "array_type":
-            elem = node.child_by_field_name("element")
-            return self._pin_signature_type(elem)
+        if node.type in {"slice_type", "array_type"}:
+            return self._pin_func_elem_type_node(
+                node.child_by_field_name("element")
+            )
         if node.type == "map_type":
             key = node.child_by_field_name("key")
             value = node.child_by_field_name("value")
             return self._pin_type_node(
                 key
-            ) and self._pin_signature_type(value)
+            ) and self._pin_func_elem_type_node(value)
+        return False
+
+    def _pin_func_elem_type_node(
+        self, node: Any, depth: int = 0
+    ) -> bool:
+        """Pin the named identities under a func-element `make`
+        type, mirroring `_func_elem_type_node`'s one-extra-level
+        walk: a func element's signature names pin through
+        `_pin_signature_type`; a named element pins through its
+        `type` binding; a map's key pins as a plain type."""
+        while (
+            node is not None and node.type == "parenthesized_type"
+        ):
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "function_type":
+            return self._pin_signature_type(node)
+        if depth >= 1:
+            return False
+        if node.type == "type_identifier":
+            return self._pin_type_node(node)
+        if node.type in {"slice_type", "array_type"}:
+            return self._pin_func_elem_type_node(
+                node.child_by_field_name("element"), depth + 1
+            )
+        if node.type == "map_type":
+            key = node.child_by_field_name("key")
+            value = node.child_by_field_name("value")
+            return self._pin_type_node(key) and (
+                self._pin_func_elem_type_node(value, depth + 1)
+            )
         return False
 
     def _pin_signature_type(self, node: Any) -> bool:
@@ -6634,6 +6782,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # whose `fs[k]()` calls opaque on it.
                     and not self._is_local_composite(binding)
                     and not self._func_elem_collection(binding.type)
+                    and not self._func_elem_nested_collection(
+                        binding.type
+                    )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not (
@@ -6769,6 +6920,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                 if binding.type.kind == "function" or (
                     self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
                 ):
                     # `f := mk(ch)` — the returned closure may
                     # capture the queue it received, so the call's
@@ -6887,11 +7039,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if (
                         src_bound is not None
-                        and self._func_elem_collection(
-                            src_bound.type
+                        and (
+                            self._func_elem_collection(
+                                src_bound.type
+                            )
+                            or self._func_elem_nested_collection(
+                                src_bound.type
+                            )
                         )
-                        and self._func_elem_collection(
-                            binding.type
+                        and (
+                            self._func_elem_collection(
+                                binding.type
+                            )
+                            or self._func_elem_nested_collection(
+                                binding.type
+                            )
                         )
                     ):
                         # `fs2 := fs` — the copy shares the
@@ -7167,6 +7329,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # short-decl form.
                         and not self._is_local_composite(binding)
                         and not self._func_elem_collection(binding.type)
+                        and not self._func_elem_nested_collection(
+                            binding.type
+                        )
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
@@ -7340,6 +7505,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         binding.type.kind == "function"
                         or self._func_elem_collection(binding.type)
+                        or self._func_elem_nested_collection(
+                            binding.type
+                        )
                     ) and value_nodes:
                         # `var f = mk(ch)` — like the short-decl
                         # form, a returned closure may capture the
@@ -7469,11 +7637,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if (
                             src_bound is not None
-                            and self._func_elem_collection(
-                                src_bound.type
+                            and (
+                                self._func_elem_collection(
+                                    src_bound.type
+                                )
+                                or self._func_elem_nested_collection(
+                                    src_bound.type
+                                )
                             )
-                            and self._func_elem_collection(
-                                binding.type
+                            and (
+                                self._func_elem_collection(
+                                    binding.type
+                                )
+                                or self._func_elem_nested_collection(
+                                    binding.type
+                                )
                             )
                         ):
                             # `var fs2 = fs` — shares the backing
@@ -8128,16 +8306,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs, locals_
                 )
                 if func_elem_lhs is not None:
-                    ref, index = func_elem_lhs
-                    if index is not None and index.type not in (
-                        _INDEX_LITERALS
-                    ):
-                        self._record_read(
-                            self.expression(
-                                index, fn, params, locals_,
-                                transfers, count, 0,
+                    ref, index, inner_index = func_elem_lhs
+                    for idx_node in (index, inner_index):
+                        if (
+                            idx_node is not None
+                            and idx_node.type not in (_INDEX_LITERALS)
+                        ):
+                            self._record_read(
+                                self.expression(
+                                    idx_node, fn, params, locals_,
+                                    transfers, count, 0,
+                                )
                             )
-                        )
                     refs.append((ref, True, False))
                     func_elem_targets.add(len(refs) - 1)
                     func_elem_holders[len(refs) - 1] = frozenset(
@@ -8794,6 +8974,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if bound is not None and (
                         bound.type.kind == "function"
                         or self._func_elem_collection(bound.type)
+                        or self._func_elem_nested_collection(bound.type)
                     ):
                         # `f = mk(ch)` — like the declaration
                         # forms, the returned closure may capture
@@ -8975,7 +9156,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         not conditional
                         and self._may_skip == 0
                         and tgt_bound is not None
-                        and self._func_elem_collection(tgt_bound.type)
+                        and (
+                            self._func_elem_collection(tgt_bound.type)
+                            or self._func_elem_nested_collection(
+                                tgt_bound.type
+                            )
+                        )
                         and (
                             src_id is None
                             or self._func_elem_eval_tokens(src_id)
@@ -9246,11 +9432,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         src_bound is not None
                         and tgt_bound is not None
-                        and self._func_elem_collection(
-                            src_bound.type
+                        and (
+                            self._func_elem_collection(
+                                src_bound.type
+                            )
+                            or self._func_elem_nested_collection(
+                                src_bound.type
+                            )
                         )
-                        and self._func_elem_collection(
-                            tgt_bound.type
+                        and (
+                            self._func_elem_collection(
+                                tgt_bound.type
+                            )
+                            or self._func_elem_nested_collection(
+                                tgt_bound.type
+                            )
                         )
                     ):
                         # `fs2 = fs` — the copy shares the
@@ -14732,6 +14928,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 bound_id = container.id
                 in_composite = True
+            elif operand is not None:
+                # `fm[k][i] = func(){…}` — the nested store's
+                # elements conflate under the root binding, so the
+                # literal records there like `fm[k] = lit` does.
+                nested = self._func_elem_nested_operand(operand)
+                if nested is not None:
+                    bound_id = nested[0]
+                    in_composite = True
         elif parent is not None and parent.type == "call_expression":
             # `append(fs, func(){…})` — the literal is an appended
             # element of the argument container; record under its
@@ -15288,9 +15492,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         index_operand, locals_, params
                     )
                 else:
-                    root_ref = self._receiver_root_ref(operand)
-                    if root_ref is not None and root_ref.binding_id:
-                        target_id = root_ref.binding_id
+                    # `fm[k][i]()` — the operand is itself an index
+                    # into a bound collection of func-element
+                    # collections: elements conflate under the root
+                    # `fm` binding like `fm[k]()` resolves. `fm[k]`
+                    # as a nested expression eval stays closed, so
+                    # the pieces evaluate separately here.
+                    nested = self._func_elem_nested_operand(operand)
+                    if nested is not None:
+                        root_id, inner_id, inner_index = nested
+                        target_id = root_id
+                        callee_deps |= self.expression(
+                            inner_id, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                        if (
+                            inner_index is not None
+                            and inner_index.type
+                            not in {
+                                "int_literal",
+                                "rune_literal",
+                                "interpreted_string_literal",
+                                "raw_string_literal",
+                            }
+                        ):
+                            callee_deps |= self.expression(
+                                inner_index, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
+                        operand = None
+                    else:
+                        root_ref = self._receiver_root_ref(operand)
+                        if (
+                            root_ref is not None
+                            and root_ref.binding_id
+                        ):
+                            target_id = root_ref.binding_id
                 if operand is not None:
                     callee_deps |= self.expression(
                         operand, fn, params, locals_, transfers,
