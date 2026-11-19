@@ -12291,9 +12291,13 @@ def test_bound_closure_free_var_only(go_types_helper):
     assert result.effects == "none_in_supported_fragment"
 
 
-def test_bound_closure_call_inside_literal_closed(go_types_helper):
+def test_bound_closure_call_inside_literal_opaque_effect(
+    go_types_helper,
+):
     # A call inside the literal defers an effect the sequencing
-    # model cannot place — stays closed.
+    # model cannot place — the call admits as an opaque effectful
+    # callee: the result carries the captures' and arguments'
+    # deps and records an imported transfer.
     data = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
@@ -12302,13 +12306,19 @@ def test_bound_closure_call_inside_literal_closed(go_types_helper):
         "func G(a int64) int64 { return a }",
     )
     result = named(*data)
-    assert not result.available
-    assert result.gaps[0].reason == "unsupported_expression"
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
 
 
-def test_bound_closure_write_inside_closed(go_types_helper):
-    # A write inside the literal mutates state out of order —
-    # stays closed.
+def test_bound_closure_write_inside_lands_at_call(
+    go_types_helper,
+):
+    # A write inside the literal mutates a captured binding —
+    # admitted: the literal sequences AT the call site, so `y = 1`
+    # folds into y's dep set when `h()` runs (the constant 1 adds
+    # no new dep — y keeps its `y := x` set — but the call records
+    # the caller-visible write as an imported effect).
     data = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
@@ -12316,6 +12326,179 @@ def test_bound_closure_write_inside_closed(go_types_helper):
         "\th := func() { y = 1 }\n"
         "\th()\n"
         "\treturn y\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_write_inside_carries_value_deps(
+    go_types_helper,
+):
+    # `x = y` inside the literal lands y's deps on x when `h()`
+    # runs — `return x` after the call reports {0, 1}.
+    data = unit(
+        go_types_helper,
+        "func F(x int64, y int64) int64 {\n"
+        "\th := func() { x = y }\n"
+        "\th()\n"
+        "\treturn x\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_closure_star_write_folds_escaped(
+    go_types_helper,
+):
+    # `*p = y` inside the literal writes caller memory the binding
+    # cannot name — folded into every escaped binding, so `return *p`
+    # reports both deps like a statement-level store does.
+    data = unit(
+        go_types_helper,
+        "func F(p *int64, y int64) int64 {\n"
+        "\th := func() { *p = y }\n"
+        "\th()\n"
+        "\treturn *p\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_inner_call_arg_deps(
+    go_types_helper,
+):
+    # `h(v)` whose literal calls `G(v)` — the inner call's sources
+    # are the literal's parameters, so the call's argument deps join
+    # the result like an opaque callee's would.
+    data = unit(
+        go_types_helper,
+        "func G(a int64) int64 { return a }\n"
+        "func F(x int64) int64 {\n"
+        "\th := func(v int64) int64 { return G(v) }\n"
+        "\treturn h(x)\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_writes_copy_with_name(
+    go_types_helper,
+):
+    # `h2 := h` — the alias inherits the write map, so `h2()`
+    # lands the literal's stores on the captured targets too.
+    data = unit(
+        go_types_helper,
+        "func F(x int64, y int64) int64 {\n"
+        "\th := func() { x = y }\n"
+        "\th2 := h\n"
+        "\th2()\n"
+        "\treturn x\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_closure_addrof_star_write_lands_on_pointee(
+    go_types_helper,
+):
+    # `p := &x; *p = y` inside the literal writes x through the
+    # local pointer — the `p := &x` alias resolves the star target,
+    # so `return x` after `h()` reports y's dep {0}.
+    data = unit(
+        go_types_helper,
+        "func F(y int64) int64 {\n"
+        "\tx := int64(0)\n"
+        "\th := func() { p := &x; *p = y }\n"
+        "\th()\n"
+        "\treturn x\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_addrof_field_write_reaches_pointee(
+    go_types_helper,
+):
+    # `p := &q; p.V = y` writes the aggregate q through the local
+    # pointer — `return q.V` after `h()` reports y's dep {0}.
+    data = unit(
+        go_types_helper,
+        "type St struct{ V int64 }\n"
+        "func F(y int64) int64 {\n"
+        "\tq := St{V: 0}\n"
+        "\th := func() { p := &q; p.V = y }\n"
+        "\th()\n"
+        "\treturn q.V\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_func_rebind_drops_stale_resolution(
+    go_types_helper,
+):
+    # `g = func() { return y }` inside the literal rebinds g — the
+    # old literal's resolution goes stale, so `g()` after `h()`
+    # resolves through the deps the write folded in and `return
+    # g()` reports y's dep {0}.
+    data = unit(
+        go_types_helper,
+        "func F(y int64) int64 {\n"
+        "\tg := func() int64 { return 0 }\n"
+        "\th := func() { g = func() int64 { return y } }\n"
+        "\th()\n"
+        "\treturn g()\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_conditional_copy_unions_records(
+    go_types_helper,
+):
+    # `if b { h = g }` may keep either function value — the copy
+    # must UNION h's old record with g's, not replace it, or `h()`
+    # loses `x = y` on the path that skips the branch. `return x`
+    # reports y's dep {1}.
+    data = unit(
+        go_types_helper,
+        "func F(b bool, y int64) int64 {\n"
+        "\tx := int64(0)\n"
+        "\th := func() { x = y }\n"
+        "\tg := func() {}\n"
+        "\tif b { h = g }\n"
+        "\th()\n"
+        "\treturn x\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_bound_closure_send_inside_stays_closed(go_types_helper):
+    # `q <- v` inside the literal targets a shared queue — the
+    # sequencing model cannot place the send, so it stays closed.
+    data = unit(
+        go_types_helper,
+        "func F(q chan int64, y int64) int64 {\n"
+        "\th := func() { q <- y }\n"
+        "\th()\n"
+        "\treturn 0\n}",
     )
     result = named(*data)
     assert not result.available
@@ -12614,12 +12797,12 @@ def test_immediate_func_literal_chan_arg_through_call_result(
     assert result.effects == "unknown"
 
 
-def test_immediate_func_literal_internal_call_closed(
+def test_immediate_func_literal_internal_call_opaque_effect(
     go_types_helper,
 ):
     # `func() int64 { return G() }()` — a call inside the literal
-    # defers an effect the model cannot sequence: stays closed,
-    # like a bound literal would.
+    # defers an effect the model cannot sequence: admits like a
+    # bound literal, as an opaque effectful callee.
     data = unit(
         go_types_helper,
         "func G() int64 { return 1 }\n"
@@ -12627,7 +12810,9 @@ def test_immediate_func_literal_internal_call_closed(
         "\treturn func() int64 { return G() }()\n}",
     )
     result = named(*data)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
 
 
 def test_nested_call_callee_stays_closed(go_types_helper):
@@ -17253,6 +17438,30 @@ def test_bound_method_value_receiver_freezes_at_bind(
     result = named_package(files, snapshot, summaries, "F")
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_bound_method_value_conditional_copy_unions_reseated_deps(
+    go_types_helper,
+):
+    # `h = g` maybe-skipped where both bind (M, s) but s was
+    # reseated between the binds — the kept pair must UNION both
+    # frozen dep sets, not keep only h's older one.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(c bool, a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\th := s.M\n"
+        "\ts = St{V: b}\n"
+        "\tg := s.M\n"
+        "\tif c { h = g }\n"
+        "\treturn h(0)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 2})
 
 
 def test_bound_method_value_copy_propagates(go_types_helper):
