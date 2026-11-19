@@ -3719,8 +3719,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
         deps = self.expression(
             expr, fn, params, locals_, transfers, count, 0
         )
-        if expr.type == "identifier":
-            ref = self.references.get(self.node_key(expr))
+        idents = [expr] if expr.type == "identifier" else []
+        if not idents and expr.type == "composite_literal":
+            # `return []func(){cl}` — a closure returned as a
+            # collection element re-resolves its captures the
+            # same way a bare `return cl` does.
+            value = expr.child_by_field_name("body") or next(
+                (c for c in expr.named_children
+                 if c.type == "literal_value"),
+                None,
+            )
+            idents = [
+                inner
+                for c in (value.named_children if value else ())
+                for inner in (
+                    [c] if c.type == "identifier"
+                    else (c.named_children if c.type in
+                          ("literal_element", "keyed_element") else ())
+                )
+                if inner.type == "identifier"
+            ]
+        for ident in idents:
+            ref = self.references.get(self.node_key(ident))
             if ref is not None and ref.binding_id:
                 extra = self._captured_current_deps(
                     self.closure_captures.get(
@@ -3749,9 +3769,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             rhs_node is not None
             and rhs_node.type == "call_expression"
         ):
-            return self._promote_chan_call_args(
+            deps = self._promote_chan_call_args(
                 rhs_node, "", locals_, params
             )
+            # `c.Mk()…` — a chan-typed receiver shares its queue
+            # with the produced closure just like a `chan`
+            # argument does, so promote it alongside the args.
+            callee = rhs_node.child_by_field_name("function")
+            if (
+                callee is not None
+                and callee.type == "selector_expression"
+            ):
+                operand = callee.child_by_field_name("operand")
+                if operand is not None:
+                    deps |= self._promote_chan_arg_roots(
+                        (operand,), "", locals_, params
+                    )
+            return deps
         return frozenset()
 
     def _chan_result_call(self, node: Any, fact_pred: Any = None) -> Any:
