@@ -6934,7 +6934,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # model and its contents seed the slot.
                             for arg_root in (
                                 self._imported_chan_result_args(
-                                    rights[i], locals_, params
+                                    rights[i]
+                                    if len(lefts) == len(rights)
+                                    else rights[0],
+                                    locals_,
+                                    params,
+                                    i if len(rights) == 1 else 0,
                                 )
                             ):
                                 self.external_chan_locals.add(

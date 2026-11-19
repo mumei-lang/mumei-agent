@@ -18683,6 +18683,41 @@ def test_imported_multi_result_chan_var_decl_shares_arg_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_imported_multi_result_chan_assign_second_position(
+    go_types_helper,
+):
+    # `n, ch = lib.G()` — the chan slot sits at position 1 of the
+    # single-RHS tuple assign; the slot index must reach the
+    # imported-args probe without indexing past the one-node RHS.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\tch := make(chan int64)\n"
+        "\tvar n int64\n"
+        "\tn, ch = lib.G(q)\n"
+        "\tch <- x\n"
+        "\treturn <-q + n\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q chan int64) (int64, chan int64) {\n"
+            "\treturn 0, q\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_imported_multi_result_chan_assign_shares_arg_queue(
     go_types_helper,
 ):
