@@ -1,13 +1,16 @@
 """Host-observation contracts only: no runner, authority or Evidence consumer."""
 
 import builtins
+import errno
 import hashlib
 import importlib
 import itertools
 import json
 import os
 import socket
+import stat
 import subprocess
+import sys
 import time
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal, localcontext
@@ -35,6 +38,7 @@ from agent.verification_attempt import (
     AttemptRecord,
     AttemptSequence,
     AttemptSequenceStore,
+    FileAttemptSequenceStore,
 )
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
@@ -4072,3 +4076,176 @@ def test_normalized_result_from_dict_requires_exit_code_on_exited():
     del data["exit_code"]
     with pytest.raises(ValueError):
         AttemptNormalizedResult.from_dict(data)
+
+
+def _file_store(tmp_path) -> FileAttemptSequenceStore:
+    return FileAttemptSequenceStore(str(tmp_path / "canonical.json"))
+
+
+def test_file_store_starts_empty(tmp_path):
+    assert _file_store(tmp_path).current is None
+
+
+def test_file_store_publish_persists_across_instances(tmp_path):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    first = _file_store(tmp_path)
+    assert first.publish(sequence) is sequence
+    restored = _file_store(tmp_path)
+    assert restored.current == sequence
+    # An equal re-publication on a fresh reader is an idempotent no-op.
+    assert restored.publish(sequence) == sequence
+
+
+def test_file_store_publish_rejects_conflict(tmp_path):
+    store = _file_store(tmp_path)
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(stored)
+    other = AttemptSequence("b" * 64, 10, ())
+    with pytest.raises(
+        ValueError, match="^canonical sequence publication conflict$"
+    ):
+        store.publish(other)
+    assert store.current == stored
+
+
+def test_file_store_publish_rejects_non_sequences(tmp_path):
+    store = _file_store(tmp_path)
+    for value in (None, True, {}, "FAKE_PRIVATE_RESULT"):
+        with pytest.raises(
+            ValueError, match="^canonical publication requires an attempt sequence$"
+        ):
+            store.publish(value)
+    assert store.current is None
+
+
+def test_file_store_compare_and_set_persists_extension(tmp_path):
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store = _file_store(tmp_path)
+    store.publish(stored)
+    extended = AttemptSequence(
+        FINGERPRINT, 10, (*stored.attempts, sequence_record("running", 2))
+    )
+    assert store.compare_and_set(stored, extended) == extended
+    assert _file_store(tmp_path).current == extended
+
+
+def test_file_store_compare_and_set_detects_expected_mismatch(tmp_path):
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store = _file_store(tmp_path)
+    store.publish(stored)
+    stale = AttemptSequence(FINGERPRINT, 10, ())
+    with pytest.raises(ValueError, match="^canonical sequence compare failed$"):
+        store.compare_and_set(stale, stale)
+    assert store.current == stored
+
+
+def test_file_store_compare_and_set_rejects_non_extension(tmp_path):
+    stored = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store = _file_store(tmp_path)
+    store.publish(stored)
+    other = AttemptSequence(FINGERPRINT, 10, (sequence_record("failed"),))
+    with pytest.raises(
+        ValueError,
+        match="^updated sequence does not extend the canonical lineage$",
+    ):
+        store.compare_and_set(stored, other)
+    assert store.current == stored
+
+
+def test_file_store_malformed_file_fails_closed(tmp_path):
+    path = tmp_path / "canonical.json"
+    path.write_text("not json", encoding="utf-8")
+    store = _file_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.current
+    path.write_text(json.dumps({"schema_version": "foreign/v9"}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        store.current
+
+
+def test_file_store_creates_missing_parent_directory(tmp_path):
+    store = FileAttemptSequenceStore(
+        str(tmp_path / "deep" / "nested" / "canonical.json")
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    assert store.current == sequence
+
+
+def test_file_store_fallback_lock_shared_per_path(tmp_path, monkeypatch):
+    # Without `fcntl` the fallback lock must still serialize two stores
+    # on one file — the registry keys it by the canonical lock path.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    first = _file_store(tmp_path)
+    second = _file_store(tmp_path)
+    registry = FileAttemptSequenceStore._path_locks
+    key = str(first._lock_path.resolve())
+    try:
+        with first._locked():
+            shared = registry[key]
+            assert shared.locked()
+        assert not shared.locked()
+        with second._locked():
+            assert shared.locked()
+    finally:
+        registry.pop(key, None)
+
+
+def test_file_store_write_fsyncs_directory(tmp_path, monkeypatch):
+    # The rename is durable only when the parent directory is fsynced
+    # after `os.replace` — record which fds get fsynced.
+    kinds = []
+    real_fsync = os.fsync
+
+    def spy(fd):
+        kinds.append(
+            "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        )
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    store = _file_store(tmp_path)
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    # File fsync on POSIX; the directory fsync is best-effort — where
+    # the platform cannot fsync a directory only the file lands.
+    assert kinds[0] == "file"
+    assert "dir" in kinds or len(kinds) == 1
+
+
+def test_file_store_dir_fsync_io_error_propagates(tmp_path, monkeypatch):
+    # An fsync failure that is not "unsupported" (EIO, not EINVAL)
+    # must surface — publication cannot claim durable success it did
+    # not get.
+    real_fsync = os.fsync
+
+    def flaky(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "simulated io error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", flaky)
+    store = _file_store(tmp_path)
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(OSError):
+        store.publish(sequence)
+
+
+def test_file_store_dir_fsync_unsupported_is_tolerated(
+    tmp_path, monkeypatch
+):
+    # Where the filesystem refuses fsync on a directory (EINVAL), the
+    # rename already landed — publication keeps the file-level
+    # guarantee instead of failing a completed write.
+    real_fsync = os.fsync
+
+    def refusing(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "fsync unsupported on dir")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refusing)
+    store = _file_store(tmp_path)
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    assert store.current == sequence

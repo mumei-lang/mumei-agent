@@ -1497,6 +1497,46 @@ is added. C11 stays partial; Core meaning and acceptance, C12's demand
 gate and existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged.
 
+### C11 durable canonical-lineage publication
+
+`FileAttemptSequenceStore` is an opt-in **file-backed** publication point
+with the same contract as `AttemptSequenceStore` — `publish` is
+first-wins and `compare_and_set` only accepts lineage extensions — but the
+canonical value persists as `mumei.verifier-attempt-sequence/v1` JSON so a
+host reinstates its own lineage across restarts through the same declared
+parse boundary `AttemptSequence.from_dict` enforces. A sibling
+`<path>.lock` serializes writers on the same host (`fcntl.flock` on POSIX;
+a process-local lock shared per lock path elsewhere, so same-process
+instances still exclude each other) and writes are atomic — a temp file in
+the same directory plus `os.replace` followed by a directory fsync, so the
+rename itself survives a power loss — and a crash mid-write cannot leave a
+partial snapshot. A missing file reads as unpublished; a malformed or
+foreign-schema one fails closed.
+
+The `attempt_runner` publish helpers (`publish_dispatch`,
+`dispatch_and_publish`) accept only the in-process `AttemptSequenceStore`
+by strict type check, so wiring durable publication into the execution
+flow needs a host-side publish step — that integration is out of scope
+here.
+
+```python
+from agent.verification_attempt import FileAttemptSequenceStore
+
+store = FileAttemptSequenceStore("/var/lib/mumei/canonical.json")
+canonical = store.publish(sequence)            # first publication wins
+canonical = store.compare_and_set(expected, updated)  # lineage extension only
+```
+
+It remains **the host's canonical value, not the canonical store**: which
+file is canonical, locking across hosts, freshness, authentication,
+backup/rotation and every result/Evidence decision stay host duties, and
+the store still holds values only — never source or stdout bodies. No
+runner/scheduler, stream collection, execution/cancellation, Evidence
+normalization/acceptance, external verifier, dependency or default
+audit/CLI/MCP route is added. C11 stays partial; Core meaning and
+acceptance, C12's demand gate and existing assurance/Lean/native/LLVM/
+deferred-WASM policies are unchanged.
+
 ### C11 canonical result selection for sequential attempts
 
 `AttemptSequence.select_result(output)` declares one bound `AttemptOutput` the

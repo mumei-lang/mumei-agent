@@ -4,12 +4,17 @@ Records cannot authorize a tool, prove observation freshness or establish that
 a process was stopped. No default verification path consumes these records.
 """
 
+import errno
 import hashlib
 import json
+import os
 import re
+import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Context, Decimal
+from pathlib import Path
 
 from agent.verification_planner import PreparedSourceRequest
 
@@ -727,6 +732,176 @@ class AttemptSequenceStore:
                     "updated sequence does not extend the canonical lineage"
                 )
             return self._current
+
+
+class FileAttemptSequenceStore:
+    """File-backed canonical publication point for one lineage (opt-in).
+
+    Same contract as `AttemptSequenceStore` — `publish` is first-wins and
+    `compare_and_set` only accepts a lineage extension — but the canonical
+    value persists as `mumei.verifier-attempt-sequence/v1` JSON so a host
+    reinstates its own lineage across restarts via the same declared parse
+    boundary `AttemptSequence.from_dict` enforces.
+
+    Writers serialize on a sibling ``<path>.lock``: `fcntl.flock` on POSIX
+    (same host, cross-process) or a process-local lock SHARED PER LOCK PATH
+    where `fcntl` is not available — same-process instances still exclude
+    each other, cross-process exclusion there needs POSIX `fcntl`. Writes
+    are atomic (temp file in the same directory plus `os.replace` followed
+    by a directory fsync, so the rename itself survives a power loss), so
+    a crash mid-write cannot leave a partial snapshot; a missing file
+    reads as unpublished and a malformed one fails closed.
+
+    The `attempt_runner` publish helpers (`publish_dispatch`,
+    `dispatch_and_publish`) accept only the in-process
+    `AttemptSequenceStore` — their strict type check rejects this store,
+    so wiring durable publication into the execution flow needs a
+    host-side publish step; that integration is out of scope here.
+
+    Still host duties, unchanged: which file is the canonical one, locking
+    across hosts, freshness, authentication, backup policy and every
+    result/Evidence decision. The store holds values, never source or
+    stdout bodies.
+    """
+
+    # Fallback mutual exclusion must outlive a single instance: two stores
+    # on one file share the lock keyed by the canonical lock path, so a
+    # `fcntl`-less platform still serializes same-process writers.
+    _path_locks: dict = {}
+    _path_locks_guard = threading.Lock()
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._lock_path = self._path.with_name(self._path.name + ".lock")
+
+    @property
+    def current(self) -> AttemptSequence | None:
+        """The last published canonical value, or None before publication."""
+        return self._read()
+
+    def publish(self, sequence: AttemptSequence) -> AttemptSequence:
+        """Publish the first canonical value; equal re-publication is a no-op."""
+        if type(sequence) is not AttemptSequence:
+            raise ValueError("canonical publication requires an attempt sequence")
+        with self._locked():
+            current = self._read()
+            if current is None:
+                self._write(sequence)
+                return sequence
+            if current != sequence:
+                raise ValueError("canonical sequence publication conflict")
+            return current
+
+    def compare_and_set(
+        self, expected: AttemptSequence, updated: AttemptSequence
+    ) -> AttemptSequence:
+        """Atomically replace the canonical value with a lineage extension.
+
+        Same rules as the in-process store: `expected` must equal the stored
+        value and `updated` must preserve the lineage. Equal updates are
+        idempotent.
+        """
+        if (
+            type(expected) is not AttemptSequence
+            or type(updated) is not AttemptSequence
+        ):
+            raise ValueError(
+                "canonical compare-and-set requires attempt sequences"
+            )
+        with self._locked():
+            current = self._read()
+            if current != expected:
+                raise ValueError("canonical sequence compare failed")
+            if updated != expected and not _is_lineage_extension(
+                expected, updated
+            ):
+                raise ValueError(
+                    "updated sequence does not extend the canonical lineage"
+                )
+            if updated != expected:
+                self._write(updated)
+            return updated if updated != expected else current
+
+    def _read(self) -> AttemptSequence | None:
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        return AttemptSequence.from_dict(json.loads(raw))
+
+    def _write(self, sequence: AttemptSequence) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=self._path.parent,
+            prefix=self._path.name + ".",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    sequence.to_dict(),
+                    handle,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._path)
+            # The rename needs a directory fsync to be durable: without
+            # it a power loss can roll the entry back even though the
+            # file content was fsynced, losing or reverting the
+            # published lineage. Platforms that cannot fsync a
+            # directory keep the file-level guarantee.
+            try:
+                dir_fd = os.open(self._path.parent, os.O_RDONLY)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    # A filesystem that opens a directory can still
+                    # refuse fsync on it (EINVAL/ENOTSUP/ENOSYS) — the
+                    # rename already landed, so keep the file-level
+                    # guarantee rather than fail a completed
+                    # publication. A real I/O failure (EIO, EBADF, …)
+                    # propagates: publication must not report durable
+                    # success it did not get.
+                    try:
+                        os.fsync(dir_fd)
+                    except OSError as e:
+                        if e.errno not in (
+                            errno.EINVAL,
+                            errno.ENOTSUP,
+                            errno.ENOSYS,
+                        ):
+                            raise
+                finally:
+                    os.close(dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    @contextmanager
+    def _locked(self):
+        with self._path_locks_guard:
+            lock = self._path_locks.setdefault(
+                str(self._lock_path.resolve()), threading.Lock()
+            )
+        with lock:
+            try:
+                import fcntl
+            except ImportError:
+                yield
+                return
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
