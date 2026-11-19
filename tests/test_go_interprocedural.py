@@ -18188,6 +18188,23 @@ def test_func_name_argument_invocation_discarded_result(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+def test_func_name_argument_receiver_value_reaches_callback(go_types_helper):
+    # `st.M(G)`: the method hands its receiver's field to the
+    # callback — `g(st.V)` — so the RECEIVER's deps join the call's
+    # argument deps for the broadcast, not just the syntactic
+    # argument list's.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var q = make(chan int64, 8); "
+        "type T struct { V int64 }; "
+        "func G(v int64) int64 { q <- v; return v }; "
+        "func (st T) M(g func(int64) int64) int64 { g(st.V); return 0 }; "
+        "func F(x int64) int64 { var st T; st.V = x; st.M(G); return <-q }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
 def test_func_name_argument_pure_callee_no_broadcast(go_types_helper):
     # The same shape with a pure `G`: no write or send can reach the
     # shared queue, so the receive keeps its dep-free result and the

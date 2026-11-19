@@ -9236,12 +9236,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._call_arg_deps[key] = (
                 self._call_arg_deps.get(key, frozenset()) | result
             )
-        if (
-            node is not None
-            and node.type == "call_expression"
-            and self._func_arg_invocations
-        ):
-            self._fold_func_arg_invocations(node, transfers)
+        if node is not None and node.type == "call_expression":
+            key = self.node_key(node)
+            if self._func_arg_invocations:
+                self._fold_func_arg_invocations(node, transfers)
+            if key not in self._func_arg_invocations:
+                # No callback was passed — drop the accumulated
+                # argument deps instead of holding them for the
+                # rest of the body.
+                self._call_arg_deps.pop(key, None)
         return result
 
     def _fold_func_arg_invocations(
@@ -10808,6 +10811,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # memory, and a `*p = x` store broadcasts
                     # into `indirect_writes`, not `p`'s own set.
                     receiver_deps |= self.indirect_writes
+            if isinstance(receiver_deps, frozenset):
+                # A receiver's value can reach an argument-position
+                # callback too — `st.M(G)` calling `g(st.V)` — so
+                # it joins the call's argument deps alongside the
+                # syntactic arguments.
+                key = self.node_key(node)
+                self._call_arg_deps[key] = (
+                    self._call_arg_deps.get(key, frozenset())
+                    | receiver_deps
+                )
             arity = len(target.parameters)
         elif call is not None and call.method_expr:
             # `T.M(st, args)` — the leading argument already IS the
