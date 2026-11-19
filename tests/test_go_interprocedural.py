@@ -23079,14 +23079,58 @@ def test_func_elem_alias_share_time_deps_preserved(go_types_helper):
     # call through `fs2` still folds `y`'s assignment to `x`.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func F(x int64) int64 {\n"
+        "func F(x int64, z int64) int64 {\n"
         "    var y int64\n"
         "    y = x\n"
         "    f := func(v int64) int64 { y = v; return y }\n"
         "    fs := []func(int64) int64{f}\n"
         "    fs2 := fs\n"
-        "    fs2[0](x)\n"
+        "    fs2[0](z)\n"
         "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_func_elem_parallel_append_reads_old_container(go_types_helper):
+    # `a, c = append(b, z), append(a, z)` — `append(a, z)` reads
+    # `a`'s backing BEFORE `a`'s own store, so `c` shares the OLD
+    # group's elements, not `b`'s that `a` just received.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return x }}\n"
+        "    b := []func() int64{func() int64 { return 0 }}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, c = append(b, z), append(a, z)\n"
+        "    _ = c\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_append_result_group(go_types_helper):
+    # `a, c = append(b, z), append(a, z)` — `c` joins `a`'s OLD
+    # backing group: an element store through a pre-statement sharer
+    # (`a2 := a`) lands in the same backing `c` returned.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{}\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var c []func() int64\n"
+        "    a, c = append(b, z), append(a, z)\n"
+        "    a2[0] = func() int64 { return x }\n"
+        "    _ = a2\n"
+        "    return c[0]()\n"
         "}",
     )
     result = named(source, snapshot, summaries)

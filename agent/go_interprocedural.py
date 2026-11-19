@@ -8157,6 +8157,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for rhs in rights
                 ]
             )
+            # Func-element append operands also resolve against the
+            # post-eval state: `a, c = append(b, z), append(a, z)`
+            # reads `a`'s backing BEFORE `a`'s own store, so the
+            # second append's records/sharers must come from these
+            # snapshots, not the live maps earlier stores rewrote.
+            captures_after_eval = dict(self.closure_captures)
+            writes_after_eval = dict(self.closure_writes)
+            star_after_eval = set(self.closure_star_writes)
+            calls_after_eval = set(self.closure_inner_calls)
+            groups_after_eval = {
+                key: set(group)
+                for key, group in self._func_elem_groups.items()
+            }
             # Channel alias targets resolve against the pre-state
             # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
             # RHS's root must be read before any element's store
@@ -9153,12 +9166,47 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.closure_inner_calls.discard(
                                 ref.binding_id
                             )
-                        self._func_elem_share(
-                            ref.binding_id, append_cont
+                        # The operand's backing resolved before any
+                        # store in this statement — a parallel
+                        # `a = append(b, z)` reseat redirected `a`'s
+                        # name, but `append(a, z)` still reads the
+                        # old backing's elements and group.
+                        append_members = (
+                            groups_after_eval.get(append_cont, set())
+                            | {append_cont}
+                        ) - func_elem_reseated - {ref.binding_id}
+                        for member_id in append_members:
+                            self._func_elem_share(
+                                ref.binding_id, member_id
+                            )
+                        captured = captures_after_eval.get(
+                            append_cont
                         )
-                        self._adopt_element_records(
-                            append_cont, ref.binding_id
-                        )
+                        if captured:
+                            self.closure_captures[
+                                ref.binding_id
+                            ] = (
+                                self.closure_captures.get(
+                                    ref.binding_id, frozenset()
+                                )
+                                | captured
+                            )
+                        writes = writes_after_eval.get(append_cont)
+                        if writes:
+                            self.closure_writes[ref.binding_id] = (
+                                self.closure_writes.get(
+                                    ref.binding_id, frozenset()
+                                )
+                                | writes
+                            )
+                        if append_cont in star_after_eval:
+                            self.closure_star_writes.add(
+                                ref.binding_id
+                            )
+                        if append_cont in calls_after_eval:
+                            self.closure_inner_calls.add(
+                                ref.binding_id
+                            )
                     elif (
                         (
                             len(lefts) != len(rights)
