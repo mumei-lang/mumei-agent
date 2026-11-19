@@ -10359,13 +10359,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # result points at (or IS, for a direct
                         # container result), so the elements iterate
                         # caller-observable memory like `(*p)[i]`.
-                        # Only a local callee's function record
-                        # declares the result fact — an imported
-                        # member's signature carries identities, not
-                        # the result's kind, so `lib.G()` stays
-                        # closed.
+                        # An imported callee's member record also
+                        # declares `result_types` even when the
+                        # composite result keeps the call
+                        # `external_or_bodyless`, so `for range
+                        # lib.G(a)` admits on the same shape.
                         call = self.calls.get(self.node_key(call_operand))
+                        call_member = None
                         if (
+                            call is not None
+                            and call.owner == fn.binding_id
+                            and call.kind
+                            in ("direct_import", "external_or_bodyless")
+                        ):
+                            callee = call_operand.child_by_field_name(
+                                "function"
+                            )
+                            if (
+                                callee is not None
+                                and callee.type == "selector_expression"
+                            ):
+                                call_member = self._package_member(callee)
+                            _, rf = self._call_result_fact(call_operand)
+                        elif (
                             call is not None
                             and call.owner == fn.binding_id
                             and call.kind == "direct_local"
@@ -10377,7 +10393,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and len(target.results) == 1
                                 else None
                             )
-                            if rf is not None and rf.kind == "pointer":
+                        else:
+                            rf = None
+                        if call is not None and rf is not None:
+                            if rf.kind == "pointer":
                                 # `*G()` requires a pointer to a
                                 # container; `for range G()`
                                 # auto-derefs pointer-to-array only —
@@ -10393,14 +10412,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         call_operand,
                                         elem,
                                         rf.type_id
-                                        or call.target + "/pointee",
+                                        or (
+                                            call_member.id
+                                            if call_member is not None
+                                            else call.target
+                                        )
+                                        + "/pointee",
                                     )
                             elif (
                                 sugar
-                                and rf is not None
                                 and rf.kind in {"slice", "array", "map"}
                             ):
-                                computed = (call_operand, rf, call.target)
+                                computed = (
+                                    call_operand,
+                                    rf,
+                                    (
+                                        call_member.id
+                                        if call_member is not None
+                                        else call.target
+                                    ),
+                                )
                     if range_ident is not None:
                         bound = self._bound_container_pointee(
                             range_ident, locals_, params
@@ -10604,6 +10635,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             for arg in args
                         )
                         computed_call = call
+                        # `for range lib.G(h, x)` — a func-typed
+                        # argument may run inside the opaque callee:
+                        # drain the invocations the argument reads
+                        # queued (the call node itself never passes
+                        # through `expression` on this path).
+                        self._fold_func_arg_invocations(
+                            call_node, params, scope, transfers
+                        )
+                        if call_member is not None:
+                            # An imported bodyless callee — its
+                            # declared signature types pin like a
+                            # member read's, the call counts opaque
+                            # for --summary-aware-calls, and a chan
+                            # argument promotes onto the shared queue
+                            # like the index-read fold's.
+                            self.pinned.update(
+                                getattr(
+                                    call_member,
+                                    "signature_type_ids",
+                                    (),
+                                )
+                                or ()
+                            )
+                            if call.kind == "external_or_bodyless":
+                                self._opaque_spans.add(_key3(call.span))
+                            self._promote_chan_call_args(
+                                call_node, "", scope, params
+                            )
                         if target_fn is not None:
                             for signature_param in (
                                 *(
