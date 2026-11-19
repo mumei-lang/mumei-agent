@@ -3010,6 +3010,15 @@ parse shape on a bound local container resolves through
 `locals_`. Element writes into a parameter container
 (`fs[i] = g`) stay closed: they reach caller memory the model
 cannot scope.
+`new(struct{...})` admits the anonymous pointee the type
+checker already reports: the literal names no `type` identity,
+so pinning reduces to each field's declared type — a nested
+literal, a signature field or an unresolvable name keeps the
+call closed through the ordinary gate. The bound pointer then
+resolves `p.F`, `(*p).F` and `p = new(struct{...})` exactly
+like `var p *struct{...}` or a `*struct{...}` parameter — field
+bindings carry the same union-fold semantics named-struct
+pointees get.
 
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.

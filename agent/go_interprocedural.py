@@ -3109,6 +3109,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return True
         return False
 
+    def _pin_struct_fields(self, node: Any) -> bool:
+        """Pin the declared type of every field a `struct{...}`
+        literal lists — `new(struct{...})` admits only when each
+        field pins cleanly, so a nested literal, a signature field
+        or an unresolvable name keeps the call closed through the
+        ordinary `_pin_type_node` gate."""
+        decls = next(
+            (
+                c
+                for c in node.named_children
+                if c.type == "field_declaration_list"
+            ),
+            None,
+        )
+        if decls is None:
+            return False
+        return all(
+            self._pin_type_node(field.child_by_field_name("type"))
+            for field in decls.named_children
+            if field.type == "field_declaration"
+        )
+
     def result(
         self,
         fn: Function,
@@ -13566,12 +13588,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # transfer records. Pinning the argument's named
                     # identities keeps `stale_dependents` honest; the
                     # pointer's own use-site gates (`*p`, `(*p)[i]`)
-                    # classify what the pointee admits. `make` stays
+                    # classify what the pointee admits. A `struct{...}`
+                    # literal names no `type` identity, so pinning
+                    # reduces to each field's declared type — the
+                    # pointee gates then resolve `p.F`/`(*p).F` like
+                    # `var p *struct{...}` does. `make` stays
                     # opaque — its result is a composite value, which
                     # the fragment's binding model cannot hold.
-                    if len(arguments) != 1 or not self._pin_type_node(
-                        arguments[0]
-                    ):
+                    pinned = (
+                        self._pin_struct_fields(arguments[0])
+                        if len(arguments) == 1
+                        and arguments[0].type == "struct_type"
+                        else len(arguments) == 1
+                        and self._pin_type_node(arguments[0])
+                    )
+                    if not pinned:
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
