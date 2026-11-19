@@ -11654,6 +11654,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `<-GC`/`range GC` to observe.
             if self._calls_touch_external_chan(callee.calls):
                 self.indirect_writes |= stored
+                if self._calls_touch_external_chan(
+                    callee.calls, self._chan_chan_id
+                ):
+                    # `cc <- q` inside the callee handed a `chan`
+                    # argument's queue to the outer queue's
+                    # domain — promote the argument roots like an
+                    # imported chan-result bind does, so sends a
+                    # received channel performs stay connected
+                    # to `<-q`.
+                    self._promote_chan_arg_roots(
+                        arguments, "", locals_, params
+                    )
         return result
 
     def _propagate_func_alias(
@@ -13223,6 +13235,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ) | stored
             if self._calls_touch_external_chan(callee.calls):
                 self.indirect_writes |= stored
+                if self._calls_touch_external_chan(
+                    callee.calls, self._chan_chan_id
+                ):
+                    # `m.cc <- q` inside the method — the same
+                    # promotion the direct-call site applies.
+                    self._promote_chan_arg_roots(
+                        arguments, "", locals_, params
+                    )
         return result
 
     def _immediate_literal_call(
@@ -13661,6 +13681,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # broadcast the local-callee site applies.
                 if self._calls_touch_external_chan(declared.calls):
                     self.indirect_writes |= stored
+                    if self._calls_touch_external_chan(
+                        declared.calls, self._chan_chan_id
+                    ):
+                        # `cc <- q` inside the declared callee —
+                        # the same argument-root promotion.
+                        self._promote_chan_arg_roots(
+                            arguments, "", locals_, params
+                        )
             # The callee's declared type pins fold like a local
             # call's — redeclaring any of them flags this summary.
             self.pinned.update(declared.pinned)
