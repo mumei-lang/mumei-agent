@@ -9123,14 +9123,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.bound_method_receiver_deps.pop(
                                     ref.binding_id, None
                                 )
-                        else:
+                        elif not elem_keep:
                             self._drop_bound_method(ref.binding_id)
                         if (
                             src_id is not None
                             and src_id in pointee_before
                         ):
                             self.pointee_closures.add(ref.binding_id)
-                        else:
+                        elif not elem_keep:
                             self.pointee_closures.discard(
                                 ref.binding_id
                             )
@@ -9181,7 +9181,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             and src_id in opaque_before
                         ):
                             self.opaque_callees.add(ref.binding_id)
-                        else:
+                        elif not elem_keep:
                             self.opaque_callees.discard(
                                 ref.binding_id
                             )
