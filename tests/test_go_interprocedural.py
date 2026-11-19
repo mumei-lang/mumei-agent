@@ -23145,7 +23145,7 @@ def test_func_elem_parallel_append_same_backing(go_types_helper):
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
-        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a := make([]func() int64, 1, 2)\n"
         "    a2 := a\n"
         "    z := func() int64 { return 0 }\n"
         "    var c []func() int64\n"
@@ -23160,15 +23160,103 @@ def test_func_elem_parallel_append_same_backing(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
-def test_func_elem_parallel_copy_uses_eval_backing(go_types_helper):
-    # `a, b, c = d, a, append(a, z)` — `a` reseats onto `d`'s
-    # backing, but `b = a` copies the OLD array `a` named at
-    # resolution time, so `b` and `c` keep the old backing and a
-    # later `a[0]` write lands in `d`'s, not theirs.
+def test_func_elem_parallel_copy_chain_stays_shared(go_types_helper):
+    # `c, b = d, c` with a/b/c/d all on one backing — both copies
+    # land on THE SAME eval-time class, so the share survives and a
+    # `b[0]` write still reaches `c[0]()`.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
         "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := b\n"
+        "    d := a\n"
+        "    c, b = d, c\n"
+        "    b[0] = func() int64 { return x }\n"
+        "    _ = a\n"
+        "    _ = d\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_self_copy_rejoins_eval_class(go_types_helper):
+    # `a, a, b = d, a, a` — the second `a` lands on its eval-time
+    # backing (shared with `b`), and `b = a` lands on the same
+    # class: the post-state `a` and `b` share, so `a[0]` reaches
+    # `b[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    d := []func() int64{}\n"
+        "    a, a, b = d, a, a\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = d\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_parallel_fresh_backing_leaves_append(go_types_helper):
+    # `a, b = make(…), append(a, z)` — `a` lands on a FRESH backing
+    # (empty landing class), `b` on the operand's eval class, so a
+    # later `a[0]` write must not reach `b[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := make([]func() int64, 1, 2)\n"
+        "    z := func() int64 { return 0 }\n"
+        "    var b []func() int64\n"
+        "    a, b = make([]func() int64, 1), append(a, z)\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    return b[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_parallel_cross_copy_splits_backings(go_types_helper):
+    # `a, c = c, b` — `a` lands on `c`'s backing, `c` on the {a,b}
+    # eval class; the two post-state backings are distinct, so an
+    # `a[0]` write must not reach `c[0]()`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    b := a\n"
+        "    c := []func() int64{func() int64 { return 0 }}\n"
+        "    a, c = c, b\n"
+        "    a[0] = func() int64 { return x }\n"
+        "    _ = b\n"
+        "    return c[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_parallel_copy_uses_eval_backing(go_types_helper):
+    # `a, b, c = d, a, append(a, z)` — `a` reseats onto `d`'s
+    # backing, but `b = a` copies the OLD array `a` named at
+    # resolution time, so `b` and `c` keep the old backing and a
+    # later `a[0]` write lands in `d`'s, not theirs. `a` has spare
+    # capacity so `append` really does reuse its array.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    a := make([]func() int64, 1, 2)\n"
         "    b := a\n"
         "    d := []func() int64{}\n"
         "    z := func() int64 { return 0 }\n"
@@ -23187,11 +23275,12 @@ def test_func_elem_parallel_copy_uses_eval_backing(go_types_helper):
 
 def test_func_elem_parallel_copy_keeps_old_sharer(go_types_helper):
     # Same shape: `b` stays on the backing `c` appended from, so an
-    # element write through `b` still reaches `c[0]()`.
+    # element write through `b` still reaches `c[0]()`. `a` has
+    # spare capacity so `append` really does reuse its array.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
-        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a := make([]func() int64, 1, 2)\n"
         "    b := a\n"
         "    d := []func() int64{}\n"
         "    z := func() int64 { return 0 }\n"

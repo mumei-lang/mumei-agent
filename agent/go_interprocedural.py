@@ -8177,6 +8177,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 key: set(group)
                 for key, group in self._func_elem_groups.items()
             }
+            # `groups` holds pairwise share edges — `c := b` links
+            # `c` through a hub, not to every member — so the
+            # backing a name shares at eval time is its CONNECTED
+            # COMPONENT here, not `groups[src]` alone.
+            func_elem_eval_class: dict[str, frozenset[str]] = {}
+            for _gk in groups_after_eval:
+                if _gk in func_elem_eval_class:
+                    continue
+                _comp: set[str] = set()
+                _stack = [_gk]
+                while _stack:
+                    _node = _stack.pop()
+                    if _node in _comp:
+                        continue
+                    _comp.add(_node)
+                    _stack.extend(groups_after_eval.get(_node, ()))
+                for _node in _comp:
+                    func_elem_eval_class[_node] = frozenset(_comp)
             # Channel alias targets resolve against the pre-state
             # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
             # RHS's root must be read before any element's store
@@ -8860,7 +8878,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         not conditional
                         and self._may_skip == 0
-                        and ref.binding_id != src_id
                         and tgt_bound is not None
                         and self._func_elem_collection(tgt_bound.type)
                     ):
@@ -8872,11 +8889,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # literal under `a` during RHS eval: that
                         # record belongs to the OLD array `a`'s
                         # sharers keep, not to `a`'s new backing.
+                        # A self-copy (`a, a = d, a`) reseats too:
+                        # the second `a` lands on its eval-time
+                        # backing, not on `d`'s.
                         self._func_elem_reseat(ref.binding_id)
                         func_elem_reseated.add(ref.binding_id)
                         func_elem_reseat_backings[ref.binding_id] = (
-                            groups_after_eval.get(src_id, set())
-                            | {src_id}
+                            func_elem_eval_class.get(
+                                src_id, frozenset({src_id})
+                            )
+                            if src_id is not None
+                            else frozenset({ref.binding_id})
                         )
                     # A maybe-skipped copy leaves the name holding
                     # EITHER function value. When the source carries
@@ -9089,20 +9112,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # members — like the append operand below —
                         # and drop members reseated onto a
                         # different backing.
-                        share_members = (
-                            groups_after_eval.get(src_id, set())
-                            | {src_id}
-                        ) - {ref.binding_id}
-                        share_eval = share_members | {ref.binding_id}
+                        share_eval = (
+                            func_elem_eval_class.get(
+                                src_id, frozenset({src_id})
+                            )
+                        )
+                        share_members = set(share_eval) - {ref.binding_id}
+                        # Eval-time groups partition names by
+                        # backing, so a reseated member stays only
+                        # when it landed on THE SAME class — an
+                        # intersection test fails because a name's
+                        # own id can stand for two different
+                        # backings across the statement
+                        # (`a, c = c, b`: `a`'s landing class {c}
+                        # intersects {a,b,c} without sharing `b`'s
+                        # backing).
                         for member_id in set(share_members):
                             if (
                                 member_id in func_elem_reseated
-                                and not (
-                                    func_elem_reseat_backings.get(
-                                        member_id, set()
-                                    )
-                                    & share_eval
+                                and func_elem_reseat_backings.get(
+                                    member_id, set()
                                 )
+                                != share_eval
                             ):
                                 share_members.discard(member_id)
                         for member_id in share_members:
@@ -9186,11 +9217,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             func_elem_reseated.add(ref.binding_id)
                             func_elem_reseat_backings[
                                 ref.binding_id
-                            ] = (
-                                groups_after_eval.get(
-                                    append_cont, set()
+                            ] = set(
+                                func_elem_eval_class.get(
+                                    append_cont,
+                                    frozenset({append_cont}),
                                 )
-                                | {append_cont}
                             )
                             # The name points at the append result's
                             # backing now — its own old elements stay
@@ -9215,8 +9246,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # name, but `append(a, z)` still reads the
                         # old backing's elements and group.
                         append_members = (
-                            groups_after_eval.get(append_cont, set())
-                            | {append_cont}
+                            set(
+                                func_elem_eval_class.get(
+                                    append_cont,
+                                    frozenset({append_cont}),
+                                )
+                            )
                         ) - {ref.binding_id}
                         # A member reseated in this statement only
                         # leaves the operand's backing when the
@@ -9226,19 +9261,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # later element writes still land in `c`;
                         # `b` in `a, b, c = d, a, append(a, z)`
                         # reseats onto the operand's own backing.
-                        append_eval = (
-                            groups_after_eval.get(append_cont, set())
-                            | {append_cont}
+                        append_eval = set(
+                            func_elem_eval_class.get(
+                                append_cont,
+                                frozenset({append_cont}),
+                            )
                         )
+                        # Same class-equality rule as the copy
+                        # path: `a, b = make(…), append(a, z)`
+                        # reseats `a` onto a fresh backing ({}, not
+                        # the operand's class) so `a` must leave.
                         for member_id in set(append_members):
                             if (
                                 member_id in func_elem_reseated
-                                and not (
-                                    func_elem_reseat_backings.get(
-                                        member_id, set()
-                                    )
-                                    & append_eval
+                                and func_elem_reseat_backings.get(
+                                    member_id, set()
                                 )
+                                != append_eval
                             ):
                                 append_members.discard(member_id)
                         for member_id in append_members:
@@ -9300,9 +9339,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # still share it before the group drops.
                             self._func_elem_reseat(ref.binding_id)
                             func_elem_reseated.add(ref.binding_id)
+                            # Fresh backing — empty landing class,
+                            # distinct from any eval-time one.
                             func_elem_reseat_backings[
                                 ref.binding_id
-                            ] = {ref.binding_id}
+                            ] = set()
                             self.opaque_callees.discard(
                                 ref.binding_id
                             )
@@ -9340,7 +9381,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             func_elem_reseated.add(ref.binding_id)
                             func_elem_reseat_backings[
                                 ref.binding_id
-                            ] = {ref.binding_id}
+                            ] = set()
                         self._adopt_container_element_records(
                             (
                                 rights[i]
