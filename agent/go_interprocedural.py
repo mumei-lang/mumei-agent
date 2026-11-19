@@ -10083,7 +10083,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or binding.type.kind != "function"
         ):
             return
+        # `P((h), x)` — parens sit between the identifier and the
+        # argument list; walk through them like `_chan_call_args`.
         parent = node.parent
+        while (
+            parent is not None
+            and parent.type == "parenthesized_expression"
+        ):
+            parent = parent.parent
         call_node = parent.parent if parent is not None else None
         if (
             parent is not None
