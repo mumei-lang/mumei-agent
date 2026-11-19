@@ -7704,6 +7704,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # both `a, a[0] = b, f` (old sharers keep the written
             # array) and the re-share case reach the right names.
             func_elem_holders: dict[int, frozenset[str]] = {}
+            # Names an earlier parallel store detached from a shared
+            # backing (`a2, a[0] = b, f` reseats `a2` before the
+            # element write lands) no longer share that backing —
+            # subtract them from the resolution-time snapshot.
+            func_elem_reseated: set[str] = set()
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -8722,11 +8727,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # detaches `a` from the aliases the write still
                     # reaches, and a parallel copy (`a2, a[0] = a,
                     # f`) shares `a` only after the LHS resolved.
-                    elem_holders = func_elem_holders.get(
-                        i, frozenset({ref.binding_id})
-                    ) | self._func_elem_groups.get(
-                        ref.binding_id, set()
-                    )
+                    elem_holders = (
+                        func_elem_holders.get(
+                            i, frozenset({ref.binding_id})
+                        )
+                        | self._func_elem_groups.get(
+                            ref.binding_id, set()
+                        )
+                    ) - func_elem_reseated | {ref.binding_id}
                     for holder_id in elem_holders:
                         # Accumulate like the container's own
                         # element store — replacing would wipe the
@@ -8845,6 +8853,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # record belongs to the OLD array `a`'s
                         # sharers keep, not to `a`'s new backing.
                         self._func_elem_reseat(ref.binding_id)
+                        func_elem_reseated.add(ref.binding_id)
                     # A maybe-skipped copy leaves the name holding
                     # EITHER function value. When the source carries
                     # a resolvable record the union covers both
@@ -9126,6 +9135,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             and ref.binding_id != append_cont
                         ):
                             self._func_elem_reseat(ref.binding_id)
+                            func_elem_reseated.add(ref.binding_id)
+                            # The name points at the append result's
+                            # backing now — its own old elements stay
+                            # reachable only through the sharers the
+                            # reseat handed them to, so the stale
+                            # records drop before `b`'s arrive.
+                            self.closure_captures.pop(
+                                ref.binding_id, None
+                            )
+                            self.closure_writes.pop(
+                                ref.binding_id, None
+                            )
+                            self.closure_star_writes.discard(
+                                ref.binding_id
+                            )
+                            self.closure_inner_calls.discard(
+                                ref.binding_id
+                            )
                         self._func_elem_share(
                             ref.binding_id, append_cont
                         )
@@ -9158,6 +9185,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # records transfer to the names that
                             # still share it before the group drops.
                             self._func_elem_reseat(ref.binding_id)
+                            func_elem_reseated.add(ref.binding_id)
                             self.opaque_callees.discard(
                                 ref.binding_id
                             )
@@ -9192,6 +9220,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # names still sharing it, not the name.
                         if not conditional and self._may_skip == 0:
                             self._func_elem_reseat(ref.binding_id)
+                            func_elem_reseated.add(ref.binding_id)
                         self._adopt_container_element_records(
                             (
                                 rights[i]
@@ -14799,7 +14828,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 )
             else:
-                if operand.type == "call_expression":
+                index_operand = operand
+                while (
+                    index_operand is not None
+                    and index_operand.type == "parenthesized_expression"
+                ):
+                    index_operand = next(
+                        (
+                            c
+                            for c in index_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    index_operand is not None
+                    and index_operand.type == "call_expression"
+                ):
                     # `mk(x)[0]()` — the container is a call result:
                     # the span stands in for the anonymous slot, and
                     # the call's `chan` arguments join the external
@@ -14809,15 +14854,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # binding instead — the appended literal
                     # recorded under `fs`, not under the span.
                     append_cont = self._func_elem_append_target(
-                        operand, locals_
+                        index_operand, locals_
                     )
                     target_id = (
                         append_cont
                         if append_cont is not None
-                        else self._immediate_span_id(operand)
+                        else self._immediate_span_id(index_operand)
                     )
                     callee_deps |= self._func_result_chan_args(
-                        operand, locals_, params
+                        index_operand, locals_, params
                     )
                 else:
                     root_ref = self._receiver_root_ref(operand)

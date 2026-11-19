@@ -23008,3 +23008,87 @@ def test_func_elem_paren_append_rhs(go_types_helper):
     result = named(source, snapshot, summaries)
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_tuple_reseat_alias_does_not_leak(go_types_helper):
+    # `a2, a[0] = b, f` — `a2` reseats to `b` before the element
+    # write lands, so `f`'s records must not reach `a2`: the call
+    # resolves `b`'s element (dep {1}) and nothing of `f`'s write.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, y0 int64) int64 {\n"
+        "    var y int64\n"
+        "    f := func() int64 { y = x; return y }\n"
+        "    a := []func() int64{func() int64 { return 0 }}\n"
+        "    a2 := a\n"
+        "    b := []func() int64{func() int64 { return y0 }}\n"
+        "    a2, a[0] = b, f\n"
+        "    _ = a\n"
+        "    return a2[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_func_elem_append_reseat_drops_stale_records(go_types_helper):
+    # `a = append(b, lit)` — the name reseats to the append result's
+    # backing, so the OLD element's captures must not survive on
+    # `a`. Both the bare and the parenthesized RHS take the same
+    # reseat arm.
+    for rhs in ("append(b, func() int64 { return 0 })",
+                "(append(b, func() int64 { return 0 }))"):
+        source, snapshot, summaries = unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "    var y int64\n"
+            "    a := []func() int64{func() int64 { return x }}\n"
+            "    b := []func() int64{func() int64 { return y }}\n"
+            f"    a = {rhs}\n"
+            "    y = 1\n"
+            "    return a[0]()\n"
+            "}",
+        )
+        result = named(source, snapshot, summaries)
+        assert result.available
+        assert result.return_dependencies == frozenset()
+
+
+def test_func_elem_paren_append_index_call(go_types_helper):
+    # `(append(fs, f))[i]()` — parens unwrap before the
+    # call-expression operand check, so the append operand still
+    # names `fs`'s binding and the call folds the element's write.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{}\n"
+        "    f := func() int64 { y = x; return y }\n"
+        "    return (append(fs, f))[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_alias_share_time_deps_preserved(go_types_helper):
+    # `fs2 := fs` when the element's write target ALREADY carries
+    # deps — the alias keeps the stored write-back record, so a
+    # call through `fs2` still folds `y`'s assignment to `x`.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    y = x\n"
+        "    f := func(v int64) int64 { y = v; return y }\n"
+        "    fs := []func(int64) int64{f}\n"
+        "    fs2 := fs\n"
+        "    fs2[0](x)\n"
+        "    return y\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
