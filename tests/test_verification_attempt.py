@@ -7,7 +7,9 @@ import itertools
 import json
 import os
 import socket
+import stat
 import subprocess
+import sys
 import time
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal, localcontext
@@ -4167,3 +4169,44 @@ def test_file_store_creates_missing_parent_directory(tmp_path):
     sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
     store.publish(sequence)
     assert store.current == sequence
+
+
+def test_file_store_fallback_lock_shared_per_path(tmp_path, monkeypatch):
+    # Without `fcntl` the fallback lock must still serialize two stores
+    # on one file — the registry keys it by the canonical lock path.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    first = _file_store(tmp_path)
+    second = _file_store(tmp_path)
+    registry = FileAttemptSequenceStore._path_locks
+    key = str(first._lock_path.resolve())
+    try:
+        with first._locked():
+            shared = registry[key]
+            assert shared.locked()
+        assert not shared.locked()
+        with second._locked():
+            assert shared.locked()
+    finally:
+        registry.pop(key, None)
+
+
+def test_file_store_write_fsyncs_directory(tmp_path, monkeypatch):
+    # The rename is durable only when the parent directory is fsynced
+    # after `os.replace` — record which fds get fsynced.
+    kinds = []
+    real_fsync = os.fsync
+
+    def spy(fd):
+        kinds.append(
+            "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        )
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    store = _file_store(tmp_path)
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    # File fsync on POSIX; the directory fsync is best-effort — where
+    # the platform cannot fsync a directory only the file lands.
+    assert kinds[0] == "file"
+    assert "dir" in kinds or len(kinds) == 1

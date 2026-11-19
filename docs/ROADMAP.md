@@ -1506,10 +1506,18 @@ canonical value persists as `mumei.verifier-attempt-sequence/v1` JSON so a
 host reinstates its own lineage across restarts through the same declared
 parse boundary `AttemptSequence.from_dict` enforces. A sibling
 `<path>.lock` serializes writers on the same host (`fcntl.flock` on POSIX;
-a process-local lock elsewhere) and writes are atomic — a temp file in the
-same directory plus `os.replace` — so a crash mid-write cannot leave a
+a process-local lock shared per lock path elsewhere, so same-process
+instances still exclude each other) and writes are atomic — a temp file in
+the same directory plus `os.replace` followed by a directory fsync, so the
+rename itself survives a power loss — and a crash mid-write cannot leave a
 partial snapshot. A missing file reads as unpublished; a malformed or
 foreign-schema one fails closed.
+
+The `attempt_runner` publish helpers (`publish_dispatch`,
+`dispatch_and_publish`) accept only the in-process `AttemptSequenceStore`
+by strict type check, so wiring durable publication into the execution
+flow needs a host-side publish step — that integration is out of scope
+here.
 
 ```python
 from agent.verification_attempt import FileAttemptSequenceStore

@@ -743,10 +743,19 @@ class FileAttemptSequenceStore:
     boundary `AttemptSequence.from_dict` enforces.
 
     Writers serialize on a sibling ``<path>.lock``: `fcntl.flock` on POSIX
-    (same host, cross-process) or a process-local lock where `fcntl` is not
-    available. Writes are atomic (temp file in the same directory plus
-    `os.replace`), so a crash mid-write cannot leave a partial snapshot; a
-    missing file reads as unpublished and a malformed one fails closed.
+    (same host, cross-process) or a process-local lock SHARED PER LOCK PATH
+    where `fcntl` is not available — same-process instances still exclude
+    each other, cross-process exclusion there needs POSIX `fcntl`. Writes
+    are atomic (temp file in the same directory plus `os.replace` followed
+    by a directory fsync, so the rename itself survives a power loss), so
+    a crash mid-write cannot leave a partial snapshot; a missing file
+    reads as unpublished and a malformed one fails closed.
+
+    The `attempt_runner` publish helpers (`publish_dispatch`,
+    `dispatch_and_publish`) accept only the in-process
+    `AttemptSequenceStore` — their strict type check rejects this store,
+    so wiring durable publication into the execution flow needs a
+    host-side publish step; that integration is out of scope here.
 
     Still host duties, unchanged: which file is the canonical one, locking
     across hosts, freshness, authentication, backup policy and every
@@ -754,10 +763,15 @@ class FileAttemptSequenceStore:
     stdout bodies.
     """
 
+    # Fallback mutual exclusion must outlive a single instance: two stores
+    # on one file share the lock keyed by the canonical lock path, so a
+    # `fcntl`-less platform still serializes same-process writers.
+    _path_locks: dict = {}
+    _path_locks_guard = threading.Lock()
+
     def __init__(self, path: str) -> None:
         self._path = Path(path)
         self._lock_path = self._path.with_name(self._path.name + ".lock")
-        self._local_lock = threading.Lock()
 
     @property
     def current(self) -> AttemptSequence | None:
@@ -832,6 +846,20 @@ class FileAttemptSequenceStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self._path)
+            # The rename needs a directory fsync to be durable: without
+            # it a power loss can roll the entry back even though the
+            # file content was fsynced, losing or reverting the
+            # published lineage. Platforms that cannot fsync a
+            # directory keep the file-level guarantee.
+            try:
+                dir_fd = os.open(self._path.parent, os.O_RDONLY)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -841,7 +869,11 @@ class FileAttemptSequenceStore:
 
     @contextmanager
     def _locked(self):
-        with self._local_lock:
+        with self._path_locks_guard:
+            lock = self._path_locks.setdefault(
+                str(self._lock_path.resolve()), threading.Lock()
+            )
+        with lock:
             try:
                 import fcntl
             except ImportError:
