@@ -7509,6 +7509,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.members.get(member.id)
                                 or self.bindings.get(member.id)
                             )
+                        elif (
+                            chan is None
+                            and (
+                                chan_member := self._chan_result_call(
+                                    right
+                                )
+                            )
+                            is not None
+                            and hasattr(chan_member, "result_types")
+                        ):
+                            # `for v := range lib.G()` — the callee-
+                            # produced external queue an imported
+                            # member's lone scalar-`chan` result
+                            # names: elements re-join
+                            # `indirect_writes` like a `chan`
+                            # parameter's, and the read records on
+                            # the member's identity with the result
+                            # type's named identities pinned.
+                            member = chan_member
+                            self._pin_member_type(member)
+                            for result_type in member.result_types:
+                                self._pin_fact_identities(result_type)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        right.start_byte,
+                                        right.end_byte,
+                                    ),
+                                    member.id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            rdeps = self.indirect_writes
+                            chan = member
                         else:
                             rdeps = self.expression(
                                 right, fn, params, scope, transfers,

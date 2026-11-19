@@ -18032,3 +18032,38 @@ def test_imported_chan_result_passthrough_arg_shares_queue(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_range_over_imported_chan_result_reads_queue(
+    go_types_helper,
+):
+    # `for v := range lib.G()` iterates the member's external
+    # queue — a send through another bound name lands in
+    # `indirect_writes` and reaches the loop element.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tch := lib.G()\n"
+        "\tch <- x\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range lib.G() {\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G() chan int64 { return nil }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
