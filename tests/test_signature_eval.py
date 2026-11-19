@@ -323,3 +323,234 @@ def test_route_refuses_output_over_revocation_list(tmp_path):
     )
     # The declared input survives untouched.
     assert json.loads(revoked.read_text())["revoked_keys"] == []
+
+
+_REFERENCE = "2026-01-01T00:00:00Z"
+
+
+def _registry_doc(key_id="producer-key-fingerprint", **entry):
+    entry = entry or {
+        "principal": "release-producer",
+        "not_before": "2025-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+    }
+    return {
+        "schema_version": "mumei.producer-key-registry/v1",
+        "registry": {key_id: entry},
+    }
+
+
+def test_key_registry_performs_key_authenticity():
+    # A declared `mumei.producer-key-registry/v1` performs
+    # `key_authenticity` on the matched envelope's key id: the key
+    # names a registry entry whose window covers the declared
+    # reference time. The registry is trusted as declared like every
+    # other supporting document.
+    from agent.core_evidence import producer_key_registry
+
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        key_registry=producer_key_registry(_registry_doc()),
+        reference_time=_REFERENCE,
+    )
+    assert evaluation["envelope_match"] is True
+    assert evaluation["key_authentic"] is True
+    assert "key_authenticity" not in evaluation["checks_not_performed"]
+
+
+def test_key_registry_unknown_key_reports_false():
+    from agent.core_evidence import producer_key_registry
+
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        key_registry=producer_key_registry(
+            _registry_doc(key_id="other-key")
+        ),
+        reference_time=_REFERENCE,
+    )
+    assert evaluation["key_authentic"] is False
+    assert "key_authenticity" not in evaluation["checks_not_performed"]
+
+
+def test_key_registry_window_bounds():
+    from agent.core_evidence import producer_key_registry
+
+    registry = producer_key_registry(_registry_doc())
+    # Outside the window in either direction reports false.
+    for ref in ("2024-12-31T23:59:59Z", "2027-01-01T00:00:01Z"):
+        evaluation = evaluate_signature_envelope(
+            _envelope(),
+            key_registry=registry,
+            reference_time=ref,
+        )
+        assert evaluation["key_authentic"] is False
+    # The window edges themselves are covered.
+    for ref in ("2025-01-01T00:00:00Z", "2027-01-01T00:00:00Z"):
+        evaluation = evaluate_signature_envelope(
+            _envelope(),
+            key_registry=registry,
+            reference_time=ref,
+        )
+        assert evaluation["key_authentic"] is True
+
+
+def test_key_registry_requires_reference_time():
+    from agent.core_evidence import producer_key_registry
+
+    registry = producer_key_registry(_registry_doc())
+    with pytest.raises(ValueError, match="reference time"):
+        evaluate_signature_envelope(_envelope(), key_registry=registry)
+    with pytest.raises(ValueError, match="key registry"):
+        evaluate_signature_envelope(
+            _envelope(), reference_time=_REFERENCE
+        )
+    with pytest.raises(ValueError, match="invalid reference time"):
+        evaluate_signature_envelope(
+            _envelope(),
+            key_registry=registry,
+            reference_time="not-a-time",
+        )
+
+
+def test_key_registry_shape_rejects_foreign_documents():
+    from agent.core_evidence import producer_key_registry
+
+    for document in (
+        "not-a-dict",
+        {},
+        {"schema_version": "mumei.producer-key-registry/v1"},
+        {"schema_version": "other/v1", "registry": {"k": {}}},
+        {"schema_version": "mumei.producer-key-registry/v1",
+         "registry": {}},
+        {"schema_version": "mumei.producer-key-registry/v1",
+         "registry": {"": {"principal": "p",
+                          "not_before": "2025-01-01T00:00:00Z",
+                          "not_after": "2026-01-01T00:00:00Z"}}},
+        {"schema_version": "mumei.producer-key-registry/v1",
+         "registry": {"k": {"principal": "",
+                            "not_before": "2025-01-01T00:00:00Z",
+                            "not_after": "2026-01-01T00:00:00Z"}}},
+        {"schema_version": "mumei.producer-key-registry/v1",
+         "registry": {"k": {"principal": "p",
+                            "not_before": "not-a-time",
+                            "not_after": "2026-01-01T00:00:00Z"}}},
+        {"schema_version": "mumei.producer-key-registry/v1",
+         "registry": {"k": {"principal": "p",
+                            "not_before": "2027-01-01T00:00:00Z",
+                            "not_after": "2025-01-01T00:00:00Z"}}},
+        {"schema_version": "mumei.producer-key-registry/v1",
+         "registry": {"k": {"principal": "p",
+                            "not_before": "2025-01-01T00:00:00Z",
+                            "not_after": "2026-01-01T00:00:00Z",
+                            "extra": 1}}},
+    ):
+        with pytest.raises(ValueError):
+            producer_key_registry(document)
+
+
+def test_route_key_registry(tmp_path, capsys):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    registry = _write(tmp_path / "registry.json", _registry_doc())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    out = tmp_path / "out.json"
+    assert (
+        main_eval(
+            _args(
+                parser,
+                envelope,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--output",
+                str(out),
+            )
+        )
+        == 0
+    )
+    doc = json.loads(out.read_text())
+    assert doc["key_authentic"] is True
+    assert "key_authenticity" not in doc["checks_not_performed"]
+
+
+def test_route_key_registry_requires_reference_time(tmp_path):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    registry = _write(tmp_path / "registry.json", _registry_doc())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    # Registry without a reference time fails.
+    assert (
+        main_eval(
+            _args(parser, envelope, "--key-registry", str(registry))
+        )
+        == 1
+    )
+    # A reference time without a registry fails too.
+    assert (
+        main_eval(
+            _args(parser, envelope, "--reference-time", _REFERENCE)
+        )
+        == 1
+    )
+
+
+def test_route_key_registry_rejects_duplicate_key_ids(tmp_path):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        '{"schema_version": "mumei.producer-key-registry/v1",'
+        '"registry": {"k": {"principal": "a",'
+        '"not_before": "2025-01-01T00:00:00Z",'
+        '"not_after": "2026-01-01T00:00:00Z"},'
+        '"k": {"principal": "b",'
+        '"not_before": "2025-01-01T00:00:00Z",'
+        '"not_after": "2026-01-01T00:00:00Z"}}}'
+    )
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(
+            _args(
+                parser,
+                envelope,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+            )
+        )
+        == 1
+    )
+
+
+def test_route_refuses_output_over_key_registry(tmp_path):
+    envelope = _write(tmp_path / "env.json", _envelope())
+    registry = _write(tmp_path / "registry.json", _registry_doc())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(
+            _args(
+                parser,
+                envelope,
+                "--key-registry",
+                str(registry),
+                "--reference-time",
+                _REFERENCE,
+                "--output",
+                str(registry),
+            )
+        )
+        == 1
+    )
+    # The declared input survives untouched.
+    assert json.loads(registry.read_text())["registry"] != {}

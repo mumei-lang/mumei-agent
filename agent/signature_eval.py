@@ -31,6 +31,7 @@ from pathlib import Path
 
 from agent.core_evidence import (
     evaluate_signature_envelope,
+    producer_key_registry,
     revocation_key_set,
 )
 
@@ -71,6 +72,23 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         "against the list's revoked_keys.",
     )
     parser.add_argument(
+        "--key-registry",
+        metavar="PATH",
+        help="Declared producer-key registry JSON "
+        "(mumei.producer-key-registry/v1) supplied over a separately "
+        "trusted channel. Requires --reference-time. When supplied "
+        "the evaluation emits key_authentic checking the envelope's "
+        "producer_key_id against the registry's declared windows.",
+    )
+    parser.add_argument(
+        "--reference-time",
+        metavar="RFC3339",
+        help="The caller's declared reference time (RFC 3339 with "
+        "timezone, e.g. 2026-11-18T00:00:00Z) the registry windows "
+        "are compared against. The fold never reads the system "
+        "clock. Required with --key-registry.",
+    )
+    parser.add_argument(
         "--output",
         metavar="PATH",
         help="Write the evaluation descriptor to PATH instead of stdout.",
@@ -93,6 +111,42 @@ def _read_declared(path: str) -> dict:
     return value
 
 
+class _DuplicateKey(ValueError):
+    """Sentinel so a duplicate-key rejection keeps its own message."""
+
+
+def _unique_object(pairs: list) -> dict:
+    """Reject duplicate keys — a closed registry shape must not let a
+    repeated `key_id` silently shadow an earlier entry."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKey(
+                "declared document has a duplicate key"
+            )
+        result[key] = value
+    return result
+
+
+def _read_declared_unique(path: str) -> dict:
+    """Like ``_read_declared`` but rejecting duplicate object keys."""
+    with open(path, "rb") as handle:
+        data = handle.read(MAX_ENVELOPE_BYTES + 1)
+    if len(data) > MAX_ENVELOPE_BYTES:
+        raise ValueError("declared document exceeds the bounded read limit")
+    try:
+        value = json.loads(
+            data.decode("utf-8"), object_pairs_hook=_unique_object
+        )
+    except _DuplicateKey:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise ValueError("declared document is not UTF-8 JSON") from exc
+    if type(value) is not dict:
+        raise ValueError("declared document must be a JSON object")
+    return value
+
+
 def main_eval(args: argparse.Namespace | None = None) -> int:
     try:
         envelope = _read_declared(args.envelope)
@@ -102,6 +156,7 @@ def main_eval(args: argparse.Namespace | None = None) -> int:
             for declared_input in (
                 args.envelope,
                 getattr(args, "revocation_list", None),
+                getattr(args, "key_registry", None),
             ):
                 if declared_input is None:
                     continue
@@ -119,11 +174,19 @@ def main_eval(args: argparse.Namespace | None = None) -> int:
             revoked_keys = revocation_key_set(
                 _read_declared(revocation_path)
             )
+        key_registry = None
+        registry_path = getattr(args, "key_registry", None)
+        if registry_path is not None:
+            key_registry = producer_key_registry(
+                _read_declared_unique(registry_path)
+            )
         evaluation = evaluate_signature_envelope(
             envelope,
             getattr(args, "expected_subject", None),
             getattr(args, "expected_producer_key", None),
             revoked_keys,
+            key_registry,
+            getattr(args, "reference_time", None),
         )
         text = json.dumps(evaluation, indent=2) + "\n"
         if output_path is None:
