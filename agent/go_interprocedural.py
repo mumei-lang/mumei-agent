@@ -6936,6 +6936,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # universe; the pass cap is a defensive analysis limit.
             passes = 0
             frame = {"kind": "loop", "exited": False}
+            # Resolution-table snapshots seen at pass boundaries. The
+            # tables are rewritten, not unioned, so a store like
+            # `f, g = g, f` (two closures capturing different locals)
+            # can oscillate between snapshots forever while dep sets
+            # stay put — a repeated snapshot breaks the cycle by
+            # dropping the oscillating entries below.
+            seen_resolutions: set = set()
             self.frames.append(frame)
             try:
                 while True:
@@ -6981,6 +6988,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dict(self.closure_captures),
                         set(self.pointee_closures),
                     )
+                    resolution_changed = False
                     self._branch_sequence(
                         _children(body_node), fn, params, inner, transfers,
                         count, deps, saw_return, conditional,
@@ -6999,9 +7007,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dict(self.closure_captures),
                         set(self.pointee_closures),
                     )
-                    resolution_changed = (
-                        resolution_after != resolution_before
-                    )
+                    if resolution_after != resolution_before:
+                        resolution_changed = True
+                        snapshot = (
+                            frozenset(resolution_after[0].items()),
+                            frozenset(resolution_after[1].items()),
+                            frozenset(resolution_after[2]),
+                        )
+                        if snapshot in seen_resolutions:
+                            # An oscillating resolution (`f, g = g, f`
+                            # swapping capture records) never converges
+                            # — the entries alternate between states
+                            # already seen. Drop the entries that moved
+                            # this pass: the calls they fed resolve
+                            # through the opaque external model, an
+                            # over-approximation that joins back
+                            # identically on the next pass.
+                            prev_a, prev_c, prev_p = resolution_before
+                            cur_a, cur_c, cur_p = resolution_after
+                            for key in cur_a.keys() | prev_a.keys():
+                                if cur_a.get(key) != prev_a.get(key):
+                                    self.func_aliases.pop(key, None)
+                            for key in cur_c.keys() | prev_c.keys():
+                                if cur_c.get(key) != prev_c.get(key):
+                                    self.closure_captures.pop(key, None)
+                            for key in cur_p ^ prev_p:
+                                self.pointee_closures.discard(key)
+                        else:
+                            seen_resolutions.add(snapshot)
                     changed = (
                         self.indirect_writes != iw_before
                         or resolution_changed

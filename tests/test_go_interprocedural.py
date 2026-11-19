@@ -16597,3 +16597,28 @@ def test_loop_keeps_effects_from_alias_resolved_pass(go_types_helper):
     )
     assert result.available
     assert result.effects == "unknown"
+
+
+def test_loop_closure_swap_terminates(go_types_helper):
+    # `f, g = g, f` alternates the capture records every pass — the
+    # resolution tables never converge under plain comparison. The
+    # join must detect the repeated snapshot, drop the oscillating
+    # entries, and settle on the external model rather than hit
+    # analysis_limit.
+    files = {
+        "a.go": "package p\n"
+        "func F(a, b int64) int64 {\n"
+        "\tf := func() int64 { return a }\n"
+        "\tg := func() int64 { return b }\n"
+        "\tfor i := int64(0); i < 2; i = i + 1 {\n"
+        "\t\tf, g = g, f\n"
+        "\t}\n"
+        "\treturn f() + g()\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
