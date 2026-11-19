@@ -1288,6 +1288,17 @@ class _Builder:
             self.pinned.add(binding.type.type_id)
         return composite
 
+    def _elem_call_conversion(self, node: Any) -> bool:
+        """`fs[i](x)` parses as a `type_conversion_expression` — the
+        recorded call still classifies it as an element call
+        (`call.kind == "indirect_or_selector"`); a real `T(x)`
+        conversion records `call.kind == "conversion"` and keeps
+        its operand in value position."""
+        if node is None or node.type != "type_conversion_expression":
+            return False
+        call = self.calls.get(self.node_key(node))
+        return call is not None and call.kind == "indirect_or_selector"
+
     def _func_elem_collection(self, fact: Any) -> bool:
         """A `[]func`/`[N]func`/`map[K]func` container — a collection
         whose elements are function values. It binds like a composite
@@ -3924,9 +3935,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 (c for c in inner.named_children if c.type != "comment"),
                 None,
             )
-        if inner is None or inner.type != "call_expression":
+        if inner is None:
             return None
-        return inner.child_by_field_name("arguments")
+        if inner.type == "call_expression":
+            args = inner.child_by_field_name("arguments")
+            return args.named_children if args is not None else ()
+        if self._elem_call_conversion(inner):
+            # `fs[i](q)` — the conversion form carries arguments on
+            # its `operand` field (an expression_list, or the single
+            # argument itself) rather than an `argument_list`.
+            operand = inner.child_by_field_name("operand")
+            if operand is None:
+                return ()
+            return (
+                operand.named_children
+                if operand.type == "expression_list"
+                else (operand,)
+            )
+        return None
 
     def _promote_chan_call_args(
         self,
@@ -3942,7 +3968,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         sends on the result name broadcast into those queues."""
         call_args = self._chan_call_args(call_node)
         return self._promote_chan_arg_roots(
-            call_args.named_children if call_args is not None else (),
+            call_args if call_args is not None else (),
             exclude_id,
             locals_,
             params,
@@ -4070,6 +4096,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         argument to an interface call does: a later `ch <- x`
         broadcasts into `indirect_writes`, which the opaque `f()`
         call then observes. Non-call RHS nodes promote nothing."""
+        if rhs_node is not None and self._elem_call_conversion(
+            rhs_node
+        ):
+            # `f := fs[i](ch)` — the conversion-form element call
+            # promotes the chan argument's queue the same way: the
+            # returned closure may capture it.
+            return self._promote_chan_call_args(
+                rhs_node, "", locals_, params
+            )
         if (
             rhs_node is not None
             and rhs_node.type == "call_expression"
@@ -5779,6 +5814,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # and a channel received from it binds as an
                         # external name — one level deep only.
                         or self._chan_chan_fact(p.type)
+                    )
+                    # A func-element collection parameter —
+                    # `[]func` / `[N]func` / `map[K]func` — admits like
+                    # the result form: the elements live in caller
+                    # memory, so `fs[k]()` calls resolve opaque on the
+                    # parameter's slot (deps of the parameter join the
+                    # callee's read set). Exactly one level deep —
+                    # `[][]func` stays closed.
+                    or (
+                        p.type.kind in {"slice", "array", "map"}
+                        and p.type.elem is not None
+                        and p.type.elem.kind == "function"
                     )
                 )
                 for p in fn.parameters
@@ -10695,18 +10742,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 frame.append(result)
         parent = node.parent if node is not None else None
         call_node = parent.parent if parent is not None else None
+        arg_call = None
         if (
-            isinstance(result, frozenset)
-            and parent is not None
+            parent is not None
             and parent.type == "argument_list"
             and call_node is not None
             and call_node.type == "call_expression"
         ):
-            key = self.node_key(call_node)
+            arg_call = call_node
+        elif parent is not None and self._elem_call_conversion(parent):
+            # `fs[i](g)` — the single-operand conversion form's
+            # argument is a direct child of the conversion node.
+            arg_call = parent
+        elif (
+            parent is not None
+            and parent.type == "expression_list"
+            and call_node is not None
+            and self._elem_call_conversion(call_node)
+        ):
+            # `fs[i](g, x)` — a multi-argument conversion nests the
+            # arguments under an `expression_list` operand.
+            arg_call = call_node
+        if isinstance(result, frozenset) and arg_call is not None:
+            key = self.node_key(arg_call)
             self._call_arg_deps[key] = (
                 self._call_arg_deps.get(key, frozenset()) | result
             )
-        if node is not None and node.type == "call_expression":
+        if node is not None and (
+            node.type == "call_expression"
+            or self._elem_call_conversion(node)
+        ):
             key = self.node_key(node)
             if self._func_arg_invocations:
                 self._fold_func_arg_invocations(
@@ -10731,7 +10796,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if (
             binding is None
             or binding.type is None
-            or binding.type.kind != "function"
+            or (
+                binding.type.kind != "function"
+                # A func-element collection argument admits too —
+                # `g(fs)` may invoke `fs[k]` inside, so the
+                # elements' write targets fold at the call site
+                # like a passed func value's do.
+                and not self._func_elem_collection(binding.type)
+            )
         ):
             return
         # `P((h), x)` — parens sit between the identifier and the
@@ -10743,14 +10815,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             parent = parent.parent
         call_node = parent.parent if parent is not None else None
+        call_target = None
         if (
             parent is not None
             and parent.type == "argument_list"
             and call_node is not None
             and call_node.type == "call_expression"
         ):
+            call_target = call_node
+        elif parent is not None and self._elem_call_conversion(parent):
+            call_target = parent
+        elif (
+            parent is not None
+            and parent.type == "expression_list"
+            and call_node is not None
+            and self._elem_call_conversion(call_node)
+        ):
+            call_target = call_node
+        if call_target is not None:
             self._func_arg_invocations.setdefault(
-                self.node_key(call_node), []
+                self.node_key(call_target), []
             ).append((node, binding_id))
 
     def _fold_func_arg_invocations(
@@ -10967,6 +11051,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if cur is None or cur.type != "identifier":
             return None
         return self.references.get(self.node_key(cur))
+
+    def _type_slot_ref_deps(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[Any, frozenset[int]] | None:
+        """The (reference, deps) pair of a bare name the grammar put
+        in a type position — a `type_identifier` inside `generic_type`
+        or `type_arguments`. `fs[i](x)` parses `fs` and `i` this way;
+        both resolve through `locals_`/`params` like an `identifier`
+        read. Anything else (a qualified or compound type node, an
+        unresolvable name) returns None and keeps the callee closed.
+        """
+        if node is None or node.type != "type_identifier":
+            return None
+        ref = self.references.get(self.node_key(node))
+        if ref is None or not ref.binding_id:
+            return None
+        binding_id = ref.binding_id
+        if binding_id in locals_:
+            return ref, locals_[binding_id]
+        if binding_id in params:
+            return ref, frozenset({params[binding_id]})
+        binding = self.bindings.get(binding_id)
+        if binding is not None and _scalar_constant(binding):
+            return ref, frozenset()
+        return None
 
     def _deref_read_deps(
         self,
@@ -12479,7 +12591,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if (
                 call is None
                 or call.owner != fn.binding_id
-                or call.kind not in {"direct_import", "conversion"}
+                or call.kind
+                not in {
+                    "direct_import",
+                    "conversion",
+                    "indirect_or_selector",
+                }
             ):
                 raise _Unsupported("unsupported_expression", _span(node))
             operand = node.child_by_field_name("operand")
@@ -12495,6 +12612,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ):
                 raise _Unsupported(
                     "call_mapping_unavailable", _span(node), call.target
+                )
+            if call.kind == "indirect_or_selector":
+                # `fs[i](x)` — an element call whose index is a bare
+                # identifier parses as a generic instantiation
+                # (`generic_type` callee); `_opaque_indirect_call`
+                # decides whether the operand names a func-element
+                # collection (a true `F[T](x)` stays closed).
+                callee_type = node.child_by_field_name("type")
+                if callee_type is None or callee_type.type != "generic_type":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return self._opaque_indirect_call(
+                    node, callee_type, arguments, fn, params, locals_,
+                    transfers, count, depth,
                 )
             if call.kind == "direct_import":
                 return self._direct_import_call(
@@ -13264,7 +13396,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 "defer_statement",
             }:
                 raise _Unsupported("unsupported_expression", _span(cur))
-            if cur.type == "call_expression":
+            if cur.type == "call_expression" or (
+                self._elem_call_conversion(cur)
+            ):
+                # `fs[i](x)` inside the literal parses as a
+                # conversion node but is a real element call —
+                # side effects count like any call.
                 has_call = True
             elif cur.type in {
                 "assignment_statement",
@@ -13301,7 +13438,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if lop is not None and lop.type == "*":
                                 star_write = True
                         lstack.extend(_children(lcur))
-            if cur.type == "identifier":
+            if cur.type in {"identifier", "type_identifier"}:
+                # `fs[i](x)`'s `generic_type` callee spells `fs`
+                # and `i` in type position — `type_identifier` —
+                # but they are still value reads when they resolve
+                # to tracked bindings. A real type name (`T` in
+                # `var v T`) carries no value read, so it is
+                # skipped rather than treated as an unbound dep.
                 ref = self.references.get(self.node_key(cur))
                 if ref is not None and ref.kind != "universe":
                     bid = ref.binding_id
@@ -13326,6 +13469,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             binding is not None
                             and binding.type.kind == "pointer"
                         )
+                    elif cur.type == "type_identifier":
+                        # A type name in type position — not a
+                        # value read.
+                        pass
                     else:
                         binding = self.bindings.get(bid)
                         if binding is not None and (
@@ -14120,6 +14267,66 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     index, fn, params, locals_, transfers, count,
                     depth + 1,
                 )
+        elif callee_node.type == "generic_type":
+            # `fs[i](x)` — a call on an element selected by a bare-
+            # identifier index parses as a generic instantiation
+            # (`generic_type` + type_arguments), not an index
+            # expression. The call record already classified it
+            # `indirect_or_selector`; admit it only when the operand
+            # names a bound func-element collection — a true
+            # `F[T](x)` instantiation of a function stays closed.
+            type_node = callee_node.child_by_field_name("type")
+            type_args = callee_node.child_by_field_name(
+                "type_arguments"
+            )
+            arg_exprs = (
+                _children(type_args) if type_args is not None else []
+            )
+            resolved = (
+                self._type_slot_ref_deps(type_node, locals_, params)
+                if type_node is not None
+                else None
+            )
+            bound = (
+                self.bindings.get(resolved[0].binding_id)
+                if resolved is not None
+                else None
+            )
+            if (
+                resolved is None
+                or len(arg_exprs) != 1
+                or bound is None
+                or not self._func_elem_collection(bound.type)
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            target_id = resolved[0].binding_id
+            callee_deps |= resolved[1]
+            index_node = next(
+                (
+                    c
+                    for c in arg_exprs[0].named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+            if index_node is not None and index_node.type not in {
+                "int_literal",
+                "rune_literal",
+                "interpreted_string_literal",
+                "raw_string_literal",
+            }:
+                resolved_index = self._type_slot_ref_deps(
+                    index_node, locals_, params
+                )
+                if resolved_index is not None:
+                    callee_deps |= resolved_index[1]
+                else:
+                    callee_deps |= self.expression(
+                        index_node, fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
         elif callee_node.type == "call_expression":
             # `mk(x)()` / `lib.Mk(x)()` — the callee is the func
             # value a call returns. Go evaluates the callee

@@ -2880,6 +2880,19 @@ call's span identity — an anonymous callee with no binding to
 name, like an immediate literal call's. `mk()()()` nests the
 same evaluation. An inner call the model cannot evaluate keeps
 the outer call closed.
+A func-element collection *parameter* — `[]func` / `[N]func` /
+`map[K]func`, including a named container type — admits like the
+result form: the elements live in caller memory, so `fs[i](x)`
+calls opaque on the parameter's own slot (the callee read carries
+the container's index and the computed index evaluates like an
+argument). A non-empty argument list parses the `fs[i]` callee as
+a `generic_type` instantiation shape — admitted only when the
+operand's binding is a func-element collection, so a true
+`F[T](x)` instantiation of a function stays closed, and the same
+parse shape on a bound local container resolves through
+`locals_`. Element writes into a parameter container
+(`fs[i] = g`) stay closed: they reach caller memory the model
+cannot scope.
 
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
