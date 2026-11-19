@@ -2883,7 +2883,21 @@ pre-state, so `cl, fs[0] = g, cl` still hands `fs[0]` `cl`'s
 OLD records — the element store is not a name rebind, so the
 record-clearing that a scalar store's name gets does not apply).
 A computed index or key evaluates like an argument on the store
-side too. A param container's elements live in caller memory, a
+side too. Copies share the backing (`fs2 := fs`, `fs2 = fs`,
+`var fs2 = fs`): an element store through any name in the group
+unions into every member's records, while a definite non-append
+reseat (`fs = mk()`, `fs = []func(){…}`, `fs = nil`) hands the
+old elements to the names still sharing the array and detaches.
+`append` admits on a bound func-element container
+(`fs = append(fs, f)`, `fs2 := append(fs, f)`, a `fs2...`
+spread): the result may reuse the argument's array, so the name
+joins the argument's group, and each appended element records
+like a composite literal's — a literal argument climbs through
+the argument list the same way. An element literal or store
+inside a branch keeps the deps of branch-local bindings it
+captures even after the merge drops them: a closure stored into
+a container still reads the value the capture held at the merge.
+A param container's elements live in caller memory, a
 scalar-element container has no func records, and a nested
 `fm[k][i]` write is a container-of-container the index model
 does not reach — all three stores stay closed.
