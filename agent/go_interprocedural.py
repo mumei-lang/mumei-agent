@@ -4574,7 +4574,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # any other signature type.
             or any(
                 p.type.kind
-                not in {"integer", "boolean", "pointer", "struct"}
+                not in {"integer", "boolean", "pointer", "struct",
+                        "function"}
                 and not (
                     # A `chan T` parameter admits under the
                     # external sync-resource model: the queue is
@@ -4698,6 +4699,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # fact, so redeclaring the element type still flags
             # this summary stale.
             self._pin_fact_identities(p.type)
+            # A func-typed slot (`f func(N) int64`) declares its inner
+            # named types on the binding record — the func fact tree
+            # holds none.
+            pb = self.bindings.get(p.binding_id)
+            if pb is not None:
+                self.pinned.update(pb.signature_type_ids)
         try:
             self._sequence(
                 statements, fn, params, locals_, transfers, count, deps,
@@ -8934,6 +8941,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # (a local `func G(y lib.T)` parameter) would otherwise leave
             # this summary looking current after `T` is redeclared.
             for p in (*target.parameters, *target.results):
+                pb = self.bindings.get(p.binding_id)
+                if pb is not None:
+                    # Func-typed signature slots (`f func(N) int64`)
+                    # declare their inner named types on the callee's
+                    # binding record, like signature_type_ids does for
+                    # an imported member.
+                    self.pinned.update(pb.signature_type_ids)
                 if p.type.type_id:
                     self.pinned.add(p.type.type_id)
                     # `p PP` on `type PP *T` — PP's member carries the
@@ -9242,20 +9256,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.bindings.get(ref.binding_id)
             if ref is not None else None
         )
+        package_var = (
+            binding is not None
+            and binding.kind == "variable"
+            and self._package_level(binding)
+        )
         if (
             binding is None
             or binding.type.kind != "function"
             or (
                 ref.binding_id not in locals_
                 and ref.binding_id not in params
+                and not package_var
             )
         ):
-            # Only a function-local callee admits: a package-level
-            # `var Alias = Id` can be reassigned by any caller, so
-            # invoking it is an opaque external call — it keeps the
-            # `indirect_or_selector` record closed like before.
+            # Only a function-local callee or a package-level `var`
+            # admits: a package-level `var Alias = Id` can be
+            # reassigned by any caller, so invoking it is an opaque
+            # external call below — a function-typed package var
+            # reads external state dep-free like a member read and
+            # always records the external effect (its callee is
+            # unknown to the caller).
             raise _Unsupported("unsupported_expression", _span(node))
         captured = self.closure_captures.get(ref.binding_id)
+        # The callee is opaque when it has no captured literal OR when
+        # it is a parameter: a branch-bound literal under a param
+        # (`if b { f = func()... }`) still leaves the caller's own
+        # callback on the untaken path, so a param callee is always
+        # external-capable.
+        external = captured is None or ref.binding_id in params
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
             # reassignments between the literal and the call move
@@ -9280,11 +9309,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 elif root in params:
                     resolved |= frozenset({params[root]})
             deps = resolved
-        elif ref.binding_id in params:
-            deps = frozenset({params[ref.binding_id]})
         else:
-            deps = locals_.get(ref.binding_id, frozenset())
-        deps |= self.indirect_writes
+            deps = frozenset()
+        # The callee name itself reads its CURRENT deps — `f = g`
+        # reseats `f` to g's dep set, and a branch-bound literal keeps
+        # the parameter ordinal in the joined set. (A local
+        # literal-bound callee skips this: `locals_[h]` holds the
+        # literal-time dep set, which the captured resolution above
+        # already supersedes with the CURRENT ones.)
+        callee_deps: frozenset[int] = frozenset()
+        if external:
+            if ref.binding_id in locals_:
+                callee_deps = locals_[ref.binding_id]
+            elif ref.binding_id in params:
+                callee_deps = frozenset({params[ref.binding_id]})
+        deps |= callee_deps | self.indirect_writes
         # A literal that captures a `chan` parameter may `<-ch` inside —
         # receiving consumes a queue the caller shares, an external
         # effect just like a captured pointer's deref. (A captured
@@ -9301,15 +9340,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and self._scalar_chan_binding(cbid)
             for cbid in (captured or ())
         )
-        if ref.binding_id in self.pointee_closures:
-            # The literal captures a pointer — calling it reads caller
-            # memory like a `*p` read: union the escaped bindings'
-            # current deps exactly as a `*p` read does (the pointer
-            # may alias any `&x`-escaped binding — `p := &a; a = y;
-            # h()` observes `y`), then record the external read on
-            # the closure's own binding identity (a real id in
-            # `known`, so `stale_dependents` stays honest) and mark
-            # effects unknown.
+        if ref.binding_id in self.pointee_closures or external:
+            # The call may read caller memory — a pointer-captured
+            # literal through its capture, an opaque external callee
+            # through a pointer argument — so it reads like a `*p`
+            # read: union the escaped bindings' current deps (the
+            # pointer may alias any `&x`-escaped binding — `p := &a;
+            # a = y; h()` observes `y`).
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
                     deps |= locals_[escaped_id]
@@ -9318,6 +9355,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if (
             ref.binding_id in self.pointee_closures
             or chan_captured_external
+            or external
         ):
             transfers.append(
                 CallTransfer(
@@ -9332,10 +9370,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     imported=True,
                 )
             )
+        if external and binding.type is not None:
+            # An external callee's DECLARED type identity pins like
+            # any signature type: `type MyFn func(...)` in another
+            # file must flag the caller when it regenerates, same
+            # as the var's own binding identity does. Its inner
+            # signature types (`func(N) int64`) ride on the binding's
+            # signature_type_ids — the func fact itself holds none.
+            self._pin_fact_identities(binding.type)
+            self.pinned.update(binding.signature_type_ids)
+        arg_deps: frozenset[int] = frozenset()
         for arg in arguments:
-            deps |= self.expression(
+            arg_deps |= self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
+        deps |= arg_deps
+        if external:
+            # The callee is unknown: it may write `*p = y` through a
+            # pointer argument or send `y` on a channel argument —
+            # fold every argument's deps AND the callee's own read
+            # set (it may write through captured state too) into the
+            # escaped bindings an opaque write could reach and into
+            # indirect writes, like `_ALIAS_FOLD` does.
+            write_deps = arg_deps | callee_deps
+            self.indirect_writes |= write_deps
+            for escaped_id in self.escaped:
+                self._store(
+                    locals_, params, escaped_id, write_deps, True
+                )
         return deps
 
     def _direct_import_call(
