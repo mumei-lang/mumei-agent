@@ -1256,27 +1256,12 @@ _CHECK_PERFORMERS: dict = {
             "subject_digest",
         ),
     ],
-    # A `mumei.producer-signature/v1` envelope over the declared
-    # anchor document's bytes, verified under a consumer-pinned root
-    # key, performs the anchor's authenticity through the
-    # verification fold — bound via the echoed `subject_digest`
-    # carrier, like `key_authenticity`.
-    "registry_authenticity": [
-        (
-            "mumei.signature-verification/v1",
-            "registry_authentic",
-            True,
-            "subject_digest",
-        ),
-    ],
-    "revocation_list_authenticity": [
-        (
-            "mumei.signature-verification/v1",
-            "revocation_list_authentic",
-            True,
-            "subject_digest",
-        ),
-    ],
+    # `registry_authenticity` / `revocation_list_authenticity` are
+    # deliberately NOT recoverable through the bound fold doc: a
+    # verification emits the anchor outcomes bound only to the
+    # signed record's digest — it does not pin WHICH anchor document
+    # it assessed, so a doc authenticating a different registry would
+    # wrongly recover this record's anchor check.
     # A signature fold's `envelope_fresh` performs `envelope_freshness`
     # for the envelope's covered record — bound via the echoed
     # `subject_digest` carrier, like `key_revocation`/`key_authenticity`.
