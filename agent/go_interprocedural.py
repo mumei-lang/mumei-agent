@@ -851,6 +851,21 @@ class _Builder:
         self.bound_method_receiver_deps: dict[
             str, frozenset[int]
         ] = {}
+        # Bound name → the enclosing-scope bindings its literal's
+        # body WRITES (`x = e`, `s.V = e`, `p[i] = e`). `h()` folds
+        # the write's value deps into each target's dep set — the
+        # literal runs at the call, so its stores sequence there.
+        self.closure_writes: dict[str, frozenset[str]] = {}
+        # Bound names whose literal writes through `*p` — the store
+        # lands on caller memory the binding cannot name, so `h()`
+        # folds write deps into every escaped binding like a `*p = e`
+        # statement does.
+        self.closure_star_writes: set[str] = set()
+        # Bound names whose literal body contains a call: the inner
+        # call's effects are unplaceable at bind time, so `h()` is an
+        # opaque effectful callee — args + captured deps into escaped
+        # bindings and indirect_writes, imported transfer recorded.
+        self.closure_inner_calls: set[str] = set()
         # Function-name aliases — `h := G` / `h = G` / `var h = G`
         # binds the name to a DECLARED function: `h(x)` resolves
         # through G's own summary exactly like a `direct_local`
@@ -5176,6 +5191,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             aliases_before = dict(self.func_aliases)
             mv_before = dict(self.bound_method_values)
             mv_deps_before = dict(self.bound_method_receiver_deps)
+            writes_before = dict(self.closure_writes)
+            star_before = set(self.closure_star_writes)
+            calls_before = set(self.closure_inner_calls)
             # Identifier-RHS pointer provenance reads the pre-state
             # too — `p, r := q, p` hands r the OLD p's pointer.
             rhs_ptrs: list = []
@@ -5365,6 +5383,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                     else:
                         self._drop_bound_method(binding.id)
+                    if src_id is not None and src_id in writes_before:
+                        self.closure_writes[binding.id] = (
+                            writes_before[src_id]
+                        )
+                    else:
+                        self.closure_writes.pop(binding.id, None)
+                    if src_id is not None and src_id in star_before:
+                        self.closure_star_writes.add(binding.id)
+                    else:
+                        self.closure_star_writes.discard(binding.id)
+                    if src_id is not None and src_id in calls_before:
+                        self.closure_inner_calls.add(binding.id)
+                    else:
+                        self.closure_inner_calls.discard(binding.id)
                     # `h := G` binds a declared function name; `h2 :=
                     # h` inherits the alias h recorded.
                     self._propagate_func_alias(
@@ -5546,6 +5578,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 aliases_before = dict(self.func_aliases)
                 mv_before = dict(self.bound_method_values)
                 mv_deps_before = dict(self.bound_method_receiver_deps)
+                writes_before = dict(self.closure_writes)
+                star_before = set(self.closure_star_writes)
+                calls_before = set(self.closure_inner_calls)
                 rhs_ptrs = []
                 for i in range(len(names)):
                     src_ref = (
@@ -5734,6 +5769,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.pointee_closures.add(binding.id)
                         else:
                             self.pointee_closures.discard(binding.id)
+                        if (
+                            src_id is not None
+                            and src_id in writes_before
+                        ):
+                            self.closure_writes[binding.id] = (
+                                writes_before[src_id]
+                            )
+                        else:
+                            self.closure_writes.pop(binding.id, None)
+                        if (
+                            src_id is not None
+                            and src_id in star_before
+                        ):
+                            self.closure_star_writes.add(binding.id)
+                        else:
+                            self.closure_star_writes.discard(
+                                binding.id
+                            )
+                        if (
+                            src_id is not None
+                            and src_id in calls_before
+                        ):
+                            self.closure_inner_calls.add(binding.id)
+                        else:
+                            self.closure_inner_calls.discard(
+                                binding.id
+                            )
                         self._propagate_func_alias(
                             binding.id, src_id, aliases_before,
                             params, conditional,
@@ -6413,6 +6475,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             aliases_before = dict(self.func_aliases)
             mv_before = dict(self.bound_method_values)
             mv_deps_before = dict(self.bound_method_receiver_deps)
+            writes_before = dict(self.closure_writes)
+            star_before = set(self.closure_star_writes)
+            calls_before = set(self.closure_inner_calls)
             # Channel alias targets resolve against the pre-state
             # too — `ch2, ch3 = ch3, ch2` swaps the queues, so each
             # RHS's root must be read before any element's store
@@ -6858,6 +6923,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self.pointee_closures.add(ref.binding_id)
                     else:
                         self.pointee_closures.discard(ref.binding_id)
+                    if src_id is not None and src_id in writes_before:
+                        self.closure_writes[ref.binding_id] = (
+                            writes_before[src_id]
+                        )
+                    else:
+                        self.closure_writes.pop(ref.binding_id, None)
+                    if src_id is not None and src_id in star_before:
+                        self.closure_star_writes.add(ref.binding_id)
+                    else:
+                        self.closure_star_writes.discard(ref.binding_id)
+                    if src_id is not None and src_id in calls_before:
+                        self.closure_inner_calls.add(ref.binding_id)
+                    else:
+                        self.closure_inner_calls.discard(ref.binding_id)
                     # `h = G` binds a declared function name; `h2 =
                     # h` inherits the alias h recorded.
                     self._propagate_func_alias(
@@ -7782,6 +7861,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         set(self.pointee_closures),
                         dict(self.chan_aliases),
                         set(self.external_chan_locals),
+                        dict(self.closure_writes),
+                        set(self.closure_star_writes),
+                        set(self.closure_inner_calls),
                     )
                     resolution_changed = False
                     self._branch_sequence(
@@ -7803,6 +7885,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         set(self.pointee_closures),
                         dict(self.chan_aliases),
                         set(self.external_chan_locals),
+                        dict(self.closure_writes),
+                        set(self.closure_star_writes),
+                        set(self.closure_inner_calls),
                     )
                     if resolution_after != resolution_before:
                         resolution_changed = True
@@ -7812,6 +7897,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             frozenset(resolution_after[2]),
                             frozenset(resolution_after[3].items()),
                             frozenset(resolution_after[4]),
+                            frozenset(resolution_after[5].items()),
+                            frozenset(resolution_after[6]),
+                            frozenset(resolution_after[7]),
                         )
                         if snapshot in seen_resolutions:
                             # An oscillating resolution (`f, g = g, f`
@@ -7838,6 +7926,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # keeps the pointer-write model.
                             prev_a, prev_c, prev_p = resolution_before[:3]
                             cur_a, cur_c, cur_p = resolution_after[:3]
+                            prev_w, prev_s, prev_i = resolution_before[5:8]
+                            cur_w, cur_s, cur_i = resolution_after[5:8]
                             for key in cur_a.keys() | prev_a.keys():
                                 if cur_a.get(key) != prev_a.get(key):
                                     self.func_aliases.pop(key, None)
@@ -7896,6 +7986,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                                 | extra
                                             )
                                         self.closure_captures.pop(key, None)
+                                        # The dropped literal may
+                                        # still write its targets —
+                                        # the values it stores are
+                                        # built from what it reads,
+                                        # so the same `extra` lands
+                                        # on each write target.
+                                        for w in (
+                                            prev_w.get(key)
+                                            or frozenset()
+                                        ) | (
+                                            cur_w.get(key)
+                                            or frozenset()
+                                        ):
+                                            if extra:
+                                                inner[w] = (
+                                                    inner.get(
+                                                        w, frozenset()
+                                                    )
+                                                    | extra
+                                                )
+                                        self.closure_writes.pop(
+                                            key, None
+                                        )
+                                        self.closure_star_writes.discard(
+                                            key
+                                        )
+                                        self.closure_inner_calls.discard(
+                                            key
+                                        )
                                     else:
                                         # Present in both states —
                                         # union keeps every binding
@@ -7907,6 +8026,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         self.closure_captures[key] = (
                                             cur_c[key] | prev_c[key]
                                         )
+                                        self.closure_writes[key] = (
+                                            cur_w.get(
+                                                key, frozenset()
+                                            )
+                                            | prev_w.get(
+                                                key, frozenset()
+                                            )
+                                        )
+                                        if (
+                                            key in cur_s
+                                            or key in prev_s
+                                        ):
+                                            self.closure_star_writes.add(
+                                                key
+                                            )
+                                        if (
+                                            key in cur_i
+                                            or key in prev_i
+                                        ):
+                                            self.closure_inner_calls.add(
+                                                key
+                                            )
                             for key in cur_p ^ prev_p:
                                 self.pointee_closures.add(key)
                             prev_ca, prev_ce = (
@@ -10444,16 +10585,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.func_aliases.get(dest_id) != target
             or dest_id in self.closure_captures
             or dest_id in self.pointee_closures
+            or dest_id in self.closure_writes
+            or dest_id in self.closure_star_writes
+            or dest_id in self.closure_inner_calls
             or dest_id in params
         )
         if ambiguous:
             self.func_aliases.pop(dest_id, None)
             self.closure_captures.pop(dest_id, None)
             self.pointee_closures.discard(dest_id)
+            self.closure_writes.pop(dest_id, None)
+            self.closure_star_writes.discard(dest_id)
+            self.closure_inner_calls.discard(dest_id)
         else:
             self.func_aliases[dest_id] = target
             self.closure_captures.pop(dest_id, None)
             self.pointee_closures.discard(dest_id)
+            self.closure_writes.pop(dest_id, None)
+            self.closure_star_writes.discard(dest_id)
+            self.closure_inner_calls.discard(dest_id)
 
     def _record_bound_method(
         self,
@@ -10547,29 +10697,76 @@ member, or one explicit dereference of one (`(*t).F` — the same
         node: Any,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
-    ) -> tuple[frozenset[int], set[str], bool]:
+    ) -> tuple[
+        frozenset[int],
+        set[str],
+        bool,
+        set[str],
+        bool,
+        bool,
+    ]:
         """Free-variable scan of a `func` literal: (deps, captured
-        binding ids, whether any capture is a pointer).
+        binding ids, whether any capture is a pointer, enclosing-scope
+        bindings the body writes, whether it writes through `*p`,
+        whether it contains a call).
 
-        Same gate as `_func_literal` — the literal's statements
-        never sequence, so a call/assignment/send/go/defer inside
-        stays closed."""
+        A call or a write inside the literal no longer closes it: the
+        body cannot sequence at bind time, so the call site models the
+        invocation as an opaque effectful callee — the write targets
+        (`x = e`, `p.V = e`, `*p = e`) and the inner-call flag ride
+        out in the returned record. A send, `go`, `defer` or `close`
+        still stays closed: the queue/concurrency effect has no
+        place to land."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
+        writes: set[str] = set()
+        star_write = False
+        has_call = False
         stack = [node]
         while stack:
             cur = stack.pop()
             if cur.type in {
-                "call_expression",
-                "assignment_statement",
-                "inc_statement",
-                "dec_statement",
                 "send_statement",
                 "go_statement",
                 "defer_statement",
             }:
                 raise _Unsupported("unsupported_expression", _span(cur))
+            if cur.type == "call_expression":
+                has_call = True
+            elif cur.type in {
+                "assignment_statement",
+                "inc_statement",
+                "dec_statement",
+            }:
+                lhs = cur.child_by_field_name("left")
+                if lhs is None:
+                    # `x++` / `x--` carry no `left` field — the
+                    # operand is the first named child.
+                    lhs = next(
+                        (
+                            c
+                            for c in cur.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if lhs is not None:
+                    for wtarget in self._literal_write_targets(lhs):
+                        writes.add(wtarget)
+                    # `*p = e` / `(*p).V = e` / `(*p)++` inside the
+                    # literal writes caller memory through a captured
+                    # pointer — the escaped fold at the call site
+                    # cannot name which binding it lands on, so flag
+                    # it separately like a `*p = e` statement does.
+                    lstack = [lhs]
+                    while lstack:
+                        lcur = lstack.pop()
+                        if lcur.type == "unary_expression":
+                            lop = lcur.child_by_field_name("operator")
+                            if lop is not None and lop.type == "*":
+                                star_write = True
+                        lstack.extend(_children(lcur))
             if cur.type == "identifier":
                 ref = self.references.get(self.node_key(cur))
                 if ref is not None and ref.kind != "universe":
@@ -10597,23 +10794,62 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     else:
                         binding = self.bindings.get(bid)
-                        if (
-                            binding is None
-                            or getattr(
-                                binding.span, "file", self.current_file
-                            )
-                            != self.current_file
-                            or not (
-                                node.start_byte
-                                <= binding.span.start
-                                <= node.end_byte
+                        if binding is not None and (
+                            binding.kind == "function"
+                            or (
+                                getattr(
+                                    binding.span,
+                                    "file",
+                                    self.current_file,
+                                )
+                                == self.current_file
+                                and (
+                                    node.start_byte
+                                    <= binding.span.start
+                                    <= node.end_byte
+                                )
                             )
                         ):
-                            raise _Unsupported(
-                                "binding_unavailable", _span(cur)
-                            )
+                            # A declared function name (`G` in
+                            # `return G(x)`) is a resolvable callee,
+                            # not a captured value; a literal-internal
+                            # binding needs no record either.
+                            continue
+                        raise _Unsupported(
+                            "binding_unavailable", _span(cur)
+                        )
             stack.extend(_children(cur))
-        return deps, captured, captures_pointer
+        return deps, captured, captures_pointer, writes, star_write, has_call
+
+    def _literal_write_targets(self, lhs: Any) -> set[str]:
+        """Enclosing-scope binding ids an assignment LHS may write.
+
+        `x = e` / `x++` writes `x` itself; `s.V = e` writes the
+        captured aggregate `s`; `(*p).V = e` / `a[i] = e` write
+        through the operand binding. Literal-internal targets (a
+        name declared inside the literal) never leave the body and
+        are skipped; a `*p` unary target is reported separately by
+        the `star_write` flag, not here."""
+        targets: set[str] = set()
+        for name in lhs.named_children:
+            if name.type == "comment":
+                continue
+            node = name
+            while node.type in {
+                "parenthesized_expression",
+                "selector_expression",
+                "index_expression",
+            }:
+                node = node.children[0]
+            if node.type == "unary_expression":
+                # `*p = e` — handled by the star_write flag.
+                continue
+            if node.type != "identifier":
+                continue
+            ref = self.references.get(self.node_key(node))
+            if ref is not None:
+                targets.add(ref.binding_id)
+        return targets
 
     def _func_literal(
         self,
@@ -10635,9 +10871,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         capture cannot describe — all stay closed. Names declared
         inside the literal (its own params and locals) are not
         captured: their span sits inside the literal's."""
-        deps, captured, captures_pointer = self._func_literal_capture(
-            node, params, locals_
-        )
+        (
+            deps,
+            captured,
+            captures_pointer,
+            writes,
+            star_write,
+            has_call,
+        ) = self._func_literal_capture(node, params, locals_)
         # Find the name this literal binds (`h := func()...`,
         # `var h = func()...`, `h = func()...`) and record which
         # enclosing bindings it captured, so `h()` can resolve
@@ -10728,6 +10969,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self.func_aliases.pop(bound_id, None)
                 self.closure_captures.pop(bound_id, None)
                 self.pointee_closures.discard(bound_id)
+                self.closure_writes.pop(bound_id, None)
+                self.closure_star_writes.discard(bound_id)
+                self.closure_inner_calls.discard(bound_id)
             elif may_skip and bound_id in self.closure_captures:
                 # A maybe-skipped rebind keeps the old literal's
                 # captures on the path that does not run it —
@@ -10736,8 +10980,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self.closure_captures[bound_id]
                     | frozenset(captured)
                 )
+                self.closure_writes[bound_id] = (
+                    self.closure_writes.get(bound_id, frozenset())
+                    | frozenset(writes)
+                )
+                if star_write:
+                    self.closure_star_writes.add(bound_id)
+                if has_call:
+                    self.closure_inner_calls.add(bound_id)
             else:
                 self.closure_captures[bound_id] = frozenset(captured)
+                self.closure_writes[bound_id] = frozenset(writes)
+                if star_write:
+                    self.closure_star_writes.add(bound_id)
+                else:
+                    self.closure_star_writes.discard(bound_id)
+                if has_call:
+                    self.closure_inner_calls.add(bound_id)
+                else:
+                    self.closure_inner_calls.discard(bound_id)
                 # An unconditional literal bind resolves the name
                 # to this literal — a function alias an earlier
                 # `h = G` left behind no longer applies.
@@ -10942,10 +11203,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     deps |= locals_[escaped_id]
                 elif escaped_id in params:
                     deps |= frozenset({params[escaped_id]})
+        writes = self.closure_writes.get(
+            ref.binding_id, frozenset()
+        )
+        star_write = ref.binding_id in self.closure_star_writes
+        inner_calls = ref.binding_id in self.closure_inner_calls
         if (
             ref.binding_id in self.pointee_closures
             or chan_captured_external
             or external
+            or writes
+            or star_write
+            or inner_calls
         ):
             transfers.append(
                 CallTransfer(
@@ -10975,6 +11244,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
         deps |= arg_deps
+        if writes or star_write or inner_calls:
+            # The literal's body sequences AT this call: its stores
+            # land on the captured targets' dep sets (the written
+            # value's sources are captured names, the literal's
+            # parameters — the call's arguments — or literal-local
+            # derivations of those), and a `*p` store or an inner
+            # call may reach any escaped binding or a shared queue,
+            # folded like the opaque external write below.
+            write_deps = deps | callee_deps
+            for target in writes:
+                self._store(locals_, params, target, write_deps, True)
+            if star_write or inner_calls:
+                self.indirect_writes |= write_deps
+                for escaped_id in self.escaped:
+                    self._store(
+                        locals_, params, escaped_id, write_deps, True
+                    )
         if external:
             # The callee is unknown: it may write `*p = y` through a
             # pointer argument or send `y` on a channel argument —
@@ -11485,8 +11771,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         pointer, and one capturing a parameter or external channel
         may receive on it inside — the same receive-side effect a
         bound literal records. The literal's own gate still applies:
-        an internal call, assignment, send, go or defer stays
-        closed, so no write-back runs here."""
+        an internal send, go or defer stays closed, while a store or
+        call admits as an opaque effectful body — its write deps fold
+        into each write target (and into escaped memory plus
+        `indirect_writes` for a `*p` store or inner call) right here,
+        where the literal runs."""
         # Go evaluates the arguments before the body, so captures and
         # alias resolution read the state AFTER `G(&x, y)`-shaped
         # arguments land — an arg that stores through `&x` or reseats
@@ -11496,9 +11785,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             arg_deps |= self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
-        deps, captured, captures_pointer = self._func_literal_capture(
-            literal, params, locals_
-        )
+        (
+            deps,
+            captured,
+            captures_pointer,
+            writes,
+            star_write,
+            has_call,
+        ) = self._func_literal_capture(literal, params, locals_)
         deps |= self.indirect_writes | arg_deps
         pointer_capture = next(
             (
@@ -11693,6 +11987,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
         for target in (
             ([pointer_capture] if captures_pointer else [])
             + sorted(external_chans)
+            + (
+                # An effectful literal body (`x = y`, `*p = y`, an
+                # inner call) records the imported transfer on the
+                # call's own span identity when no captured pointer
+                # or channel names it.
+                [self._immediate_span_id(node)]
+                if (writes or star_write or has_call)
+                and not captures_pointer
+                and not external_chans
+                else []
+            )
         ):
             transfers.append(
                 CallTransfer(
@@ -11707,7 +12012,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     imported=True,
                 )
             )
+        if writes or star_write or has_call:
+            # The literal's body runs in place: its stores land on
+            # the captured targets' dep sets now, and a `*p` store or
+            # an inner call folds like an opaque callee's write.
+            write_deps = deps
+            for target in writes:
+                self._store(locals_, params, target, write_deps, True)
+            if star_write or has_call:
+                self.indirect_writes |= write_deps
+                for escaped_id in self.escaped:
+                    self._store(
+                        locals_, params, escaped_id, write_deps, True
+                    )
         return deps
+
+    def _immediate_span_id(self, node: Any) -> str:
+        """Transfer identity for an immediate literal call whose
+        effect has no captured pointer/channel to name — the call's
+        own span stands in for the anonymous callee."""
+        return f"{self.current_file}:{node.start_byte}:{node.end_byte}"
 
     def _direct_import_call(
         self,

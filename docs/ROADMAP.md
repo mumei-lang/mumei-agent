@@ -2719,10 +2719,20 @@ a bound-literal call whose captures resolve at the call
 site: the result unions the captured bindings' current
 dep sets, the arguments and indirect writes, and a
 pointer or external-channel capture records an imported
-transfer on that identity. Calls or writes
-inside the literal and a
-function name read in any non-store position (argument,
-return, operand) stay closed),
+transfer on that identity. A literal whose
+body still defers an effect — a call, a store, a `*p`
+store — admits too, as an opaque effectful callee: a
+literal-internal call or `*p` write unions the escaped
+bindings' deps into the result and records an imported
+transfer on a synthetic span identity, a store whose
+write target resolves to a captured binding lands the
+written value's deps on that binding at the call site
+(conditional _store union semantics), and a declared
+function name inside the literal body (`return G(x)`)
+needs no capture — only the send/go/defer statements
+that target a shared queue stay closed. A function name
+read in any non-store position (argument,
+return, operand) stays closed),
 per-statement read attribution now
 lands in `statement_reads` (one `(span, deps)` record per walked
 statement — see its own section below), and cross-file dependencies
