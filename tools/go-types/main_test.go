@@ -740,4 +740,3 @@ func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
 		t.Fatalf("the promoted embedded method must stay closed: %+v", out.Calls)
 	}
 }
-
