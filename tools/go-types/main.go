@@ -586,12 +586,17 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 	m := member{
 		ID: id, Name: obj.Name(), Kind: kind, Type: ix.typeOf(obj.Type()),
 	}
-	if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
+	if kind == "function" || kind == "type" {
 		// `func G(...)` declares them, and so does a named function
 		// type member (`type MyFn func(N) int64`): a `var f MyFn`
 		// binding's func fact carries no inner ids, so the member
-		// must publish what MyFn's signature names.
-		m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+		// must publish what MyFn's signature names. A func-typed
+		// `var` member stays unpublished — no consumer path pins
+		// member signature ids for var reads today, and the
+		// snapshot schema does not carry the field there.
+		if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
+			m.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+		}
 	}
 	ix.importMembers[id] = m
 	if kind == "type" {
@@ -1039,8 +1044,13 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	bnd := binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf, nil,
 	}
-	if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
-		bnd.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+	// `obj.Type()` is nil for label bindings (`goto L; L: ...`) —
+	// guard before Underlying or the whole report becomes an
+	// internal_error.
+	if t := obj.Type(); t != nil {
+		if sig, ok := t.Underlying().(*types.Signature); ok {
+			bnd.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+		}
 	}
 	ix.out.Bindings = append(ix.out.Bindings, bnd)
 	// Anonymous `struct{...}` VALUES admit under the consumer's

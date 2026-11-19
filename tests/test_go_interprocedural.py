@@ -16333,3 +16333,62 @@ def test_named_func_type_var_pins_inner_signature_types(
         if b.name == "N" and b.kind == "type"
     )
     assert n_binding.id in result.pinned
+
+
+def test_label_binding_does_not_break_report(go_types_helper):
+    # A `goto L; L:` label binding has a nil object type — emitting
+    # signature ids must not panic and poison the whole report.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tgoto L\n"
+        "L:\treturn x\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    label = next(b for b in snapshot.bindings if b.name == "L")
+    assert label.kind == "label"
+    assert label.signature_type_ids == ()
+    # CFG construction stays closed on goto — the extractor must
+    # still emit a parseable report instead of internal_error.
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+
+
+def test_imported_func_typed_var_member_loads(go_types_helper):
+    # An imported `var Callback func(N) int64` member must not emit
+    # signature_type_ids — var members have no consumer for them —
+    # or the snapshot loader rejects the whole report.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "var _ = lib.Callback\n"
+        "func F(x int64) int64 { return lib.G(x) }\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "type N int64\n"
+            "var Callback func(N) int64\n"
+            "func G(y int64) int64 { return y + 1 }\n"
+        }
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, lib)
+    )
+    assert report["status"] == "ok"
+    member = next(
+        m for m in report["imported_members"] if m["name"] == "Callback"
+    )
+    assert "signature_type_ids" not in member
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
