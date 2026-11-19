@@ -2638,10 +2638,14 @@ def test_imported_call_marks_effects_unknown(go_types_helper):
 
 
 def test_composite_import_result_fails_closed(go_types_helper):
+    # A bare composite binding `s := lib.S()` stays closed — the
+    # composite local has no container fact (only index reads and
+    # range over the call result are admitted).
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
-        "\tfor range lib.S() { x++ }\n"
+        "\ts := lib.S()\n"
+        "\t_ = s\n"
         "\treturn x\n}\n"
     }
     lib = {
@@ -13896,10 +13900,10 @@ def test_computed_range_map_key_value(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_computed_range_imported_callee_stays_closed(go_types_helper):
-    # `for range *lib.G()` — the imported member's signature carries
-    # identities, not the result's kind, so the operand stays
-    # closed like `*lib.G()` itself.
+def test_computed_range_imported_callee(go_types_helper):
+    # `for range *lib.G()` — the imported member's `result_types`
+    # declares the pointer-to-slice shape, so the range admits on
+    # the same container fact the local `*G()` path already used.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(s int64) int64 {\n"
@@ -13919,7 +13923,8 @@ def test_computed_range_imported_callee_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert 0 in result.return_dependencies
 
 
 def test_computed_range_transfer_carries_arguments(go_types_helper):
@@ -18490,6 +18495,160 @@ def test_range_over_method_result_reads_receiver(go_types_helper):
     # `r = v` is a may-write inside the loop — the join unions the
     # receiver's {0} with the initial `r := x` {1}.
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_method_result_callback_write_carries_receiver(
+    go_types_helper,
+):
+    # `for range s.Items(h)` — the receiver reads like an argument,
+    # so a callback's writes carry `s`'s deps like `s.M(h)`'s do.
+    files = {
+        "a.go": "package p\n"
+        "type T struct{}\n"
+        "func (t T) Items(h func()) []int64 { return nil }\n"
+        "func F(s T, x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\th := func() { y = 1 }\n"
+        "\tfor range s.Items(h) {\n"
+        "\t}\n"
+        "\treturn y + x\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_imported_map_result_key_carries_deps(
+    go_types_helper,
+):
+    # `for k, _ := range lib.M(x)` — a map's key is stored data like
+    # the element: a callee-produced container's key carries the
+    # call's own dep set.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor k := range lib.M(x) {\n"
+        "\t\tr = k\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(a int64) map[int64]int64 {\n"
+            "\treturn map[int64]int64{a: 0}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_range_over_slice_result_index_stays_dep_free(
+    go_types_helper,
+):
+    # `for i, _ := range lib.G(x)` — a slice's index position is not
+    # stored data: it stays dep-free like a literal index does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor i, _ := range lib.G(x) {\n"
+        "\t\tr = int64(i) + 1\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(a int64) []int64 { return []int64{a} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # Only `i` feeds the return — a wrong index dep set would
+    # leak the call's arg into it.
+    assert result.return_dependencies == frozenset()
+
+
+def test_range_over_bound_map_key_tracks_mid_iteration_writes(
+    go_types_helper,
+):
+    # `for k := range *p` — a key stored through the same pointer
+    # mid-iteration surfaces on a later pass, so `k` re-joins the
+    # indirect writes like the element position does.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *map[int64]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor k := range *p {\n"
+        "\t\t(*p)[b] = 1\n"
+        "\t\tr += k\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # `k` may be a key written from `b` — the loop's own store.
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_pointer_to_array_index_does_not_read_pointer(
+    go_types_helper,
+):
+    # `for i := range p` over `*[4]int64` never evaluates the
+    # operand — Go skips the range expression when at most one
+    # iteration variable is present and `len(x)` is constant — so
+    # `p` is not read, and `i` stays dep-free.
+    files = {
+        "a.go": "package p\n"
+        "func F(p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor i := range p {\n"
+        "\t\tr += int64(i)\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    # No statement reads `p` (param index 0) — an evaluated
+    # operand would land it in `statement_reads`.
+    assert not any(
+        r.deps == frozenset({0}) for r in result.statement_reads
+    )
+
+
 
 
 def test_method_expr_chan_result_passthrough_skips_receiver(
@@ -24506,6 +24665,501 @@ def test_call_result_index_read_transfer_records_args(go_types_helper):
     assert any(
         frozenset({0}) in t.arguments for t in transfers
     ), transfers
+
+
+def test_call_result_range_imported_slice(go_types_helper):
+    # `for _, v := range lib.G(a)` — the call's composite result is
+    # the iterated container, so the element carries the call's dep
+    # set like `for range g(a)` already does for local callees.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range lib.G(a) {\n"
+        "\t\ts += v\n\t}\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_range_imported_deref(go_types_helper):
+    # `for _, v := range *lib.P(a)` — an explicit deref of a
+    # pointer-to-slice result iterates the callee-owned memory.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range *lib.P(a) {\n"
+        "\t\ts += v\n\t}\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func P(x int64) *[]int64 { return &[]int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_range_func_arg_write_back(go_types_helper):
+    # `for range lib.G(h, x)` — the opaque callee may invoke the
+    # passed func value: `h`'s captured write lands on `g` at the
+    # call site even though the call node itself never routes
+    # through `expression` on this path.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar g int64\n"
+        "\th := func(v int64) { g = v }\n"
+        "\tfor range lib.G(h, x) {\n"
+        "\t}\n"
+        "\treturn g\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(h func(int64), x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_range_local_still_works(go_types_helper):
+    # The imported-member extension must not regress the existing
+    # local-callee path: `for range g(a)` keeps admitting.
+    files = {
+        "a.go": "package p\n"
+        "func g(x int64) []int64 { return []int64{x} }\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range g(a) {\n"
+        "\t\ts += v\n\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_range_chan_alias_arg(go_types_helper):
+    # `for range lib.G(alias, x)` — the callee's sends land on the
+    # root queue the alias stands for, so `<-q` observes `x`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(q chan int64, x int64) int64 {\n"
+        "\talias := q\n"
+        "\tfor range lib.G(alias, x) {\n"
+        "\t}\n"
+        "\treturn <-q\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(c chan int64, x int64) []int64 {\n"
+            "\treturn []int64{x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_call_result_range_no_empty_transfer_target(go_types_helper):
+    # A bodyless imported callee records `call.target == ""` — the
+    # range transfer pins the member's id instead so no empty
+    # identity reaches the transfer list.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range lib.G(a) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert all(t.target for t in result.calls)
+
+
+def test_call_result_range_parenthesized_callee(go_types_helper):
+    # `for range *(lib.P)(a)` — the parenthesized selector still
+    # resolves the member, so the result admits and the callee
+    # identity pins.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range *(lib.P)(a) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func P(x int64) *[]int64 { return &[]int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+    assert all(t.target for t in result.calls)
+
+
+def test_call_result_range_parens_slice_callee(go_types_helper):
+    # `for range (lib.G)(a)` — a parenthesized selector callee
+    # returning a slice resolves the member through
+    # `_call_result_fact`, so the range admits like the bare
+    # `lib.G(a)` form.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range (lib.G)(a) { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(x int64) []int64 { return []int64{x} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+
+
+def test_call_result_index_read_comma_ok_parens_callee(go_types_helper):
+    # `v, ok := (lib.M)(a)["k"]` — the parenthesized selector callee
+    # resolves through `_call_result_fact`, so the comma-ok pair binds
+    # like the bare form and the callee identity is recorded.
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(a int64) int64 {\n"
+        "\tv, ok := (lib.M)(a)[\"k\"]\n"
+        "\t_ = ok\n"
+        "\treturn v\n}\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "func M(x int64) map[string]int64 {\n"
+            "\treturn map[string]int64{\"k\": x}\n}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert 0 in result.return_dependencies
+    member = next(m for m in snapshot.imported_members if m.name == "M")
+    assert any(t.target == member.id for t in result.calls)
+
+def test_range_over_pointer_to_array_pair_rejoins_writes(
+    go_types_helper,
+):
+    # `for _, v := range p` over a `*[N]T` reads the pointee's live
+    # elements each pass — a mid-iteration store through the same
+    # pointer surfaces in the element the next pass reads.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range p {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_element_body_rebind_does_not_carry_over(
+    go_types_helper,
+):
+    # Each iteration reassigns `v` — a body store into `v` is
+    # clobbered by the next element, so `v = x` inside the loop
+    # must not leak `x`'s deps into later passes' reads.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\tr += v\n"
+        "\t\tv = x\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_map_key_write_deps_apply_after_rhs_reads(
+    go_types_helper,
+):
+    # `(*p)[k], r = 1, (*p)[0]` — the RHS reads the pre-state
+    # before any store lands, so `r` reads `(*p)[0]` without the
+    # key's deps the same statement is about to store.
+    files = {
+        "a.go": "package p\n"
+        "func F(k int64, p *map[int64]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\t(*p)[k], r = 1, (*p)[0]\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_nested_map_write_outer_index_is_not_stored_key(
+    go_types_helper,
+):
+    # `(*p)[i][b] = 1` on a slice of maps stores `b` as the key —
+    # `i` only selects which map receives it, so a later read
+    # through a DIFFERENT pointer sees `b`'s deps, not `i`'s.
+    files = {
+        "a.go": "package p\n"
+        "func F(i, b int64, p, q *[]map[int64]int64) int64 {\n"
+        "\t(*p)[i][b] = 1\n"
+        "\treturn (*q)[0][0]\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1, 3})
+
+def test_range_over_deref_pointer_to_array_reads_copy(
+    go_types_helper,
+):
+    # `for _, v := range *p` evaluates `*p` once — a start-time
+    # COPY — so a mid-iteration store through the same pointer
+    # never reaches `v` (unlike the live `range p` sugar).
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range *p {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+
+def test_range_over_pointer_result_call_reads_live_pointee(
+    go_types_helper,
+):
+    # `for _, v := range G(p)` where `G` returns `*[N]T` iterates
+    # the pointee's live elements like `range p` (verified `go
+    # run`): a mid-iteration store through the pointer surfaces in
+    # the element the next pass reads.
+    files = {
+        "a.go": "package p\n"
+        "func G(q *[4]int64) *[4]int64 { return q }\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range G(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_range_over_array_value_result_call_reads_copy(
+    go_types_helper,
+):
+    # `for _, v := range A(p)` where `A` returns `[N]T` ranges a
+    # start-time copy — a mid-iteration store through `p` never
+    # reaches `v`.
+    files = {
+        "a.go": "package p\n"
+        "func A(q *[4]int64) [4]int64 { return *q }\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range A(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_range_over_imported_pointer_result_reads_live_pointee(
+    go_types_helper,
+):
+    # `for _, v := range lib.G(p)` where the imported `G` returns
+    # `*[N]T` resolves its result through the member's declared
+    # type — the live-pointee rule applies on the imported path
+    # the same as the local one.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(b int64, p *[4]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor _, v := range lib.G(p) {\n"
+        "\t\t(*p)[1] = b\n"
+        "\t\tr += v\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    lib = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(q *[4]int64) *[4]int64 { return q }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 def test_func_value_chan_result_param_admitted(go_types_helper):
     # `ch := g(x)` — `g` is a func-typed parameter declaring a scalar

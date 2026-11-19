@@ -3937,6 +3937,15 @@ folds through the minimal opaque-argument union — while the bare
 composite binding (`s := lib.G(a)`) stays closed, as do struct
 elements, multi-result calls and local callees whose composite
 result is not summarizable.
+A range over a call result — `for _, v := range lib.G(a)` and the
+explicit `for range *lib.P(a)` deref — admits on the same shape:
+the imported member's `result_types` carry the container (or
+pointer-to-container) fact even when the composite result keeps
+the call `external_or_bodyless`, so the element binds with the
+call's dep set like the local `for range g(a)` path already did.
+Func-typed arguments still queue their invocations on the call
+node, which this path drains itself, and a chan argument promotes
+onto the shared queue.
 `len`/`cap` on a call result — `len(lib.G(a))`, `cap(lib.M(a))` —
 admits through the same member resolution: the length is runtime
 container state whose provenance is the call's own dep set (a

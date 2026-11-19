@@ -3758,6 +3758,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         params: dict[str, int],
         conditional: bool,
         value_deps: frozenset[int] = frozenset(),
+        key_deps: frozenset[int] = frozenset(),
     ) -> None:
         """Bind `for` range names to dep-free (external-state) values.
 
@@ -3769,11 +3770,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         — when the container lives in caller memory a bound pointer's
         aim selects (`for range *p`): those elements carry the
         pointer's own and the indirect stores' deps like `(*p)[i]`.
+        `key_deps` applies to the first name when the ranged
+        container is a map whose entries a call produced — the key
+        is stored data like the element, not an index position.
         """
         for pos, name in enumerate(names):
             if name.text == b"_":
                 continue
-            deps = value_deps if pos == 1 else frozenset()
+            deps = value_deps if pos == 1 else key_deps
             binding = self.bindings_by_span.get(self.node_key(name))
             if binding is not None:
                 if binding.type.kind not in {
@@ -3966,6 +3970,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if node.type != "call_expression":
             return None, None
         callee_node = node.child_by_field_name("function")
+        while (
+            callee_node is not None
+            and callee_node.type == "parenthesized_expression"
+        ):
+            callee_node = next(
+                (
+                    c
+                    for c in callee_node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
         candidate = (
             self._package_member(callee_node)
             if callee_node is not None
@@ -8650,6 +8666,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # already held), so it stays an append sharer even
             # though no surviving member name groups with it.
             func_elem_reseat_backings: dict[str, set[str]] = {}
+            # A stored map key's deps broadcast into
+            # `indirect_writes` only when the store lands — the RHS
+            # of the same statement reads the pre-state, so the
+            # union waits until after `values` evaluates below:
+            # `(*p)[k], r = 1, (*p)[0]` reads `(*p)[0]` without
+            # `k`'s deps.
+            pending_map_key_deps = frozenset()
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -8826,15 +8849,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dest_deps = dest_deps | self.indirect_writes
                     self._record_read(dest_deps)
                     self._pin_fact_identities(fact)
+                    map_key_deps = frozenset()
                     for extra in reversed(extras):
                         if extra.type in _INDEX_LITERALS:
                             continue
-                        self._record_read(
-                            self.expression(
-                                extra, fn, params, locals_,
-                                transfers, count, 0,
-                            )
+                        extra_deps = self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
                         )
+                        self._record_read(extra_deps)
+                        if fact.kind == "map" and extra is extras[0]:
+                            # A map key is stored data — `(*p)[b]=1`
+                            # stores `b`'s value, so a later key read
+                            # (`for k := range *p`) must observe `b`'s
+                            # deps through the broadcast. `extras` is
+                            # innermost-first, so `extras[0]` is the
+                            # index into the written map — in
+                            # `(*p)[i][7] = 1` (a slice of maps) `i`
+                            # only selects which map receives the
+                            # store; `7` is the stored key.
+                            map_key_deps |= extra_deps
+                    pending_map_key_deps |= map_key_deps
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -9120,6 +9155,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # reads `a`'s backing BEFORE `a`'s own store, so the
             # second append's records/sharers must come from these
             # snapshots, not the live maps earlier stores rewrote.
+            # The stored map keys' deps join the external-write set
+            # only now — the store lands after every RHS read.
+            self.indirect_writes |= pending_map_key_deps
             captures_after_eval = dict(self.closure_captures)
             writes_after_eval = dict(self.closure_writes)
             star_after_eval = set(self.closure_star_writes)
@@ -10463,6 +10501,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             update = None
             # (elem binding id, seed deps, local channel id | None).
             range_elem = None
+            # (key binding id, seed deps, None, re-join escaped).
+            range_key = None
             if clause is not None and clause.type == "range_clause":
                 # Two operand families are reachable: an integer
                 # (`for i := range e` yields one index variable) and
@@ -10491,6 +10531,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 package_pointee = None
                 range_ident = None
                 computed = None
+                # `range G()` where `G` returns `*[N]T` iterates the
+                # pointee's live elements like `range p` (verified
+                # `go run`): a mid-iteration `(*p)[i] = x` IS
+                # observed. `range *G()` and an array-VALUE result
+                # iterate a start-time copy — `range_static` keys on
+                # this distinction.
+                computed_pointer_result = False
                 if (
                     right is not None
                     and member is None
@@ -10554,13 +10601,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # result points at (or IS, for a direct
                         # container result), so the elements iterate
                         # caller-observable memory like `(*p)[i]`.
-                        # Only a local callee's function record
-                        # declares the result fact — an imported
-                        # member's signature carries identities, not
-                        # the result's kind, so `lib.G()` stays
-                        # closed.
+                        # An imported callee's member record also
+                        # declares `result_types` even when the
+                        # composite result keeps the call
+                        # `external_or_bodyless`, so `for range
+                        # lib.G(a)` admits on the same shape.
                         call = self.calls.get(self.node_key(call_operand))
+                        call_member = None
                         if (
+                            call is not None
+                            and call.owner == fn.binding_id
+                            and call.kind
+                            in ("direct_import", "external_or_bodyless")
+                        ):
+                            callee = call_operand.child_by_field_name(
+                                "function"
+                            )
+                            while (
+                                callee is not None
+                                and callee.type
+                                == "parenthesized_expression"
+                            ):
+                                callee = next(
+                                    (
+                                        c
+                                        for c in callee.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if (
+                                callee is not None
+                                and callee.type == "selector_expression"
+                            ):
+                                call_member = self._package_member(callee)
+                            _, rf = self._call_result_fact(call_operand)
+                        elif (
                             call is not None
                             and call.owner == fn.binding_id
                             and call.kind == "direct_local"
@@ -10572,7 +10648,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and len(target.results) == 1
                                 else None
                             )
-                            if rf is not None and rf.kind == "pointer":
+                        else:
+                            rf = None
+                        if call is not None and rf is not None:
+                            if rf.kind == "pointer":
                                 # `*G()` requires a pointer to a
                                 # container; `for range G()`
                                 # auto-derefs pointer-to-array only —
@@ -10584,18 +10663,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     "array",
                                     "map",
                                 } and (not sugar or elem.kind == "array"):
+                                    computed_pointer_result = True
                                     computed = (
                                         call_operand,
                                         elem,
                                         rf.type_id
-                                        or call.target + "/pointee",
+                                        or (
+                                            call_member.id
+                                            if call_member is not None
+                                            else call.target
+                                        )
+                                        + "/pointee",
                                     )
                             elif (
                                 sugar
-                                and rf is not None
                                 and rf.kind in {"slice", "array", "map"}
                             ):
-                                computed = (call_operand, rf, call.target)
+                                computed = (
+                                    call_operand,
+                                    rf,
+                                    (
+                                        call_member.id
+                                        if call_member is not None
+                                        else call.target
+                                    ),
+                                )
                     if range_ident is not None:
                         bound = self._bound_container_pointee(
                             range_ident, locals_, params
@@ -10799,6 +10891,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             for arg in args
                         )
                         computed_call = call
+                        if call.method:
+                            # A method's receiver reads like an
+                            # argument: `Items` may hand `r`'s value
+                            # to a callback `h`, so its deps join
+                            # the fold the argument reads queued.
+                            call_key = self.node_key(call_node)
+                            self._call_arg_deps[call_key] = (
+                                self._call_arg_deps.get(
+                                    call_key, frozenset()
+                                )
+                                | range_receiver_deps
+                            )
+                        # `for range lib.G(h, x)` — a func-typed
+                        # argument may run inside the opaque callee:
+                        # drain the invocations the argument reads
+                        # queued (the call node itself never passes
+                        # through `expression` on this path).
+                        self._fold_func_arg_invocations(
+                            call_node, params, scope, transfers
+                        )
+                        if call_member is not None:
+                            # An imported bodyless callee — its
+                            # declared signature types pin like a
+                            # member read's, the call counts opaque
+                            # for --summary-aware-calls, and a chan
+                            # argument promotes onto the shared queue
+                            # like the index-read fold's.
+                            self.pinned.update(
+                                getattr(
+                                    call_member,
+                                    "signature_type_ids",
+                                    (),
+                                )
+                                or ()
+                            )
+                            if call.kind == "external_or_bodyless":
+                                self._opaque_spans.add(_key3(call.span))
+                            self._promote_chan_call_args(
+                                call_node, "", scope, params
+                            )
                         if target_fn is not None:
                             for signature_param in (
                                 *(
@@ -10900,42 +11032,69 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             imported=True,
                         )
                     )
-                    if (
-                        computed_call is not None
-                        and computed[2] != computed_call.target
-                    ):
+                    if computed_call is not None:
                         # `*G()` — the shared transfer above pins the
                         # result pointee's identity; the call itself
                         # pins the callee's. A direct container
                         # result (`G()`) names `call.target` in both,
                         # so the shared transfer already covers it.
-                        transfers.append(
-                            CallTransfer(
-                                computed_call.span,
-                                computed_call.target,
-                                computed_args,
-                                frozenset(),
-                                imported=True,
-                            )
+                        # A bodyless imported callee records an empty
+                        # `call.target` — the member's id stands in
+                        # for it (an empty identity would mark every
+                        # consumer summary stale).
+                        second_target = computed_call.target or (
+                            call_member.id
+                            if call_member is not None
+                            else ""
                         )
+                        if second_target and computed[2] != second_target:
+                            transfers.append(
+                                CallTransfer(
+                                    computed_call.span,
+                                    second_target,
+                                    computed_args,
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
                     value_deps = frozenset()
-                    if bound is not None and len(lefts) == 2:
-                        # `for range *p` — each element is caller
-                        # memory the pointer's aim selects, so the
-                        # bound name carries the pointer's own deps
-                        # and every earlier indirect store, the same
-                        # union `(*p)[i]`'s read reports.
-                        value_deps = self.expression(
-                            range_ident, fn, params, scope,
-                            transfers, count, 0,
-                        ) | self.indirect_writes
-                    elif computed is not None and len(lefts) == 2:
-                        # `for range *G()` — the elements live in the
-                        # memory the opaque result aims at, which may
-                        # alias any escaped binding like a `*p` read:
-                        # the argument deps (already evaluated above)
-                        # union with every escaped binding's current
-                        # deps and every indirect store.
+                    if bound is not None:
+                        if (
+                            bound[2].kind == "array"
+                            and len(lefts) <= 1
+                        ):
+                            # `for i := range p` and `for range
+                            # *p` never evaluate the operand: Go
+                            # skips the range expression when at
+                            # most one iteration variable is
+                            # present and `len(x)` is constant.
+                            # The pointer write is not observed
+                            # and no element binds at all (the
+                            # index is dep-free), so nothing
+                            # carries `p`'s deps.
+                            pass
+                        else:
+                            # `for range *p` — each element (and a
+                            # map's key, when only one name
+                            # binds) is caller memory the
+                            # pointer's aim selects, so the bound
+                            # name carries the pointer's own deps
+                            # and every earlier indirect store,
+                            # the same union `(*p)[i]`'s read
+                            # reports.
+                            value_deps = self.expression(
+                                range_ident, fn, params, scope,
+                                transfers, count, 0,
+                            ) | self.indirect_writes
+                    elif computed is not None:
+                        # `for range *G()` — the elements (and a
+                        # map's key, when only one name binds) live
+                        # in the memory the opaque result aims at,
+                        # which may alias any escaped binding like
+                        # a `*p` read: the argument deps (already
+                        # evaluated above) union with every escaped
+                        # binding's current deps and every indirect
+                        # store.
                         value_deps = (
                             frozenset().union(*computed_args)
                             if computed_args
@@ -10950,31 +11109,103 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # Each name's declared type comes from the
                     # compiler's binding — scalar-or-pointer, matching
                     # the index-read rule (a struct element or a
-                    # string map key stays closed).
+                    # string map key stays closed). A map's key is
+                    # stored data like the element — a callee- or
+                    # caller-produced container's key carries the
+                    # same deps the element does; a slice index
+                    # stays dep-free.
                     self._bind_range_names(
-                        lefts, scope, params, conditional, value_deps
+                        lefts, scope, params, conditional, value_deps,
+                        (
+                            value_deps
+                            if fact is not None
+                            and fact.kind == "map"
+                            else frozenset()
+                        ),
                     )
                     if (
                         (bound is not None or computed is not None)
-                        and len(lefts) == 2
-                        and lefts[1].text != b"_"
+                        and fact is not None
+                        and len(lefts) >= 1
+                        and len(lefts) <= 2
                     ):
-                        elem_binding = self.bindings_by_span.get(
-                            self.node_key(lefts[1])
+                        # A map's key is stored data — keys added
+                        # mid-iteration surface on later passes, so
+                        # the key name re-joins like the element.
+                        # An array range operand is evaluated once —
+                        # `for _, v := range *p` or an array VALUE
+                        # iterates a start-time copy: the element
+                        # still rebinds each pass (a body store into
+                        # `v` cannot survive), but mid-iteration
+                        # writes to the original never reach it — a
+                        # `static` re-join resets to the seed only.
+                        # The bare `for _, v := range p` sugar is
+                        # different: Go iterates the pointee's live
+                        # elements (`(*p)[i]` re-read each pass), so
+                        # a `*[N]T` operand under `sugar` re-joins
+                        # like a slice.
+                        range_static = (
+                            fact.kind == "array"
+                            and not (
+                                sugar
+                                and (
+                                    bound is not None
+                                    or computed_pointer_result
+                                )
+                            )
                         )
-                        if elem_binding is not None:
-                            range_elem = (elem_binding.id, value_deps, None, False)
-                        else:
-                            elem_ref = self.references.get(
+                        if (
+                            fact.kind == "map"
+                            and lefts[0].type == "identifier"
+                            and lefts[0].text != b"_"
+                        ):
+                            key_binding = self.bindings_by_span.get(
+                                self.node_key(lefts[0])
+                            )
+                            if key_binding is not None:
+                                range_key = (
+                                    key_binding.id,
+                                    value_deps,
+                                    None,
+                                    computed is not None,
+                                    range_static,
+                                )
+                            else:
+                                key_ref = self.references.get(
+                                    self.node_key(lefts[0])
+                                )
+                                if key_ref is not None:
+                                    range_key = (
+                                        key_ref.binding_id,
+                                        value_deps,
+                                        None,
+                                        computed is not None,
+                                        range_static,
+                                    )
+                        if len(lefts) == 2 and lefts[1].text != b"_":
+                            elem_binding = self.bindings_by_span.get(
                                 self.node_key(lefts[1])
                             )
-                            if elem_ref is not None:
+                            if elem_binding is not None:
                                 range_elem = (
-                                    elem_ref.binding_id,
+                                    elem_binding.id,
                                     value_deps,
                                     None,
                                     False,
+                                    range_static,
                                 )
+                            else:
+                                elem_ref = self.references.get(
+                                    self.node_key(lefts[1])
+                                )
+                                if elem_ref is not None:
+                                    range_elem = (
+                                        elem_ref.binding_id,
+                                        value_deps,
+                                        None,
+                                        False,
+                                        range_static,
+                                    )
                 else:
                     if right is None or len(lefts) > 1 or (
                         lefts and lefts[0].type != "identifier"
@@ -11258,13 +11489,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         else None
                                     ),
                                     False,
+                                    False,
                                 )
                             elif func_iter:
                                 # `for v := range lib.Iter(&a)` —
                                 # the element re-joins escaped
                                 # memory each pass like a chan's.
                                 range_elem = (
-                                    binding.id, rdeps, None, True
+                                    binding.id, rdeps, None, True,
+                                    False,
                                 )
                         else:
                             ref = self.references.get(self.node_key(lefts[0]))
@@ -11315,10 +11548,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         else None
                                     ),
                                     False,
+                                    False,
                                 )
                             elif func_iter:
                                 range_elem = (
-                                    ref.binding_id, rdeps, None, True
+                                    ref.binding_id, rdeps, None,
+                                    True, False,
                                 )
             elif clause is not None and clause.type == "for_clause":
                 init = clause.child_by_field_name("initializer")
@@ -11357,7 +11592,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     mark = len(transfers)
                     frame["exited"] = False
                     inner = dict(scope)
-                    if range_elem is not None:
+                    for range_rejoin in (range_elem, range_key):
+                        if range_rejoin is None:
+                            continue
                         # An element of `for range *p` is caller
                         # memory — a store through the pointer inside
                         # the body writes what the next iteration
@@ -11367,24 +11604,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # own widened set instead: sends inside the
                         # body grow it in `inner`, and the pass join
                         # carries that growth back through `scope`.
-                        elem_id, elem_base, elem_chan, elem_escaped = (
-                            range_elem
-                        )
+                        # A map's key re-joins the same way: keys
+                        # added mid-iteration surface on later passes.
+                        (
+                            elem_id,
+                            elem_base,
+                            elem_chan,
+                            elem_escaped,
+                            elem_static,
+                        ) = range_rejoin
                         extra = (
-                            (
-                                inner.get(elem_chan, frozenset())
-                                | (
-                                    self.indirect_writes
-                                    if (
-                                        elem_chan
-                                        in self.external_chan_locals
-                                        or elem_chan in params
+                            frozenset()
+                            if elem_static
+                            else (
+                                (
+                                    inner.get(elem_chan, frozenset())
+                                    | (
+                                        self.indirect_writes
+                                        if (
+                                            elem_chan
+                                            in self.external_chan_locals
+                                            or elem_chan in params
+                                        )
+                                        else frozenset()
                                     )
-                                    else frozenset()
                                 )
+                                if elem_chan is not None
+                                else self.indirect_writes
                             )
-                            if elem_chan is not None
-                            else self.indirect_writes
                         )
                         if elem_escaped:
                             # A func iterator's callee reads escaped
@@ -11395,11 +11642,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     extra |= inner[eid]
                                 elif eid in params:
                                     extra |= {params[eid]}
-                        self._store(
-                            inner, params, elem_id,
-                            elem_base | extra,
-                            conditional,
-                        )
+                        # Each iteration REASSIGNS the element
+                        # (and key) name — a value the body stored
+                        # into it is clobbered next pass, so this
+                        # replaces the slot rather than joining
+                        # into it: `for _, v := range *p { …; v = x }`
+                        # must not keep `x`'s deps on later passes.
+                        inner[elem_id] = elem_base | extra
                     # A send to external state inside the body (a
                     # `chan` parameter, `*p`, `GC <- x`) grows
                     # `indirect_writes`, which no `inner` slot
@@ -17671,14 +17920,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # a local channel's conflated set gains the deps;
                     # a channel parameter's live in external state,
                     # so they broadcast into `indirect_writes` where
-                    # a later `<-ch` observes them.
-                    if binding.id in params or (
-                        binding.id in self.external_chan_locals
+                    # a later `<-ch` observes them. `G(alias)` names
+                    # the root queue the alias stands for — storing
+                    # on the alias's own slot would hide the send
+                    # from `<-ch`.
+                    chan_id = self._chan_root(binding.id)
+                    if chan_id in params or (
+                        chan_id in self.external_chan_locals
                     ):
                         self.indirect_writes |= stored
-                    elif binding.id in locals_:
-                        locals_[binding.id] = (
-                            locals_.get(binding.id, frozenset())
+                    elif chan_id in locals_:
+                        locals_[chan_id] = (
+                            locals_.get(chan_id, frozenset())
                             | stored
                         )
                     elif (
