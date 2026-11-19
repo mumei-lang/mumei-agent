@@ -12103,6 +12103,23 @@ def test_immediate_func_literal_pointer_capture(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_immediate_func_literal_capture_resolves_after_arg_writes(
+    go_types_helper,
+):
+    # `func() int64 { return x }(G(&x, y))` — Go runs the argument
+    # first, so the literal's `x` reads the state after `G` stored
+    # `y` through `&x`; a constant result still carries the write.
+    data = unit(
+        go_types_helper,
+        "func G(p *int64, y int64) int64 { *p = y; return 1 }\n"
+        "func F(x int64, y int64) int64 {\n"
+        "\treturn func(a int64) int64 { return x }(G(&x, y))\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_immediate_func_literal_internal_call_closed(
     go_types_helper,
 ):

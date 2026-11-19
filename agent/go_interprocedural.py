@@ -11216,10 +11216,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
         bound literal records. The literal's own gate still applies:
         an internal call, assignment, send, go or defer stays
         closed, so no write-back runs here."""
+        # Go evaluates the arguments before the body, so captures and
+        # alias resolution read the state AFTER `G(&x, y)`-shaped
+        # arguments land — an arg that stores through `&x` or reseats
+        # a channel alias changes what the literal's free names mean.
+        arg_deps: frozenset[int] = frozenset()
+        for arg in arguments:
+            arg_deps |= self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
         deps, captured, captures_pointer = self._func_literal_capture(
             literal, params, locals_
         )
-        deps |= self.indirect_writes
+        deps |= self.indirect_writes | arg_deps
         pointer_capture = next(
             (
                 cbid
