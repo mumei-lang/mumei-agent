@@ -7518,6 +7518,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # unions the old contents with the received
                         # deps, so a maybe-skipped store keeps both
                         # queue meanings' coverage.
+                        old_queue = frozenset()
+                        if conditional or self._may_skip > 0:
+                            # A maybe-skipped `c = <-cc` can leave
+                            # `c` meaning EITHER its aliased queue
+                            # or the received one — externalize the
+                            # old root too and merge its contents
+                            # into the slot like the conditional
+                            # rebind arm below.
+                            root_before = self._chan_root(
+                                ref.binding_id
+                            )
+                            old_queue = locals_.get(root_before)
+                            if (
+                                old_queue is None
+                                and root_before in params
+                            ):
+                                old_queue = frozenset(
+                                    {params[root_before]}
+                                )
+                            if root_before != ref.binding_id:
+                                self.external_chan_locals.add(
+                                    root_before
+                                )
                         self.chan_aliases.pop(ref.binding_id, None)
                         self.external_chan_locals.add(
                             ref.binding_id
@@ -7531,8 +7554,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 {params[ref.binding_id]}
                             )
                         locals_[ref.binding_id] = (
-                            base or frozenset()
-                        ) | value
+                            (base or frozenset())
+                            | old_queue
+                            | value
+                        )
                         continue
                     if conditional or self._may_skip > 0:
                         # A maybe-skipped rebind can leave the name
