@@ -8647,15 +8647,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         dest_deps = dest_deps | self.indirect_writes
                     self._record_read(dest_deps)
                     self._pin_fact_identities(fact)
+                    map_key_deps = frozenset()
                     for extra in reversed(extras):
                         if extra.type in _INDEX_LITERALS:
                             continue
-                        self._record_read(
-                            self.expression(
-                                extra, fn, params, locals_,
-                                transfers, count, 0,
-                            )
+                        extra_deps = self.expression(
+                            extra, fn, params, locals_,
+                            transfers, count, 0,
                         )
+                        self._record_read(extra_deps)
+                        if fact.kind == "map":
+                            # A map key is stored data — `(*p)[b]=1`
+                            # stores `b`'s value, so a later key read
+                            # (`for k := range *p`) must observe `b`'s
+                            # deps through the broadcast.
+                            map_key_deps |= extra_deps
+                    self.indirect_writes |= map_key_deps
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -10284,6 +10291,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             update = None
             # (elem binding id, seed deps, local channel id | None).
             range_elem = None
+            # (key binding id, seed deps, None, re-join escaped).
+            range_key = None
             if clause is not None and clause.type == "range_clause":
                 # Two operand families are reachable: an integer
                 # (`for i := range e` yields one index variable) and
@@ -10882,25 +10891,60 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if (
                         (bound is not None or computed is not None)
-                        and len(lefts) == 2
-                        and lefts[1].text != b"_"
+                        and fact is not None
+                        and fact.kind != "array"
+                        and len(lefts) >= 1
+                        and len(lefts) <= 2
                     ):
-                        elem_binding = self.bindings_by_span.get(
-                            self.node_key(lefts[1])
-                        )
-                        if elem_binding is not None:
-                            range_elem = (elem_binding.id, value_deps, None, False)
-                        else:
-                            elem_ref = self.references.get(
-                                self.node_key(lefts[1])
+                        # A map's key is stored data — keys added
+                        # mid-iteration surface on later passes, so
+                        # the key name re-joins like the element.
+                        # An array ranges over a start-time copy:
+                        # mid-iteration writes to the original never
+                        # reach the iteration, so nothing re-joins.
+                        if (
+                            fact.kind == "map"
+                            and lefts[0].type == "identifier"
+                            and lefts[0].text != b"_"
+                        ):
+                            key_binding = self.bindings_by_span.get(
+                                self.node_key(lefts[0])
                             )
-                            if elem_ref is not None:
-                                range_elem = (
-                                    elem_ref.binding_id,
+                            if key_binding is not None:
+                                range_key = (
+                                    key_binding.id,
                                     value_deps,
                                     None,
-                                    False,
+                                    computed is not None,
                                 )
+                            else:
+                                key_ref = self.references.get(
+                                    self.node_key(lefts[0])
+                                )
+                                if key_ref is not None:
+                                    range_key = (
+                                        key_ref.binding_id,
+                                        value_deps,
+                                        None,
+                                        computed is not None,
+                                    )
+                        if len(lefts) == 2 and lefts[1].text != b"_":
+                            elem_binding = self.bindings_by_span.get(
+                                self.node_key(lefts[1])
+                            )
+                            if elem_binding is not None:
+                                range_elem = (elem_binding.id, value_deps, None, False)
+                            else:
+                                elem_ref = self.references.get(
+                                    self.node_key(lefts[1])
+                                )
+                                if elem_ref is not None:
+                                    range_elem = (
+                                        elem_ref.binding_id,
+                                        value_deps,
+                                        None,
+                                        False,
+                                    )
                 else:
                     if right is None or len(lefts) > 1 or (
                         lefts and lefts[0].type != "identifier"
@@ -11283,7 +11327,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     mark = len(transfers)
                     frame["exited"] = False
                     inner = dict(scope)
-                    if range_elem is not None:
+                    for range_rejoin in (range_elem, range_key):
+                        if range_rejoin is None:
+                            continue
                         # An element of `for range *p` is caller
                         # memory — a store through the pointer inside
                         # the body writes what the next iteration
@@ -11293,8 +11339,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # own widened set instead: sends inside the
                         # body grow it in `inner`, and the pass join
                         # carries that growth back through `scope`.
+                        # A map's key re-joins the same way: keys
+                        # added mid-iteration surface on later passes.
                         elem_id, elem_base, elem_chan, elem_escaped = (
-                            range_elem
+                            range_rejoin
                         )
                         extra = (
                             (

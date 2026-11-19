@@ -18586,6 +18586,37 @@ def test_range_over_slice_result_index_stays_dep_free(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_range_over_bound_map_key_tracks_mid_iteration_writes(
+    go_types_helper,
+):
+    # `for k := range *p` — a key stored through the same pointer
+    # mid-iteration surfaces on a later pass, so `k` re-joins the
+    # indirect writes like the element position does.
+    files = {
+        "a.go": "package p\n"
+        "func F(b int64, p *map[int64]int64) int64 {\n"
+        "\tvar r int64\n"
+        "\tfor k := range *p {\n"
+        "\t\t(*p)[b] = 1\n"
+        "\t\tr += k\n"
+        "\t}\n"
+        "\treturn r\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    # `k` may be a key written from `b` — the loop's own store.
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+
+
 def test_method_expr_chan_result_passthrough_skips_receiver(
     go_types_helper,
 ):
