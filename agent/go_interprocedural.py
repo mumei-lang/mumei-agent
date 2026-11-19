@@ -10923,16 +10923,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         (bound is not None or computed is not None)
                         and fact is not None
-                        and fact.kind != "array"
+                        and (
+                            bound is not None
+                            or fact.kind != "array"
+                        )
                         and len(lefts) >= 1
                         and len(lefts) <= 2
                     ):
                         # A map's key is stored data — keys added
                         # mid-iteration surface on later passes, so
                         # the key name re-joins like the element.
-                        # An array ranges over a start-time copy:
-                        # mid-iteration writes to the original never
-                        # reach the iteration, so nothing re-joins.
+                        # An array VALUE ranges over a start-time
+                        # copy: mid-iteration writes to the original
+                        # never reach the iteration, so nothing
+                        # re-joins. A bound POINTER ranges over the
+                        # pointee's live elements — `for _, v :=
+                        # range p` reads `(*p)[i]` fresh each pass,
+                        # so even a `*[N]T` operand re-joins.
                         if (
                             fact.kind == "map"
                             and lefts[0].type == "identifier"
@@ -11400,11 +11407,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     extra |= inner[eid]
                                 elif eid in params:
                                     extra |= {params[eid]}
-                        self._store(
-                            inner, params, elem_id,
-                            elem_base | extra,
-                            conditional,
-                        )
+                        # Each iteration REASSIGNS the element
+                        # (and key) name — a value the body stored
+                        # into it is clobbered next pass, so this
+                        # replaces the slot rather than joining
+                        # into it: `for _, v := range *p { …; v = x }`
+                        # must not keep `x`'s deps on later passes.
+                        inner[elem_id] = elem_base | extra
                     # A send to external state inside the body (a
                     # `chan` parameter, `*p`, `GC <- x`) grows
                     # `indirect_writes`, which no `inner` slot
