@@ -15383,3 +15383,25 @@ def test_chan_result_callee_send_broadcasts_to_peer_locals(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_result_passthrough_capture_marks_effects(go_types_helper):
+    # `c := g(q)` (g returns its chan parameter) captured by a
+    # literal that receives — the call reads an external queue like
+    # a captured `chan` parameter's, so `h()` marks `effects`
+    # unknown and records the imported transfer.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func g(ch chan int64) chan int64 {\n"
+            "\treturn ch\n}\n"
+            "func F(q chan int64) int64 {\n"
+            "\tc := g(q)\n"
+            "\th := func() int64 { return <-c }\n"
+            "\treturn h()\n}\n",
+        )
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    assert any(t.imported for t in result.calls)

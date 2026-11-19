@@ -8665,7 +8665,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # are the only ones a channel capture can hide.
         chan_captured_external = any(
             (
-                cbid in params
+                self._chan_root(cbid) in params
                 or self._chan_root(cbid)
                 in self.external_chan_locals
             )
