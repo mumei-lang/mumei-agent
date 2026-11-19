@@ -10148,42 +10148,60 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for c in callee.calls
                 )
             else:
-                # A local func value or parameter: a param binding,
-                # an opaque mark, or the absence of any resolvable
-                # literal record leaves the invoked value unknown; a
-                # tracked literal stays bounded unless it writes,
-                # dereferences, calls out, or captures external state.
-                has_literal = (
-                    binding_id in self.closure_captures
-                    or binding_id in self.closure_writes
-                    or binding_id in self.pointee_closures
-                    or binding_id in self.closure_star_writes
-                    or binding_id in self.closure_inner_calls
-                )
-                effectful = (
-                    bool(self.closure_writes.get(binding_id))
-                    or binding_id in self.closure_star_writes
-                    or binding_id in self.closure_inner_calls
-                    or binding_id in self.pointee_closures
-                    or any(
-                        (
-                            self._chan_root(cbid) in params
-                            or self._chan_root(cbid)
-                            in self.external_chan_locals
-                        )
-                        and self._scalar_chan_binding(cbid)
-                        for cbid in self.closure_captures.get(
-                            binding_id, ()
+                # `h := Id` — a local alias of a declared function
+                # resolves exactly like the function-name argument
+                # form (`H(G, x)`): a bounded pure callee keeps its
+                # own effects instead of the opaque broadcast.
+                alias = self.func_aliases.get(binding_id)
+                if alias is not None and alias in self.functions:
+                    aliased = self.summarize(alias)
+                    unbounded = (
+                        aliased is None
+                        or not aliased.available
+                        or aliased.effects == "unknown"
+                    )
+                    external_chan = aliased is not None and any(
+                        self._external_chan_id(c.target)
+                        for c in aliased.calls
+                    )
+                else:
+                    # A local func value or parameter: a param binding,
+                    # an opaque mark, or the absence of any resolvable
+                    # literal record leaves the invoked value unknown;
+                    # a tracked literal stays bounded unless it writes,
+                    # dereferences, calls out, or captures external
+                    # state.
+                    has_literal = (
+                        binding_id in self.closure_captures
+                        or binding_id in self.closure_writes
+                        or binding_id in self.pointee_closures
+                        or binding_id in self.closure_star_writes
+                        or binding_id in self.closure_inner_calls
+                    )
+                    effectful = (
+                        bool(self.closure_writes.get(binding_id))
+                        or binding_id in self.closure_star_writes
+                        or binding_id in self.closure_inner_calls
+                        or binding_id in self.pointee_closures
+                        or any(
+                            (
+                                self._chan_root(cbid) in params
+                                or self._chan_root(cbid)
+                                in self.external_chan_locals
+                            )
+                            and self._scalar_chan_binding(cbid)
+                            for cbid in self.closure_captures.get(
+                                binding_id, ()
+                            )
                         )
                     )
-                )
-                unbounded = (
-                    binding_id in params
-                    or binding_id in self.opaque_callees
-                    or not has_literal
-                    or effectful
-                )
-                external_chan = unbounded
+                    unbounded = (
+                        binding_id in params
+                        or binding_id in self.opaque_callees
+                        or not has_literal
+                        or effectful
+                    )
+                    external_chan = unbounded
             transfers.append(
                 CallTransfer(
                     FileSpan(
