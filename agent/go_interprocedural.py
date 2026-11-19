@@ -846,6 +846,12 @@ class _Builder:
         # `_chan_binding` resolves the chain before classifying the
         # operand as local queue or shared parameter.
         self.chan_aliases: dict[str, str] = {}
+        # Locals bound to a callee-produced queue (`ch := g()` where
+        # `g` declares a scalar `chan` result) — ops on them follow
+        # the parameter's external model (sends broadcast into
+        # `indirect_writes`, reads union it) rather than the
+        # conflated-set model a `make(chan)` local uses.
+        self.external_chan_locals: set[str] = set()
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -2838,6 +2844,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and elem.kind in {"integer", "boolean"}
         )
 
+    def _scalar_chan_fact(self, fact: Any) -> bool:
+        """Whether `fact` is a `chan T` whose element is scalar —
+        the binding-free twin of `_scalar_chan_binding` for declared
+        result types, which carry facts rather than bindings."""
+        return (
+            fact is not None
+            and fact.kind == "chan"
+            and fact.elem is not None
+            and fact.elem.kind in {"integer", "boolean"}
+        )
+
     def _chan_binding(self, node: Any, locals_: dict, params: dict) -> Any:
         """The channel binding `node` names, or None.
 
@@ -2987,6 +3004,124 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return True
         member = self.members.get(target_id)
         return member is not None and self._scalar_chan_fact(member.type)
+
+    def _chan_result_call(self, node: Any) -> Any:
+        """The callee `node` calls when `ch := f()` binds a
+        callee-produced queue — `f` declares one scalar-element
+        `chan` result. Only a local callee's function record
+        carries the result's kind; an imported member's signature
+        records identities, not kinds, so `lib.G()` stays closed."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_local":
+            return None
+        target = self.functions.get(call.target)
+        if (
+            target is None
+            or len(target.results) != 1
+            or not self._scalar_chan_fact(target.results[0].type)
+        ):
+            return None
+        return target
+
+    def _chan_result_passthrough(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> Any | None:
+        """`c := g(q)` where `g`'s whole body is `return <param>` —
+        the bound name aliases the argument's queue (the callee hands
+        the same queue back), so it binds through `chan_aliases`
+        rather than the external-local model. Returns the alias
+        source binding, or None when the callee is not a pure
+        passthrough or the passed-through argument is not a channel
+        identifier."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(inner))
+        if call is None or call.kind != "direct_local":
+            return None
+        target = self.functions.get(call.target)
+        if target is None:
+            return None
+        fn_binding = self.bindings.get(target.binding_id)
+        block = (
+            self.blocks.get(_key3(fn_binding.span))
+            if fn_binding is not None
+            else None
+        )
+        if block is None:
+            return None
+        stmts = [c for c in block.named_children if c.type != "comment"]
+        while len(stmts) == 1 and stmts[0].type == "statement_list":
+            stmts = [
+                c
+                for c in stmts[0].named_children
+                if c.type != "comment"
+            ]
+        if len(stmts) != 1 or stmts[0].type != "return_statement":
+            return None
+        expr = next(
+            (
+                c
+                for c in stmts[0].named_children
+                if c.type != "comment"
+            ),
+            None,
+        )
+        if expr is not None and expr.type == "expression_list":
+            items = [
+                c for c in expr.named_children if c.type != "comment"
+            ]
+            expr = items[0] if len(items) == 1 else None
+        if expr is None or expr.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(expr))
+        if ref is None:
+            return None
+        index = next(
+            (
+                i
+                for i, p in enumerate(target.parameters)
+                if p.binding_id == ref.binding_id
+            ),
+            None,
+        )
+        if index is None:
+            return None
+        args = inner.child_by_field_name("arguments")
+        arg_nodes = (
+            [
+                c
+                for c in args.named_children
+                if c.type != "comment"
+            ]
+            if args is not None
+            else []
+        )
+        if index >= len(arg_nodes):
+            return None
+        return self._chan_alias_target(arg_nodes[index], locals_, params)
 
     def _is_make_chan_call(self, node: Any) -> bool:
         """`make(chan T[, cap])` — the one in-fragment channel
@@ -4129,6 +4264,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             or any(
                 r.type.kind not in {"integer", "boolean", "pointer"}
+                and not (
+                    # A scalar-element `chan T` result admits under
+                    # the same external sync-resource model a `chan`
+                    # parameter uses: the callee hands the caller a
+                    # shared queue, so ops on the bound result name
+                    # record imported effects exactly like a
+                    # parameter's do.
+                    r.type.kind == "chan"
+                    and r.type.elem is not None
+                    and r.type.elem.kind in {"integer", "boolean"}
+                )
                 for r in fn.results
             )
         ):
@@ -4182,6 +4328,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_ptr_deps = self._ptr_deps
         saved_chan_aliases = self.chan_aliases
         saved_field_queues = self.field_chan_queues
+        saved_external_chans = self.external_chan_locals
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -4191,6 +4338,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._ptr_deps = {}
         self.chan_aliases = {}
         self.field_chan_queues = {}
+        self.external_chan_locals = set()
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -4225,6 +4373,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._ptr_deps = saved_ptr_deps
             self.chan_aliases = saved_chan_aliases
             self.field_chan_queues = saved_field_queues
+            self.external_chan_locals = saved_external_chans
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -4376,7 +4525,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if not result_id:
                     raise _Unsupported("unsupported_return", _span(node))
-                result_deps = locals_.get(result_id, frozenset())
+                # A `r = q` store on a `chan` named result goes
+                # through `chan_aliases` (no dep set lands in
+                # `locals_[r]`) — resolve the queue root like an
+                # identifier read does so `return` carries q's deps.
+                result_root = self._chan_root(result_id)
+                if result_root in params:
+                    result_deps = frozenset(
+                        {params[result_root]}
+                    ) | self.indirect_writes
+                elif result_root in self.external_chan_locals:
+                    result_deps = (
+                        locals_.get(result_root, frozenset())
+                        | self.indirect_writes
+                    )
+                else:
+                    result_deps = locals_.get(
+                        result_root, frozenset()
+                    )
                 deps[0] |= result_deps
                 self._record_read(result_deps)
             elif len(expressions) == 1:
@@ -4488,23 +4654,43 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             rights[i], locals_, params
                         )
                         is not None
+                        or self._chan_result_call(rights[i])
+                        is not None
                     )
                 ):
                     # `ch2 := ch` aliases one queue under a second
                     # name — sends through ch2 land in ch's dep set
-                    # through `chan_aliases` — but any other RHS (a
-                    # receive, a call result) produces a queue the
+                    # through `chan_aliases` — and `ch := g()` binds
+                    # a callee-produced queue under the external
+                    # model — but any other RHS (a receive, a
+                    # non-chan call result) produces a queue the
                     # conflated dep set cannot model. Only `make`
                     # creates a channel in-fragment, an identifier
-                    # copies one, and only a scalar element keeps
-                    # queue contents inside the dep model.
+                    # copies one, a declared-`chan` call hands one
+                    # over, and only a scalar element keeps queue
+                    # contents inside the dep model.
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "chan" and not self._is_make_chan_call(
                     rights[i]
                 ):
-                    self.chan_aliases[binding.id] = self._chan_alias_target(
+                    chan_alias = self._chan_alias_target(
                         rights[i], locals_, params
-                    ).id
+                    )
+                    if chan_alias is not None:
+                        self.chan_aliases[binding.id] = chan_alias.id
+                    else:
+                        passthrough = self._chan_result_passthrough(
+                            rights[i], locals_, params
+                        )
+                        if passthrough is not None:
+                            # `c := g(q)` with `g`'s body `return ch`
+                            # — c names q's queue, not a fresh
+                            # external one.
+                            self.chan_aliases[binding.id] = (
+                                passthrough.id
+                            )
+                        else:
+                            self.external_chan_locals.add(binding.id)
                 if not conditional:
                     self._ptr_deps[binding.id] = (
                         rhs_ptrs[i]
@@ -4697,6 +4883,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     value_nodes[i], locals_, params
                                 )
                                 is None
+                                and self._chan_result_call(
+                                    value_nodes[i]
+                                )
+                                is None
                             )
                         )
                     ):
@@ -4715,11 +4905,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and value_nodes
                         and not self._is_make_chan_call(value_nodes[i])
                     ):
-                        self.chan_aliases[binding.id] = (
-                            self._chan_alias_target(
-                                value_nodes[i], locals_, params
-                            ).id
+                        chan_alias = self._chan_alias_target(
+                            value_nodes[i], locals_, params
                         )
+                        if chan_alias is not None:
+                            self.chan_aliases[binding.id] = chan_alias.id
+                        elif self._chan_result_call(value_nodes[i]) is not None:
+                            passthrough = self._chan_result_passthrough(
+                                value_nodes[i], locals_, params
+                            )
+                            if passthrough is not None:
+                                self.chan_aliases[binding.id] = (
+                                    passthrough.id
+                                )
+                            else:
+                                self.external_chan_locals.add(
+                                    binding.id
+                                )
                     if not conditional:
                         self._ptr_deps[binding.id] = (
                             rhs_ptrs[i]
@@ -5971,7 +6173,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "unsupported_statement", _span(clause)
                         )
                     chan = self._chan_binding(right, scope, params)
-                    if chan is not None and chan.id in params:
+                    if chan is not None and (
+                        chan.id in params
+                        or chan.id in self.external_chan_locals
+                    ):
                         # `for v := range ch` over a channel
                         # parameter iterates a queue the caller
                         # shares — each element reads external
@@ -5993,7 +6198,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                         rdeps = (
-                            frozenset({params[chan.id]})
+                            (
+                                frozenset({params[chan.id]})
+                                if chan.id in params
+                                else scope.get(
+                                    chan.id, frozenset()
+                                )
+                            )
                             | self.indirect_writes
                         )
                     else:
@@ -6100,6 +6311,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     (
                                         chan.id
                                         if chan.id in scope
+                                        and chan.id
+                                        not in self.external_chan_locals
                                         else None
                                     ),
                                 )
@@ -6122,6 +6335,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     (
                                         chan.id
                                         if chan.id in scope
+                                        and chan.id
+                                        not in self.external_chan_locals
                                         else None
                                     ),
                                 )
@@ -6696,11 +6911,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             value_deps = self.expression(
                 value, fn, params, locals_, transfers, count, 0
             )
-            if binding.id in params:
-                # `ch <- x` on a channel parameter — the queue is
-                # shared with the caller, so the send is an external
-                # mutation: record it against the parameter's real
-                # binding identity (staleness-honest, `effects`
+            if binding.id in params or (
+                binding.id in self.external_chan_locals
+            ):
+                # `ch <- x` on a channel parameter or a
+                # callee-produced queue (`ch := g()`) — the queue is
+                # shared beyond this function, so the send is an
+                # external mutation: record it against the name's
+                # real binding identity (staleness-honest, `effects`
                 # unknown) and broadcast the sent deps into
                 # `indirect_writes` — a later `<-ch` CAN observe
                 # this exact value, so dropping them would
@@ -6901,17 +7119,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `ch2 := ch` names one queue under two names —
                     # a bare `G(ch2)` read surfaces what the queue
                     # may hold, so it reads the SOURCE binding's
-                    # slot (plus a parameter's send broadcast), not
-                    # the snapshot `locals_[ch2]` froze at the copy.
+                    # slot (plus a shared queue's send broadcast),
+                    # not the snapshot `locals_[ch2]` froze at the
+                    # copy.
                     if chan_root in locals_:
-                        return locals_[chan_root]
+                        deps = locals_[chan_root]
+                        if chan_root in self.external_chan_locals:
+                            deps |= self.indirect_writes
+                        return deps
                     if chan_root in params:
                         return (
                             frozenset({params[chan_root]})
                             | self.indirect_writes
                         )
                     return frozenset()
-                return locals_[ref.binding_id]
+                deps = locals_[ref.binding_id]
+                if ref.binding_id in self.external_chan_locals:
+                    # `ch := g()` names a callee-produced queue —
+                    # contents live in `indirect_writes`, like a
+                    # channel parameter's.
+                    deps |= self.indirect_writes
+                return deps
             if ref is not None and ref.binding_id in params:
                 chan_root = (
                     self._chan_root(ref.binding_id)
@@ -6923,7 +7151,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # another queue — the read surfaces that queue's
                     # contents, not p's own provenance slot.
                     if chan_root in locals_:
-                        return locals_[chan_root]
+                        deps = locals_[chan_root]
+                        if chan_root in self.external_chan_locals:
+                            deps |= self.indirect_writes
+                        return deps
                     if chan_root in params:
                         return (
                             frozenset({params[chan_root]})
@@ -7472,11 +7703,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                         return self.indirect_writes | base_deps
-                    if binding.id in params:
-                        # `<-ch` on a channel parameter reads a
-                        # queue the caller shares — external state
-                        # like a bound pointer's memory: the
-                        # parameter's own index carries provenance,
+                    if binding.id in params or (
+                        binding.id in self.external_chan_locals
+                    ):
+                        # `<-ch` on a channel parameter or a
+                        # callee-produced queue reads state shared
+                        # beyond this function — external state like
+                        # a bound pointer's memory: the name's own
+                        # provenance carries provenance,
                         # `indirect_writes` makes own sends
                         # observable, and the imported transfer
                         # keeps `effects` honest.
@@ -7494,7 +7728,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                         return (
-                            frozenset({params[binding.id]})
+                            (
+                                frozenset({params[binding.id]})
+                                if binding.id in params
+                                else locals_.get(
+                                    binding.id, frozenset()
+                                )
+                            )
                             | self.indirect_writes
                         )
                     return locals_.get(binding.id, frozenset())
@@ -7805,10 +8045,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                         return frozenset()
-                    if binding.id in params:
-                        # `close(ch)` on a channel parameter — the
-                        # caller's queue closes, a caller-visible
-                        # effect the summary records on the
+                    if binding.id in params or (
+                        binding.id in self.external_chan_locals
+                    ):
+                        # `close(ch)` on a channel parameter or a
+                        # callee-produced queue — the shared queue
+                        # closes, a caller-visible effect the
+                        # summary records on the
                         # parameter's binding identity (unlike a
                         # local close, which is an untracked
                         # synchronization fact only).
@@ -7847,7 +8090,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `chan` parameter it observes the caller's
                         # queue, recorded as an imported transfer on
                         # the parameter's binding identity.
-                        if chan.id in params:
+                        if chan.id in params or (
+                            chan.id in self.external_chan_locals
+                        ):
                             transfers.append(
                                 CallTransfer(
                                     FileSpan(
@@ -8401,6 +8646,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if root in locals_:
                     resolved |= locals_[root]
+                    if root in self.external_chan_locals:
+                        resolved |= self.indirect_writes
                 elif root in params:
                     resolved |= frozenset({params[root]})
             deps = resolved
@@ -8417,7 +8664,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # `close` are closed inside literals, so receive-side effects
         # are the only ones a channel capture can hide.
         chan_captured_external = any(
-            cbid in params and self._scalar_chan_binding(cbid)
+            (
+                self._chan_root(cbid) in params
+                or self._chan_root(cbid)
+                in self.external_chan_locals
+            )
+            and self._scalar_chan_binding(cbid)
             for cbid in (captured or ())
         )
         if ref.binding_id in self.pointee_closures:
@@ -8817,13 +9069,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # a channel parameter's live in external state,
                     # so they broadcast into `indirect_writes` where
                     # a later `<-ch` observes them.
-                    if binding.id in locals_:
+                    if binding.id in params or (
+                        binding.id in self.external_chan_locals
+                    ):
+                        self.indirect_writes |= stored
+                    elif binding.id in locals_:
                         locals_[binding.id] = (
                             locals_.get(binding.id, frozenset())
                             | stored
                         )
-                    elif binding.id in params:
-                        self.indirect_writes |= stored
 
 
 def _declared_key(binding_id: str) -> tuple[str, int] | None:
