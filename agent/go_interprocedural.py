@@ -1355,12 +1355,18 @@ class _Builder:
         nesting level only: `fm[k]` yields a container whose slots
         conflate under the root binding like `fm[k]`'s own elements
         do. Deeper nesting stays closed."""
-        return (
+        collection = (
             fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
             and self._func_elem_collection(fact.elem)
         )
+        if collection:
+            # Pin the WHOLE type tree like the single-level admit —
+            # the outer named container and outer map key otherwise
+            # escape `stale_dependents` when their declarations change.
+            self._pin_fact_identities(fact)
+        return collection
 
     def _func_elem_nested_operand(
         self, operand: Any
@@ -1440,6 +1446,17 @@ class _Builder:
                 src = ref.binding_id if ref is not None else None
                 if src and src != bound_id:
                     self._adopt_element_records(src, bound_id)
+                    src_bound = self.bindings.get(src)
+                    if (
+                        el.type == "identifier"
+                        and src_bound is not None
+                        and self._func_elem_collection(src_bound.type)
+                    ):
+                        # `fm := [][]func{fs}` — the inner slot shares
+                        # `fs`'s backing, so element stores through
+                        # either name union into both record sets and
+                        # an inner reseat detaches like `fm2 := fm`.
+                        self._func_elem_share(src, bound_id)
                 # A selector's operand (`st` in `st.M`) names no
                 # element — skip its children like an identifier's.
                 continue
@@ -1605,19 +1622,47 @@ class _Builder:
             if member_toks & toks
         } | {binding_id}
 
-    def _func_elem_reseat(self, binding_id: str) -> None:
+    def _func_elem_reseat(
+        self, binding_id: str, prestate: tuple | None = None
+    ) -> None:
         """A non-append reseat (`fs = mk()`, `fs = []func(){…}`,
         `fs = nil`) hands the name a fresh backing — the OLD
         elements stay reachable through names that shared it, so
         the binding's element records union onto each alias before
-        the records clear; then the name leaves the group."""
+        the records clear; then the name leaves the group. When the
+        caller passes the pre-RHS-eval snapshot (`prestate`), the
+        sharers receive only the OLD records — a literal the RHS
+        just recorded under this name belongs to the NEW backing."""
+        if prestate is not None:
+            captured = prestate[0].get(binding_id)
+            writes = prestate[1].get(binding_id)
+            starred = binding_id in prestate[2]
+            called = binding_id in prestate[3]
+        else:
+            captured = self.closure_captures.get(binding_id)
+            writes = self.closure_writes.get(binding_id)
+            starred = binding_id in self.closure_star_writes
+            called = binding_id in self.closure_inner_calls
         for member_id in self._func_elem_groups.pop(binding_id, set()):
             members = self._func_elem_groups.get(member_id)
             if members is not None:
                 members.discard(binding_id)
                 if not members:
                     self._func_elem_groups.pop(member_id, None)
-            self._adopt_element_records(binding_id, member_id)
+            if captured:
+                self.closure_captures[member_id] = (
+                    self.closure_captures.get(member_id, frozenset())
+                    | captured
+                )
+            if writes:
+                self.closure_writes[member_id] = (
+                    self.closure_writes.get(member_id, frozenset())
+                    | writes
+                )
+            if starred:
+                self.closure_star_writes.add(member_id)
+            if called:
+                self.closure_inner_calls.add(member_id)
         # The name leaves its old backing for a fresh one — hand it
         # a brand-new token so a default `binding_id` token cannot
         # collide with the backing the name just detached from.
@@ -8307,7 +8352,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if func_elem_lhs is not None:
                     ref, index, inner_index = func_elem_lhs
-                    for idx_node in (index, inner_index):
+                    # Go evaluates `fm[k()][i()]` outer index first —
+                    # `inner_index` names `k()`, `index` names `i()`.
+                    for idx_node in (inner_index, index):
                         if (
                             idx_node is not None
                             and idx_node.type not in (_INDEX_LITERALS)
@@ -9734,7 +9781,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # backing first so its elements reach the
                         # names still sharing it, not the name.
                         if not conditional and self._may_skip == 0:
-                            self._func_elem_reseat(ref.binding_id)
+                            self._func_elem_reseat(
+                                ref.binding_id,
+                                (
+                                    captures_before,
+                                    writes_before,
+                                    star_before,
+                                    calls_before,
+                                ),
+                            )
                             func_elem_reseated.add(ref.binding_id)
                             func_elem_reseat_backings[
                                 ref.binding_id
