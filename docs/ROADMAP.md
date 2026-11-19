@@ -2832,7 +2832,6 @@ deps ride the result's dep set — so `f := mk(x)` binds an opaque
 func value whose calls resolve through the ordinary func-value
 path (`var f = mk()` and `f = mk()` admit identically, and a
 multi-result signature with a func slot unpacks the same way).
-`return nil` stays closed.
 An imported func-result callee (`f := lib.Mk()`) records
 `direct_import` and binds an opaque func value the same way —
 see the C06 imported-callee section below.
