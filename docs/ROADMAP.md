@@ -3939,7 +3939,8 @@ elements, multi-result calls and local callees whose composite
 result is not summarizable.
 `len`/`cap` on a call result — `len(lib.G(a))`, `cap(lib.M(a))` —
 admits through the same member resolution: the length is runtime
-container state, so the result is dep-free like `len(lib.VA)`,
+container state whose provenance is the call's own dep set (a
+callee-produced container, not external state like `len(lib.VA)`),
 while a bodyless callee's call still folds minimally (argument
 deps evaluated, func-arg invocations drained, chan arguments
 promoted onto the external queue, writes stored, and a transfer

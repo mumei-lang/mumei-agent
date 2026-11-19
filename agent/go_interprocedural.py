@@ -14318,9 +14318,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         ):
                             # `len(G(x))` / `cap(lib.G(x))` — a call
                             # result's length is runtime container
-                            # state, dep-free like `len(lib.VA)`.
+                            # state whose provenance is the call's
+                            # own dep set (a callee-produced container,
+                            # not external state like `len(lib.VA)`).
                             # A resolvable callee evaluates through
-                            # `expression` for its effects only; a
+                            # `expression` and its deps carry; a
                             # bodyless imported callee whose COMPOSITE
                             # result keeps the call opaque folds
                             # minimally below (args ∪ writes ∪ chan
@@ -14333,11 +14335,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 or inner_call.kind
                                 != "external_or_bodyless"
                             ):
-                                self.expression(
+                                return self.expression(
                                     operand, fn, params, locals_,
                                     transfers, count, depth + 1,
                                 )
-                                return frozenset()
                             call_member, fact = self._call_result_fact(
                                 operand
                             )
@@ -14493,11 +14494,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._promote_chan_call_args(
                             call_node, "", locals_, params
                         )
-                        self._store_call_writes(
-                            list(inner_args),
+                        # The container is callee-produced — its
+                        # provenance is the call's own dep set, like
+                        # an index read or range element on the same
+                        # result, so the length carries those deps.
+                        result_deps = (
                             frozenset().union(*computed_args)
                             if computed_args
-                            else frozenset(),
+                            else frozenset()
+                        )
+                        self._store_call_writes(
+                            list(inner_args),
+                            result_deps,
                             locals_,
                             params,
                         )
@@ -14514,7 +14522,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     imported=True,
                                 )
                             )
-                        return frozenset()
+                        return result_deps
                     self._pin_fact_identities(member.type)
                     transfers.append(
                         CallTransfer(

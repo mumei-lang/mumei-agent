@@ -25045,8 +25045,9 @@ def test_func_elem_chan_result_conversion_arg_promotes(go_types_helper):
 
 def test_len_call_result_imported_slice(go_types_helper):
     # `len(lib.G(x))` — a call result's length is runtime container
-    # state: the result binds dep-free like `len(lib.VA)` while the
-    # bodyless callee folds minimally (member transfer recorded).
+    # state whose provenance is the call's own dep set, like an
+    # index read on the same result, while the bodyless callee
+    # folds minimally (member transfer recorded).
     files = {
         "a.go": "package p\n"
         "import \"lib\"\n"
@@ -25069,7 +25070,7 @@ def test_len_call_result_imported_slice(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
     assert all(t.target for t in result.calls)
 
 
@@ -25097,7 +25098,7 @@ def test_len_call_result_imported_map(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_cap_call_result_imported(go_types_helper):
@@ -25124,13 +25125,13 @@ def test_cap_call_result_imported(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_len_call_result_scalar_callee(go_types_helper):
     # `len(lib.S(x))` — an imported callee returning a string is a
-    # `direct_import` call: it evaluates through `expression` for
-    # its effects and the length stays dep-free.
+    # `direct_import` call: it evaluates through `expression` and
+    # the length carries the call result's own dependencies.
     files = {
         "a.go": "package p\n"
         "import \"lib\"\n"
@@ -25153,7 +25154,7 @@ def test_len_call_result_scalar_callee(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset()
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_len_call_result_chan_arg_promotes(go_types_helper):
