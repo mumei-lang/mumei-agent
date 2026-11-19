@@ -16570,9 +16570,12 @@ def test_bound_method_value_pointer_receiver_writes_back(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_bound_method_value_type_operand_stays_closed(go_types_helper):
-    # `f := St.M` is a method EXPRESSION — the type-name operand is
-    # not a variable receiver, so a call through `f` stays closed.
+def test_method_expr_value_call_counts_receiver_argument(
+    go_types_helper,
+):
+    # `f := St.M` is a method EXPRESSION value — argument 0 IS the
+    # receiver like the direct `St.M(s, 2)` call, so arity is
+    # parameters+1 and index 0 carries the receiver's deps.
     files = {
         "a.go": "package p\n"
         "type St struct { V int64 }\n"
@@ -16581,6 +16584,65 @@ def test_bound_method_value_type_operand_stays_closed(go_types_helper):
         "\ts := St{V: a}\n"
         "\tf := St.M\n"
         "\treturn f(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_value_copy_and_var_forms(go_types_helper):
+    # `var f = St.M` binds like `f := St.M`; `g := f` copies.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tvar f = St.M\n"
+        "\tg := f\n"
+        "\treturn g(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_method_expr_value_receiver_resolves_at_call_site(
+    go_types_helper,
+):
+    # `s` reseats between `f := St.M` and `f(s, 2)` — the receiver
+    # arg evaluates at the CALL site, so the current `s` deps flow.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func F(a int64, b int64) int64 {\n"
+        "\ts := St{V: a}\n"
+        "\tf := St.M\n"
+        "\ts = St{V: b}\n"
+        "\treturn f(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_method_expr_value_computed_operand_stays_closed(
+    go_types_helper,
+):
+    # `f := g().M` — a computed operand binds no stable receiver,
+    # so the record stays empty and `f(2)` keeps its opaque shape.
+    files = {
+        "a.go": "package p\n"
+        "type St struct { V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "func g() St { return St{V: 1} }\n"
+        "func F(a int64) int64 {\n"
+        "\tf := g().M\n"
+        "\treturn f(2)\n}\n"
     }
     _, snapshot, summaries = _method_unit(go_types_helper, files)
     result = named_package(files, snapshot, summaries, "F")
@@ -17372,4 +17434,136 @@ def test_loop_closure_callback_swap_keeps_updated_capture_deps(
     )
     assert result.available
     assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_expr_value_pointer_arg_broadcasts(
+    go_types_helper,
+):
+    # `type P = *St`; `f := P.Set; f(ptr, v)` — the receiver
+    # argument is a pointer binding, so the callee's writes land in
+    # its pointee and `ptr.V` afterwards carries every actual.
+    files = {
+        "a.go": "package p\n"
+        "type St struct{ V int64 }\n"
+        "type P = *St\n"
+        "func (st *St) Set(v int64) int64 { st.V = v; x := int64(0); q := &x; *q = v; return x }\n"
+        "func F(a int64, v int64) int64 {\n"
+        "\tptr := new(St)\n"
+        "\tptr.V = a\n"
+        "\tf := P.Set\n"
+        "\tf(ptr, v)\n"
+        "\treturn ptr.V\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_expr_value_field_receiver_arg_broadcasts(
+    go_types_helper,
+):
+    # `f := P.Set; f(box.P, v)` — the receiver argument is a field
+    # expression; the callee writes through `*box.P`, which is
+    # pointee memory, so the writes broadcast into escaped memory
+    # and `box.P.V` afterwards carries every actual.
+    files = {
+        "a.go": "package p\n"
+        "type St struct{ V int64 }\n"
+        "type P = *St\n"
+        "func (st *St) Set(v int64) int64 { st.V = v; x := int64(0); q := &x; *q = v; return x }\n"
+        "type Box struct{ P *St }\n"
+        "func F(a int64, v int64) int64 {\n"
+        "\tptr := new(St)\n"
+        "\tptr.V = a\n"
+        "\tbox := Box{P: ptr}\n"
+        "\tf := P.Set\n"
+        "\tf(box.P, v)\n"
+        "\treturn ptr.V\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_expr_value_promoted_embedded_pointer_broadcasts(
+    go_types_helper,
+):
+    # `f := Outer.Set` where `Outer` embeds `*Inner` — the callee
+    # writes through `outer.Inner`'s pointee, NOT `outer`'s own
+    # fields, so folding onto the argument's binding would lose the
+    # write: broadcast into pointee memory instead.
+    files = {
+        "a.go": "package p\n"
+        "type Inner struct{ X int64 }\n"
+        "func (i *Inner) Set(v int64) int64 { i.X = v; x := int64(0); q := &x; *q = v; return x }\n"
+        "type Outer struct{ *Inner }\n"
+        "func F(a int64, v int64) int64 {\n"
+        "\tinner := new(Inner)\n"
+        "\tinner.X = a\n"
+        "\ts := Outer{Inner: inner}\n"
+        "\tf := Outer.Set\n"
+        "\tf(s, v)\n"
+        "\treturn inner.X\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_expr_value_pins_type_operand_identity(go_types_helper):
+    # `f := Wrap.M` — the method-set lookup names the OPERAND type;
+    # `Wrap` promoted `M` from an embedded `St`, so its identity
+    # (not only the callee's `St` signature) must be pinned for
+    # `stale_dependents` to flag the summary when Wrap's set moves.
+    files = {
+        "a.go": "package p\n"
+        "type St struct{ V int64 }\n"
+        "func (st St) M(x int64) int64 { return st.V + x }\n"
+        "type Wrap struct{ St }\n"
+        "func F(a int64) int64 {\n"
+        "\ts := Wrap{St: St{V: a}}\n"
+        "\tf := Wrap.M\n"
+        "\treturn f(s, 2)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    wrap = next(
+        b
+        for b in snapshot.bindings
+        if b.kind == "type" and b.name == "Wrap"
+    )
+    assert wrap.type.type_id in result.pinned
+
+
+def test_method_expr_value_promoted_receiver_reads_pointee_writes(
+    go_types_helper,
+):
+    # `f := Outer.Get` where `Outer` embeds `*Inner` — `Get` reads
+    # `outer.Inner`'s pointee, so updates made through `inner` after
+    # the struct was built must reach the call's receiver deps.
+    files = {
+        "a.go": "package p\n"
+        "type Inner struct{ X int64 }\n"
+        "func (i Inner) Get() int64 { return i.X }\n"
+        "type Outer struct{ *Inner }\n"
+        "func F(a int64, v int64) int64 {\n"
+        "\tinner := new(Inner)\n"
+        "\tinner.X = a\n"
+        "\ts := Outer{Inner: inner}\n"
+        "\tf := Outer.Get\n"
+        "\tinner.X = v\n"
+        "\treturn f(s)\n}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
     assert result.return_dependencies == frozenset({0, 1})
