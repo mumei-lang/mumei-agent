@@ -1982,6 +1982,91 @@ class _Builder:
             return None, None
         return root_ref.binding_id, member
 
+    def _opaque_append_bind_toks(
+        self, rhs: Any
+    ) -> frozenset[tuple[int, int, int]] | None:
+        """The token set a `b := append(s, v)`/`b := append(a[i], v)`
+        result binds — a fresh backing beside the operand's share
+        group, or None when `rhs` is not a builtin `append` call.
+        Reading `_opaque_container_tokens` at call time makes the
+        share resolve against whichever state is live — the
+        parallel-assignment pre-pass calls this at pre-state so
+        `a, b = sub, append(a, v)` lands `b` on `a`'s OLD group."""
+        call = self.calls.get(self.node_key(rhs))
+        if call is None or call.kind != "builtin":
+            return None
+        callee_node = rhs.child_by_field_name("function")
+        while (
+            callee_node is not None
+            and callee_node.type == "parenthesized_expression"
+        ):
+            callee_node = next(
+                (
+                    c
+                    for c in callee_node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if callee_node is None or callee_node.text != b"append":
+            return None
+        # `a = append(b, x)` — append may reuse `b`'s array,
+        # so the result aims at `b`'s backing and a fresh
+        # one alike.
+        toks = {self.node_key(rhs)}
+        arguments_node = rhs.child_by_field_name("arguments")
+        args = (
+            _children(arguments_node)
+            if arguments_node is not None
+            else []
+        )
+        if args:
+            arg0 = args[0]
+            while (
+                arg0 is not None
+                and arg0.type == "parenthesized_expression"
+            ):
+                arg0 = next(
+                    (
+                        c
+                        for c in arg0.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if arg0 is not None and (
+                arg0.type == "index_expression"
+            ):
+                # `b = append(a[i], v)` — the appended
+                # element names a bound nested root's
+                # backing; the result may reuse it, so the
+                # root's share group unions in beside the
+                # fresh token. An unbound/deeper/array
+                # operand has no group.
+                toks |= self._opaque_container_index_sharer_toks(
+                    arg0
+                )
+            if arg0 is not None and arg0.type == "identifier":
+                arg_ref = self.references.get(self.node_key(arg0))
+                arg_binding = (
+                    self.bindings.get(arg_ref.binding_id)
+                    if arg_ref is not None
+                    else None
+                )
+                if (
+                    arg_binding is not None
+                    and arg_binding.type is not None
+                    and arg_binding.type.kind == "slice"
+                    and self._scalar_elem_collection(
+                        arg_binding.type
+                    )
+                ):
+                    toks |= self._opaque_container_tokens.get(
+                        arg_ref.binding_id,
+                        frozenset({arg_ref.binding_id}),
+                    )
+        return frozenset(toks)
+
     def _opaque_container_bind(
         self, rhs: Any
     ) -> frozenset[tuple[int, int, int]] | None:
@@ -2004,83 +2089,10 @@ class _Builder:
             if rhs is None:
                 return None
         if rhs.type == "call_expression":
+            append_toks = self._opaque_append_bind_toks(rhs)
+            if append_toks is not None:
+                return append_toks
             call = self.calls.get(self.node_key(rhs))
-            if call is not None and call.kind == "builtin":
-                callee_node = rhs.child_by_field_name("function")
-                while (
-                    callee_node is not None
-                    and callee_node.type == "parenthesized_expression"
-                ):
-                    callee_node = next(
-                        (
-                            c
-                            for c in callee_node.named_children
-                            if c.type != "comment"
-                        ),
-                        None,
-                    )
-                if callee_node is None or callee_node.text != b"append":
-                    return None
-                # `a = append(b, x)` — append may reuse `b`'s array,
-                # so the result aims at `b`'s backing and a fresh
-                # one alike.
-                toks = {self.node_key(rhs)}
-                arguments_node = rhs.child_by_field_name("arguments")
-                args = (
-                    _children(arguments_node)
-                    if arguments_node is not None
-                    else []
-                )
-                if args:
-                    arg0 = args[0]
-                    while (
-                        arg0 is not None
-                        and arg0.type == "parenthesized_expression"
-                    ):
-                        arg0 = next(
-                            (
-                                c
-                                for c in arg0.named_children
-                                if c.type != "comment"
-                            ),
-                            None,
-                        )
-                    if arg0 is not None and (
-                        arg0.type == "index_expression"
-                    ):
-                        # `b = append(a[i], v)` — the appended
-                        # element names a bound nested root's
-                        # backing; the result may reuse it, so the
-                        # root's share group unions in beside the
-                        # fresh token. An unbound/deeper/array
-                        # operand has no group.
-                        toks |= (
-                            self._opaque_container_index_sharer_toks(
-                                arg0
-                            )
-                        )
-                    if arg0 is not None and arg0.type == "identifier":
-                        arg_ref = self.references.get(
-                            self.node_key(arg0)
-                        )
-                        arg_binding = (
-                            self.bindings.get(arg_ref.binding_id)
-                            if arg_ref is not None
-                            else None
-                        )
-                        if (
-                            arg_binding is not None
-                            and arg_binding.type is not None
-                            and arg_binding.type.kind == "slice"
-                            and self._scalar_elem_collection(
-                                arg_binding.type
-                            )
-                        ):
-                            toks |= self._opaque_container_tokens.get(
-                                arg_ref.binding_id,
-                                frozenset({arg_ref.binding_id}),
-                            )
-                return frozenset(toks)
             if call is None or call.kind != "external_or_bodyless":
                 return None
             _member, fact = self._call_result_fact(rhs)
@@ -10588,6 +10600,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             pre_container_toks[pre_i] = frozenset(
                                 pre_toks
                             )
+                    elif (
+                        pre_rhs is not None
+                        and pre_rhs.type == "call_expression"
+                    ):
+                        # `a, b = sub, append(a, v)` — the append's
+                        # operand names the backing `a` held at
+                        # pre-state; `b` lands on that OLD group,
+                        # not the one `a`'s reseat produced.
+                        pre_bind = self._opaque_append_bind_toks(
+                            pre_rhs
+                        )
+                        if pre_bind is not None:
+                            pre_container_toks[pre_i] = pre_bind
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -16297,8 +16322,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             append_cont
                         ):
                             self._store(
-                                locals_, params, holder_id, appended,
-                                True,
+                                locals_, params, holder_id,
+                                appended, True,
                             )
                         self.indirect_writes |= appended
                     return deps

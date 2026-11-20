@@ -18979,6 +18979,32 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `a, b = sub, append(a[0], y)` — the append's operand
+        # names `a`'s PRE-state backing, so `b` lands on the old
+        # group `c` shares, not `a`'s reseated one.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tc := a[0]\n"
+            "\tvar b []int64\n"
+            "\ta, b = [][]int64{{0}}, append(a[0], y)\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # The same pre-state resolution on an identifier
+        # operand — `b` lands on the old `[]int64` group `c`
+        # shares.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tc := a\n"
+            "\tvar b []int64\n"
+            "\ta, b = []int64{0}, append(a, y)\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
