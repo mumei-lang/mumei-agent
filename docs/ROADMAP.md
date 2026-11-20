@@ -6143,8 +6143,9 @@ any default audit/CLI/MCP route are unchanged.
 Markers scan only the captured prefix of each stream: the output
 collector keeps at most the first 64 KiB of stdout and stderr, so a
 marker that appears only beyond the byte bound records `null`
-(indistinguishable from no match — the run's `complete` flag is the
-host's claim about whether the capture is whole).
+(indistinguishable from no match — the run's `complete` flag declares
+stdout's completeness, `stderr_complete` stderr's, so a stderr marker
+that misses is checked against `stderr_complete`).
 
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
