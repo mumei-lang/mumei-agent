@@ -6337,6 +6337,25 @@ declared, and grade promotion stays with the downstream gate — C11
 stays partial.
 
 
+### C11 audit + MCP scheduled-attempt requirement-list acceptance
+
+The audit and MCP mirrors of the conjunctive check:
+`audit --schedule-core-requirement-list PATH` (requires
+`--schedule-core`, conflicts with `--schedule-core-requirement`) and
+the MCP `verify_schedule` `core_requirement_list_path` input
+(requires `core_path`, conflicts with `core_requirement_path`) run
+`core evidence accept --stdin --json --requirement-list PATH` over
+the selected attempt's captured output against a declared
+`mumei.evidence-requirement-list/v1` document, recording Core's
+declared verdict as the `evidence_check` outcome with the
+`requirement_fingerprint` it emitted. Both paths join the declared
+inputs and are redacted from error text; the promotable export stays
+CLI-only — neither surface writes the gate triple.
+
+C11 stays partial; verdict-bearing grade promotion and C12's demand
+gate are unchanged.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

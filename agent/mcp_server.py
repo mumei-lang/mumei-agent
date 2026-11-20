@@ -2962,6 +2962,7 @@ def verify_schedule(
     memory_bound_mb: int | None = None,
     core_path: str | None = None,
     core_requirement_path: str | None = None,
+    core_requirement_list_path: str | None = None,
 ) -> str:
     """Run the declared plan/dispatch/observe/fallback schedule.
 
@@ -3003,6 +3004,14 @@ def verify_schedule(
             declared verdict — still a dispatch observation on
             ``mumei.attempt-schedule/v1``, never a grade or claim
             verdict.
+        core_requirement_list_path: Optional absolute path to a
+            declared ``mumei.evidence-requirement-list/v1`` document;
+            requires ``core_path`` and conflicts with
+            ``core_requirement_path``. With it the selected attempt's
+            captured output runs through ``core evidence accept --stdin
+            --json --requirement-list PATH`` — the conjunctive
+            requirement-set check — and ``evidence_check`` records
+            Core's declared verdict the same way.
 
     Returns:
         JSON with `report` — the `mumei.attempt-schedule/v1`
@@ -3027,11 +3036,22 @@ def verify_schedule(
         paths["core_path"] = core_path
     if core_requirement_path is not None:
         paths["core_requirement_path"] = core_requirement_path
+    if core_requirement_list_path is not None:
+        paths["core_requirement_list_path"] = core_requirement_list_path
     for name, path in paths.items():
         if not _valid_declared_path(path):
             return _err(f"{name} must be a nonempty single-line path")
     if core_requirement_path is not None and core_path is None:
         return _err("core_requirement_path requires core_path")
+    if core_requirement_list_path is not None and core_path is None:
+        return _err("core_requirement_list_path requires core_path")
+    if (
+        core_requirement_path is not None
+        and core_requirement_list_path is not None
+    ):
+        return _err(
+            "core_requirement_list_path conflicts with core_requirement_path"
+        )
     if (
         type(max_attempts) is not int
         or max_attempts < 1
@@ -3055,6 +3075,7 @@ def verify_schedule(
         memory_bound_mb=memory_bound_mb,
         core=core_path,
         core_requirement=core_requirement_path,
+        core_requirement_list=core_requirement_list_path,
         output=None,
     )
     try:
