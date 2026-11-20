@@ -4121,7 +4121,11 @@ reuse the extracted element's backing, so `b := append(a[i], v)`
 unions the root's share-group tokens into `b` beside the
 fresh result token (an unbound/array operand stays closed),
 and the appended elements' deps land in the root's sharers
-like the plain `append(a, v)` slice case. A FIELD member
+like the plain `append(a, v)` slice case; an appended
+SLICE or MAP element (`append(a[i][j], sub)`) unions the
+element's share group into the result's, so a store through
+either side reaches the other, while a spread `sub...` or
+array element copies and stays detached. A FIELD member
 shares the same way at any depth — `a := s.F`
 on a `[][]int64`/`[][][]int64`/`map[K][]T`/`[N][]T` member binds
 `a` into the field's group like the single-level form, and an

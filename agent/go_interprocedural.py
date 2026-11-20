@@ -2086,6 +2086,43 @@ class _Builder:
                         arg_ref.binding_id,
                         frozenset({arg_ref.binding_id}),
                     )
+            # `b := append(a[i][j], sub)` — an appended
+            # collection element shares its backing with the
+            # result's element slot, so its group unions in
+            # beside the operand's. A spread `sub...` is a
+            # `variadic_argument` node (skipped — the elements
+            # copy), and an array element is a value copy for
+            # the same reason.
+            for extra in args[1:]:
+                while (
+                    extra is not None
+                    and extra.type == "parenthesized_expression"
+                ):
+                    extra = next(
+                        (
+                            c
+                            for c in extra.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if extra is None or extra.type != "identifier":
+                    continue
+                extra_ref = self.references.get(self.node_key(extra))
+                extra_binding = (
+                    self.bindings.get(extra_ref.binding_id)
+                    if extra_ref is not None
+                    else None
+                )
+                if (
+                    extra_binding is not None
+                    and extra_binding.type is not None
+                    and extra_binding.type.kind in {"slice", "map"}
+                ):
+                    toks |= self._opaque_container_tokens.get(
+                        extra_ref.binding_id,
+                        frozenset({extra_ref.binding_id}),
+                    )
         return frozenset(toks)
 
     def _opaque_container_bind(

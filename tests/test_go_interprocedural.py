@@ -19248,6 +19248,28 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0][0]\n}\n",
             frozenset({0, 1}),
         ),
+        # `b := append(a[i][j], sub)` — an appended slice element
+        # shares its backing with `b`'s element slot, so a store
+        # through `b` reaches `sub`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][][][]int64{{{{0}}}}\n"
+            "\tsub := []int64{0}\n"
+            "\tb := append(a[0][0], sub)\n"
+            "\tb[1][0] = x\n"
+            "\treturn sub[0]\n}\n",
+            frozenset({0}),
+        ),
+        # …and a store on the appended slice reaches `b`'s slot.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][][][]int64{{{{0}}}}\n"
+            "\tsub := []int64{0}\n"
+            "\tb := append(a[0][0], sub)\n"
+            "\tsub[0] = x\n"
+            "\treturn b[1][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
