@@ -6301,6 +6301,21 @@ C11 stays partial; verdict-bearing grade promotion, C12's demand gate
 and the MCP port are unchanged — Evidence acceptance remains open.
 
 
+### C11 MCP scheduled-attempt evidence acceptance
+
+The MCP `verify_schedule` tool gains an optional
+`core_requirement_path` input — the MCP port of
+`verify-schedule --core-requirement`: it requires `core_path` and
+declares the same `mumei.evidence-requirement/v1` document, so the
+selected attempt's captured output runs `core evidence accept --stdin
+--json --requirement PATH` and the schedule record carries Core's
+declared verdict and the `requirement_fingerprint` it emitted. The
+path joins the declared inputs and is redacted from error text.
+
+C11 stays partial; verdict-bearing grade promotion and C12's demand
+gate are unchanged — Evidence acceptance remains open.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
