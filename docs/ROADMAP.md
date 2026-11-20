@@ -6284,17 +6284,6 @@ and the audit/MCP ports are unchanged — Evidence acceptance remains
 open.
 
 
-### C11 MCP scheduled-attempt evidence check
-
-The MCP `verify_schedule` tool gains an optional `core_path` input that
-declares the same trusted Core executable as `verify-schedule --core`:
-absolute path, passed through to `run_attempt_schedule` so a selected
-attempt's captured output runs the Core representation check and the
-schedule record carries `evidence_check` / `evidence_acceptance`. The
-MCP surface is identical in shape to the CLI — the field is a dispatch
-observation on `mumei.attempt-schedule/v1`, never a grade or claim
-verdict. C11 stays partial; Evidence acceptance remains open.
-
 ### C11 MCP scheduled-attempt evidence acceptance
 
 The MCP `verify_schedule` tool gains an optional
