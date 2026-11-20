@@ -4033,6 +4033,31 @@ Direct method *calls* (`st.M(x)`, `T.M(st, x)`) admit in the Go
 interprocedural frontier's method-call slice below; bound method
 *values* (`f := st.M`) admit in the slice after it.
 
+### C07 scalar-element local containers
+
+A *local* `[]T`/`[N]T`/`map[K]T` whose element is scalar or a
+pointer — `var a [4]int64`, `a := []int64{x, 7}`,
+`m := map[K]V{...}`, `a := make([]int64, n)` — binds under the
+same backing-token model a call-result container uses: one
+conflated dep set carries every element's provenance, so
+`a[i] = v` lands `v|index` in the backing every sharer reads and
+`a[i]`/`m[k]`/`v, ok := m[k]`/`for _, v := range a` union the
+sharers' sets with the index's own deps. `a[i] = <-ch` in a
+select lands the received deps the same way, and `a[i]++` reads
+the element's own set plus the index before unioning both back.
+`b := a` shares a slice/map backing and copies an array's;
+`a = append(a, v)`/`b := append(a, v)` may reuse the argument's
+array so the element lands in the shared group, and a definite
+`a = []T{...}`/`a = make(...)` reseat mints a fresh backing like
+`a :=` does while `a = nil` drops the token (`a[i]` then fails
+closed again). A named collection type pins its declared
+identities on admit. The element gate keeps the honest closures:
+`[][]int64`/`[]struct`/`[]func` locals still cannot bind (the
+func-element collection has its own model), a nested
+`a[i][j] = v` stays one-level-closed, `delete(m, k)`/`copy` stay
+opaque builtins, and a parameter container (`a []int64`) is
+rejected by the signature gate before it can ever register.
+
 ### C07 per-statement read attribution
 
 `FunctionSummary` now also emits `statement_reads`: one

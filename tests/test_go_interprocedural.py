@@ -186,8 +186,8 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
-        # `make` still produces non-scalar resource state.
-        "func F(x int64) int64 { var s []int64; _ = s; return x }",
+        # A non-scalar-element local still cannot bind.
+        "func F(x int64) int64 { var s [][]int64; _ = s; return x }",
         # A parenthesized function name is outside the store-RHS
         # position the alias admits — `h := (G)` stays closed.
         "func G(v int64) int64 { return v }; func F(x int64) int64 { h := (G); return h(x) }",
@@ -1235,8 +1235,8 @@ def test_pure_builtin_dependencies(go_types_helper, declarations, expected):
         # bound in the scalar fragment anyway.
         "func F(x int64) int64 { return int64(len(\"ab\")) + x }",
         "func F(x int64) int64 { return int64(cap([3]int64{1, 2, 3})) }",
-        # `make` is allocation of a composite value — still opaque.
-        "func F(x int64) int64 { _ = make([]int64, 2); return x }",
+        # `make` of a non-scalar-element container cannot bind.
+        "func F(x int64) int64 { s := make([][]int64, 2); _ = s; return x }",
     ],
 )
 def test_impure_builtins_stay_opaque(go_types_helper, declarations):
@@ -1254,8 +1254,8 @@ def test_impure_builtins_stay_opaque(go_types_helper, declarations):
         # defer/go are effect-bearing and stay outside the fragment.
         "func F(x int64) int64 { defer F(0); return x }",
         "func F(x int64) int64 { go F(0); return x }",
-        # inc/dec on a non-identifier operand is outside the fragment.
-        "func F(x int64) int64 { a := [1]int64{x}; a[0]++; return x }",
+        # inc/dec on a nested index operand is outside the fragment.
+        "func F(x int64) int64 { a := [][]int64{{x}}; a[0][0]++; return x }",
     ],
 )
 def test_control_statement_shapes_stay_unsupported(
@@ -7236,13 +7236,12 @@ def test_local_struct_value_pointer_leaf_field(
 def test_local_struct_value_boundaries(
     go_types_helper,
 ):
-    # Named slices stay closed (a direct `st.M()` call admits through
-    # the method-call slice and `f := st.M` through bound method
-    # values — both covered by their own tests; anonymous
-    # `struct{...}` values admit — covered by the dedicated
-    # anonymous-struct tests).
-    for decl, body in [
-        ("type S []int64", "sl := S{x}; return sl[0]"),
+    # A named slice over a scalar element rides the bound
+    # scalar-container model like an anonymous `[]int64`; a named
+    # slice over a non-scalar element stays closed.
+    for decl, body, available in [
+        ("type S []int64", "sl := S{x}; return sl[0]", True),
+        ("type N [][]int64", "sl := N{{x}}; return sl[0][0]", False),
     ]:
         files = {
             "a.go": f"package p\n{decl}\n"
@@ -7252,7 +7251,7 @@ def test_local_struct_value_boundaries(
         result = named_package(
             files, snapshot, ip.summarize_go_package(files, snapshot), "F"
         )
-        assert not result.available, body
+        assert result.available == available, body
 
 
 @pytest.mark.parametrize(
@@ -12548,24 +12547,23 @@ def test_builtin_new_named_pointee_field(
     assert result.return_dependencies == frozenset({0})
 
 
-def test_builtin_make_stays_closed(
+def test_builtin_make_non_scalar_stays_closed(
     go_types_helper,
 ):
-    # `make([]int64)` — a composite value the binding model cannot
-    # hold stays opaque like before.
+    # `make([][]int64)` — a composite value whose element the
+    # scalar-container gate rejects stays opaque like before.
     files = {
         "a.go": "package p\n"
         "func F(a int64) int64 {\n"
-        "\ts := make([]int64, 3)\n"
-        "\ts[0] = a\n"
-        "\treturn s[0]\n}\n"
+        "\ts := make([][]int64, 3)\n"
+        "\ts[0] = nil\n"
+        "\treturn 0\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
-    assert result.gaps[0].reason == "unresolved_or_opaque_call"
 
 
 def test_builtin_new_pointer_arg_propagates_callee_writes(
@@ -14901,10 +14899,11 @@ def test_channel_len_through_alias(go_types_helper):
 
 def test_channel_boundaries_stay_closed(go_types_helper):
     # A send through a selector (`p.C <- x`) admits under the same
-    # external model a `chan` parameter or package var uses; only
-    # `make([]T)` stays opaque here. A select is modelled like an
-    # if/else chain whose guards are comm ops: the receive's name
-    # takes the queue's deps and every alternative joins by union.
+    # external model a `chan` parameter or package var uses. A
+    # select is modelled like an if/else chain whose guards are comm
+    # ops: the receive's name takes the queue's deps and every
+    # alternative joins by union. `make([]T)` now binds a scalar
+    # container — `_ = s` folds nothing.
     slice_make = named(
         *unit(
             go_types_helper,
@@ -14912,7 +14911,7 @@ def test_channel_boundaries_stay_closed(go_types_helper):
             "\ts := make([]int64, 2)\n\t_ = s\n\treturn x\n}\n",
         )
     )
-    assert not slice_make.available
+    assert slice_make.available
     select_case = named(
         *unit(
             go_types_helper,
@@ -16152,7 +16151,7 @@ def test_statement_reads_absent_when_closed(go_types_helper):
         *unit(
             go_types_helper,
             "func F(x int64) int64 {\n"
-            "\ts := make([]int64, 2)\n\treturn s[0]\n}\n",
+            "\ts := make([][]int64, 2)\n\t_ = s\n\treturn x\n}\n",
         )
     )
     assert not result.available
@@ -18194,19 +18193,461 @@ def test_select_send_case_admits(go_types_helper):
 
 
 def test_select_non_identifier_store_stays_closed(go_types_helper):
-    # `a[i] = <-ch` — an index into an unbound container has no
-    # binding to fold the received deps into, so it stays closed.
+    # `a[i] = <-ch` on a PARAMETER container — the signature gate
+    # rejects `[]int64` params outright, so it stays closed.
     result = named(
         *unit(
             go_types_helper,
-            "func F(ch chan int64) int64 {\n"
-            "\tvar a [4]int64\n"
+            "func F(ch chan int64, a []int64) int64 {\n"
             "\tselect {\n"
             "\tcase a[0] = <-ch:\n"
             "\t}\n"
             "\treturn 0\n}\n",
         )
     )
+    assert not result.available
+
+
+def test_select_bound_container_elem_store_admits(go_types_helper):
+    # `a[i] = <-ch` on a bound scalar container — the received deps
+    # land in the backing every sharer reads, like `a[i] = v`.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64) int64 {\n"
+            "\ta := make([]int64, 4)\n"
+            "\tb := a\n"
+            "\tselect {\n"
+            "\tcase b[0] = <-ch:\n"
+            "\t}\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_scalar_container_array_copy_isolates(go_types_helper):
+    # `b := a` on an ARRAY copies the backing — `b[0] = <-ch` never
+    # reaches `a`'s elements.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(ch chan int64) int64 {\n"
+            "\tvar a [4]int64\n"
+            "\tb := a\n"
+            "\tselect {\n"
+            "\tcase b[0] = <-ch:\n"
+            "\t}\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `var a [4]int64; a[0] = x; return a[0]` — the store lands in
+        # the backing, the read folds the whole conflated set.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar a [4]int64\n"
+            "\ta[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i] = x` — the index's own deps join the store.
+        (
+            "func F(x, i int64) int64 {\n"
+            "\tvar a []int64\n"
+            "\ta[i] = x\n"
+            "\treturn a[i]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a := []int64{x, 7}` — literal element deps conflate, so
+        # even `a[1]` (which stored 7) reads x's provenance.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{x, 7}\n"
+            "\treturn a[1]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` shares a slice's backing — `b[i] = x` reaches `a`.
+        (
+            "func F(x, i int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tb := a\n"
+            "\tb[i] = x\n"
+            "\treturn a[i]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `m := map[K]V{}; m[i] = x; return m[i]`.
+        (
+            "func F(x, i int64) int64 {\n"
+            "\tm := map[int64]int64{}\n"
+            "\tm[i] = x\n"
+            "\treturn m[i]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `v, ok := m[i]` — the comma-ok read folds the same set.
+        (
+            "func F(x, i int64) int64 {\n"
+            "\tm := map[int64]int64{}\n"
+            "\tm[0] = x\n"
+            "\tv, ok := m[i]\n"
+            "\t_ = ok\n"
+            "\treturn v\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a = append(a, x)` — the element lands in the backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 0)\n"
+            "\ta = append(a, x)\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a = append(a, x)` may reuse `a`'s backing, so a sharer may
+        # observe the new element.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 4)\n"
+            "\tb := a\n"
+            "\ta = append(a, x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `make([]int64, n)` — a fresh empty container binds.
+        (
+            "func F(x, n int64) int64 {\n"
+            "\ta := make([]int64, n)\n"
+            "\ta[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `for _, v := range a` — each element carries the conflated
+        # set.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\ts := int64(0)\n"
+            "\tfor _, v := range a {\n"
+            "\t\ts += v\n"
+            "\t}\n"
+            "\treturn s\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i]++` — the element's own set plus the index's deps.
+        (
+            "func F(x, i int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\ta[i]++\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a = []int64{x}` — a literal reseat replaces the backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\ta = []int64{x}\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `len(a)` on a bound container — the length is runtime
+        # container state carrying the conflated set.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\treturn int64(len(a))\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i] = <-ch` on a bound map — same elem-store admit as the
+        # slice path.
+        (
+            "func F(ch chan int64, k int64) int64 {\n"
+            "\tm := map[int64]int64{}\n"
+            "\tselect {\n"
+            "\tcase m[k] = <-ch:\n"
+            "\t}\n"
+            "\treturn m[k]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `case b[0] = <-ch` accumulates like `s[i] = v` — the
+        # backing's prior element deps survive the receive.
+        (
+            "func F(ch chan int64, x int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\tb := a\n"
+            "\tselect {\n"
+            "\tcase b[0] = <-ch:\n"
+            "\t}\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a := s.F; b := s.F` — two reads of the same composite
+        # field share one backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The field backing persists across binds — a second `b :=
+        # s.F` after the store still shares it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\ta[0] = x\n"
+            "\tb := s.F\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Distinct instances keep distinct field backings —
+        # `a := s.F` and `b := t.F` do not share.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\tvar t struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tb := t.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset(),
+        ),
+        # `a := s.F` on an ARRAY field copies — `b` is an
+        # independent value, so `a[0] = x` never reaches it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [4]int64 }\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset(),
+        ),
+        # `s.F = …` reseats the field's backing — `a` still aliases
+        # the previous slice while `b` names the new one.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\ts.F = []int64{0}\n"
+            "\tb := s.F\n"
+            "\tb[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset(),
+        ),
+        # `s.F = []int64{x}` — the stored literal's elements land
+        # in `s`'s set, and `b := s.F` reads them through the
+        # reseated group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ts.F = []int64{x}\n"
+            "\tb := s.F\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s.F = a` — the field reseats onto `a`'s backing, so
+        # `a[0] = x` is visible through `b`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := []int64{0}\n"
+            "\ts.F = a\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s.F, s.G = s.G, s.F` swaps the fields' backings — `a`
+        # still aliases the slice `s.F` named at pre-state, and
+        # `s.G` reseated onto that same group, so the store reaches
+        # a `b := s.G` bound after the swap.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64; G []int64 }\n"
+            "\ta := s.F\n"
+            "\ts.F, s.G = s.G, s.F\n"
+            "\tb := s.G\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The other direction of the same swap — `b` aliases
+        # `s.G`'s old backing and `s.F` reseated onto it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64; G []int64 }\n"
+            "\tb := s.G\n"
+            "\ts.F, s.G = s.G, s.F\n"
+            "\tc := s.F\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A swap keeps BOTH backings under the root — `t := s`
+        # copies share them, so a write through `s.G`'s old alias
+        # still reaches a `t.F` read after the swap reseated `s.F`
+        # onto that group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64; G []int64 }\n"
+            "\ts.F = []int64{0}\n"
+            "\ts.G = []int64{0}\n"
+            "\tb := s.G\n"
+            "\ts.F, s.G = s.G, s.F\n"
+            "\tb[0] = x\n"
+            "\tt := s\n"
+            "\tc := t.F\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `if c { s.F = t }` — the untaken path keeps `s.F` aimed
+        # at `a`'s backing, so `a[0] = x` still lands in `s`'s
+        # conflated set and `b`'s read observes it.
+        (
+            "func F(x int64, c bool) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tvar t []int64\n"
+            "\tif c {\n\t\ts.F = t\n\t}\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A conditional `s.F = nil` likewise leaves the old backing
+        # a candidate — the untaken path never dissolved the group.
+        (
+            "func F(x int64, c bool) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tif c {\n\t\ts.F = nil\n\t}\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `_ = append(a, x)` — a discarded append may still reuse
+        # `a`'s array, so its elements land in the backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 4)\n"
+            "\t_ = append(a, x)\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 4)\n"
+            "\tb := a\n"
+            "\t_ = append(a, x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a, b = b, a` swaps the backings — after the swap `b` still
+        # shares `c`'s backing (it now names `a`'s original array).
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tb := []int64{0}\n"
+            "\tc := a\n"
+            "\ta, b = b, a\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a = ([]int64{x})` — a parenthesized literal reseat still
+        # replaces the backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\ta = ([]int64{x})\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `p := &a[0]; *p = x` — the pointer write folds into the
+        # container's conflated set through the escaped binding.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tp := &a[0]\n"
+            "\t*p = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_scalar_container_bind_read_write_admits(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `var a [][]int64` — a non-scalar element still cannot bind.
+        "func F(x int64) int64 {\n"
+        "\tvar a [][]int64\n"
+        "\ta[0][0] = x\n"
+        "\treturn a[0][0]\n}\n",
+        # `a[0][0] = x` on a nested param container stays closed —
+        # `_opaque_container_index_target` is one level only.
+        "func F(a [][]int64, x int64) {\n"
+        "\ta[0][0] = x\n}\n",
+        # `delete(m, k)` — the builtin has no scalar-container
+        # handling and stays opaque.
+        "func F(x int64) int64 {\n"
+        "\tm := map[int64]int64{}\n"
+        "\tdelete(m, x)\n"
+        "\treturn m[0]\n}\n",
+        # `a = nil` drops the backing token — `a[0]` afterwards
+        # resolves nothing.
+        "func F(x int64) int64 {\n"
+        "\ta := []int64{x}\n"
+        "\ta = nil\n"
+        "\treturn a[0]\n}\n",
+        # `a[0] = x` directly on a param — the param's backing was
+        # never registered (no `b := a` mint), so the store stays
+        # closed.
+        "func F(a []int64, x int64) {\n"
+        "\ta[0] = x\n}\n",
+        # `a := t[0]` — the element of a nested container has no
+        # shareable identity to mint from.
+        "func F(t [][]int64, x int64) int64 {\n"
+        "\ta := t[0]\n"
+        "\ta[0] = x\n"
+        "\treturn a[0]\n}\n",
+        # `a := s.F` where `F` is a non-scalar container — the
+        # selector share only covers scalar-element fields, and the
+        # opaque gate still rejects the nested element.
+        "func F(x int64) int64 {\n"
+        "\tvar s struct{ F [][]int64 }\n"
+        "\ta := s.F\n"
+        "\ta[0][0] = x\n"
+        "\treturn a[0][0]\n}\n",
+        # `a := <-cc` — a container received off a channel has no
+        # identity to share; the bind stays closed.
+        "func F(cc chan []int64, x int64) int64 {\n"
+        "\ta := <-cc\n"
+        "\ta[0] = x\n"
+        "\treturn a[0]\n}\n",
+    ],
+)
+def test_scalar_container_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
     assert not result.available
 
 
@@ -21772,7 +22213,7 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     # cannot evaluate, so the outer call fails closed through it.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { m:=map[int]int{1:2}; _=m; return nil }; "
+        "func mk() func() int64 { m:=map[int][]int{1:nil}; _=m; return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
@@ -23187,9 +23628,9 @@ def test_func_elem_index_write_make_named_and_rebind(go_types_helper):
 def test_func_elem_index_write_stays_closed(go_types_helper):
     # A param container's elements live in caller memory — storing
     # into `fs[0]` is an external mutation the summary cannot
-    # model; a scalar-element container stays closed the same way,
-    # and a nested `fm[k][i]` write is a container-of-container the
-    # index model does not reach.
+    # model; a nested `fm[k][i]` write is a container-of-container
+    # the index model does not reach. A bound scalar-element
+    # container's `vs[0] = x` admits through the scalar slice.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(fs []func() int64, f func() int64) int64 {\n"
@@ -23209,7 +23650,8 @@ def test_func_elem_index_write_stays_closed(go_types_helper):
         "}",
     )
     result = named(source, snapshot, summaries)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
     # A third index level stays closed — `fm[k][i][j]` nests deeper
     # than the one extra level the slot model conflates.
@@ -23560,12 +24002,12 @@ def test_func_elem_append_forms(go_types_helper):
     assert result.available
     assert result.return_dependencies == frozenset({0})
 
-    # `append` on a non-func container stays closed.
+    # `append` on a non-scalar-element container stays closed.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 {\n"
-        "    xs := []int64{}\n"
-        "    xs = append(xs, x)\n"
+        "    xs := [][]int64{}\n"
+        "    xs = append(xs, []int64{x})\n"
         "    return x\n"
         "}",
     )
@@ -24738,14 +25180,14 @@ def test_opaque_composite_scalar_reseat_closes(go_types_helper):
     assert not result.available
 
 
-def test_opaque_composite_literal_stays_closed(go_types_helper):
-    # `s := []int64{a}` — only call results and bound containers
-    # back a name; a literal keeps `s[i]` closed.
+def test_opaque_composite_literal_non_scalar_stays_closed(go_types_helper):
+    # `s := [][]int64{{a}}` — a literal with a non-scalar element
+    # still cannot bind a name.
     files = {
         "a.go": "package p\n"
         "func F(a, j int64) int64 {\n"
-        "\ts := []int64{a}\n"
-        "\treturn s[j]\n}\n"
+        "\ts := [][]int64{{a}}\n"
+        "\treturn s[j][0]\n}\n"
     }
     snapshot = load_go_package_snapshot(
         package_report(go_types_helper, files), files, target_arch="amd64"

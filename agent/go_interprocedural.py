@@ -1460,6 +1460,27 @@ class _Builder:
             self._pin_fact_identities(fact)
         return collection
 
+    def _scalar_elem_collection(self, fact: Any) -> bool:
+        """A `[]T`/`[N]T`/`map[K]T` local whose elements are scalar
+        or pointer — `var a [4]int64`, `a := []int64{x}`,
+        `m := map[K]int{...}`. It rides the bound opaque-container
+        model: one conflated dep set carries every element's
+        provenance, `a[i] = v` lands in the backing every sharer
+        reads, and `a[i]` unions the sharers' sets with the index's
+        own deps. A `b := a` copy shares a slice/map backing; an
+        array copy mints a fresh one (`_opaque_container_bind`). A
+        named container type pins its declared identities on admit
+        like a func-element container's does."""
+        collection = (
+            fact is not None
+            and fact.kind in {"slice", "array", "map"}
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind in {"integer", "boolean", "pointer"}
+        )
+        if collection:
+            self._pin_fact_identities(fact)
+        return collection
+
     def _func_elem_nested_operand(
         self, operand: Any
     ) -> tuple[str, Any, Any | None] | None:
@@ -1687,13 +1708,20 @@ class _Builder:
         return ref, lhs.child_by_field_name("index"), inner_index
 
     def _func_elem_append_target(
-        self, node: Any, locals_: dict[str, frozenset[int]]
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        gate: Any = None,
     ) -> str | None:
         """`append(fs, ...)` — the builtin append whose first argument
         names a bound func-element container local. Returns the
         container's binding id, or None for any other call shape. A
         param container stays closed like an element store does: its
-        elements live in caller memory."""
+        elements live in caller memory. `gate` overrides the element
+        collection check (`_scalar_elem_collection` admits the scalar
+        form)."""
+        if gate is None:
+            gate = self._func_elem_collection
         while (
             node is not None and node.type == "parenthesized_expression"
         ):
@@ -1737,7 +1765,7 @@ class _Builder:
         if ref is None or ref.binding_id not in locals_:
             return None
         bound = self.bindings.get(ref.binding_id)
-        if bound is None or not self._func_elem_collection(bound.type):
+        if bound is None or not gate(bound.type):
             return None
         return ref.binding_id
 
@@ -1796,6 +1824,58 @@ class _Builder:
             "struct",
         }
 
+    def _scalar_container_field(
+        self, sel: Any
+    ) -> tuple[str | None, Any]:
+        """`s.F` (or a nested `s.W.F`) naming a scalar-element
+        collection field on a local-composite root — returns
+        (root binding id, member), else (None, None). An array
+        member is included: callers decide whether its copy
+        semantics admit a shared backing token."""
+        field = sel.child_by_field_name("field")
+        f_ref = (
+            self.references.get(self.node_key(field))
+            if field is not None
+            else None
+        )
+        member = self._field_identity(f_ref)
+        root = sel.child_by_field_name("operand")
+        while root is not None and root.type in {
+            "parenthesized_expression",
+            "selector_expression",
+            "field_expression",
+            "index_expression",
+            "dereference_expression",
+        }:
+            if root.type == "parenthesized_expression":
+                root = next(
+                    (
+                        c
+                        for c in root.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            else:
+                root = root.child_by_field_name("operand")
+        root_ref = (
+            self.references.get(self.node_key(root))
+            if root is not None and root.type == "identifier"
+            else None
+        )
+        if (
+            member is None
+            or member.type is None
+            or not self._scalar_elem_collection(member.type)
+            or root_ref is None
+            or root_ref.binding_id is None
+            or not self._is_local_composite(
+                self.bindings.get(root_ref.binding_id)
+            )
+        ):
+            return None, None
+        return root_ref.binding_id, member
+
     def _opaque_container_bind(
         self, rhs: Any
     ) -> frozenset[tuple[int, int, int]] | None:
@@ -1819,6 +1899,68 @@ class _Builder:
                 return None
         if rhs.type == "call_expression":
             call = self.calls.get(self.node_key(rhs))
+            if call is not None and call.kind == "builtin":
+                callee_node = rhs.child_by_field_name("function")
+                while (
+                    callee_node is not None
+                    and callee_node.type == "parenthesized_expression"
+                ):
+                    callee_node = next(
+                        (
+                            c
+                            for c in callee_node.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if callee_node is None or callee_node.text != b"append":
+                    return None
+                # `a = append(b, x)` — append may reuse `b`'s array,
+                # so the result aims at `b`'s backing and a fresh
+                # one alike.
+                toks = {self.node_key(rhs)}
+                arguments_node = rhs.child_by_field_name("arguments")
+                args = (
+                    _children(arguments_node)
+                    if arguments_node is not None
+                    else []
+                )
+                if args:
+                    arg0 = args[0]
+                    while (
+                        arg0 is not None
+                        and arg0.type == "parenthesized_expression"
+                    ):
+                        arg0 = next(
+                            (
+                                c
+                                for c in arg0.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if arg0 is not None and arg0.type == "identifier":
+                        arg_ref = self.references.get(
+                            self.node_key(arg0)
+                        )
+                        arg_binding = (
+                            self.bindings.get(arg_ref.binding_id)
+                            if arg_ref is not None
+                            else None
+                        )
+                        if (
+                            arg_binding is not None
+                            and arg_binding.type is not None
+                            and arg_binding.type.kind == "slice"
+                            and self._scalar_elem_collection(
+                                arg_binding.type
+                            )
+                        ):
+                            toks |= self._opaque_container_tokens.get(
+                                arg_ref.binding_id,
+                                frozenset({arg_ref.binding_id}),
+                            )
+                return frozenset(toks)
             if call is None or call.kind != "external_or_bodyless":
                 return None
             _member, fact = self._call_result_fact(rhs)
@@ -1910,6 +2052,32 @@ class _Builder:
             fresh = frozenset({self.node_key(rhs)})
             self._opaque_container_tokens[ref.binding_id] = fresh
             return fresh
+        if rhs.type in {"selector_expression", "field_expression"}:
+            root_id, member = self._scalar_container_field(rhs)
+            if root_id is None:
+                return None
+            if member.type.kind == "array":
+                # `a := s.F` on an array field is a value copy —
+                # each extraction mints its own backing. Sharing
+                # the field's token (or joining `s`'s group) would
+                # leak `a[i] = x` into an independent `b`'s reads.
+                return frozenset({self.node_key(rhs)})
+            field_key = f"{root_id}\x00{member.id}"
+            toks = self._opaque_container_tokens.get(field_key)
+            if not toks:
+                toks = frozenset({self.node_key(rhs)})
+            self._opaque_container_tokens[field_key] = toks
+            # `s`'s conflated set covers every field — join it to
+            # the group so `a[i] = x` lands on the slot `s.F[j]`
+            # reads. Different fields mint different token sets but
+            # all reach `s`, matching the composite's own conflation.
+            self._opaque_container_tokens[root_id] = (
+                self._opaque_container_tokens.get(
+                    root_id, frozenset()
+                )
+                | toks
+            )
+            return toks
         return None
 
     def _opaque_call_container(
@@ -4654,6 +4822,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 pending.append(("alias",))
                 continue
+            opaque_elem = self._opaque_container_index_target(lhs)
+            if opaque_elem is not None:
+                ref, index_node = opaque_elem
+                # `a[i] = <-ch` — a store into a bound container's
+                # backing lands the received deps (plus the index's
+                # own) in every sharer's set, like `a[i] = v` does.
+                index_deps = (
+                    self.expression(
+                        index_node, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                    if index_node is not None
+                    else frozenset()
+                )
+                self._record_read(index_deps)
+                pending.append(("elem", ref, index_deps))
+                continue
             if lhs.type != "identifier":
                 raise _Unsupported("unsupported_statement", _span(node))
             binding = self.bindings_by_span.get(self.node_key(lhs))
@@ -4698,6 +4883,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 if bcast:
                     self.indirect_writes |= recv_deps
+            elif entry[0] == "elem":
+                _, ref, index_deps = entry
+                elem_value = recv_deps | index_deps
+                for holder_id in self._opaque_container_sharers(
+                    ref.binding_id
+                ):
+                    # An element store accumulates like `s[i] = v`
+                    # does: `_store(..., True)` unions the backing's
+                    # existing element deps — replacing would drop
+                    # every element landed before the receive.
+                    self._store(
+                        locals_, params, holder_id, elem_value,
+                        True,
+                    )
+                self.indirect_writes |= elem_value
             elif entry[0] == "alias":
                 self.indirect_writes |= recv_deps
                 for escaped_id in self.escaped:
@@ -6084,6 +6284,58 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._func_elem_collection(binding.type)
                     or self._func_elem_nested_collection(binding.type)
                 )
+            )
+        return False
+
+    def _scalar_elem_make(self, node: Any) -> bool:
+        """`make(<coll>[, n])` — a fresh EMPTY scalar-element
+        container: `make([]int64, n)`/`make(map[K]T)` binds the same
+        way `a := []int64{}` does — zero elements, an empty dep set.
+        The element-kind gate lives at the bind site
+        (`_scalar_elem_collection`), so this admit checks only the
+        call's container shape; a named collection type resolves
+        through its declared fact."""
+        if node is None or node.type != "call_expression":
+            return False
+        call = self.calls.get(self.node_key(node))
+        if call is None or call.kind != "builtin":
+            return False
+        function_node = node.child_by_field_name("function")
+        while (
+            function_node is not None
+            and function_node.type == "parenthesized_expression"
+        ):
+            function_node = next(
+                iter(function_node.named_children), None
+            )
+        if function_node is None or function_node.text != b"make":
+            return False
+        arguments_node = node.child_by_field_name("arguments")
+        arguments = (
+            _children(arguments_node) if arguments_node is not None else []
+        )
+        if not arguments or len(arguments) > 3:
+            return False
+        type_arg = arguments[0]
+        while (
+            type_arg is not None and type_arg.type == "parenthesized_type"
+        ):
+            type_arg = next(iter(type_arg.named_children), None)
+        if type_arg is None:
+            return False
+        if type_arg.type in {"slice_type", "array_type", "map_type"}:
+            return True
+        if type_arg.type == "type_identifier":
+            ref = self.references.get(self.node_key(type_arg))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            return (
+                binding is not None
+                and binding.kind == "type"
+                and self._scalar_elem_collection(binding.type)
             )
         return False
 
@@ -7851,14 +8103,62 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or self._func_elem_collection(binding.type)
                     or self._func_elem_nested_collection(binding.type)
                 ):
-                    if opaque_toks is None or not (
-                        self._opaque_container_fact(binding.type)
+                    if (
+                        opaque_toks is None
+                        or not self._opaque_container_fact(binding.type)
+                    ) and not self._scalar_elem_collection(
+                        binding.type
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
                         )
+                    if opaque_toks is None:
+                        # A scalar-element literal/make mints its own
+                        # backing; any other tokenless RHS (a field
+                        # read `_opaque_container_bind` could not key,
+                        # a channel receive, an element of a nested
+                        # container) has no shareable identity —
+                        # minting would invent a backing that silently
+                        # misses the real memory's stores.
+                        rhs_node = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        )
+                        while (
+                            rhs_node is not None
+                            and rhs_node.type
+                            == "parenthesized_expression"
+                        ):
+                            rhs_node = next(
+                                (
+                                    c
+                                    for c in rhs_node.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if (
+                            rhs_node is None
+                            or (
+                                rhs_node.type
+                                not in {
+                                    "composite_literal",
+                                    "call_expression",
+                                }
+                                and not (
+                                    rhs_node.type == "identifier"
+                                    and rhs_node.text == b"nil"
+                                )
+                            )
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(node)
+                            )
                     self._opaque_container_tokens[binding.id] = (
                         opaque_toks
+                        if opaque_toks is not None
+                        else frozenset({binding.id})
                     )
                 elif (
                     binding.type.kind
@@ -8438,14 +8738,61 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             binding.type
                         )
                     ):
-                        if opaque_toks is None or not (
-                            self._opaque_container_fact(binding.type)
+                        if (
+                            opaque_toks is None
+                            or not self._opaque_container_fact(
+                                binding.type
+                            )
+                        ) and not self._scalar_elem_collection(
+                            binding.type
                         ):
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
                             )
+                        if opaque_toks is None and value_nodes:
+                            # Same rule as the short-declaration gate:
+                            # a literal/make mints a fresh backing;
+                            # any other tokenless RHS has no
+                            # shareable identity and stays closed.
+                            rhs_node = (
+                                value_nodes[i]
+                                if len(names) == len(value_nodes)
+                                else value_nodes[0]
+                            )
+                            while (
+                                rhs_node is not None
+                                and rhs_node.type
+                                == "parenthesized_expression"
+                            ):
+                                rhs_node = next(
+                                    (
+                                        c
+                                        for c in rhs_node.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if (
+                                rhs_node is None
+                                or (
+                                    rhs_node.type
+                                    not in {
+                                        "composite_literal",
+                                        "call_expression",
+                                    }
+                                    and not (
+                                        rhs_node.type == "identifier"
+                                        and rhs_node.text == b"nil"
+                                    )
+                                )
+                            ):
+                                raise _Unsupported(
+                                    "binding_unavailable", _span(spec)
+                                )
                         self._opaque_container_tokens[binding.id] = (
                             opaque_toks
+                            if opaque_toks is not None
+                            else frozenset({binding.id})
                         )
                     elif (
                         binding.type.kind
@@ -9155,6 +9502,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `(*p)[k], r = 1, (*p)[0]` reads `(*p)[0]` without
             # `k`'s deps.
             pending_map_key_deps = frozenset()
+            # `s.F = v` field reseats: LHS position → (root binding
+            # id, member id). Applied at pre-state — after every LHS
+            # resolves but before `values` or any store runs.
+            field_container_reseats: dict[int, tuple[str, str]] = {}
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -9261,6 +9612,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # (`p.Next.V = v`) — computing the destination
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
+                    field_root, field_member = (
+                        self._scalar_container_field(lhs)
+                    )
+                    if field_root is not None:
+                        # `s.F = v` — the field's share group
+                        # reseats onto the RHS's own backing once
+                        # the LHS pre-pass finishes (pre-state).
+                        field_container_reseats[len(refs) - 1] = (
+                            field_root,
+                            field_member.id,
+                        )
                     field_chan = self._bound_field_chan(
                         lhs, locals_, params
                     )
@@ -9549,6 +9911,83 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
+            # `s.F = v` reseats the field's share group onto the
+            # RHS's own backing: a `a := s.F` bound before the store
+            # keeps the OLD tokens (it still aliases the previous
+            # array), while `b := s.F` afterwards mints afresh. The
+            # old tokens come off the root's union too — `s`'s
+            # conflated set only covers the field's current backing.
+            # Every field's source resolves at pre-state BEFORE any
+            # field_key changes — `s.F, s.G = s.G, s.F` swaps the
+            # backings, so no replacement may be observed while a
+            # sibling RHS still names its old group.
+            reseat_plan: list = []
+            for pos, (root_id, member_id) in (
+                field_container_reseats.items()
+            ):
+                fkey = f"{root_id}\x00{member_id}"
+                old_toks = self._opaque_container_tokens.get(
+                    fkey, frozenset()
+                )
+                src = rights[pos] if pos < len(rights) else None
+                new_toks = (
+                    self._opaque_container_bind(src)
+                    if src is not None
+                    else None
+                )
+                reseat_plan.append(
+                    (fkey, root_id, old_toks, new_toks)
+                )
+            reseat_roots: set[str] = set()
+            for fkey, root_id, old_toks, new_toks in reseat_plan:
+                reseat_roots.add(root_id)
+                if conditional or self._may_skip > 0:
+                    # `if c { s.F = v }` — the untaken path keeps
+                    # `s.F` aimed at its old backing, so the reseat
+                    # unions the new tokens like `_store`'s
+                    # conditional join (never pops or subtracts).
+                    if new_toks:
+                        self._opaque_container_tokens[fkey] = (
+                            self._opaque_container_tokens.get(
+                                fkey, frozenset()
+                            )
+                            | new_toks
+                        )
+                        self._opaque_container_tokens[root_id] = (
+                            self._opaque_container_tokens.get(
+                                root_id, frozenset()
+                            )
+                            | new_toks
+                        )
+                    continue
+                if new_toks is None:
+                    # `s.F = nil` or an untracked RHS — the field's
+                    # share group dissolves; a later `b := s.F`
+                    # mints its own backing like a fresh read.
+                    self._opaque_container_tokens.pop(fkey, None)
+                else:
+                    self._opaque_container_tokens[fkey] = new_toks
+            if not (conditional or self._may_skip > 0):
+                # The root's token set is exactly the union of its
+                # live field keys — a subtract-per-field update
+                # breaks when a token one field releases is another
+                # field's new backing (`s.F, s.G = s.G, s.F`).
+                for root_id in reseat_roots:
+                    prefix = f"{root_id}\x00"
+                    live: set = set()
+                    for key, toks in (
+                        self._opaque_container_tokens.items()
+                    ):
+                        if key.startswith(prefix):
+                            live |= toks
+                    if live:
+                        self._opaque_container_tokens[root_id] = (
+                            frozenset(live)
+                        )
+                    else:
+                        self._opaque_container_tokens.pop(
+                            root_id, None
+                        )
             # Go assignments run in two phases — destination operands
             # (pointer indirections and index expressions) and every
             # RHS evaluate against the pre-state before any store
@@ -9748,6 +10187,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for i in field_chan_lhs
                 if len(lefts) == len(rights) and i < len(rights)
             }
+            # `a, b = b, a` — an identifier RHS's container backing
+            # resolves against the pre-state like the dep set does:
+            # the per-slot reseat hands `b` the backing `a` named
+            # BEFORE `a`'s own store redirected it to `b`'s.
+            pre_container_toks: dict[int, Any] = {}
+            if len(lefts) == len(rights):
+                for pre_i in range(len(refs)):
+                    pre_rhs = rights[pre_i]
+                    while (
+                        pre_rhs is not None
+                        and pre_rhs.type == "parenthesized_expression"
+                    ):
+                        pre_rhs = next(
+                            (
+                                c
+                                for c in pre_rhs.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        pre_rhs is not None
+                        and pre_rhs.type == "identifier"
+                    ):
+                        pre_ref = self.references.get(
+                            self.node_key(pre_rhs)
+                        )
+                        if pre_ref is not None and pre_ref.binding_id:
+                            pre_container_toks[pre_i] = (
+                                self._opaque_container_tokens.get(
+                                    pre_ref.binding_id
+                                )
+                            )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -10266,12 +10738,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ):
                         # `s = lib.G(b)`/`s = t` re-targets the
                         # backing like `:=` does; a non-container
-                        # RHS drops the token so `s[i]` closes.
+                        # RHS drops the token so `s[i]` closes. An
+                        # identifier RHS reads the pre-state tokens
+                        # (`a, b = b, a` swaps the backings like the
+                        # dep sets do).
                         new_toks = (
-                            self._opaque_container_bind(rights[i])
+                            pre_container_toks.get(i)
+                            or self._opaque_container_bind(rights[i])
                             if len(lefts) == len(rights)
                             else None
                         )
+                        reseat_rhs = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else None
+                        )
+                        while (
+                            reseat_rhs is not None
+                            and reseat_rhs.type
+                            == "parenthesized_expression"
+                        ):
+                            reseat_rhs = next(
+                                (
+                                    c
+                                    for c in reseat_rhs.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
                         if conditional or self._may_skip > 0:
                             # `if c { s = t }` — the untaken path
                             # keeps `s` aimed at its old backing, so
@@ -10292,6 +10786,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._opaque_container_tokens[
                                 ref.binding_id
                             ] = new_toks
+                        elif (
+                            self._scalar_elem_collection(bound.type)
+                            and reseat_rhs is not None
+                            and reseat_rhs.type
+                            in {"composite_literal", "call_expression"}
+                        ):
+                            # `a = []int64{x}` / `a = make([]int64, n)`
+                            # — a fresh literal/make backing replaces
+                            # the old one like `a :=` does; `a = nil`
+                            # drops the token below instead.
+                            self._opaque_container_tokens[
+                                ref.binding_id
+                            ] = frozenset({self.node_key(reseat_rhs)})
                         else:
                             self._opaque_container_tokens.pop(
                                 ref.binding_id, None
@@ -12893,6 +13400,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                 return
+            opaque_elem = self._opaque_container_index_target(operand)
+            if opaque_elem is not None:
+                ref, index_node = opaque_elem
+                # `a[i]++` — the stored value's provenance is the
+                # element's own (the backing's conflated set) plus
+                # the index that picked the slot; both union back
+                # into every sharer's set like `a[i] = v` does.
+                elem_value = self._opaque_container_deps(
+                    ref.binding_id, locals_
+                )
+                if index_node is not None:
+                    elem_value = elem_value | self.expression(
+                        index_node, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                for holder_id in self._opaque_container_sharers(
+                    ref.binding_id
+                ):
+                    self._store(
+                        locals_, params, holder_id, elem_value, True
+                    )
+                self.indirect_writes |= elem_value
+                self._record_read(elem_value)
+                return
             raise _Unsupported(
                 "binding_unavailable"
                 if operand.type == "identifier"
@@ -14785,6 +15316,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # st's conflated set, so letting a pointer alias it
                 # would under-approximate the read.
                 root = operand
+                saw_index = False
                 while root is not None and root.type in {
                     "parenthesized_expression",
                     "selector_expression",
@@ -14800,6 +15332,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             None,
                         )
                     else:
+                        if root.type == "index_expression":
+                            saw_index = True
                         root = root.child_by_field_name("operand")
                 # `&P{...}` stays closed too: the literal carries the
                 # initializer's deps, but the bound-pointer field read
@@ -14816,6 +15350,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self.bindings.get(root_ref.binding_id)
                 ):
                     raise _Unsupported("unsupported_operator", _span(node))
+                if (
+                    saw_index
+                    and root_ref is not None
+                    and root_ref.binding_id
+                    in self._opaque_container_tokens
+                    and (
+                        (root_binding := self.bindings.get(
+                            root_ref.binding_id
+                        )) is not None
+                        and root_binding.type is not None
+                        and self._scalar_elem_collection(
+                            root_binding.type
+                        )
+                    )
+                ):
+                    # `p := &a[i]` — a pointer into a bound scalar
+                    # container's backing. Marking the container
+                    # escaped folds `*p = x` into its conflated set
+                    # through the deref-store path, and the sharer
+                    # union then lets every alias's `b[j]` read it.
+                    self.escaped.add(root_ref.binding_id)
                 ref = (
                     self.references.get(self.node_key(operand))
                     if operand is not None
@@ -15059,6 +15614,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or not self._pin_func_elem_make_type(
                                 arguments[0]
                             )
+                        ) and not (
+                            # `make([]int64, n)`/`make(map[K]T)` — a
+                            # fresh EMPTY scalar container; the
+                            # bind site's `_scalar_elem_collection`
+                            # gate rejects non-scalar elements, so
+                            # the admit only checks the shape.
+                            self._scalar_elem_make(node)
+                            and self._pin_type_node(arguments[0])
                         ):
                             raise _Unsupported(
                                 "unresolved_or_opaque_call", _span(node)
@@ -15187,14 +15750,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     append_cont = self._func_elem_append_target(
                         node, locals_
                     )
+                    scalar_cont = False
                     if append_cont is None:
-                        raise _Unsupported(
-                            "unresolved_or_opaque_call", _span(node)
+                        # `append(a, x)` / `append(a, b...)` on a
+                        # bound scalar container — the result unions
+                        # the container's deps with every appended
+                        # element's, like the func-element form
+                        # without the closure-record bookkeeping.
+                        # The `_opaque_container_bind` token rule
+                        # keeps the result aimed at the argument's
+                        # backing (append may reuse the array).
+                        append_cont = self._func_elem_append_target(
+                            node, locals_,
+                            self._scalar_elem_collection,
                         )
+                        scalar_cont = append_cont is not None
+                        if append_cont is None:
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call",
+                                _span(node),
+                            )
                     deps = self.expression(
                         arguments[0], fn, params, locals_, transfers,
                         count, depth + 1,
                     )
+                    appended = frozenset()
                     for extra in arguments[1:]:
                         element = extra
                         variadic = element.type == "variadic_argument"
@@ -15202,6 +15782,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             element = next(
                                 iter(element.named_children), None
                             )
+                        if scalar_cont:
+                            # A scalar spread's elements join through
+                            # its own dep set — no per-element records
+                            # to resolve, so any operand evaluates.
+                            extra_deps = self.expression(
+                                extra, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
+                            appended |= extra_deps
+                            deps |= extra_deps
+                            continue
                         element_id: str | None = None
                         if element is not None and element.type == (
                             "identifier"
@@ -15262,12 +15853,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # records union into each sharer like a store
                     # through it would.
                     for holder_id in (
-                        self._func_elem_sharers(append_cont)
+                        ()
+                        if scalar_cont
+                        else self._func_elem_sharers(append_cont)
                         - {append_cont}
                     ):
                         self._adopt_element_records(
                             append_cont, holder_id
                         )
+                    if scalar_cont:
+                        # `append(a, x)` may reuse `a`'s array —
+                        # the appended elements' deps land in `a`'s
+                        # backing whether or not the result rebinds,
+                        # so `_ = append(a, x)` (or `b := append(a,
+                        # x)` where `b` only MAY share) still lets
+                        # `a`'s sharers read `x`.
+                        for holder_id in self._opaque_container_sharers(
+                            append_cont
+                        ):
+                            self._store(
+                                locals_, params, holder_id, appended,
+                                True,
+                            )
+                        self.indirect_writes |= appended
                     return deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
