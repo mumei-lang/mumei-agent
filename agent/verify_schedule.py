@@ -265,10 +265,11 @@ def run_schedule(args: argparse.Namespace) -> dict:
     declared = Path(args.source)
     if not declared.is_file():
         raise ValueError("source requires a regular declared file")
-    if args.core is not None and (
-        not os.path.isabs(args.core)
-        or "\x00" in args.core
-        or not Path(args.core).is_file()
+    core = getattr(args, "core", None)
+    if core is not None and (
+        not os.path.isabs(core)
+        or "\x00" in core
+        or not Path(core).is_file()
     ):
         raise ValueError("--core must be an absolute path to a regular file")
     source = declared.read_bytes()
@@ -312,7 +313,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
         success_exit_codes=success,
         memory_bound_mb=args.memory_bound_mb,
         stdin_for=stdin_for,
-        core_executable=args.core,
+        core_executable=core,
     )
     return result.to_dict()
 
@@ -320,7 +321,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
 def _declared_paths(args: argparse.Namespace) -> list[str]:
     paths = [args.request, args.adapters, args.argv_map, args.policy,
              args.source]
-    if args.core is not None:
+    if getattr(args, "core", None) is not None:
         paths.append(args.core)
     if args.observations is not None:
         paths.append(args.observations)
@@ -434,6 +435,8 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                       args.policy, args.source]
             if args.observations is not None:
                 inputs.append(args.observations)
+            if getattr(args, "core", None) is not None:
+                inputs.append(args.core)
             if any(os.path.realpath(p) == target for p in inputs):
                 raise ValueError(
                     "--output must not overwrite a declared input"
