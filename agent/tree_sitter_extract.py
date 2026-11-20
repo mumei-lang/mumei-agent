@@ -1053,6 +1053,9 @@ class Statement:
     # ``outer: for ...``); ``""`` otherwise. Callers that model labelled
     # jumps resolve names against enclosing labelled statements.
     label: str = ""
+    # ``True`` on the synthetic block that wraps ``L1: L2: stmt`` — it
+    # exists only to carry the outer label and introduces no Go scope.
+    stacked_label: bool = False
 
 
 _GO_TERMINATING_CALLS = re.compile(
@@ -1442,6 +1445,7 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
             return Statement(
                 kind="block", text=text, start=start,
                 body=(statement,), labeled=True, label=label,
+                stacked_label=True,
             )
         return replace(statement, labeled=True, label=label)
     if kind == "func_literal":
