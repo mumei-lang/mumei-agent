@@ -6079,10 +6079,13 @@ declared exit codes only — adapter stdout never lands in the document.
 
 `AdapterDescriptor.attempt_argv` lets an adapter manifest declare the
 attempt command itself: `verify-schedule` and the audit
-`--enable-summary-attempts` schedule now fall back to the declared
-`attempt_argv` when the host argv map carries no entry for the
-adapter. The host argv map still wins when both are present, so a host
-can always pin or override the command an adapter shipped with.
+`--enable-scheduled-verification` schedule can fall back to the
+declared `attempt_argv` when the host argv map carries no entry for
+the adapter — but only when the host planner policy declares
+`allow_manifest_attempt_argv: true`, so a manifest can never plant an
+executable command on its own. The host argv map still wins when both
+are present, so a host can always pin or override the command an
+adapter shipped with.
 
 The field is a static manifest declaration like `probe_argv` — a tuple
 of argv strings validated at registration, round-tripped through
@@ -6091,7 +6094,9 @@ never executed at parse time; the scheduled dispatch runs it through
 the same declared boundary as an argv-map entry (plan → dispatch →
 terminal reconciliation), so an adapter that declares its own attempt
 needs no host-side argv declaration to run. A manifest with neither
-still yields `not_dispatched` — the route never guesses a command.
+still yields `not_dispatched` — the route never guesses a command, and
+without the explicit policy opt-in a declared `attempt_argv` is inert
+metadata.
 
 ```python
 descriptor = AdapterDescriptor.from_manifest({
