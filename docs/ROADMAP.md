@@ -6021,6 +6021,30 @@ is a static error, and declared-path failures are redacted like the
 MCP `audit_schema` vocabulary — it is a CLI observational lane, not a
 finding contract.
 
+### C04 consumable verification-plan route
+
+`python -m agent verify-plan` is the explainable counterpart to
+`verify-schedule`: the same declared inputs (request, adapter
+manifests, planner policy, optional observations) run through
+`AdapterRegistry.plan` and emit the full
+`mumei.verification-plan/v1` document — the selected adapter's
+effective non-secret settings, `fallback_from`, and every candidate's
+`decisions` reasons (`selected_priority`, `selected_explicit`,
+`selected_fallback`, `compatible_not_selected`,
+`explicit_selection_blocks_automatic_route`, `not_registered` and the
+whole exclusion vocabulary from `disabled` to
+`tool_version_mismatch`). Until now the plan document only existed as
+a fingerprint inside the schedule record, so the C04 "explainable"
+surface was not consumable; this route is planning only — it declares
+no argv, spawns nothing, and `not_dispatched` is not a plan outcome.
+Failures reuse the declared-path redaction of `verify-schedule`, the
+closed-shape JSON checks reject unknown keys, and `--output` refuses
+to overwrite a declared input. 13 tests cover selection/exclusion
+reasons, explicit and fallback selection, denied fallback, pins,
+missing tools, unregistered selections, effective settings exposure,
+closed-shape rejection, the output guard, secret-free output and
+CLI/library document equality.
+
 
 ## Roadmap authority and vocabulary
 

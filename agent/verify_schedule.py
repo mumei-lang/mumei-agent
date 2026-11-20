@@ -292,6 +292,89 @@ def _redact_declared_paths(text: str, declared: list[str]) -> str:
     return text
 
 
+def build_plan_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    if parser is None:
+        parser = argparse.ArgumentParser(prog="verify-plan")
+    parser.description = (
+        "Plan one declared route through the adapter registry and emit "
+        "mumei.verification-plan/v1 — the selected adapter, its effective "
+        "non-secret settings, per-candidate selection/exclusion reasons "
+        "and the fallback origin. Planning only: nothing is spawned, "
+        "dispatched or accepted."
+    )
+    parser.add_argument(
+        "--request", required=True, metavar="PATH",
+        help="Declared route requirements JSON (profile, method, result_contract).",
+    )
+    parser.add_argument(
+        "--adapters", required=True, metavar="PATH",
+        help="Declared JSON array of adapter manifests to register.",
+    )
+    parser.add_argument(
+        "--policy", required=True, metavar="PATH",
+        help=(
+            "Declared planner policy JSON. allowed_permissions must be "
+            "declared (an empty list permits only permission-free adapters)."
+        ),
+    )
+    parser.add_argument(
+        "--observations", metavar="PATH",
+        help="Optional declared JSON array of runtime observations.",
+    )
+    parser.add_argument(
+        "--output", metavar="PATH",
+        help="Write the plan document here instead of stdout.",
+    )
+    return parser
+
+
+def run_plan(args: argparse.Namespace) -> dict:
+    request = _load_request(args.request)
+    registry = _load_registry(args.adapters)
+    policy = _load_policy(args.policy)
+    observations = _load_observations(args.observations)
+    return registry.plan(request, policy, observations).to_dict()
+
+
+def _plan_declared_paths(args: argparse.Namespace) -> list[str]:
+    paths = [args.request, args.adapters, args.policy]
+    if args.observations is not None:
+        paths.append(args.observations)
+    if args.output is not None:
+        paths.append(args.output)
+    return paths
+
+
+def main_plan(args: argparse.Namespace | None = None) -> int:
+    if args is None:
+        args = build_plan_parser().parse_args()
+    declared = _plan_declared_paths(args)
+    try:
+        if args.output is not None:
+            target = os.path.realpath(args.output)
+            inputs = [args.request, args.adapters, args.policy]
+            if args.observations is not None:
+                inputs.append(args.observations)
+            if any(os.path.realpath(p) == target for p in inputs):
+                raise ValueError(
+                    "--output must not overwrite a declared input"
+                )
+        document = json.dumps(run_plan(args), indent=2, sort_keys=True) + "\n"
+        if args.output is not None:
+            Path(args.output).write_text(document, encoding="utf-8")
+        else:
+            sys.stdout.write(document)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        print(
+            f"verify-plan: {_redact_declared_paths(str(exc), declared)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return 0
+
+
 def main_schedule(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_schedule_parser().parse_args()

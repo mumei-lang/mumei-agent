@@ -71,6 +71,7 @@ _SUBCOMMANDS = {
     "verify-recheck",
     "verify-accept",
     "verify-schedule",
+    "verify-plan",
     "native-attempt",
     "native-recheck",
     "native-accept",
@@ -986,6 +987,24 @@ def main() -> None:
         verify_schedule_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(verify_schedule_main(args))
+    elif command == "verify-plan":
+        import argparse
+        from agent.verify_schedule import (
+            build_plan_parser as verify_plan_build_parser,
+            main_plan as verify_plan_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-plan",
+            description=(
+                "Plan one declared route through the adapter registry "
+                "and emit mumei.verification-plan/v1 with per-candidate "
+                "reasons. Planning only: nothing is spawned."
+            ),
+        )
+        verify_plan_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(verify_plan_main(args))
     elif command == "native-recheck":
         import argparse
         from agent.native_recheck import (
