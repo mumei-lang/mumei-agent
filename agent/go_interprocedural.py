@@ -5207,17 +5207,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `a[i] = <-ch` — a store into a bound container's
                 # backing lands the received deps (plus every index's
                 # own) in every sharer's set, like `a[i] = v` does.
-                index_deps = (
-                    self.expression(
-                        index_node, fn, params, locals_,
-                        transfers, count, 0,
-                    )
-                    if index_node is not None
-                    else frozenset()
-                )
-                for inner_index in inner_indexes or ():
+                # Indexes evaluate innermost-first (Go's order), so
+                # an effectful `a[Set(&v,x)][Get(v)]` reads the
+                # post-`Set` state in `Get(v)`.
+                index_deps = frozenset()
+                for inner_index in reversed(inner_indexes or ()):
                     index_deps |= self.expression(
                         inner_index, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                if index_node is not None:
+                    index_deps |= self.expression(
+                        index_node, fn, params, locals_,
                         transfers, count, 0,
                     )
                 self._record_read(index_deps)
@@ -10463,18 +10464,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if inline:
                         opaque_elem_array_roots[ri] = oref.binding_id
                     opaque_elem_index_deps[ri] = frozenset()
-                    if (
-                        oindex is not None
-                        and oindex.type not in _INDEX_LITERALS
+                    # Innermost index first (Go's order) — an
+                    # effectful `a[Set(&v,x)][Get(v)]` reads `Set`'s
+                    # post-state inside `Get(v)`.
+                    for inner_index in reversed(
+                        inner_indexes or ()
                     ):
-                        opaque_elem_index_deps[ri] = self.expression(
-                            oindex, fn, params, locals_,
-                            transfers, count, 0,
-                        )
-                        self._record_read(
-                            opaque_elem_index_deps[ri]
-                        )
-                    for inner_index in inner_indexes or ():
                         if (
                             inner_index is not None
                             and inner_index.type
@@ -10489,6 +10484,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._record_read(
                                 opaque_elem_index_deps[ri]
                             )
+                    if (
+                        oindex is not None
+                        and oindex.type not in _INDEX_LITERALS
+                    ):
+                        opaque_elem_index_deps[ri] |= self.expression(
+                            oindex, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                        self._record_read(
+                            opaque_elem_index_deps[ri]
+                        )
                     continue
                 func_elem_lhs = self._func_elem_index_target(
                     lhs, locals_
@@ -14139,8 +14145,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 elem_value = self._opaque_container_deps(
                     ref.binding_id, locals_
                 )
-                for idx in (index_node,) + tuple(
-                    inner_indexes or ()
+                # Innermost index first (Go's order).
+                for idx in tuple(reversed(inner_indexes or ())) + (
+                    index_node,
                 ):
                     if idx is not None:
                         elem_value = elem_value | self.expression(
@@ -15852,9 +15859,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         extracted = getattr(extracted, "elem", None)
                     if extracted is not None and extracted.kind == "struct":
                         deps = field_index_deps
-                        for idx_node in (
-                            container_idx[1],
-                            *(container_idx[2] or ()),
+                        # Innermost index first (Go's order) —
+                        # `s[Set(&v,x)][Get(v)].A` reads `Set`'s
+                        # post-state inside `Get(v)`.
+                        for idx_node in reversed(
+                            (
+                                container_idx[1],
+                                *(container_idx[2] or ()),
+                            )
                         ):
                             if (
                                 idx_node is None

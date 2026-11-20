@@ -19780,6 +19780,30 @@ def test_scalar_container_unsupported_stays_closed(
     assert not result.available
 
 
+def test_scalar_container_nested_index_eval_order(go_types_helper):
+    # `s[Set(&v,x)][Get(v)].A.V` — Go evaluates the innermost index
+    # first, so `Set`'s write to `v` is visible when `Get(v)` runs.
+    # The outermost-first order dropped `x`: `Set` returns a
+    # constant, so the only way its argument lands is through
+    # `Get(v)` observing `v`'s post-`Set` set.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct{ V int64 }\n"
+            "type St struct{ A W }\n"
+            "func Set(v *int64, x int64) int64 { *v = x; return 0 }\n"
+            "func Get(v int64) int64 { return v }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar v int64\n"
+            "\ts := [][]St{{St{A: W{V: 0}}}}\n"
+            "\treturn s[Set(&v, x)][Get(v)].A.V\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
