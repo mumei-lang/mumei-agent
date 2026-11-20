@@ -3031,6 +3031,7 @@ def verify_schedule(
         max_attempts=max_attempts,
         success_exit_code=None,
         memory_bound_mb=memory_bound_mb,
+        core=None,
         output=None,
     )
     try:
