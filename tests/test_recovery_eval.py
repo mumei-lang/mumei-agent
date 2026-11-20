@@ -967,3 +967,28 @@ def test_envelope_freshness_recovers_through_bound_fold_docs():
             evaluation["checks"]["envelope_freshness"]
             == "evidence_failed"
         )
+
+
+def test_anchor_authenticity_is_not_composable_through_the_fold():
+    # `registry_authentic` / `revocation_list_authentic` on a
+    # signature-verification doc are bound only to the signed record's
+    # digest — they do not pin WHICH anchor document was assessed, so
+    # a doc authenticating a different registry must not recover this
+    # record's anchor check. The checks stay unperformable by
+    # composition: no performer entries exist.
+    digest = "a" * 64
+    for check, field in (
+        ("registry_authenticity", "registry_authentic"),
+        ("revocation_list_authenticity", "revocation_list_authentic"),
+    ):
+        record = _record(check)
+        doc = _doc(
+            "mumei.signature-verification/v1",
+            envelope_match=True,
+            subject_digest=digest,
+            **{field: True},
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=digest,
+        )
+        assert evaluation["checks"][check] == "no_evidence"

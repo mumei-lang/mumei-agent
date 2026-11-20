@@ -61,6 +61,8 @@ def test_well_formed_envelope_matches():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "registry_authenticity",
+        "revocation_list_authenticity",
         "producer_time_authenticity",
         "clock_authenticity",
     }
@@ -673,3 +675,128 @@ def test_route_envelope_freshness(tmp_path, capsys):
     doc = json.loads(capsys.readouterr().out)
     assert doc["envelope_fresh"] is True
     assert "envelope_freshness" not in doc["checks_not_performed"]
+
+
+def _anchor_signature(digest: str) -> dict:
+    """A declared `mumei.producer-signature/v1` envelope claiming to
+    sign the anchor document's digest — the eval route binds only."""
+    return {
+        "schema_version": "mumei.producer-signature/v1",
+        "subject_digest": digest,
+        "algorithm": "ed25519",
+        "signature": "00" * 64,
+        "producer_key_id": "anchor-root",
+    }
+
+
+def test_registry_signature_bound():
+    # The wrapper's declared subject_digest echoing the registry's
+    # digest reports `registry_signature_bound` — representation-level
+    # only, no crypto on this route.
+    import hashlib
+
+    from agent.core_evidence import producer_key_registry
+
+    registry_doc = _registry_doc()
+    digest = hashlib.sha256(
+        json.dumps(registry_doc).encode("utf-8")
+    ).hexdigest()
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        key_registry=producer_key_registry(registry_doc),
+        reference_time=_REFERENCE,
+        registry_signature=_anchor_signature(digest),
+        registry_digest=digest,
+    )
+    assert evaluation["registry_signature_bound"] is True
+    assert "registry_authentic" not in evaluation
+    assert "registry_authenticity" in evaluation[
+        "checks_not_performed"
+    ]
+
+    # A wrapper pinned to other bytes reports False.
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        key_registry=producer_key_registry(registry_doc),
+        reference_time=_REFERENCE,
+        registry_signature=_anchor_signature("c" * 64),
+        registry_digest=digest,
+    )
+    assert evaluation["registry_signature_bound"] is False
+
+
+def test_revocation_signature_bound():
+    import hashlib
+
+    from agent.core_evidence import revocation_key_set
+
+    list_doc = {"schema_version": "mumei.key-revocation-list/v1",
+                "revoked_keys": []}
+    digest = hashlib.sha256(
+        json.dumps(list_doc).encode("utf-8")
+    ).hexdigest()
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        revoked_keys=revocation_key_set(list_doc),
+        revocation_signature=_anchor_signature(digest),
+        revocation_digest=digest,
+    )
+    assert evaluation["revocation_signature_bound"] is True
+
+
+def test_registry_signature_requires_registry():
+    with pytest.raises(ValueError, match="key registry"):
+        evaluate_signature_envelope(
+            _envelope(), registry_signature=_anchor_signature("a" * 64),
+            registry_digest="a" * 64,
+        )
+
+
+def test_route_registry_signature(tmp_path, capsys):
+    import hashlib
+
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(_registry_doc()))
+    digest = hashlib.sha256(registry.read_bytes()).hexdigest()
+    wrapper = tmp_path / "registry.sig.json"
+    wrapper.write_text(json.dumps(_anchor_signature(digest)))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    out = tmp_path / "out.json"
+    args = parser.parse_args(
+        [
+            "--envelope", str(envelope),
+            "--key-registry", str(registry),
+            "--reference-time", _REFERENCE,
+            "--registry-signature", str(wrapper),
+            "--output", str(out),
+        ]
+    )
+    assert main_eval(args) == 0
+    doc = json.loads(out.read_text())
+    assert doc["registry_signature_bound"] is True
+
+
+def test_route_registry_signature_requires_registry(tmp_path, capsys):
+    envelope = tmp_path / "env.json"
+    envelope.write_text(json.dumps(_envelope()))
+    wrapper = tmp_path / "registry.sig.json"
+    wrapper.write_text(json.dumps(_anchor_signature("a" * 64)))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    args = parser.parse_args(
+        [
+            "--envelope", str(envelope),
+            "--registry-signature", str(wrapper),
+        ]
+    )
+    assert main_eval(args) == 1
+    assert "--registry-signature requires --key-registry" in (
+        capsys.readouterr().err
+    )

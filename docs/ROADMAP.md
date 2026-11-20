@@ -5657,6 +5657,42 @@ declared, not signed (the signature covers the digest alone, like
 inside the signed payload — and `clock_authenticity` stay
 not-performed by design.
 
+### C02 signed trust anchors (issue #984 Option A)
+
+The declared anchors `key_authenticity`/`key_revocation` lean on are
+now themselves authenticatable: `--registry-signature PATH` +
+`--registry-key HEX` on `signature-verify` supplies a
+`mumei.producer-signature/v1` envelope signing the `--key-registry`
+document's exact bytes — canonicalization is the document itself, so
+the signed `subject_digest` is the file's SHA-256 — verified under a
+consumer-pinned root key arriving over a separately trusted channel.
+Only when the wrapper matches the closed envelope shape, verifies
+cryptographically and pins the registry's digest does the fold emit
+`registry_authentic: true` and AND it into `key_authentic` — an
+inauthentic anchor can only fail the check, never widen it.
+`--revocation-signature` + `--revocation-key` do the same for the
+`--revocation-list` document, emitting `revocation_list_authentic`
+AND-ed into `key_not_revoked`. Each signature flag requires its
+anchor flag; each key requires its signature flag. `signature-eval`
+accepts `--registry-signature`/`--revocation-signature`
+representation-level only, emitting `registry_signature_bound` /
+`revocation_signature_bound` (the wrapper's declared digest echoing
+the anchor's) while `registry_authenticity` /
+`revocation_list_authenticity` stay not-performed — the eval fold
+binds signatures, never verifies them.
+
+Neither check name joins `_CHECK_PERFORMERS`: a verification doc's
+anchor outcomes are bound only to the signed record's digest — they
+do not pin WHICH anchor document was assessed, so a doc that
+authenticated a different registry would wrongly recover this
+record's anchor check. `registry_authenticity` /
+`revocation_list_authenticity` are therefore observable on the
+verify route but not composable through `recovery-eval` until the
+verification doc can pin the anchor bytes it assessed. The producer
+side needs no Core change: `mumei evidence sign` already accepts any
+record file — the registry is just a record. Revocation of the root
+keys themselves and rotation policy stay deferred.
+
 ### C11 declared unperformed-check recovery
 
 `agent.core_evidence.evaluate_unperformed_check_recovery(record,
