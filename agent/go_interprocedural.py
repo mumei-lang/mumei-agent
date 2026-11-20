@@ -9917,6 +9917,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # array), while `b := s.F` afterwards mints afresh. The
             # old tokens come off the root's union too — `s`'s
             # conflated set only covers the field's current backing.
+            # Every field's source resolves at pre-state BEFORE any
+            # field_key changes — `s.F, s.G = s.G, s.F` swaps the
+            # backings, so no replacement may be observed while a
+            # sibling RHS still names its old group.
+            reseat_plan: list = []
             for pos, (root_id, member_id) in (
                 field_container_reseats.items()
             ):
@@ -9930,6 +9935,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if src is not None
                     else None
                 )
+                reseat_plan.append(
+                    (fkey, root_id, old_toks, new_toks)
+                )
+            for fkey, root_id, old_toks, new_toks in reseat_plan:
                 if new_toks is None:
                     # `s.F = nil` or an untracked RHS — the field's
                     # share group dissolves; a later `b := s.F`
