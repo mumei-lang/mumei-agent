@@ -1161,6 +1161,27 @@ class FunctionDataflow:
 # ---------------------------------------------------------------------------
 
 
+
+def _reslice_inner(inner: str) -> bool:
+    """True when ``inner`` slices: a ``:`` at bracket depth 0 only.
+
+    ``s[:bounds[0]]`` keeps its colon at depth 0 even though the bound is
+    an index expression; ``slots[:1][0]`` drives depth negative at the
+    ``][`` join and ``m[string(key[:])]`` buries its colon inside a call.
+    """
+    depth = 0
+    sliced = False
+    for ch in inner:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif ch == ":" and depth == 0:
+            sliced = True
+    return sliced and depth == 0
+
 class _Walker:
     def __init__(
         self,
@@ -2017,8 +2038,7 @@ class _Walker:
                     )
                     reslice = (
                         reslice_inner
-                        and ":" in reslice_inner_text
-                        and "][" not in reslice_inner_text
+                        and _reslice_inner(reslice_inner_text)
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2159,8 +2179,7 @@ class _Walker:
                     )
                     reslice = (
                         reslice_inner
-                        and ":" in reslice_inner_text
-                        and "][" not in reslice_inner_text
+                        and _reslice_inner(reslice_inner_text)
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2218,7 +2237,6 @@ class _Walker:
         if literal is not None:
             return literal >= 0
         return text in env.nonneg or text in env.consts and env.consts[text] >= 0
-
     def _define(self, target: str, value: str, env: _Env) -> None:
         text = _norm(value)
         self._escape(value, env)
@@ -2248,8 +2266,7 @@ class _Walker:
         if (
             slice_source
             and slice_source.group(1) != target
-            and ":" in slice_inner
-            and "][" not in slice_inner
+            and _reslice_inner(slice_inner)
         ):
             # ``x := s[lo:hi]`` re-slices the same backing — the result is
             # nil exactly when the source is, so its nil state carries.

@@ -2282,3 +2282,20 @@ def test_reslice_with_indexed_bound_propagates_nonnil() -> None:
     facts = flow.facts_for_expression("part[0]")
     assert facts is not None
     assert "part" in facts.nonnil
+
+
+def test_map_key_with_slice_expression_is_not_a_reslice() -> None:
+    # ``m[string(key[:])]`` — the colon sits inside a nested call, so the
+    # expression is a map index, not a reslice of ``m``.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if m == nil {\n    return 0\n}\n"
+        "p := m[string(key[:])]\n"
+        "return *p",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("*p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
