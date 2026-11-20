@@ -4362,6 +4362,7 @@ def _scheduled_verification_ctx(
     both_exit: int | None = None,
     core: str | None = None,
     beta_stdout: str | None = None,
+    core_requirement: str | None = None,
 ):
     files = _scheduled_verification_files(
         tmp_path, both_exit=both_exit, beta_stdout=beta_stdout
@@ -4383,6 +4384,8 @@ def _scheduled_verification_ctx(
     ]
     if core is not None:
         argv += ["--schedule-core", core]
+    if core_requirement is not None:
+        argv += ["--schedule-core-requirement", core_requirement]
     args = build_parser().parse_args(argv)
     return _load_scheduled_verification(args)
 
@@ -4636,6 +4639,104 @@ def test_audit_scheduled_verification_core_records_evidence(
     assert schedule["evidence_check"]["outcome"] == "valid"
     assert schedule["evidence_acceptance"]["accepted"] is True
     assert "FAKE_PRIVATE" not in json.dumps(schedule)
+
+
+def _schedule_requirement(tmp_path: Path) -> Path:
+    req = tmp_path / "requirement.json"
+    req.write_text(
+        json.dumps({"schema_version": "mumei.evidence-requirement/v1"}),
+        encoding="utf-8",
+    )
+    return req
+
+
+def _schedule_accept_core(tmp_path: Path, verdict: str) -> Path:
+    # Stub Core `evidence accept`: binds the descriptor's evidence
+    # fingerprint to the stdin bytes it was fed and its requirement
+    # fingerprint to the declared requirement file, then emits the
+    # verdict with its matching exit code.
+    code = 0 if verdict == "accepted" else 1 if verdict == "rejected" else 3
+    core = tmp_path / f"mumei-stub-accept-{verdict}"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+        '    [ "$5" = "--requirement" ] || exit 4\n'
+        '    [ -f "$6" ] || exit 5\n'
+        "    sum=$(sha256sum | cut -d' ' -f1)\n"
+        "    req=$(sha256sum \"$6\" | cut -d' ' -f1)\n"
+        '    printf %s "{\\"schema_version\\":\\"mumei.evidence-acceptance/v1\\",'
+        '\\"requirement_fingerprint\\":\\"$req\\",'
+        '\\"evidence_fingerprint\\":\\"$sum\\",'
+        '\\"acceptance\\":\\"evaluated\\",'
+        '\\"verdict\\":\\"' + verdict + '\\"}"\n'
+        f"    exit {code}\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    return core
+
+
+@pytest.mark.parametrize("verdict,accepted", [
+    ("accepted", True), ("rejected", False), ("inconclusive", False),
+])
+def test_audit_scheduled_verification_core_requirement_verdict(
+    tmp_path: Path, verdict: str, accepted: bool
+) -> None:
+    req = _schedule_requirement(tmp_path)
+    core = _schedule_accept_core(tmp_path, verdict)
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=_scheduled_verification_ctx(
+            tmp_path, core=str(core), core_requirement=str(req)
+        ),
+    )
+    schedule = result.scheduled_verification
+    assert schedule["evidence_check"]["outcome"] == verdict
+    assert schedule["evidence_acceptance"]["accepted"] is accepted
+    assert schedule["evidence_acceptance"]["requirement_fingerprint"] == (
+        hashlib.sha256(req.read_bytes()).hexdigest()
+    )
+
+
+def test_audit_scheduled_verification_core_requirement_needs_core(
+    tmp_path: Path,
+) -> None:
+    req = _schedule_requirement(tmp_path)
+    files = _scheduled_verification_files(tmp_path)
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(tmp_path / "placeholder.py"),
+            "--enable-scheduled-verification",
+            "--schedule-request",
+            files["request"],
+            "--schedule-adapters",
+            files["adapters"],
+            "--schedule-argv-map",
+            files["argv_map"],
+            "--schedule-policy",
+            files["policy"],
+            "--schedule-core-requirement",
+            str(req),
+        ]
+    )
+    with pytest.raises(ValueError, match="--schedule-core-requirement"):
+        _load_scheduled_verification(args)
+
+
+def test_audit_scheduled_verification_core_requirement_absolute_path(
+    tmp_path: Path,
+) -> None:
+    core = _schedule_accept_core(tmp_path, "accepted")
+    for bad in ("relative/req.json", str(tmp_path / "missing.json")):
+        with pytest.raises(ValueError, match="--schedule-core-requirement"):
+            _scheduled_verification_ctx(
+                tmp_path, core=str(core), core_requirement=bad
+            )
 
 
 def test_audit_scheduled_verification_core_requires_absolute_path(

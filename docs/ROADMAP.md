@@ -6283,6 +6283,23 @@ C11 stays partial; verdict-bearing grade promotion, C12's demand gate
 and the audit/MCP ports are unchanged — Evidence acceptance remains
 open.
 
+### C11 audit scheduled-attempt evidence acceptance
+
+`audit --schedule-core-requirement PATH` (with
+`--enable-scheduled-verification` and `--schedule-core`) declares the
+same `mumei.evidence-requirement/v1` document for the directory
+audit's scheduled verification: the selected attempt's captured
+output runs through `core evidence accept --stdin --json
+--requirement PATH` and the schedule record carries Core's declared
+verdict and the `requirement_fingerprint` it emitted — the audit
+port of `verify-schedule --core-requirement`. The requirement path is
+redacted from per-unit failure text like every other declared input.
+`--schedule-core-requirement` requires `--schedule-core` and an
+absolute path to a regular file.
+
+C11 stays partial; verdict-bearing grade promotion, C12's demand gate
+and the MCP port are unchanged — Evidence acceptance remains open.
+
 
 ## Roadmap authority and vocabulary
 
