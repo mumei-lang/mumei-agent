@@ -1384,6 +1384,10 @@ class _Walker:
         if kind == "switch":
             return self._switch(statement, env)
         if kind == "block":
+            if statement.stacked_label:
+                # ``L1: L2: stmt`` — a stacked label introduces no Go
+                # scope, so walk the inner statement in this scope.
+                return self.statement(statement.body[0], env)
             inner, terminated = self._scoped_walk(statement.body, env.copy(), env)
             return inner, terminated
         if kind in {"define", "assign"}:

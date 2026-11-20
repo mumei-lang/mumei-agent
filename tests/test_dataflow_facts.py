@@ -2351,3 +2351,17 @@ def test_quote_inside_raw_string_does_not_swallow_bracket_join() -> None:
     facts = flow.facts_for_expression("p")
     assert facts is not None
     assert "p" not in facts.nonnil
+
+
+def test_stacked_label_does_not_scope_the_inner_statement() -> None:
+    # ``L1: L2: x := 0`` is not a Go block — the declaration lands in
+    # the function scope, so its value reaches the division.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "L1: L2: x := 0\nreturn 1 / x", "go"
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("1 / x")
+    assert facts is not None
+    assert facts.consts.get("x") == 0
