@@ -1388,7 +1388,12 @@ def _run_scheduled_verification(
     def argv_for(adapter_id: str) -> tuple[str, ...] | None:
         argv = context.argv_map.get(adapter_id)
         if argv is None:
-            return None
+            if not context.policy.allow_manifest_attempt_argv:
+                return None
+            descriptor = context.registry.descriptor(adapter_id)
+            if descriptor is None or descriptor.attempt_argv is None:
+                return None
+            argv = descriptor.attempt_argv
         return (*argv, str(source_path))
 
     try:
