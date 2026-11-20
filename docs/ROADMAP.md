@@ -4080,11 +4080,18 @@ while `[]struct`/`[]func` locals still cannot bind (the
 func-element collection has its own model). The mutating builtins
 `copy`/`delete`/`clear` admit on a bound scalar-element container
 operand: `copy(dst, src)` lands the source's conflated element set
-every sharer of `dst`'s group like an element store (the source
-takes any evaluable expression), and `delete`/`clear` mutate the
-backing without a stored value — the conflated set cannot
-track removal, so a later read keeps its deps (the sound
-over-approximation). On an unbound operand all three stay opaque.
+on every sharer of `dst`'s group like an element store (the source
+takes any evaluable expression), and when the source is itself
+bound the two groups MERGE — `dst[i]` aliases `src[i]`'s backing
+(a `[][]int64` copy shares the inner slices). `delete(m, k)`
+stores the key's deps into the sharers — an element's survival
+depends on `k`, the most the conflated set can say — and `clear(m)`
+mutates without a stored value: the set cannot track removal, so
+a later read keeps its deps (the sound over-approximation). A
+shared-group PARAM operand flags `/caller-backing` unconditionally
+for all three — a dep-free mutation (`clear(m)`, `delete(m, 1)`)
+grows no dep set but still writes caller memory. On an unbound
+operand all three stay opaque.
 
 ### C07 scalar-element *nested* local containers
 

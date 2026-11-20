@@ -19523,6 +19523,27 @@ def test_container_param_write_reaches_caller(
             "\treturn b[0]\n}\n",
             frozenset({0}),
         ),
+        # `delete(m, k)` — whether an element survives depends on
+        # `k`, so `k`'s deps store into `m`'s sharers: `m[1]` reads
+        # {seed, k}.
+        (
+            "func F(m map[int64]int64, k int64) int64 {\n"
+            "\tdelete(m, k)\n"
+            "\treturn m[1]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `copy(b, a)` on `[][]int64` — `b[i]` aliases `a[i]`'s
+        # backing, so the two groups merge: a store through `b`'s
+        # inner slice reaches `a`'s read.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := [][]int64{{0}}\n"
+            "\tcopy(b, a)\n"
+            "\tb[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_container_mutating_builtins(
@@ -19531,6 +19552,24 @@ def test_container_mutating_builtins(
     result = named(*unit(go_types_helper, declarations))
     assert result.available
     assert result.return_dependencies == expected
+
+
+def test_container_builtin_dep_free_param_write_marks_effects(
+    go_types_helper,
+):
+    # `clear(m)` on a shared-group param mutates caller memory but
+    # grows no dep set — the unconditional `/caller-backing` flag
+    # keeps the callee's effects honest.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(m map[int64]int64) int64 {\n"
+            "\tclear(m)\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert result.available
+    assert result.effects == "unknown"
 
 
 @pytest.mark.parametrize(
