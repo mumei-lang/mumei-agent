@@ -1983,3 +1983,20 @@ def test_switch_shadowed_index_keeps_bound_when_cases_do_not_write() -> None:
         "s[i]",
     )
     assert ("i", "s") in facts.lt_len
+
+
+def test_switch_shadowed_handle_keeps_leak_when_case_writes_other_names() -> None:
+    # The held fact's site operand (the ``err`` pairing) being written
+    # inside a case must not drop the outer handle's tracking.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "switch f := 1; x {\n"
+        "case 0:\n"
+        "    err = nil\n"
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )

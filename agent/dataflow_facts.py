@@ -644,12 +644,13 @@ def _copy_name_facts(
     for key, value in src.aliases.items():
         if (mentions(key) or mentions(value)) and stable(key) and stable(value):
             dst.aliases.setdefault(key, value)
+    # The site operand (``h[2]``, e.g. the paired ``err`` name) is
+    # provenance, not state — writing it does not invalidate the handle.
     dst.held |= {
         h
         for h in src.held
         if (mentions(h[1]) or (len(h) == 3 and mentions(h[2])))
         and stable(h[1])
-        and (len(h) != 3 or stable(h[2]))
     }
     dst.slices |= {t for t in src.slices if mentions(t) and stable(t)}
     for key, value in src.nilable.items():
