@@ -2055,16 +2055,77 @@ def test_err_wrap_after_successful_open_still_reports() -> None:
 def test_parallel_assign_element_target_drops_its_nonzero() -> None:
     # ``i, d[i] = i, 0`` rewrites ``d[i]`` — its old non-zero fact must
     # not come back through the ``i`` copy-back, or ``10 / d[i]`` is
-    # silently trusted.
+    # silently trusted. The guard above the assignment proves ``d[i]``
+    # was known non-zero beforehand.
     facts = _facts(
         "d := []int{1, 2}\n"
         "d[0] = 3\n"
         "i := 0\n"
+        "if d[i] == 0 {\n"
+        "    return 0\n"
+        "}\n"
         "i, d[i] = i, 0\n"
         "return 10 / d[i]",
         "10 / d[i]",
     )
     assert "d[i]" not in facts.nonzero
+
+
+def test_self_reslice_keeps_uninitialized_slice_state() -> None:
+    # ``buf = buf[:0]`` re-slices the same backing — a nil slice stays
+    # nil, so ``buf[0]`` still panics.
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    buf = buf[:0]\n"
+        "    return buf[0]\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "uninitialized_use")
+
+
+def test_reslice_result_inherits_source_nil_state() -> None:
+    # ``x := buf[1:]`` is nil exactly when ``buf`` is.
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    x := buf[1:]\n"
+        "    return x[0]\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "uninitialized_use")
+
+
+def test_channel_direction_cast_keeps_closed_state() -> None:
+    # ``chan<- int(ch)`` is the same channel — its closed state must
+    # survive the conversion.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    sendCh := chan<- int(ch)\n"
+        "    sendCh <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_append_to_nil_slice_does_not_report() -> None:
+    # ``buf = append(buf, 1)`` produces a non-nil slice — no nil
+    # index warning may fire on it.
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    buf = append(buf, 1)\n"
+        "    return buf[0]\n"
+        "}\n"
+    )
+    assert not _transition_messages(source, "uninitialized_use")
 
 
 def test_reseated_channel_does_not_keep_closed_state() -> None:
