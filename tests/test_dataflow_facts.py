@@ -571,6 +571,28 @@ def test_goto_carried_resource_state_survives_the_jump() -> None:
     assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
 
 
+def test_goto_strips_facts_for_scope_local_names() -> None:
+    # The inner ``d := 1`` shadows the parameter and dies at the jump —
+    # its nonzero fact must not land on the outer ``d`` at the label.
+    body = "if d == 0 {\n    d := 1\n    goto done\n}\nreturn 0\ndone:\nreturn n / d\n"
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" not in facts.nonzero
+
+
+def test_goto_never_walks_the_statements_it_skips() -> None:
+    # The ``defer`` after ``goto`` never runs on the jumped path, so the
+    # lock is still held at ``done`` — no deferred release may register.
+    body = (
+        "mu.Lock()\n"
+        "goto done\n"
+        "defer mu.Unlock()\n"
+        "done:\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names=set())
+    assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
+
+
 def test_fallthrough_enters_next_case_without_its_guard() -> None:
     body = (
         "switch d {\n"
