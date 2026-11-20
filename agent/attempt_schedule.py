@@ -31,7 +31,6 @@ from agent.core_evidence import (
     evaluate_evidence_check,
     record_evidence_acceptance,
     record_evidence_check,
-    requirement_fingerprint,
 )
 from agent.verification_attempt import (
     AttemptEvidenceCheck,
@@ -408,19 +407,27 @@ def run_attempt_schedule(
                     )
                     sequences[-1] = selected
                     if core_requirement is not None:
-                        evidence_check = record_evidence_acceptance(
-                            selected,
-                            dispatch.captured_output(),
-                            core_executable=core_executable,
-                            requirement_path=core_requirement,
-                            timeout_ms=min(policy.timeout_ms, 60_000),
-                            cancel_event=cancel_event,
+                        evidence_check, descriptor = (
+                            record_evidence_acceptance(
+                                selected,
+                                dispatch.captured_output(),
+                                core_executable=core_executable,
+                                requirement_path=core_requirement,
+                                timeout_ms=min(policy.timeout_ms, 60_000),
+                                cancel_event=cancel_event,
+                            )
                         )
                         evidence_acceptance = evaluate_evidence_check(
                             selected,
                             evidence_check,
-                            requirement_fingerprint=requirement_fingerprint(
-                                core_requirement
+                            # The fingerprint Core emitted — the bytes it
+                            # actually evaluated, so a requirement edited
+                            # between spawn and return cannot mislabel
+                            # which requirement the verdict answered.
+                            requirement_fingerprint=(
+                                descriptor["requirement_fingerprint"]
+                                if descriptor is not None
+                                else None
                             ),
                         )
                     else:

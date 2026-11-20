@@ -602,8 +602,9 @@ def _accept_core(tmp_path, verdict):
         '    [ "$5" = "--requirement" ] || exit 4\n'
         '    [ -f "$6" ] || exit 5\n'
         "    sum=$(sha256sum | cut -d' ' -f1)\n"
+        "    req=$(sha256sum \"$6\" | cut -d' ' -f1)\n"
         '    printf %s "{\\"schema_version\\":\\"mumei.evidence-acceptance/v1\\",'
-        '\\"requirement_fingerprint\\":\\"f000\\",'
+        '\\"requirement_fingerprint\\":\\"$req\\",'
         '\\"evidence_fingerprint\\":\\"$sum\\",'
         '\\"acceptance\\":\\"evaluated\\",'
         '\\"verdict\\":\\"' + verdict + '\\"}"\n'

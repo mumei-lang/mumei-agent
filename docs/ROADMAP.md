@@ -6272,8 +6272,9 @@ through `core evidence accept --stdin --json --requirement PATH`
 (`record_evidence_acceptance`), and the recorded `evidence_check`
 outcome is Core's declared verdict — `accepted` / `rejected` /
 `inconclusive`, `failed` or `cancelled`. The acceptance descriptor
-echoes the requirement's sha256 as `requirement_fingerprint` so
-consumers pin which requirement the verdict answered.
+echoes the `requirement_fingerprint` Core itself emitted — the
+requirement bytes it actually evaluated — so consumers pin which
+requirement the verdict answered.
 `--core-requirement` requires `--core` and must be an absolute path to
 a regular file; a verdict that disagrees with Core's exit code is a
 `failed` check, never a verdict — and no outcome blocks the selection.

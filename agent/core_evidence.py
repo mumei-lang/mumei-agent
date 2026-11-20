@@ -174,22 +174,6 @@ _VERDICT_EXIT_CODES = {
 }
 
 
-def requirement_fingerprint(path: str) -> str:
-    """SHA-256 fingerprint of a declared requirement document's bytes.
-
-    Pins the exact bytes the requirement-declared acceptance check fed to
-    `mumei evidence accept` — the same digest Core emits as
-    `requirement_fingerprint` in its `mumei.evidence-acceptance/v1`
-    descriptor. A foreign or unreadable path raises `ValueError`."""
-    if type(path) is not str or not path or "\x00" in path:
-        raise ValueError("invalid requirement path")
-    try:
-        with open(path, "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()
-    except OSError:
-        raise ValueError("invalid requirement path") from None
-
-
 def check_evidence_requirement(
     output: AttemptOutput,
     *,
@@ -198,19 +182,24 @@ def check_evidence_requirement(
     timeout_ms: int,
     cancel_event: threading.Event | None = None,
     attempt_sequence: AttemptSequence | None = None,
-) -> str:
-    """Send original bytes to `core evidence accept`; return its verdict.
+) -> dict:
+    """Send original bytes to `core evidence accept`; return its descriptor.
 
     Runs `[core, "evidence", "accept", "--stdin", "--json", "--requirement",
     path]` under the same spawn/cancellation/lineage contract as
-    `check_evidence_representation`. Returns the Core verdict —
-    `"accepted"`, `"rejected"` or `"inconclusive"` — only when stdout is
-    a `mumei.evidence-acceptance/v1` descriptor whose declared verdict
-    agrees with the process exit code (0/1/3); anything else raises
-    `CoreCheckFailed`. An invalid representation is a `CoreCheckFailed`
-    too — Core rejects it on the decode gate before any verdict exists.
-    The check is a host-declared observation only: no Evidence, proof or
-    grade is produced and semantic-check content stays Core-side."""
+    `check_evidence_representation`. Returns the validated
+    `mumei.evidence-acceptance/v1` descriptor only when: it is a
+    duplicate-free JSON object declaring `acceptance: "evaluated"`; its
+    `verdict` (`"accepted"` / `"rejected"` / `"inconclusive"`) agrees
+    with the process exit code (0/1/3); `requirement_fingerprint` is a
+    64-char hex pin of the requirement bytes Core itself evaluated; and
+    `evidence_fingerprint` is the sha256 of the bytes fed on stdin — a
+    descriptor answering different bytes is not this check's verdict.
+    Anything else raises `CoreCheckFailed`; an invalid representation is
+    a failure too — Core rejects it on the decode gate before any
+    verdict exists. The check is a host-declared observation only: no
+    Evidence, proof or grade is produced and semantic-check content
+    stays Core-side."""
     if (
         os.name != "posix"
         or type(output) is not AttemptOutput
@@ -247,18 +236,25 @@ def check_evidence_requirement(
         )
         _check_cancelled(cancel_event)
         pairs = json.loads(stdout.decode("utf-8"), object_pairs_hook=tuple)
+        if (
+            type(pairs) is not tuple
+            or len(pairs) != len({key for key, _ in pairs})
+        ):
+            raise ValueError
         descriptor = dict(pairs)
         verdict = descriptor.get("verdict")
         if (
-            type(pairs) is not tuple
-            or descriptor.get("schema_version")
+            descriptor.get("schema_version")
             != "mumei.evidence-acceptance/v1"
             or descriptor.get("acceptance") != "evaluated"
             or _VERDICT_EXIT_CODES.get(verdict) != code
+            or not _is_fingerprint(descriptor.get("requirement_fingerprint"))
+            or descriptor.get("evidence_fingerprint")
+            != hashlib.sha256(output.stdout).hexdigest()
         ):
             raise ValueError
         _check_cancelled(cancel_event)
-        return verdict
+        return descriptor
     except CoreCheckCancelled:
         raise
     except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
@@ -275,15 +271,18 @@ def record_evidence_acceptance(
     requirement_path: str,
     timeout_ms: int,
     cancel_event: threading.Event | None = None,
-) -> AttemptEvidenceCheck:
+) -> tuple[AttemptEvidenceCheck, dict | None]:
     """Run the requirement-declared Core check; record the Core verdict.
 
     Same contract as `record_evidence_check`, but the record's outcome is
     the Core `evidence accept` verdict (`"accepted"` / `"rejected"` /
     `"inconclusive"`) — or `"failed"`/`"cancelled"` when no verdict
-    exists. The verdict is Core's declared judgement under the host-
-    declared requirement; recording stays a host declaration, not
-    acceptance."""
+    exists — and the validated descriptor is returned alongside (None
+    when no descriptor exists), so the caller can pin the
+    `requirement_fingerprint` Core actually evaluated rather than
+    re-reading the file. The verdict is Core's declared judgement under
+    the host-declared requirement; recording stays a host declaration,
+    not acceptance."""
     if type(sequence) is not AttemptSequence:
         raise ValueError("unsupported Core requirement check request")
     candidate = sequence.evidence_candidate()
@@ -291,7 +290,7 @@ def record_evidence_acceptance(
     if output.to_dict()["output_fingerprint"] != candidate.output_fingerprint:
         raise ValueError("evidence check output is not the selected result")
     try:
-        verdict = check_evidence_requirement(
+        descriptor = check_evidence_requirement(
             output,
             core_executable=core_executable,
             requirement_path=requirement_path,
@@ -300,12 +299,12 @@ def record_evidence_acceptance(
             attempt_sequence=sequence,
         )
     except CoreCheckCancelled:
-        outcome = "cancelled"
+        outcome, descriptor = "cancelled", None
     except CoreCheckFailed:
-        outcome = "failed"
+        outcome, descriptor = "failed", None
     else:
-        outcome = verdict
-    return sequence.evidence_check(candidate, outcome)
+        outcome = descriptor["verdict"]
+    return sequence.evidence_check(candidate, outcome), descriptor
 
 
 def evaluate_evidence_check(

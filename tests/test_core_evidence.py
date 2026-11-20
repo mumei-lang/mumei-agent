@@ -20,7 +20,6 @@ from agent.core_evidence import (
     check_evidence_representation,
     check_evidence_requirement,
     record_evidence_acceptance,
-    requirement_fingerprint,
 )
 from agent.verification_attempt import (
     EVIDENCE_CHECK_OUTCOMES,
@@ -1338,13 +1337,14 @@ def test_check_evidence_requirement_returns_the_core_verdict(
     executable, tmp_path, verdict
 ):
     requirement = _requirement_file(tmp_path)
-    result = check_evidence_requirement(
+    descriptor = check_evidence_requirement(
         snapshot(),
         core_executable=executable(accept_script(verdict)),
         requirement_path=requirement,
         timeout_ms=2000,
     )
-    assert result == verdict
+    assert descriptor["verdict"] == verdict
+    assert descriptor["requirement_fingerprint"] == "0" * 64
 
 
 @pytest.mark.parametrize("verdict,code", [("accepted", 1), ("rejected", 0), ("inconclusive", 0), ("accepted", 3)])
@@ -1389,7 +1389,7 @@ def test_record_evidence_acceptance_records_the_core_verdict(
 ):
     output = snapshot()
     sequence = matching_sequence(output).select_result(output)
-    check = record_evidence_acceptance(
+    check, descriptor = record_evidence_acceptance(
         sequence,
         output,
         core_executable=executable(accept_script(verdict)),
@@ -1397,9 +1397,14 @@ def test_record_evidence_acceptance_records_the_core_verdict(
         timeout_ms=2000,
     )
     assert check.outcome == verdict
-    acceptance = evaluate_evidence_check(sequence, check)
+    assert descriptor["requirement_fingerprint"] == "0" * 64
+    acceptance = evaluate_evidence_check(
+        sequence,
+        check,
+        requirement_fingerprint=descriptor["requirement_fingerprint"],
+    )
     assert acceptance["accepted"] is (verdict == "accepted")
-    assert "requirement_fingerprint" not in acceptance
+    assert acceptance["requirement_fingerprint"] == "0" * 64
 
 
 def test_record_evidence_acceptance_records_failed_and_cancelled(
@@ -1407,7 +1412,7 @@ def test_record_evidence_acceptance_records_failed_and_cancelled(
 ):
     output = snapshot()
     sequence = matching_sequence(output).select_result(output)
-    check = record_evidence_acceptance(
+    check, descriptor = record_evidence_acceptance(
         sequence,
         output,
         core_executable=executable(
@@ -1417,12 +1422,13 @@ def test_record_evidence_acceptance_records_failed_and_cancelled(
         timeout_ms=2000,
     )
     assert check.outcome == "failed"
+    assert descriptor is None
 
     output2 = snapshot()
     sequence2 = matching_sequence(output2).select_result(output2)
     event = threading.Event()
     event.set()
-    check2 = record_evidence_acceptance(
+    check2, descriptor2 = record_evidence_acceptance(
         sequence2,
         output2,
         core_executable=executable("import sys\nsys.exit(0)\n"),
@@ -1431,6 +1437,7 @@ def test_record_evidence_acceptance_records_failed_and_cancelled(
         cancel_event=event,
     )
     assert check2.outcome == "cancelled"
+    assert descriptor2 is None
 
 
 def test_record_evidence_acceptance_rejects_malformed_requests(tmp_path):
@@ -1454,14 +1461,67 @@ def test_record_evidence_acceptance_rejects_malformed_requests(tmp_path):
             record_evidence_acceptance(sequence, output, **{**base, **bad})
 
 
-def test_requirement_fingerprint_pins_the_document_bytes(tmp_path):
-    requirement = _requirement_file(tmp_path, body='{"a": 1}')
-    assert requirement_fingerprint(requirement) == hashlib.sha256(
-        b'{"a": 1}'
-    ).hexdigest()
-    for bad in ("", "relative/path.json", str(tmp_path / "missing.json")):
-        with pytest.raises(ValueError):
-            requirement_fingerprint(bad)
+@pytest.mark.parametrize("document", [b"null", b"false", b"7", b"[]", b"{}"])
+def test_check_evidence_requirement_rejects_non_object_documents(
+    executable, tmp_path, document
+):
+    # A Core printing a JSON scalar/array must be a failed check, never
+    # an uncaught TypeError escaping to the schedule.
+    script = (
+        "import sys\nsys.stdin.buffer.read()\n"
+        f"sys.stdout.buffer.write({document!r})\nsys.exit(0)\n"
+    )
+    with pytest.raises(ValueError, match="requirement check failed"):
+        check_evidence_requirement(
+            snapshot(),
+            core_executable=executable(script),
+            requirement_path=_requirement_file(tmp_path),
+            timeout_ms=2000,
+        )
+
+
+def test_check_evidence_requirement_rejects_duplicate_verdict_keys(
+    executable, tmp_path
+):
+    # `{"verdict": "rejected", ..., "verdict": "accepted"}` — a
+    # duplicate-keyed descriptor keeps only the last value under
+    # dict(); it must be a failed check, not an accepted one.
+    doc = _accept_doc("accepted")
+    injected = doc.replace(
+        b'"verdict"', b'"verdict": "rejected", "verdict"', 1
+    )
+    script = (
+        "import sys\nsys.stdin.buffer.read()\n"
+        f"sys.stdout.buffer.write({injected!r})\nsys.exit(0)\n"
+    )
+    with pytest.raises(ValueError, match="requirement check failed"):
+        check_evidence_requirement(
+            snapshot(),
+            core_executable=executable(script),
+            requirement_path=_requirement_file(tmp_path),
+            timeout_ms=2000,
+        )
+
+
+def test_check_evidence_requirement_binds_descriptor_to_fed_bytes(
+    executable, tmp_path
+):
+    # A descriptor naming a different evidence fingerprint answers a
+    # different record — the check fails rather than crediting it.
+    doc = _accept_doc("accepted", fingerprint="0" * 64).replace(
+        hashlib.sha256(PRIVATE).hexdigest().encode(), b"9" * 64
+    )
+    script = (
+        "import sys\nsys.stdin.buffer.read()\n"
+        f"sys.stdout.buffer.write({doc!r})\nsys.exit(0)\n"
+    )
+    with pytest.raises(ValueError, match="requirement check failed"):
+        check_evidence_requirement(
+            snapshot(),
+            core_executable=executable(script),
+            requirement_path=_requirement_file(tmp_path),
+            timeout_ms=2000,
+        )
 
 
 def test_evaluate_evidence_check_emits_the_declared_requirement_pin(tmp_path):
