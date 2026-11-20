@@ -41,8 +41,12 @@ sets out of the loop. Nested blocks are lexical scopes: value facts about
 names declared inside a block are restored to the enclosing scope's facts on
 exit, while held resources survive the block.
 
-Bodies containing ``goto`` are not analysed (``None``), since a label can
-re-enter any point of the function.
+Forward ``goto`` is analysed: a ``goto L`` records the current environment
+against the label and leaves the path dead, so the surviving paths continue
+uninterrupted and the recorded environments merge in when the labelled
+statement is reached. A ``goto`` that jumps backward (a real loop through a
+label), names an undeclared label, or targets a label outside its own
+statement list's ancestors stays unanalysed (``None``).
 """
 from __future__ import annotations
 
@@ -1006,6 +1010,12 @@ def _strip_borrowing_calls(value: str) -> str:
 
 def _join_termination(*kinds: str) -> str:
     """Termination kind of a join where every branch left the block."""
+    for kind in kinds:
+        # A ``goto:<label>`` exit must keep its label so the owning frame can
+        # absorb the dead path and keep walking toward the labelled
+        # statement; the label's recorded environments merge there.
+        if kind.startswith("goto:"):
+            return kind
     for kind in ("fallthrough", "continue", "break"):
         if kind in kinds:
             return kind
@@ -1020,6 +1030,56 @@ def _contains_kind(statements: tuple[tree_sitter_extract.Statement, ...], kind: 
             if _contains_kind(group, kind):
                 return True
     return False
+
+
+def _forward_goto_plan(statements: tuple[tree_sitter_extract.Statement, ...]) -> bool:
+    """True when every ``goto`` is admissible: it names a label that is
+    declared, comes later in document order (forward jump only), and lives
+    in the goto's own statement list or an enclosing one — the shapes the
+    carried-environment merge in ``_Walker`` models exactly."""
+    labels: dict[str, int] = {}
+    label_frames: dict[str, int] = {}
+    gotos: list[tuple[int, str, frozenset[int]]] = []
+    counter = [0]
+    ok = [True]
+
+    def visit(
+        group: tuple[tree_sitter_extract.Statement, ...],
+        ancestors: tuple[int, ...],
+    ) -> None:
+        for statement in group:
+            counter[0] += 1
+            index = counter[0]
+            if statement.labeled and statement.label:
+                if statement.label in labels:
+                    ok[0] = False
+                    return
+                labels[statement.label] = index
+                label_frames[statement.label] = id(group)
+            if statement.kind == "goto":
+                label = control_flow._jump_label(statement.text)
+                gotos.append((index, label or "", ancestors + (id(group),)))
+            for sub in (
+                statement.init,
+                statement.body,
+                statement.orelse,
+                statement.post,
+            ):
+                visit(sub, ancestors + (id(group),))
+                if not ok[0]:
+                    return
+
+    visit(statements, ())
+    if not ok[0]:
+        return False
+    for index, label, frames in gotos:
+        if not label or label not in labels:
+            return False
+        if labels[label] <= index:
+            return False
+        if label_frames[label] not in frames:
+            return False
+    return True
 
 
 def _absorb(target: _Env, source: _Env) -> None:
@@ -1234,6 +1294,27 @@ class _Walker:
         # Environments carried by ``break`` to the innermost enclosing switch /
         # loop (one list per open construct).
         self.break_targets: list[list[_Env]] = []
+        # Environments recorded by ``goto`` at its site, consumed when the
+        # labelled statement is reached on any surviving path.
+        self.goto_carried: dict[str, list[_Env]] = {}
+        # Label name -> the statement list that owns the labelled statement,
+        # so a ``goto:`` termination propagates up to that frame only.
+        self._label_frames: dict[str, int] = {}
+        self._collect_label_frames(tree.statements)
+
+    def _collect_label_frames(
+        self, statements: tuple[tree_sitter_extract.Statement, ...]
+    ) -> None:
+        for statement in statements:
+            if statement.labeled and statement.label:
+                self._label_frames.setdefault(statement.label, id(statements))
+            for group in (
+                statement.init,
+                statement.body,
+                statement.orelse,
+                statement.post,
+            ):
+                self._collect_label_frames(group)
 
     # -- helpers ---------------------------------------------------------
 
@@ -1320,15 +1401,55 @@ class _Walker:
 
         ``terminated`` is ``""`` when control falls off the end, otherwise the
         kind of statement that left the block (``"return"``, ``"terminate"``,
-        ``"break"``, ``"continue"``, ``"fallthrough"``).
+        ``"break"``, ``"continue"``, ``"fallthrough"``, ``"goto:<label>"``).
         """
-        for statement in statements:
+        index = 0
+        while index < len(statements):
+            statement = statements[index]
             env, terminated = self.statement(statement, env)
-            if terminated:
+            index += 1
+            if not terminated:
+                continue
+            if terminated.startswith("goto:") and self._label_frames.get(
+                terminated[5:]
+            ) == id(statements):
+                # The label lives in this list: the jumped path is dead
+                # here but the walk continues toward it — its env is
+                # already recorded, and intersecting with the site env at
+                # the label keeps must-facts conservative.
+                continue
+            # Every path that reaches this point in the list is dead — but
+            # a recorded ``goto`` can still land on a labelled sibling, so
+            # resume the walk there with the recorded environments as the
+            # only live state (the dead path does not fall through).
+            for ahead in range(index, len(statements)):
+                later = statements[ahead]
+                if (
+                    later.labeled
+                    and later.label
+                    and self.goto_carried.get(later.label)
+                ):
+                    env = None
+                    index = ahead
+                    break
+            else:
                 return env, terminated
         return env, ""
 
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
+        if statement.labeled and statement.label:
+            # Paths recorded by earlier ``goto``s join the fall-through at
+            # the labelled statement. When the fall-through is dead (the
+            # ``env is None`` resume marker) the recorded environments are
+            # the only ones that reach here.
+            pending = self.goto_carried.pop(statement.label, ())
+            if env is None and pending:
+                env = pending[0]
+                pending = pending[1:]
+            for carried in pending:
+                env = env.merge(carried)
+        if env is None:
+            env = _Env()
         kind = statement.kind
         if kind in {
             "define", "assign", "inc", "dec", "expr",
@@ -1373,6 +1494,13 @@ class _Walker:
             if self.break_targets:
                 self.break_targets[-1].append(env.copy())
             return env, kind
+        if kind == "goto":
+            label = control_flow._jump_label(statement.text)
+            if not label:
+                # ``_forward_goto_plan`` already rejects malformed operands.
+                return env, "terminate"
+            self.goto_carried.setdefault(label, []).append(env.copy())
+            return env, f"goto:{label}"
         if kind in {"continue", "fallthrough"}:
             return env, kind
         if kind == "if":
@@ -2765,7 +2893,7 @@ def analyze_function(
     ``len(xs)``) seed the entry state. Only Go bodies are analysed for now.
     """
     tree = tree_sitter_extract.extract_statements(body, language)
-    if tree is None or _contains_kind(tree.statements, "goto"):
+    if tree is None or not _forward_goto_plan(tree.statements):
         return None
     walker = _Walker(
         tree,
