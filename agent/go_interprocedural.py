@@ -1461,9 +1461,11 @@ class _Builder:
         return collection
 
     def _scalar_elem_collection(self, fact: Any) -> bool:
-        """A `[]T`/`[N]T`/`map[K]T` local whose elements are scalar
-        or pointer — `var a [4]int64`, `a := []int64{x}`,
-        `m := map[K]int{...}`. It rides the bound opaque-container
+        """A `[]T`/`[N]T`/`map[K]T` local whose elements are scalar,
+        pointer, or struct — `var a [4]int64`, `a := []int64{x}`,
+        `m := map[K]int{...}`, `s := []St{...}`. A struct element's
+        fields conflate into the element's set — `s[i].F = v` stores
+        like `s[i] = v` and `s[i].F` reads the group's deps. It rides the bound opaque-container
         model: one conflated dep set carries every element's
         provenance, `a[i] = v` lands in the backing every sharer
         reads, and `a[i]` unions the sharers' sets with the index's
@@ -1475,7 +1477,8 @@ class _Builder:
             fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
-            and fact.elem.kind in {"integer", "boolean", "pointer"}
+            and fact.elem.kind
+            in {"integer", "boolean", "pointer", "struct"}
         )
         if collection:
             self._pin_fact_identities(fact)
@@ -1676,6 +1679,19 @@ class _Builder:
         inner index nodes (the elements conflate under the root `a`
         like the func-element collection-of-collection). A computed
         operand stays closed."""
+        # A selector chain (`s[i].F`, `s[i].F.G`) unwinds to its
+        # innermost operand first — the conflated element set cannot
+        # distinguish fields, so the field access rides the same
+        # index resolution.
+        while True:
+            while (
+                lhs is not None
+                and lhs.type == "parenthesized_expression"
+            ):
+                lhs = lhs.child_by_field_name("operand")
+            if lhs is None or lhs.type != "selector_expression":
+                break
+            lhs = lhs.child_by_field_name("operand")
         if lhs is None or lhs.type != "index_expression":
             return None
         operand = lhs.child_by_field_name("operand")
@@ -15805,6 +15821,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         transfers, count, depth + 1,
                     )
                     return deps
+            # `s[i].F` — a field read on a bound container's struct
+            # element: the conflated element set covers the field like
+            # `s[i]` itself, so the read unions the group's deps with
+            # the indexes' own (evaluated into `field_index_deps`
+            # above, in the `member is None` arm this branch shares).
+            if member is None:
+                sel_operand = node.child_by_field_name("operand")
+                while (
+                    sel_operand is not None
+                    and sel_operand.type == "parenthesized_expression"
+                ):
+                    sel_operand = next(
+                        (
+                            c
+                            for c in sel_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                container_idx = self._opaque_container_index_target(
+                    sel_operand
+                )
+                if container_idx is not None:
+                    cref = container_idx[0]
+                    cbound = self.bindings.get(cref.binding_id)
+                    extracted = getattr(cbound, "type", None)
+                    for _ in range(1 + len(container_idx[2] or ())):
+                        extracted = getattr(extracted, "elem", None)
+                    if extracted is not None and extracted.kind == "struct":
+                        return self._opaque_container_deps(
+                            cref.binding_id, locals_
+                        ) | field_index_deps
             if (
                 member is None
                 or member.kind != "const"

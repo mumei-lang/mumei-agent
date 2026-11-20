@@ -4076,22 +4076,34 @@ array so the element lands in the shared group, and a definite
 closed again). A named collection type pins its declared
 identities on admit. The element gate keeps the honest closures:
 `[][]int64` admits one level deeper in the nested section below,
-while `[]struct`/`[]func` locals still cannot bind (the
-func-element collection has its own model). The mutating builtins
-`copy`/`delete`/`clear` admit on a bound scalar-element container
-operand: `copy(dst, src)` lands the source's conflated element set
-on every sharer of `dst`'s group like an element store (the source
-takes any evaluable expression), and when the source is itself
-bound the two groups MERGE — `dst[i]` aliases `src[i]`'s backing
-(a `[][]int64` copy shares the inner slices). `delete(m, k)`
-stores the key's deps into the sharers — an element's survival
-depends on `k`, the most the conflated set can say — and `clear(m)`
-mutates without a stored value: the set cannot track removal, so
-a later read keeps its deps (the sound over-approximation). A
-shared-group PARAM operand flags `/caller-backing` unconditionally
-for all three — a dep-free mutation (`clear(m)`, `delete(m, 1)`)
-grows no dep set but still writes caller memory. On an unbound
-operand all three stay opaque.
+while `[]func` locals keep their own func-element model. The
+mutating builtins `copy`/`delete`/`clear` admit on a bound
+scalar-element container operand: `copy(dst, src)` lands the
+source's conflated element set on every sharer of `dst`'s group
+like an element store (the source takes any evaluable
+expression), and when the source is itself bound the two groups
+MERGE — `dst[i]` aliases `src[i]`'s backing (a `[][]int64` copy
+shares the inner slices). `delete(m, k)` stores the key's deps
+into the sharers — an element's survival depends on `k`, the
+most the conflated set can say — and `clear(m)` mutates without
+a stored value: the set cannot track removal, so a later read
+keeps its deps (the sound over-approximation). A shared-group
+PARAM operand flags `/caller-backing` unconditionally for all
+three — a dep-free mutation (`clear(m)`, `delete(m, 1)`) grows
+no dep set but still writes caller memory. On an unbound
+operand all three stay opaque. A struct element admits the
+same conflated way — `s := []St{...}`, `var a
+[N]St`, `m := map[K]St{...}` bind, and a field access on an
+element rides the element's own set since the conflated model
+cannot distinguish fields: `s[i].F = v` stores like `s[i] =
+v`, `s[i].F.G = v` resolves through the selector chain to the
+same slot, `s[i].F++`/`s[i].F` reads union the group's deps
+with the indexes' own, and a parallel assign (`s[i].F, s[j].F
+= x, y`) shares the form. A whole-element map store (`m[k] =
+St{...}`) lands like any element write — the only write Go
+allows on a map element — and a `b := s[i]` extraction stays
+closed like the `[][4]int64` form (a struct embeds no
+collection to share).
 
 ### C07 scalar-element *nested* local containers
 
