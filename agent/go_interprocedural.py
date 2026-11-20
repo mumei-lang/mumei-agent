@@ -1482,21 +1482,27 @@ class _Builder:
         return collection
 
     def _scalar_elem_nested_collection(self, fact: Any) -> bool:
-        """A `[][]T`/`map[K][]T`/`[N][]T` local — exactly one level
-        of nesting over a scalar-element collection. It rides the
-        same backing-token model with a ONE-LEVEL conflation like
-        the func-element collection-of-collection: every inner
-        element lands in the root binding's conflated dep set —
-        `a[i][j] = v` stores into the backing every sharer reads,
-        `a[i][j]` unions the sharers' sets with both indexes' deps,
-        and `a[i] = inner` replaces a slot while its deps join the
-        same set. Extracting an inner container (`b := a[i]`) or a
-        deeper nest stays closed."""
+        """A `[][]T`/`map[K][]T`/`[N][]T`... local — one OR MORE
+        levels of nesting over a scalar-element collection. It
+        rides the same backing-token model with a ONE-LEVEL
+        conflation like the func-element collection-of-collection:
+        every inner element lands in the root binding's conflated
+        dep set — `a[i][j][...] = v` stores into the backing every
+        sharer reads, `a[i][j][...]` unions the sharers' sets with
+        every index's deps, and `a[i] = inner` replaces a slot
+        while its deps join the same set. Extraction (`b := a[i]`,
+        `b := a[i][j]`) joins the root's share group when the
+        extracted value still shares the backing's headers
+        (`_type_embeds_collection`); a pure-array extracted value
+        copies out and shares nothing."""
         collection = (
             fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
-            and self._scalar_elem_collection(fact.elem)
+            and (
+                self._scalar_elem_collection(fact.elem)
+                or self._scalar_elem_nested_collection(fact.elem)
+            )
         )
         if collection:
             self._pin_fact_identities(fact)
@@ -1662,39 +1668,31 @@ class _Builder:
 
     def _opaque_container_index_target(
         self, lhs: Any
-    ) -> tuple[Any, Any | None, Any | None] | None:
+    ) -> tuple[Any, Any | None, list[Any] | None] | None:
         """`s[i]` as an element-store LHS whose operand names a bound
         opaque container (`s := lib.G(a)`). Returns the operand's
-        reference, the index node, and — for a nested `a[i][j]` on
-        a bound scalar-nested collection — the inner index node
-        (the elements conflate under the root `a` like the
-        func-element collection-of-collection). A deeper nest or a
-        computed operand stays closed."""
+        reference, the outermost index node, and — for a nested
+        `a[i][j][...]` on a bound scalar-nested collection — the
+        inner index nodes (the elements conflate under the root `a`
+        like the func-element collection-of-collection). A computed
+        operand stays closed."""
         if lhs is None or lhs.type != "index_expression":
             return None
         operand = lhs.child_by_field_name("operand")
-        while (
-            operand is not None
-            and operand.type == "parenthesized_expression"
-        ):
-            operand = operand.child_by_field_name("operand")
-        if operand is None:
-            return None
-        inner_index = None
-        if operand.type == "index_expression":
-            # `a[i][j]` — the inner operand must name a bound
-            # scalar-nested collection; the store lands in the
-            # root's backing.
-            inner_index = operand.child_by_field_name("index")
-            operand = operand.child_by_field_name("operand")
+        inner_indexes: list[Any] = []
+        while True:
             while (
                 operand is not None
                 and operand.type == "parenthesized_expression"
             ):
                 operand = operand.child_by_field_name("operand")
-            if operand is None or operand.type != "identifier":
-                return None
-        if operand.type != "identifier":
+            if operand is None or operand.type != "index_expression":
+                break
+            inner_indexes.append(
+                operand.child_by_field_name("index")
+            )
+            operand = operand.child_by_field_name("operand")
+        if operand is None or operand.type != "identifier":
             return None
         ref = self.references.get(self.node_key(operand))
         if (
@@ -1703,38 +1701,42 @@ class _Builder:
             or ref.binding_id not in self._opaque_container_tokens
         ):
             return None
-        if inner_index is not None:
+        if inner_indexes:
             bound = self.bindings.get(ref.binding_id)
             if bound is None or not self._scalar_elem_nested_collection(
                 bound.type
             ):
                 return None
-        return ref, lhs.child_by_field_name("index"), inner_index
+        return ref, lhs.child_by_field_name("index"), (
+            inner_indexes or None
+        )
 
     def _opaque_container_index_sharer_toks(
         self, node: Any
     ) -> frozenset[tuple[int, int, int]]:
-        """`a[i]`/`m[k]` on a bound nested scalar container — the
-        extracted element shares the root's backing, so its tokens
-        join the bound name's share group (`b := a[i]` then
-        `b[0] = x` reaches `a[0][0]` and `a[0][0] = x` reaches
-        `b[0]`). Empty for anything else: an unbound operand, a
-        deeper nest (`a[i][j]`), or a non-container element."""
+        """`a[i]`/`m[k]`/`a[i][j][...]` on a bound nested scalar
+        container — the extracted value shares the root's backing
+        when its copied headers still alias it (a slice/map header,
+        or an array embedding one), so its tokens join the bound
+        name's share group (`b := a[i]` then `b[0] = x` reaches
+        `a[0][0]` and `a[0][0] = x` reaches `b[0]`). Empty for
+        anything else: an unbound or computed operand, or a
+        pure-array extracted value, which is a value copy sharing
+        no backing."""
         target = self._opaque_container_index_target(node)
-        if target is None or target[2] is not None:
+        if target is None:
             return frozenset()
         ref = target[0]
         binding = self.bindings.get(ref.binding_id)
-        if (
-            binding is None
-            or binding.type is None
-            or not self._scalar_elem_nested_collection(binding.type)
-            or binding.type.elem is None
-            or binding.type.elem.kind not in {"slice", "map"}
-        ):
-            # An inner ARRAY (`a[i]` on `[][M]T`/`[N][M]T`) is a
-            # value copy — it shares no backing, so extraction
-            # stays closed like an unbound operand.
+        if binding is None or binding.type is None:
+            return frozenset()
+        extracted = binding.type
+        for _ in range(1 + len(target[2] or ())):
+            extracted = getattr(extracted, "elem", None)
+        if not self._type_embeds_collection(extracted):
+            # An inner ARRAY (`a[i]` on `[][M]T`, `a[i][j]` on
+            # `[][M][K]T`) is a value copy — it shares no backing,
+            # so extraction stays closed like an unbound operand.
             return frozenset()
         return self._opaque_container_tokens.get(
             ref.binding_id, frozenset()
@@ -1847,13 +1849,23 @@ class _Builder:
             if not self._opaque_container_index_sharer_toks(arg0):
                 return None
             target = self._opaque_container_index_target(arg0)
-            if target is None or target[2] is not None:
+            if target is None:
                 return None
             ref = target[0]
             bound = self.bindings.get(ref.binding_id)
-            if bound is None or bound.type is None or not gate(
-                bound.type.elem
-            ):
+            if bound is None or bound.type is None:
+                return None
+            if target[2]:
+                # `append(a[i][j], v)` — the deep operand still
+                # names the root's share group; the sharer gate
+                # above already checked the extracted level
+                # embeds a collection, so the root only needs the
+                # nested scalar chain.
+                if not self._scalar_elem_nested_collection(
+                    bound.type
+                ):
+                    return None
+            elif not gate(bound.type.elem):
                 return None
             return ref.binding_id
         if arg0 is None or arg0.type != "identifier":
@@ -2176,20 +2188,14 @@ class _Builder:
             if binding.type.kind == "array":
                 # `s = a` copies the array — the reseat never
                 # aliases `a`'s backing, so the destination mints
-                # its own token. A nested `[N][]T` copy still
-                # shares every inner slice's backing, so the
-                # source's tokens union in: `a[0][0] = x` reaches
-                # `b[0][0]` reads (and `b[0] = sub` stays a
-                # conflated may-write on `a`'s group). An inner
-                # ARRAY (`[N][M]T`) is a value copy itself — the
-                # copy shares nothing, so no tokens union.
+                # its own token. A copy whose type still embeds a
+                # slice/map (`[N][]T`, `[N][M][]T`...) shares the
+                # headers it copied, so the source's tokens union
+                # in: `a[0][0] = x` reaches `b[0][0]` reads. A pure
+                # array chain (`[N][M]T`) shares nothing — no
+                # tokens union.
                 fresh = {self.node_key(rhs)}
-                if self._scalar_elem_nested_collection(
-                    binding.type
-                ) and (
-                    binding.type.elem is not None
-                    and binding.type.elem.kind in {"slice", "map"}
-                ):
+                if self._type_embeds_collection(binding.type):
                     fresh |= self._opaque_container_tokens.get(
                         ref.binding_id, frozenset()
                     )
@@ -2272,6 +2278,11 @@ class _Builder:
             # carries the extracted element's slice header, which
             # shares its root's backing.
             return self._opaque_container_index_sharer_toks(node)
+        if node is not None and node.type == "composite_literal":
+            # `[][][]int64{{sub}}` — a nested literal's own
+            # element donors carry their sharable tokens up one
+            # level like `[][]int64{sub}` does at the root.
+            return self._opaque_container_elem_toks(node)
         if node is None or node.type != "identifier":
             return frozenset()
         ref = self.references.get(self.node_key(node))
@@ -4251,7 +4262,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 elem.kind not in {"integer", "boolean", "pointer"}
                 and not (
                     opaque_composite is not None
-                    and self._scalar_elem_collection(elem)
+                    and (
+                        self._scalar_elem_collection(elem)
+                        or self._scalar_elem_nested_collection(
+                            elem
+                        )
+                    )
                 )
             )
         ):
@@ -5074,11 +5090,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 continue
             opaque_elem = self._opaque_container_index_target(lhs)
             if opaque_elem is not None:
-                ref, index_node, inner_index = opaque_elem
+                ref, index_node, inner_indexes = opaque_elem
                 # `a[i] = <-ch` — a store into a bound container's
-                # backing lands the received deps (plus the index's
+                # backing lands the received deps (plus every index's
                 # own) in every sharer's set, like `a[i] = v` does.
-                # `a[i][j] = <-ch` unions the inner index's deps too.
                 index_deps = (
                     self.expression(
                         index_node, fn, params, locals_,
@@ -5087,7 +5102,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if index_node is not None
                     else frozenset()
                 )
-                if inner_index is not None:
+                for inner_index in inner_indexes or ():
                     index_deps |= self.expression(
                         inner_index, fn, params, locals_,
                         transfers, count, 0,
@@ -10196,7 +10211,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs
                 )
                 if opaque_elem_lhs is not None:
-                    oref, oindex, inner_index = opaque_elem_lhs
+                    oref, oindex, inner_indexes = opaque_elem_lhs
                     refs.append(oref)
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(
@@ -10205,18 +10220,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     )
                     obound = self.bindings.get(oref.binding_id)
-                    if (
+                    inline = (
                         obound is not None
                         and obound.type is not None
                         and obound.type.kind == "array"
-                        and (
-                            inner_index is None
-                            or (
-                                obound.type.elem is not None
-                                and obound.type.elem.kind == "array"
-                            )
-                        )
-                    ):
+                    )
+                    if inline:
+                        # `a[i][j][...] = v` stays inline only while
+                        # every container level the store crosses is
+                        # an array — a slice/map level's slot reseat
+                        # can move the element out of the root's
+                        # inline storage.
+                        walk = obound.type.elem
+                        for _ in inner_indexes or ():
+                            if walk is None or walk.kind != "array":
+                                inline = False
+                                break
+                            walk = getattr(walk, "elem", None)
+                    if inline:
                         opaque_elem_array_roots[ri] = oref.binding_id
                     opaque_elem_index_deps[ri] = frozenset()
                     if (
@@ -10230,19 +10251,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._record_read(
                             opaque_elem_index_deps[ri]
                         )
-                    if (
-                        inner_index is not None
-                        and inner_index.type not in _INDEX_LITERALS
-                    ):
-                        opaque_elem_index_deps[ri] |= (
-                            self.expression(
-                                inner_index, fn, params, locals_,
-                                transfers, count, 0,
+                    for inner_index in inner_indexes or ():
+                        if (
+                            inner_index is not None
+                            and inner_index.type
+                            not in _INDEX_LITERALS
+                        ):
+                            opaque_elem_index_deps[ri] |= (
+                                self.expression(
+                                    inner_index, fn, params,
+                                    locals_, transfers, count, 0,
+                                )
                             )
-                        )
-                        self._record_read(
-                            opaque_elem_index_deps[ri]
-                        )
+                            self._record_read(
+                                opaque_elem_index_deps[ri]
+                            )
                     continue
                 func_elem_lhs = self._func_elem_index_target(
                     lhs, locals_
@@ -13885,15 +13908,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 return
             opaque_elem = self._opaque_container_index_target(operand)
             if opaque_elem is not None:
-                ref, index_node, inner_index = opaque_elem
+                ref, index_node, inner_indexes = opaque_elem
                 # `a[i]++` — the stored value's provenance is the
                 # element's own (the backing's conflated set) plus
-                # the index that picked the slot; both union back
+                # every index that picked the slot; both union back
                 # into every sharer's set like `a[i] = v` does.
                 elem_value = self._opaque_container_deps(
                     ref.binding_id, locals_
                 )
-                for idx in (index_node, inner_index):
+                for idx in (index_node,) + tuple(
+                    inner_indexes or ()
+                ):
                     if idx is not None:
                         elem_value = elem_value | self.expression(
                             idx, fn, params, locals_,
@@ -19889,28 +19914,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `lib.U(a[i], v)` — `a[i]` hands the callee a slice
                 # header sharing the bound root's backing: the
                 # callee's `q[0] = v` lands in every sharer's set
-                # like a caller-side `a[i][0] = v`.
-                target = self._opaque_container_index_target(arg_node)
-                if target is not None and target[2] is None:
-                    binding = self.bindings.get(target[0].binding_id)
-                    if (
-                        binding is not None
-                        and binding.type is not None
-                        and self._scalar_elem_nested_collection(
-                            binding.type
-                        )
-                        and binding.type.elem is not None
-                        and binding.type.elem.kind
-                        in {"slice", "map"}
+                # like a caller-side `a[i][0] = v`. A deep
+                # `a[i][j][...]` donor shares the same way when the
+                # extracted headers still alias the backing.
+                sharer = self._opaque_container_index_sharer_toks(
+                    arg_node
+                )
+                if sharer:
+                    for holder_id in self._opaque_container_holders(
+                        sharer
                     ):
-                        for holder_id in self._opaque_container_sharers(
-                            target[0].binding_id
-                        ):
-                            self._store(
-                                locals_, params, holder_id, stored,
-                                True,
-                            )
-                        self.indirect_writes |= stored
+                        self._store(
+                            locals_, params, holder_id, stored,
+                            True,
+                        )
+                    self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the

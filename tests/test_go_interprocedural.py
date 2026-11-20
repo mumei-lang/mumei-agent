@@ -186,8 +186,10 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
-        # A local nested more than one level still cannot bind.
-        "func F(x int64) int64 { var s [][][]int64; _ = s; return x }",
+        # A local func-element nested two levels deep still
+        # cannot bind — `[][]func` is the func-element model's
+        # limit.
+        "func F(x int64) int64 { var s [][][]func(); _ = s; return x }",
         # A parenthesized function name is outside the store-RHS
         # position the alias admits — `h := (G)` stays closed.
         "func G(v int64) int64 { return v }; func F(x int64) int64 { h := (G); return h(x) }",
@@ -1236,7 +1238,7 @@ def test_pure_builtin_dependencies(go_types_helper, declarations, expected):
         "func F(x int64) int64 { return int64(len(\"ab\")) + x }",
         "func F(x int64) int64 { return int64(cap([3]int64{1, 2, 3})) }",
         # `make` of a twice-nested container cannot bind.
-        "func F(x int64) int64 { s := make([][][]int64, 2); _ = s; return x }",
+        "func F(x int64) int64 { s := make([][][]func(), 2); _ = s; return x }",
     ],
 )
 def test_impure_builtins_stay_opaque(go_types_helper, declarations):
@@ -1254,9 +1256,10 @@ def test_impure_builtins_stay_opaque(go_types_helper, declarations):
         # defer/go are effect-bearing and stay outside the fragment.
         "func F(x int64) int64 { defer F(0); return x }",
         "func F(x int64) int64 { go F(0); return x }",
-        # inc/dec on a twice-nested index operand is outside the
-        # fragment.
-        "func F(x int64) int64 { a := [][][]int64{{{x}}}; a[0][0][0]++; return x }",
+        # inc/dec on a twice-nested index operand whose root is a
+        # parameter container is outside the fragment — the param
+        # never joined a share group.
+        "func F(t [][][]int64, x int64) int64 { t[0][0][0]++; return x }",
     ],
 )
 def test_control_statement_shapes_stay_unsupported(
@@ -7238,13 +7241,13 @@ def test_local_struct_value_boundaries(
     go_types_helper,
 ):
     # A named slice over a scalar element rides the bound
-    # scalar-container model like an anonymous `[]int64`; a named
-    # one-level nest rides the same model, while a second nested
-    # level stays closed.
+    # scalar-container model like an anonymous `[]int64`; named
+    # deeper nests ride the same model — a `[][][]int64` named
+    # type binds and reads at depth like the anonymous shape.
     for decl, body, available in [
         ("type S []int64", "sl := S{x}; return sl[0]", True),
         ("type N [][]int64", "sl := N{{x}}; return sl[0][0]", True),
-        ("type D [][][]int64", "sl := D{{{x}}}; return sl[0][0][0]", False),
+        ("type D [][][]int64", "sl := D{{{x}}}; return sl[0][0][0]", True),
     ]:
         files = {
             "a.go": f"package p\n{decl}\n"
@@ -12553,13 +12556,13 @@ def test_builtin_new_named_pointee_field(
 def test_builtin_make_non_scalar_stays_closed(
     go_types_helper,
 ):
-    # `make([][][]int64)` — a composite value whose element nests
-    # one level deeper than the scalar-container gate admits
-    # stays opaque like before.
+    # `make([][][]func)` — a composite value whose element nests
+    # one level deeper than the func-element model admits stays
+    # opaque like before.
     files = {
         "a.go": "package p\n"
         "func F(a int64) int64 {\n"
-        "\ts := make([][][]int64, 3)\n"
+        "\ts := make([][][]func(), 3)\n"
         "\ts[0] = nil\n"
         "\treturn 0\n}\n"
     }
@@ -16155,7 +16158,7 @@ def test_statement_reads_absent_when_closed(go_types_helper):
         *unit(
             go_types_helper,
             "func F(x int64) int64 {\n"
-            "\ts := make([][][]int64, 2)\n\t_ = s\n\treturn x\n}\n",
+            "\ts := make([][][]func(), 2)\n\t_ = s\n\treturn x\n}\n",
         )
     )
     assert not result.available
@@ -19103,6 +19106,148 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn c[0]\n}\n",
             frozenset({0, 1}),
         ),
+        # `[][][]int64` — a deep store lands in the root's
+        # conflated set and the deep read unions it with every
+        # index's deps.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [][][]int64{{{x}}}\n"
+            "\ta[0][0][0] = y\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b := a[i][j]` — deep extraction joins the root's
+        # share group: `b`'s store reaches the deep read on `a`.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [][][]int64{{{x}}}\n"
+            "\tb := a[0][0]\n"
+            "\tb[0] = y\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # And the reverse direction: the root's deep store
+        # reaches the extracted name.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [][][]int64{{{x}}}\n"
+            "\tb := a[0][0]\n"
+            "\ta[0][0][0] = y\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b = a[i][j]` — the reseat form joins the group the
+        # same way.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [][][]int64{{{x}}}\n"
+            "\tvar b []int64\n"
+            "\tb = a[0][0]\n"
+            "\tb[0] = y\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `[][]int64{a[i][j]}` — a deep index donor carries the
+        # extracted slice header into the new container's group.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [][][]int64{{{x}}}\n"
+            "\tc := [][]int64{a[0][0]}\n"
+            "\tc[0][0] = y\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `[][][]int64{sub}` — a bound deep donor shares its
+        # backing through the literal.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\tsub := [][]int64{{x}}\n"
+            "\ta := [][][]int64{sub}\n"
+            "\ta[0][0][0] = y\n"
+            "\treturn sub[0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b := a[i]` on `[N][M][]T` — the copied array still
+        # shares its slice headers, so `b` joins the group.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [2][1][]int64{{{x}}}\n"
+            "\tb := a[0]\n"
+            "\ta[0][0][0] = y\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b := a` on `[N][M][]T` — the array copy embeds slice
+        # headers that still alias `a`'s backing.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\ta := [2][1][]int64{{{x}}}\n"
+            "\tb := a\n"
+            "\tb[0][0][0] = y\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a[i][j][k] = v` — every index's deps union into the
+        # store like the two-level form does.
+        (
+            "func F(i, j, k, y int64) int64 {\n"
+            "\ta := [][][]int64{{{0}}}\n"
+            "\ta[i][j][k] = y\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1, 2, 3}),
+        ),
+        # `a[i][j][k]++` — the deep inc/dec path unions the
+        # conflated set and every index back into the sharers.
+        (
+            "func F(i int64) int64 {\n"
+            "\ta := [][][]int64{{{0}}}\n"
+            "\ta[i][0][0]++\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i][j][k] = <-ch` — a receive store at depth lands
+        # the receive deps plus every index's.
+        (
+            "func F(ch chan int64, i int64) int64 {\n"
+            "\ta := [][][]int64{{{0}}}\n"
+            "\tselect {\n"
+            "\tcase a[i][0][0] = <-ch:\n"
+            "\t}\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `m[k][i][j]` on `map[K][][]T` — mixed roots ride the
+        # same model.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\tm := map[int64][][]int64{0: {{x}}}\n"
+            "\tb := m[0][0]\n"
+            "\tb[0] = y\n"
+            "\treturn m[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a := s.F` on a `[][][]int64` field — the member's
+        # share group binds at arbitrary depth too.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [][][]int64 }\n"
+            "\ts.F = [][][]int64{{{0}}}\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0][0][0] = x\n"
+            "\treturn b[0][0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := append(a[i][j], v)` — the deep append shares like
+        # the two-level form.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\ta := [][][]int64{{{0}}}\n"
+            "\tb := append(a[0][0], y)\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -19164,17 +19309,25 @@ def test_scalar_container_bind_read_write_admits(
         "\tb = a[0]\n"
         "\tb[0] = x\n"
         "\treturn a[0][0]\n}\n",
-        # `[][][]int64` — two levels of nesting stays closed; the
-        # model admits exactly one.
+        # `b := t[i][j]` on a bound nested PARAM — the param's
+        # backing was never registered, so the deep extraction
+        # stays closed.
+        "func F(t [][][]int64, x int64) int64 {\n"
+        "\tb := t[0][0]\n"
+        "\tb[0] = x\n"
+        "\treturn b[0]\n}\n",
+        # `b := a[i][j]` on `[][4][4]int64` — the extracted element
+        # is a pure array of scalars (a value copy), so `a[0][0]`
+        # has no shared backing to name and stays closed.
         "func F(x int64) int64 {\n"
-        "\ta := [][][]int64{{{x}}}\n"
-        "\ta[0][0][0] = int64(0)\n"
+        "\ta := [][4][4]int64{{{0}}}\n"
+        "\tb := a[0][0]\n"
+        "\tb[0] = x\n"
         "\treturn a[0][0][0]\n}\n",
-        # `a := s.F` where `F` is a two-level container — the
-        # selector share covers scalar-element fields and their
-        # one-level nesting, but `[][][]int64` stays closed.
-        "func F(x int64) int64 {\n"
-        "\tvar s struct{ F [][][]int64 }\n"
+        # `a := s.F` on a POINTER-to-composite root — field
+        # shares need a local-composite root, so the extraction
+        # stays closed.
+        "func F(s *struct{ F [][][]int64 }, x int64) int64 {\n"
         "\ta := s.F\n"
         "\ta[0][0][0] = x\n"
         "\treturn a[0][0][0]\n}\n",
@@ -22755,7 +22908,7 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     # cannot evaluate, so the outer call fails closed through it.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { m:=map[int][][]int{1:nil}; _=m; return nil }; "
+        "func mk() func() int64 { defer func(){}(); return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
@@ -25724,9 +25877,10 @@ def test_opaque_composite_scalar_reseat_closes(go_types_helper):
     assert not result.available
 
 
-def test_opaque_composite_literal_deeper_nest_stays_closed(go_types_helper):
-    # `s := [][][]int64{{{a}}}` — a literal nested one level deeper
-    # than the model admits still cannot bind a name.
+def test_opaque_composite_literal_deeper_nest_admits(go_types_helper):
+    # `s := [][][]int64{{{a}}}` — a deep scalar-element literal
+    # binds under the same conflated model: the deep read unions
+    # `a`'s deps with the non-literal index's.
     files = {
         "a.go": "package p\n"
         "func F(a, j int64) int64 {\n"
@@ -25739,7 +25893,8 @@ def test_opaque_composite_literal_deeper_nest_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_opaque_composite_local_callee_stays_closed(go_types_helper):
@@ -27089,6 +27244,23 @@ def test_opaque_composite_callee_writes_container_arg(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_callee_writes_deep_index_arg(
+    go_types_helper,
+):
+    # `lib.U(a[0][0], x)` on `[][][]int64` — the deep index donor
+    # still hands the callee a slice header sharing the bound
+    # root's backing, so its writes land in every sharer's set.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\ta := [][][]int64{{{0}}}\n"
+        "\tlib.U(a[0][0], x)\n"
+        "\treturn a[0][0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_opaque_composite_callee_writes_index_arg(
