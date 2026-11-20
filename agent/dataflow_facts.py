@@ -1423,25 +1423,6 @@ class _Walker:
                     # The label lives in an enclosing list — bubble up to
                     # the frame that owns it.
                     return env, terminated
-                # The path is dead: a ``goto`` whose label lives here was
-                # absorbed, or control left by return/break/continue. The
-                # dead path does NOT keep walking — statements after it
-                # never ran (a skipped ``defer`` must not register), but a
-                # recorded ``goto`` can still land on a labelled sibling,
-                # so resume there with the recorded envs as the only live
-                # state.
-                for ahead in range(index, len(statements)):
-                    later = statements[ahead]
-                    if (
-                        later.labeled
-                        and later.label
-                        and self.goto_carried.get(later.label)
-                    ):
-                        env = None
-                        index = ahead
-                        break
-                else:
-                    return env, terminated
             return env, ""
         finally:
             self._scope_stack.pop()
@@ -1974,7 +1955,13 @@ class _Walker:
             env.nilable = {
                 k: v for k, v in env.nilable.items() if k != name
             }
-            env.held = {h for h in env.held if not mentions(h[1])}
+            # Resource state survives scope exit like ``_leave_scope``:
+            # a handle still open past the jump is a real leak — only the
+            # site pairing dies with the block-local name.
+            env.held = {
+                (h[0], h[1], "") if len(h) == 3 and h[2] in names else h
+                for h in env.held
+            }
             env.defined = {d for d in env.defined if d != name}
 
     def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:

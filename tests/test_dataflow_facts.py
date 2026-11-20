@@ -593,6 +593,25 @@ def test_goto_never_walks_the_statements_it_skips() -> None:
     assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
 
 
+def test_goto_out_of_a_scope_keeps_the_held_resource() -> None:
+    # The inner ``mu := M(); mu.Lock()`` handle is still open past the
+    # jump — its lock stays held at the return even though the name died.
+    body = (
+        "if c {\n"
+        "    mu := M()\n"
+        "    mu.Lock()\n"
+        "    goto done\n"
+        "}\n"
+        "return 0\n"
+        "done:\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
+
+
+
+
 def test_fallthrough_enters_next_case_without_its_guard() -> None:
     body = (
         "switch d {\n"
