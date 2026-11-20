@@ -2086,12 +2086,12 @@ def test_self_reslice_keeps_uninitialized_slice_state() -> None:
 
 
 def test_reslice_result_inherits_source_nil_state() -> None:
-    # ``x := buf[1:]`` is nil exactly when ``buf`` is.
+    # ``x := buf[:0]`` is nil exactly when ``buf`` is.
     source = (
         "package demo\n"
         "func First() int {\n"
         "    var buf []int\n"
-        "    x := buf[1:]\n"
+        "    x := buf[:0]\n"
         "    return x[0]\n"
         "}\n"
     )
