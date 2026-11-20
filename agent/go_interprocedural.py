@@ -36,8 +36,13 @@ calls are legal — evaluate for their recorded transfer and discard the
 result. An unlabelled
 ``break``/``continue`` marks its innermost loop or switch construct as
 exited — every later statement in that body is a may-assignment whose
-writes union instead of replace, because the jump may have skipped them
-(labelled jumps, ``goto``, ``defer`` and ``go`` stay unmodelled). Scalar
+writes union instead of replace, because the jump may have skipped them.
+A labelled ``break L``/``continue L`` resolves its label against the
+loop/switch frames a ``labeled_statement`` wraps and marks every
+construct between the jump and the labelled one exited; ``goto``
+conservatively marks all open constructs exited and every later
+statement conditional, since anything between the jump and its label
+may be skipped (``defer`` and ``go`` stay unmodelled). Scalar
 ``const`` declarations and reads are admitted: a constant expression can
 never read a variable (the compiler rejects it before this reader runs),
 so a scalar-typed ``constant`` binding always resolves to an empty
@@ -1071,8 +1076,16 @@ class _Builder:
         self._defer_result_deps: frozenset[int] = frozenset()
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
-        # unlabelled break or continue marks the frame it exits.
+        # unlabelled break or continue marks the frame it exits. A frame
+        # may carry the label of the ``labeled_statement`` that wraps its
+        # construct so `break L`/`continue L` resolve against it.
         self.frames: list[dict[str, Any]] = []
+        # Labels of enclosing ``labeled_statement``s, outermost first —
+        # consumed (peeked) by the next loop/switch frame pushed.
+        self._pending_labels: list[str] = []
+        # Once a `goto` runs, every statement until its label — at any
+        # depth — may have been skipped, so all later writes union.
+        self._goto_seen = False
         self.raws = raws
         for file, raw in raws.items():
             root = _syntax(raw)
@@ -7514,7 +7527,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         """
         frame = self.frames[-1] if self.frames else None
         for child in children:
-            if frame is not None and frame["exited"]:
+            if (frame is not None and frame["exited"]) or self._goto_seen:
                 conditional = True
             self.statement(
                 child, fn, params, locals_, transfers, count, deps,
@@ -12174,7 +12187,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # parameter indexes, so widening is monotone over a bounded
             # universe; the pass cap is a defensive analysis limit.
             passes = 0
-            frame = {"kind": "loop", "exited": False}
+            frame = {
+                "kind": "loop",
+                "exited": False,
+                "label": self._pending_labels[-1]
+                if self._pending_labels
+                else None,
+            }
             # Resolution-table snapshots seen at pass boundaries. The
             # tables are rewritten, not unioned, so a store like
             # `f, g = g, f` (two closures capturing different locals)
@@ -12507,7 +12526,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self.expression(
                     value, fn, params, scope, transfers, count, 0
                 )
-            frame = {"kind": "switch", "exited": False}
+            frame = {
+                "kind": "switch",
+                "exited": False,
+                "label": self._pending_labels[-1]
+                if self._pending_labels
+                else None,
+            }
             self.frames.append(frame)
             try:
                 clauses = [
@@ -12602,12 +12627,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
             # A label with no labelled jumps is inert syntax — the wrapped
-            # statement is processed normally; `break L`/`continue L`
-            # inside it stay unsupported via the label check below.
-            self.statement(
-                inner[0], fn, params, locals_, transfers, count, deps,
-                saw_return, conditional,
+            # statement is processed normally. When the inner statement is
+            # a loop or switch the label registers on its frame so a
+            # `break L`/`continue L` inside can resolve it; on any other
+            # inner statement the label is simply discarded.
+            label = next(
+                (
+                    c.text.decode("utf-8", "replace")
+                    for c in node.named_children
+                    if c.type == "label_name"
+                ),
+                "",
             )
+            self._pending_labels.append(label)
+            try:
+                self.statement(
+                    inner[0], fn, params, locals_, transfers, count, deps,
+                    saw_return, conditional,
+                )
+            finally:
+                self._pending_labels.pop()
             return
         if kind in {"inc_statement", "dec_statement"}:
             operands = _children(node)
@@ -12827,8 +12866,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 _span(node),
             )
         if kind in {"break_statement", "continue_statement"}:
-            if any(c.type == "label_name" for c in node.named_children):
-                raise _Unsupported("unsupported_statement", _span(node))
+            label_node = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type == "label_name"
+                ),
+                None,
+            )
+            if label_node is not None:
+                want = label_node.text.decode("utf-8", "replace")
+                hit = None
+                for index in range(len(self.frames) - 1, -1, -1):
+                    frame = self.frames[index]
+                    if frame.get("label") == want and (
+                        kind == "break_statement"
+                        or frame["kind"] == "loop"
+                    ):
+                        hit = index
+                        break
+                if hit is None:
+                    # `break L` needs a labelled loop/switch/select,
+                    # `continue L` a labelled loop — anything else is a
+                    # jump this fragment cannot model.
+                    raise _Unsupported(
+                        "unsupported_statement", _span(node)
+                    )
+                # The jump abandons every construct between here and the
+                # labelled one — all of their remaining statements are
+                # conditional.
+                for frame in self.frames[hit:]:
+                    frame["exited"] = True
+                return
             if kind == "break_statement":
                 # Unlabelled break exits the innermost loop or switch.
                 if not self.frames:
@@ -12844,6 +12913,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         break
                 else:
                     raise _Unsupported("unsupported_statement", _span(node))
+            return
+        if kind == "goto_statement":
+            # Every statement between the jump and its label may never
+            # run — mark all open constructs exited and the rest of the
+            # function conditional; the label itself is inert.
+            for frame in self.frames:
+                frame["exited"] = True
+            self._goto_seen = True
             return
         if kind == "expression_statement":
             # A call (or receive) evaluated for its side channel and
@@ -12940,7 +13017,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ]
             if not clauses:
                 raise _Unsupported("unsupported_statement", _span(node))
-            frame = {"kind": "switch", "exited": False}
+            frame = {
+                "kind": "switch",
+                "exited": False,
+                "label": self._pending_labels[-1]
+                if self._pending_labels
+                else None,
+            }
             self.frames.append(frame)
             try:
                 # Go evaluates every case's channel operand and send
