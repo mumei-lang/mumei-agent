@@ -347,7 +347,8 @@ class RouteRequirements:
 class VerdictMarker:
     """One manifest-declared output marker: ``contains`` bytes on ``stream``
     mean the adapter reports ``outcome`` — a declared self-report, never
-    Evidence acceptance."""
+    Evidence acceptance. Only the collector's bounded prefix (64 KiB per
+    stream) is scanned, so a marker beyond the bound reads as no match."""
 
     stream: str
     contains: str
@@ -538,7 +539,9 @@ class AdapterDescriptor:
         attempt_argv = manifest.get("attempt_argv")
         if attempt_argv is not None and type(attempt_argv) is not list:
             raise ValueError("invalid adapter attempt declaration")
-        verdict_markers = manifest.get("verdict_markers") or []
+        verdict_markers = manifest.get("verdict_markers")
+        if verdict_markers is None:
+            verdict_markers = []
         if type(verdict_markers) is not list or any(
             type(marker) is not dict
             or set(marker) != {"stream", "contains", "outcome"}

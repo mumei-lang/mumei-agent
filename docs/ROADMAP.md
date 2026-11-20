@@ -6098,6 +6098,18 @@ still yields `not_dispatched` — the route never guesses a command, and
 without the explicit policy opt-in a declared `attempt_argv` is inert
 metadata.
 
+```python
+descriptor = AdapterDescriptor.from_manifest({
+    ...,
+    "attempt_argv": ["/usr/bin/myverifier", "--batch"],
+})
+```
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged — declared output
+interpretation is covered by `verdict_markers` below while Evidence
+acceptance remains open.
+
 ### C11 manifest-declared output verdict markers
 
 `AdapterDescriptor.verdict_markers` lets an adapter manifest declare
@@ -6128,16 +6140,15 @@ descriptor = AdapterDescriptor.from_manifest({
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged.
 
-```python
-descriptor = AdapterDescriptor.from_manifest({
-    ...,
-    "attempt_argv": ["/usr/bin/myverifier", "--batch"],
-})
-```
+Markers scan only the captured prefix of each stream: the output
+collector keeps at most the first 64 KiB of stdout and stderr, so a
+marker that appears only beyond the byte bound records `null`
+(indistinguishable from no match — the run's `complete` flag is the
+host's claim about whether the capture is whole).
 
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
-any default audit/CLI/MCP route are unchanged — output interpretation
-and Evidence acceptance remain open.
+any default audit/CLI/MCP route are unchanged — Evidence acceptance
+remains open.
 
 
 ## Roadmap authority and vocabulary
