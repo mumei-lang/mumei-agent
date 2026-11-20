@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -4544,6 +4545,15 @@ def test_audit_scheduled_verification_output_overwrite_rejected(
     with pytest.raises(SystemExit):
         main(
             build_parser().parse_args(base_args + ["--output", str(alias)])
+        )
+    assert "must not overwrite" in capsys.readouterr().err
+
+    # A hardlink is a different path onto the same inode.
+    hard = tmp_path / "policy_hardlink.json"
+    os.link(Path(files["policy"]), hard)
+    with pytest.raises(SystemExit):
+        main(
+            build_parser().parse_args(base_args + ["--output", str(hard)])
         )
     assert "must not overwrite" in capsys.readouterr().err
 

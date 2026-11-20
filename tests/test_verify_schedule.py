@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -264,6 +265,18 @@ def test_output_must_not_overwrite_declared_input(inputs, capsys):
     assert "FAKE_PRIVATE" not in err
     # The source survives untouched.
     assert open(inputs["source"], "rb").read() == SOURCE
+
+
+def test_output_must_not_overwrite_declared_input_hardlink(
+    inputs, capsys, tmp_path
+):
+    # A hardlink is a different path onto the same inode.
+    hard = tmp_path / "policy_hardlink.json"
+    os.link(inputs["policy"], hard)
+    args = args_for(inputs, output=str(hard))
+    with pytest.raises(SystemExit):
+        main_schedule(args)
+    assert "must not overwrite" in capsys.readouterr().err
 
 
 def test_policy_requires_explicit_allowed_permissions(inputs, tmp_path, capsys):
