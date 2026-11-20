@@ -1386,6 +1386,21 @@ def test_stacked_and_empty_labels_both_resolve():
     assert edges_to(cfg, jump.node_id) == {labelled.node_id}
 
 
+def test_goto_label_before_closing_brace_resolves():
+    # `L:` immediately before `}` carries no child statement either —
+    # the label still exists as a goto target, modelled as a no-op.
+    body = "x := 0; goto L; x = 1; L: "
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "L:")
+    assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+    body = "x := 0; { goto L; x = 1; L: }; after()"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "L:")
+    assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+
+
 def test_terminal_fallthrough_edges_into_the_next_case_body():
     # `case 0: fallthrough` falls into case 1's body, so `a()` is
     # reached through the case-0 alternative too.

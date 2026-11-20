@@ -1429,7 +1429,13 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
             else:
                 inner = child
         if inner is None:
-            return None
+            # ``L:`` immediately before ``}`` — tree-sitter reports the
+            # labelled statement with no child. The label still exists
+            # as a ``goto`` target; model it as a no-op expression.
+            return Statement(
+                kind="expr", text=text, start=start,
+                labeled=True, label=label,
+            )
         statement = _go_statement(source_bytes, inner, base, offsets)
         if statement is None:
             # ``L: ;`` — the labelled statement is empty, but the label
