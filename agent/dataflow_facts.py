@@ -1303,7 +1303,14 @@ class _Walker:
         self._collect_label_frames(tree.statements)
         # (statement-list id, names it declares) for every open frame —
         # a ``goto`` strips the names of the scopes it exits.
-        self._scope_stack: list[tuple[int, frozenset[str]]] = []
+        self._scope_stack: list[
+            tuple[int, tuple[tree_sitter_extract.Statement, ...]]
+        ] = []
+        # ``_descent_indices[k]`` is the index inside
+        # ``_scope_stack[k]``'s statement list of the child statement the
+        # walk is currently inside — a ``goto`` only exits names declared
+        # BEFORE that point; a later sibling's declaration never ran.
+        self._descent_indices: list[int] = []
 
     def _collect_label_frames(
         self, statements: tuple[tree_sitter_extract.Statement, ...]
@@ -1406,13 +1413,13 @@ class _Walker:
         kind of statement that left the block (``"return"``, ``"terminate"``,
         ``"break"``, ``"continue"``, ``"fallthrough"``, ``"goto:<label>"``).
         """
-        self._scope_stack.append(
-            (id(statements), frozenset(self._declared_names(statements)))
-        )
+        self._scope_stack.append((id(statements), statements))
+        self._descent_indices.append(0)
         try:
             index = 0
             while index < len(statements):
                 statement = statements[index]
+                self._descent_indices[-1] = index
                 env, terminated = self.statement(statement, env)
                 index += 1
                 if not terminated:
@@ -1440,6 +1447,7 @@ class _Walker:
             return env, ""
         finally:
             self._scope_stack.pop()
+            self._descent_indices.pop()
 
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         if statement.labeled and statement.label:
@@ -1511,17 +1519,27 @@ class _Walker:
             # inner ``d := 1`` that shadows a parameter would otherwise
             # carry its nonzero fact into the outer ``d``).
             label_frame = self._label_frames[label]
-            strip: frozenset[str] = frozenset()
-            for depth, (frame_id, declared) in enumerate(self._scope_stack):
+            for depth, (frame_id, _) in enumerate(self._scope_stack):
                 if frame_id == label_frame:
-                    strip = frozenset().union(
-                        *(d for _, d in self._scope_stack[depth + 1 :])
-                    )
+                    deeper = range(depth + 1, len(self._scope_stack))
                     break
             else:
-                strip = frozenset().union(
-                    *(d for _, d in self._scope_stack)
+                deeper = range(len(self._scope_stack))
+            # Only names declared BEFORE the descent point in each exited
+            # scope die at the jump — a sibling declaration after it
+            # never ran on this path, so the outer binding's facts must
+            # survive to the label.
+            strip = frozenset().union(
+                *(
+                    frozenset(
+                        self._declared_names(
+                            frame_statements[: self._descent_indices[j]]
+                        )
+                    )
+                    for j in deeper
+                    for _, frame_statements in (self._scope_stack[j],)
                 )
+            )
             if strip:
                 self._strip_scoped_names(carried, strip)
             self.goto_carried.setdefault(label, []).append(carried)
