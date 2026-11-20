@@ -16720,10 +16720,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else None
                         )
                         if src_toks:
+                            # Union, never replace — a member's
+                            # stored tokens may carry OTHER share
+                            # edges (`c := [][]int64{a, b}` keeps
+                            # `b`'s token), so the merged set is the
+                            # union over every holder of the two
+                            # operand groups, not just the operands'.
                             merged = op_toks | src_toks
-                            for member_id in (
-                                self._opaque_container_holders(merged)
-                            ):
+                            holders = self._opaque_container_holders(
+                                merged
+                            )
+                            merged = frozenset().union(
+                                *(
+                                    self._opaque_container_tokens[
+                                        member_id
+                                    ]
+                                    for member_id in holders
+                                )
+                            )
+                            for member_id in holders:
                                 self._opaque_container_tokens[
                                     member_id
                                 ] = merged

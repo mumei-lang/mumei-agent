@@ -19544,6 +19544,21 @@ def test_container_param_write_reaches_caller(
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `copy(d, a)` when `a` already shares through a literal
+        # donor — the merge unions every holder's tokens instead of
+        # replacing them, so `b`'s edge via `c` survives and `b`'s
+        # store still reaches `c[1][0]` (`b`).
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := [][]int64{{0}}\n"
+            "\tc := [][][]int64{a, b}\n"
+            "\td := [][]int64{{0}}\n"
+            "\tcopy(d, a)\n"
+            "\tb[0][0] = x\n"
+            "\treturn c[1][0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_container_mutating_builtins(
