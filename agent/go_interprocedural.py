@@ -10085,6 +10085,39 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for i in field_chan_lhs
                 if len(lefts) == len(rights) and i < len(rights)
             }
+            # `a, b = b, a` — an identifier RHS's container backing
+            # resolves against the pre-state like the dep set does:
+            # the per-slot reseat hands `b` the backing `a` named
+            # BEFORE `a`'s own store redirected it to `b`'s.
+            pre_container_toks: dict[int, Any] = {}
+            if len(lefts) == len(rights):
+                for pre_i in range(len(refs)):
+                    pre_rhs = rights[pre_i]
+                    while (
+                        pre_rhs is not None
+                        and pre_rhs.type == "parenthesized_expression"
+                    ):
+                        pre_rhs = next(
+                            (
+                                c
+                                for c in pre_rhs.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        pre_rhs is not None
+                        and pre_rhs.type == "identifier"
+                    ):
+                        pre_ref = self.references.get(
+                            self.node_key(pre_rhs)
+                        )
+                        if pre_ref is not None and pre_ref.binding_id:
+                            pre_container_toks[pre_i] = (
+                                self._opaque_container_tokens.get(
+                                    pre_ref.binding_id
+                                )
+                            )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -10603,12 +10636,34 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ):
                         # `s = lib.G(b)`/`s = t` re-targets the
                         # backing like `:=` does; a non-container
-                        # RHS drops the token so `s[i]` closes.
+                        # RHS drops the token so `s[i]` closes. An
+                        # identifier RHS reads the pre-state tokens
+                        # (`a, b = b, a` swaps the backings like the
+                        # dep sets do).
                         new_toks = (
-                            self._opaque_container_bind(rights[i])
+                            pre_container_toks.get(i)
+                            or self._opaque_container_bind(rights[i])
                             if len(lefts) == len(rights)
                             else None
                         )
+                        reseat_rhs = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else None
+                        )
+                        while (
+                            reseat_rhs is not None
+                            and reseat_rhs.type
+                            == "parenthesized_expression"
+                        ):
+                            reseat_rhs = next(
+                                (
+                                    c
+                                    for c in reseat_rhs.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
                         if conditional or self._may_skip > 0:
                             # `if c { s = t }` — the untaken path
                             # keeps `s` aimed at its old backing, so
@@ -10631,8 +10686,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             ] = new_toks
                         elif (
                             self._scalar_elem_collection(bound.type)
-                            and len(lefts) == len(rights)
-                            and rights[i].type
+                            and reseat_rhs is not None
+                            and reseat_rhs.type
                             in {"composite_literal", "call_expression"}
                         ):
                             # `a = []int64{x}` / `a = make([]int64, n)`
@@ -10641,7 +10696,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # drops the token below instead.
                             self._opaque_container_tokens[
                                 ref.binding_id
-                            ] = frozenset({self.node_key(rights[i])})
+                            ] = frozenset({self.node_key(reseat_rhs)})
                         else:
                             self._opaque_container_tokens.pop(
                                 ref.binding_id, None
