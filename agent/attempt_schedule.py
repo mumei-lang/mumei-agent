@@ -286,12 +286,24 @@ def run_attempt_schedule(
             feed = stdin_for(adapter_id) if stdin_for is not None else None
             if feed is not None and type(feed) is not bytes:
                 raise ValueError("attempt stdin must be bytes or absent")
+            descriptor = registry.descriptor(adapter_id)
             dispatch = dispatch_attempt(
                 sequence,
                 argv,
                 runner=active_runner,
                 cancel_event=cancel_event,
-                memory_bound_mb=memory_bound_mb,
+                # The host's declared bound wins; otherwise the adapter's
+                # own manifest ``max_memory_mb`` is the child's ceiling —
+                # its declared budget, enforced as an observed outcome.
+                memory_bound_mb=(
+                    memory_bound_mb
+                    if memory_bound_mb is not None
+                    else (
+                        descriptor.max_memory_mb
+                        if descriptor is not None
+                        else None
+                    )
+                ),
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",
@@ -299,7 +311,6 @@ def run_attempt_schedule(
             sequences.append(dispatch.sequence)
             record = dispatch.run.record
             exit_code = record.events[-1].exit_code
-            descriptor = registry.descriptor(adapter_id)
             reported = None
             if descriptor is not None and record.state == "exited":
                 # Declared interpretation: the adapter's own markers map
