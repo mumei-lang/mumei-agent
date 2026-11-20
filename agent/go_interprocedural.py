@@ -15617,6 +15617,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         arguments[0], fn, params, locals_, transfers,
                         count, depth + 1,
                     )
+                    appended = frozenset()
                     for extra in arguments[1:]:
                         element = extra
                         variadic = element.type == "variadic_argument"
@@ -15628,10 +15629,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # A scalar spread's elements join through
                             # its own dep set — no per-element records
                             # to resolve, so any operand evaluates.
-                            deps |= self.expression(
+                            extra_deps = self.expression(
                                 extra, fn, params, locals_,
                                 transfers, count, depth + 1,
                             )
+                            appended |= extra_deps
+                            deps |= extra_deps
                             continue
                         element_id: str | None = None
                         if element is not None and element.type == (
@@ -15701,6 +15704,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._adopt_element_records(
                             append_cont, holder_id
                         )
+                    if scalar_cont:
+                        # `append(a, x)` may reuse `a`'s array —
+                        # the appended elements' deps land in `a`'s
+                        # backing whether or not the result rebinds,
+                        # so `_ = append(a, x)` (or `b := append(a,
+                        # x)` where `b` only MAY share) still lets
+                        # `a`'s sharers read `x`.
+                        for holder_id in self._opaque_container_sharers(
+                            append_cont
+                        ):
+                            self._store(
+                                locals_, params, holder_id, appended,
+                                True,
+                            )
+                        self.indirect_writes |= appended
                     return deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
