@@ -507,8 +507,6 @@ def test_no_feed_closes_stdin_instead_of_inheriting():
     )
     result = schedule(registry, ("alpha",), {"alpha": probe})
     assert result.outcome == "selected"
-||||||| parent of 1a617047 (C11: manifest max_memory_mb is the scheduled attempt ceiling when the host declares none)
-=======
 
 
 def test_manifest_memory_bound_caps_the_attempt():
@@ -526,3 +524,16 @@ def test_manifest_memory_bound_caps_the_attempt():
         registry, ("alpha",), {"alpha": probe}, memory_bound_mb=1024
     )
     assert result2.outcome == "selected"
+
+def test_manifest_memory_bound_skipped_without_posix_mechanism(monkeypatch):
+    # A platform with no ``resource``/``prlimit``/``sh`` cannot enforce a
+    # bound — the manifest fallback stays unenforced instead of breaking
+    # the schedule (an explicit host bound still fails statically).
+    monkeypatch.setattr(
+        "agent.attempt_schedule.memory_bound_enforceable", lambda: False
+    )
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", max_memory_mb=64))
+    probe = (PY, "-c", "import sys; sys.exit(0)")
+    result = schedule(registry, ("alpha",), {"alpha": probe})
+    assert result.outcome == "selected"
