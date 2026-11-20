@@ -918,6 +918,71 @@ class TestVerifyScheduleTool:
         assert report["evidence_acceptance"]["accepted"] is True
         assert "FAKE_PRIVATE" not in json.dumps(report)
 
+    @pytest.mark.parametrize("verdict,accepted", [
+        ("accepted", True), ("rejected", False), ("inconclusive", False),
+    ])
+    def test_core_requirement_path_records_verdict(
+        self, tmp_path, verdict, accepted
+    ):
+        inputs = _schedule_inputs(tmp_path)
+        req = tmp_path / "requirement.json"
+        req.write_text(
+            json.dumps({"schema_version": "mumei.evidence-requirement/v1"}),
+            encoding="utf-8",
+        )
+        code = (
+            0 if verdict == "accepted"
+            else 1 if verdict == "rejected" else 3
+        )
+        core = tmp_path / f"mumei-stub-accept-{verdict}"
+        core.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+            '    [ "$5" = "--requirement" ] || exit 4\n'
+            '    [ -f "$6" ] || exit 5\n'
+            "    sum=$(sha256sum | cut -d' ' -f1)\n"
+            "    req=$(sha256sum \"$6\" | cut -d' ' -f1)\n"
+            '    printf %s "{\\"schema_version\\":\\"mumei.evidence-acceptance/v1\\",'
+            '\\"requirement_fingerprint\\":\\"$req\\",'
+            '\\"evidence_fingerprint\\":\\"$sum\\",'
+            '\\"acceptance\\":\\"evaluated\\",'
+            '\\"verdict\\":\\"' + verdict + '\\"}"\n'
+            f"    exit {code}\n"
+            "fi\n"
+            "exit 2\n"
+        )
+        core.chmod(0o755)
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"], inputs["adapters"],
+                inputs["argv_map"], inputs["policy"], inputs["source"],
+                observations_path=inputs["observations"],
+                core_path=str(core),
+                core_requirement_path=str(req),
+            )
+        )
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["evidence_check"]["outcome"] == verdict
+        assert report["evidence_acceptance"]["accepted"] is accepted
+        assert report["evidence_acceptance"]["requirement_fingerprint"] == (
+            hashlib.sha256(req.read_bytes()).hexdigest()
+        )
+
+    def test_core_requirement_path_requires_core(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        req = tmp_path / "requirement.json"
+        req.write_text("{}", encoding="utf-8")
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"], inputs["adapters"],
+                inputs["argv_map"], inputs["policy"], inputs["source"],
+                core_requirement_path=str(req),
+            )
+        )
+        assert out["status"] == "error"
+        assert "core_path" in out["error"]
+
     def test_bad_args_are_errors(self, tmp_path):
         inputs = _schedule_inputs(tmp_path)
         out = json.loads(mcp_server.verify_schedule("", inputs["adapters"],

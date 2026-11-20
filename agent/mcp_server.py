@@ -2961,6 +2961,7 @@ def verify_schedule(
     max_attempts: int = 8,
     memory_bound_mb: int | None = None,
     core_path: str | None = None,
+    core_requirement_path: str | None = None,
 ) -> str:
     """Run the declared plan/dispatch/observe/fallback schedule.
 
@@ -2994,6 +2995,14 @@ def verify_schedule(
             and the record carries ``evidence_check`` /
             ``evidence_acceptance`` — a representation check only,
             never an Evidence acceptance.
+        core_requirement_path: Optional absolute path to a declared
+            ``mumei.evidence-requirement/v1`` document; requires
+            ``core_path``. With it the selected attempt's captured
+            output runs through ``core evidence accept --stdin --json
+            --requirement PATH`` and ``evidence_check`` records Core's
+            declared verdict — still a dispatch observation on
+            ``mumei.attempt-schedule/v1``, never a grade or claim
+            verdict.
 
     Returns:
         JSON with `report` — the `mumei.attempt-schedule/v1`
@@ -3016,9 +3025,13 @@ def verify_schedule(
         paths["observations_path"] = observations_path
     if core_path is not None:
         paths["core_path"] = core_path
+    if core_requirement_path is not None:
+        paths["core_requirement_path"] = core_requirement_path
     for name, path in paths.items():
         if not _valid_declared_path(path):
             return _err(f"{name} must be a nonempty single-line path")
+    if core_requirement_path is not None and core_path is None:
+        return _err("core_requirement_path requires core_path")
     if (
         type(max_attempts) is not int
         or max_attempts < 1
@@ -3041,6 +3054,7 @@ def verify_schedule(
         success_exit_code=None,
         memory_bound_mb=memory_bound_mb,
         core=core_path,
+        core_requirement=core_requirement_path,
         output=None,
     )
     try:
