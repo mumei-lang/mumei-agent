@@ -613,6 +613,25 @@ def test_outer_goto_still_analyses_a_pending_inner_label() -> None:
     assert "d" in facts.nonzero
 
 
+def test_goto_out_of_a_scope_drops_the_shadows_nil_state() -> None:
+    # The inner ``var m`` nil-map marker dies with the shadowed binding —
+    # the outer initialized map must not report nil_map_write.
+    body = (
+        "m := map[string]int64{}\n"
+        "if c {\n"
+        "    var m map[string]int64\n"
+        "    goto done\n"
+        "}\n"
+        "done:\n"
+        "m[\"k\"] = 1\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert not any(
+        issue.category == "nil_map_write" for issue in flow.issues
+    )
+
+
 def test_goto_out_of_a_scope_keeps_the_held_resource() -> None:
     # The inner ``mu := M(); mu.Lock()`` handle is still open past the
     # jump — its lock stays held at the return even though the name died.

@@ -1969,9 +1969,17 @@ class _Walker:
             env.nilable = {
                 k: v for k, v in env.nilable.items() if k != name
             }
-            # Resource state survives scope exit like ``_leave_scope``:
-            # a handle still open past the jump is a real leak — only the
-            # site pairing dies with the block-local name.
+            # Name-state markers (``nilmap``, ``uninit_*``,
+            # ``mutex_unlocked``, ``closed_*``) describe the dead
+            # binding's static state and leave with it; a live resource —
+            # a held lock, an open file, a pending deferred call — still
+            # exists past the jump, so its entry survives like
+            # ``_leave_scope`` keeps it, minus the site pairing.
+            env.held = {
+                h for h in env.held
+                if h[0] in {"lock", "file", "deferred"}
+                or not mentions(h[1])
+            }
             env.held = {
                 (h[0], h[1], "") if len(h) == 3 and h[2] in names else h
                 for h in env.held
