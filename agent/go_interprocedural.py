@@ -9749,6 +9749,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # like a read's.
             opaque_elem_targets: dict[int, frozenset] = {}
             opaque_elem_index_deps: dict[int, frozenset[int]] = {}
+            # `a, a[0] = arr, x` — assigning an ARRAY copies the
+            # value into the variable's own storage, which keeps
+            # naming the element the LHS pointer was computed
+            # against. The snapshot's holders is empty once `a`'s
+            # reseat replaces its tokens, so an array operand also
+            # expands holders over its CURRENT token set at store
+            # landing — slice/map operands detach their backing on
+            # reseat and keep the snapshot only. Record the array
+            # operand's root binding here.
+            opaque_elem_array_roots: dict[int, str] = {}
             # An element store's holder set resolves like the
             # destination operand itself — against the pre-state —
             # but a name an earlier parallel store re-shared
@@ -10132,6 +10142,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             oref.binding_id, frozenset()
                         )
                     )
+                    obound = self.bindings.get(oref.binding_id)
+                    if (
+                        obound is not None
+                        and obound.type is not None
+                        and obound.type.kind == "array"
+                    ):
+                        opaque_elem_array_roots[ri] = oref.binding_id
                     opaque_elem_index_deps[ri] = frozenset()
                     if (
                         oindex is not None
@@ -11161,9 +11178,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         value
                         | opaque_elem_index_deps.get(i, frozenset())
                     )
-                    for holder_id in self._opaque_container_holders(
+                    elem_holders = self._opaque_container_holders(
                         opaque_elem_targets[i]
-                    ):
+                    )
+                    array_root = opaque_elem_array_roots.get(i)
+                    if array_root is not None:
+                        # An array reseat copied a new value into
+                        # the same storage — the store lands on
+                        # whoever holds the root's CURRENT tokens.
+                        elem_holders |= (
+                            self._opaque_container_holders(
+                                self._opaque_container_tokens.get(
+                                    array_root, frozenset()
+                                )
+                            )
+                        )
+                    for holder_id in elem_holders:
                         self._store(
                             locals_, params, holder_id, elem_value,
                             True,

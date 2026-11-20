@@ -18918,6 +18918,17 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0]\n}\n",
             frozenset({0}),
         ),
+        # `a, a[0] = arr, x` — assigning an ARRAY copies the
+        # value into `a`'s own storage, so the pre-computed
+        # element pointer still names `a[0]`; the write lands
+        # and `a[0]` reads `x` back.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1]int64{0}\n"
+            "\ta, a[0] = [1]int64{0}, x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
