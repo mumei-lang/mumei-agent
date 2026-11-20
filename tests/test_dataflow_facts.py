@@ -593,6 +593,26 @@ def test_goto_never_walks_the_statements_it_skips() -> None:
     assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
 
 
+def test_outer_goto_still_analyses_a_pending_inner_label() -> None:
+    # ``goto inner`` recorded a path to the label inside the block —
+    # ``goto done`` ending the walk early must not skip it.
+    body = (
+        "if c {\n"
+        "    if d != 0 {\n"
+        "        goto inner\n"
+        "    }\n"
+        "    goto done\n"
+        "inner:\n"
+        "    return n / d\n"
+        "}\n"
+        "done:\n"
+        "return 0\n"
+    )
+    facts = _facts(body, "n / d", param_names={"c", "d", "n"})
+    assert facts is not None
+    assert "d" in facts.nonzero
+
+
 def test_goto_out_of_a_scope_keeps_the_held_resource() -> None:
     # The inner ``mu := M(); mu.Lock()`` handle is still open past the
     # jump — its lock stays held at the return even though the name died.

@@ -1417,11 +1417,25 @@ class _Walker:
                 index += 1
                 if not terminated:
                     continue
-                if terminated.startswith("goto:") and self._label_frames.get(
-                    terminated[5:]
-                ) != id(statements):
-                    # The label lives in an enclosing list — bubble up to
-                    # the frame that owns it.
+                # The path is dead — return/break/continue, or a ``goto``
+                # absorbed by this frame or bound for an outer one. The
+                # dead path does NOT keep walking — statements after it
+                # never ran (a skipped ``defer`` must not register) — but
+                # a recorded ``goto`` can still land on a labelled sibling
+                # of THIS list, so resume there with the recorded envs as
+                # the only live state; an inner label is analysed even
+                # when an outer jump ends the block.
+                for ahead in range(index, len(statements)):
+                    later = statements[ahead]
+                    if (
+                        later.labeled
+                        and later.label
+                        and self.goto_carried.get(later.label)
+                    ):
+                        env = None
+                        index = ahead
+                        break
+                else:
                     return env, terminated
             return env, ""
         finally:
