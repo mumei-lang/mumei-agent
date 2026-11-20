@@ -18496,6 +18496,32 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0][0]\n}\n",
             frozenset(),
         ),
+        # `s.F = [][]int64{sub}` — the literal's inner-container
+        # element joins the field's group, so a later `a := s.F`
+        # shares `sub`'s backing: a write through `sub` reaches
+        # `a`'s reads.
+        (
+            "func F(x int64) int64 {\n"
+            "\tsub := []int64{0}\n"
+            "\tvar s struct{ F [][]int64 }\n"
+            "\ts.F = [][]int64{sub}\n"
+            "\ta := s.F\n"
+            "\tsub[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # The reverse direction — a write through the extracted
+        # `a` lands in `sub`'s shared backing.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\tsub := []int64{0}\n"
+            "\tvar s struct{ F [][]int64 }\n"
+            "\ts.F = [][]int64{sub}\n"
+            "\ta := s.F\n"
+            "\ta[0][0] = y\n"
+            "\treturn sub[0]\n}\n",
+            frozenset({1}),
+        ),
         # `s.F = …` reseats the field's backing — `a` still aliases
         # the previous slice while `b` names the new one.
         (

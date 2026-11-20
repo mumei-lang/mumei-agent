@@ -10304,11 +10304,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     fkey, frozenset()
                 )
                 src = rights[pos] if pos < len(rights) else None
+                s_src = src
+                while (
+                    s_src is not None
+                    and s_src.type == "parenthesized_expression"
+                ):
+                    s_src = next(
+                        (
+                            c
+                            for c in s_src.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
                 new_toks = (
                     self._opaque_container_bind(src)
                     if src is not None
                     else None
                 )
+                if (
+                    new_toks is None
+                    and s_src is not None
+                    and s_src.type
+                    in {"composite_literal", "call_expression"}
+                ):
+                    # `s.F = [][]int64{sub}` — the field reseats
+                    # onto a fresh backing like a local `a = lit`
+                    # does; the literal's inner-container elements
+                    # join the group so a later `a := s.F` shares
+                    # `sub`'s backing (scalar elements contribute
+                    # no tokens, so the union is a plain mint for a
+                    # scalar member).
+                    fresh_toks = {self.node_key(s_src)}
+                    fresh_toks |= self._opaque_container_elem_toks(
+                        s_src
+                    )
+                    new_toks = frozenset(fresh_toks)
                 reseat_plan.append(
                     (fkey, root_id, old_toks, new_toks)
                 )
