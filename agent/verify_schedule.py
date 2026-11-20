@@ -332,6 +332,41 @@ def run_schedule(args: argparse.Namespace) -> dict:
             "--export-evidence-acceptance requires --core-requirement-list "
             "and an absolute directory path"
         )
+    if export_dir is not None:
+        # The export must not clobber a declared input or the schedule
+        # document itself: an export target that resolves to an
+        # existing declared path, or --output pointing into the export
+        # directory's triple, is a declaration error.
+        declared_inputs = [
+            args.request,
+            args.adapters,
+            args.argv_map,
+            args.policy,
+            args.source,
+            requirement or "",
+            requirement_list,
+        ]
+        if args.observations is not None:
+            declared_inputs.append(args.observations)
+        for name in (
+            "requirement-list.json",
+            "evidence.json",
+            "acceptance.json",
+        ):
+            target = os.path.join(export_dir, name)
+            if args.output is not None and os.path.realpath(
+                target
+            ) == os.path.realpath(args.output):
+                raise ValueError(
+                    "--output must not overwrite an exported acceptance artifact"
+                )
+            if os.path.exists(target) and any(
+                os.path.exists(p) and os.path.samefile(target, p)
+                for p in declared_inputs
+            ):
+                raise ValueError(
+                    "--export-evidence-acceptance must not overwrite a declared input"
+                )
     source = declared.read_bytes()
     success = (
         frozenset({0})
@@ -515,6 +550,7 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
             if any(
                 os.path.realpath(p) == target
                 or os.path.exists(args.output)
+                and os.path.exists(p)
                 and os.path.samefile(p, args.output)
                 for p in inputs
             ):

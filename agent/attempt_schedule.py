@@ -210,6 +210,21 @@ class AttemptScheduleResult:
 
 
 _MAX_REQUIREMENT_LIST_BYTES = 65_536
+_EXPORT_FILENAMES = ("requirement-list.json", "evidence.json", "acceptance.json")
+
+
+def _clear_export_dir(export_dir: str) -> None:
+    """Drop any triple left by an earlier run before dispatching.
+
+    A run that declares export but produces no descriptor — a failed
+    or cancelled check — must not leave last run's accepted set in
+    place for automation to pick up as this run's result."""
+    for name in _EXPORT_FILENAMES:
+        path = os.path.join(export_dir, name)
+        if os.path.islink(path):
+            raise ValueError("promotable export refuses to touch a link")
+        if os.path.isfile(path):
+            os.unlink(path)
 
 
 def _export_promotable(
@@ -217,6 +232,7 @@ def _export_promotable(
     requirement_list_path: str,
     evidence_bytes: bytes,
     descriptor: dict,
+    descriptor_bytes: bytes,
 ) -> None:
     """Write the promotable gate triple the schedule verdict answers.
 
@@ -225,12 +241,14 @@ def _export_promotable(
     downstream `mumei claims --require-evidence-acceptance` gate
     consumes — instead of only the normalized schedule record. The
     requirement list is the declared file's own bytes (bounded like a
-    declared input); `evidence.json` is the captured output Core
-    evaluated; `acceptance.json` is the validated descriptor. A
-    descriptor is exported only when Core produced one — a failed or
-    cancelled check has no promotable verdict to hand over. Export is
-    observability, not promotion: pinning and gating stay with the
-    gate."""
+    declared input) and must still hash to the fingerprint Core
+    evaluated — a file edited between the check and the export is not
+    the requirement this verdict answered. `evidence.json` is the
+    captured output Core evaluated; `acceptance.json` is the raw
+    descriptor bytes, not a re-serialization. A descriptor is exported
+    only when Core produced one — a failed or cancelled check has no
+    promotable verdict to hand over. Export is observability, not
+    promotion: pinning and gating stay with the gate."""
     if (
         type(export_dir) is not str
         or not os.path.isabs(export_dir)
@@ -242,14 +260,18 @@ def _export_promotable(
     )
     if len(requirement_list) > _MAX_REQUIREMENT_LIST_BYTES:
         raise ValueError("declared requirement list exceeds the input bound")
+    if (
+        hashlib.sha256(requirement_list).hexdigest()
+        != descriptor["requirement_list_fingerprint"]
+    ):
+        raise ValueError(
+            "declared requirement list changed since the check ran"
+        )
     os.makedirs(export_dir, exist_ok=True)
     for name, payload in (
         ("requirement-list.json", requirement_list),
         ("evidence.json", evidence_bytes),
-        (
-            "acceptance.json",
-            (json.dumps(descriptor, indent=2) + "\n").encode("utf-8"),
-        ),
+        ("acceptance.json", descriptor_bytes),
     ):
         path = os.path.join(export_dir, name)
         if os.path.islink(path):
@@ -354,6 +376,8 @@ def run_attempt_schedule(
         raise ValueError(
             "attempt schedule promotable export requires a requirement list"
         )
+    if export_dir is not None:
+        _clear_export_dir(export_dir)
     active_runner = runner or AttemptRunner()
 
     entries: list[ScheduledAttemptEntry] = []
@@ -500,7 +524,7 @@ def run_attempt_schedule(
                             ),
                         )
                     elif core_requirement_list is not None:
-                        evidence_check, descriptor = (
+                        evidence_check, descriptor, descriptor_raw = (
                             record_evidence_acceptance_list(
                                 selected,
                                 dispatch.captured_output(),
@@ -525,6 +549,7 @@ def run_attempt_schedule(
                                 core_requirement_list,
                                 dispatch.captured_output().stdout,
                                 descriptor,
+                                descriptor_raw,
                             )
                     else:
                         evidence_check = record_evidence_check(
