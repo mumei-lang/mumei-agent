@@ -1,6 +1,7 @@
 """Tests for integrated code audit pipeline."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from dataclasses import asdict
@@ -4273,7 +4274,11 @@ def test_summary_plan_flag_gating(tmp_path: Path) -> None:
     assert default.summary_plan_histories is None
 
 
-def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
+def _scheduled_verification_files(
+    tmp_path: Path,
+    both_exit: int | None = None,
+    beta_stdout: str | None = None,
+):
     """Declared inputs for the --enable-scheduled-verification lane."""
     def write(name: str, doc: object) -> str:
         path = tmp_path / f"FAKE_PRIVATE_SCHED_{name}.json"
@@ -4303,6 +4308,12 @@ def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
 
     alpha_exit = both_exit if both_exit is not None else 3
     beta_exit = both_exit if both_exit is not None else 0
+    beta_code = f"import sys; sys.exit({beta_exit})"
+    if beta_stdout is not None:
+        beta_code = (
+            f"import sys; sys.stdout.write({beta_stdout!r}); "
+            f"sys.exit({beta_exit})"
+        )
     return {
         "request": write(
             "request",
@@ -4318,7 +4329,7 @@ def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
             "argv",
             {
                 "alpha": [sys.executable, "-c", f"import sys; sys.exit({alpha_exit})"],
-                "beta": [sys.executable, "-c", f"import sys; sys.exit({beta_exit})"],
+                "beta": [sys.executable, "-c", beta_code],
             },
         ),
         "policy": write(
@@ -4349,8 +4360,11 @@ def _scheduled_verification_ctx(
     tmp_path: Path,
     both_exit: int | None = None,
     core: str | None = None,
+    beta_stdout: str | None = None,
 ):
-    files = _scheduled_verification_files(tmp_path, both_exit=both_exit)
+    files = _scheduled_verification_files(
+        tmp_path, both_exit=both_exit, beta_stdout=beta_stdout
+    )
     argv = [
         "--code-file",
         str(tmp_path / "placeholder.py"),
@@ -4576,11 +4590,17 @@ def test_audit_scheduled_verification_core_records_evidence(
             "artifact_semantics",
         ],
     }
+    expected = "BETA_DECLARED_OUTPUT"
+    expected_sha = hashlib.sha256(expected.encode()).hexdigest()
     core = tmp_path / "mumei-stub"
+    # Accepts only the selected adapter's exact captured bytes.
     core.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
-        "    cat > /dev/null\n"
+        "    fed=$(mktemp)\n"
+        "    cat > \"$fed\"\n"
+        "    sha=$(sha256sum \"$fed\" | cut -d' ' -f1)\n"
+        '    [ "$sha" = "' + expected_sha + '" ] || exit 1\n'
         "    printf %s '" + json.dumps(diagnostic) + "'\n"
         "    exit 0\n"
         "fi\n"
@@ -4593,7 +4613,7 @@ def test_audit_scheduled_verification_core_records_evidence(
         source,
         "python",
         scheduled_verification=_scheduled_verification_ctx(
-            tmp_path, core=str(core)
+            tmp_path, core=str(core), beta_stdout=expected
         ),
     )
     schedule = result.scheduled_verification

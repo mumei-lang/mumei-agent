@@ -296,7 +296,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--schedule-max-attempts` | `<<N>>` | no | — | Bounded schedule attempts per unit for --enable-scheduled-verification (default: 8). |
 | `--schedule-success-exit-code` | `<<N>>` | no | — | Declared exit code counting as a scheduling success for --enable-scheduled-verification (repeatable; default {0}). |
 | `--schedule-memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per scheduled attempt child. |
-| `--schedule-core` | `<PATH>` | no | — | Optional Core executable: when a scheduled verification selects an attempt, run the Core representation check on its captured output and record the mumei.evidence-check-acceptance/v1 descriptor on the schedule record. |
+| `--schedule-core` | `<PATH>` | no | — | Optional Core executable: when a scheduled verification selects an attempt, run the Core representation check on its captured output and record the mumei.evidence-check-acceptance/v1 descriptor on the schedule record (use --json for the full record; text output shows only the schedule outcome). |
 
 
 ## `mumei-agent extract-spec`

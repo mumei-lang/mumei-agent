@@ -1319,7 +1319,8 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "selects an attempt, run the Core representation check on its "
             "captured output and record the "
             "mumei.evidence-check-acceptance/v1 descriptor on the "
-            "schedule record."
+            "schedule record (use --json for the full record; text "
+            "output shows only the schedule outcome)."
         ),
     )
     return parser
@@ -1534,8 +1535,17 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             raise SystemExit(2)
         if getattr(args, "output", None) is not None:
             target = os.path.realpath(args.output)
+
+            def _is_declared(path: str) -> bool:
+                if os.path.realpath(path) == target:
+                    return True
+                try:
+                    return os.path.samefile(path, args.output)
+                except OSError:
+                    return False
+
             if any(
-                os.path.realpath(path) == target
+                _is_declared(path)
                 for path in _scheduled_verification_declared_paths(args)
             ):
                 print(

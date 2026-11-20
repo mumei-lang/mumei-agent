@@ -6237,8 +6237,9 @@ remains open.
 ### C11 audit scheduled-attempt evidence check
 
 `audit --schedule-core PATH` (with `--enable-scheduled-verification`)
-declares the trusted Core executable for a directory audit's scheduled
-dispatch: when a unit's schedule selects an attempt, the captured
+declares the trusted Core executable for an audit's scheduled dispatch —
+single-file and directory audits alike: when a unit's schedule selects
+an attempt, the captured
 output runs through the Core representation check and the schedule
 record carries `evidence_check` / `evidence_acceptance`, matching the
 `verify-schedule --core` route. `--schedule-core` must be an absolute
