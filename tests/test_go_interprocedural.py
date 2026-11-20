@@ -165,8 +165,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x int64) int64 {return 1.0}",
         "func G(){}; func F(x int64) int64 {defer G(); return x}",
         "func G(){}; func F(x int64) int64 {go G(); return x}",
-        "func F(x []int64) int64 {return x[0]}",
-        "func F(x map[int64]int64) int64 {return x[0]}",
         "type I interface{Get()int64}; func F(x I) int64 {return x.Get()}",
         "func G[T ~int64](x T)T{return x}; func F(x int64)int64{return G(x)}",
         "func G(x ...int64)int64{return x[0]}; func F(x int64)int64{return G(x)}",
@@ -183,9 +181,6 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
 @pytest.mark.parametrize(
     "declarations",
     [
-        # A callee mutating a slice's resource state has a non-scalar
-        # signature; the composite literal argument is unsupported anyway.
-        "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
         # A local nested more than one level still cannot bind.
         "func F(x int64) int64 { var s [][][]int64; _ = s; return x }",
         # A parenthesized function name is outside the store-RHS
@@ -6552,12 +6547,12 @@ def test_bound_pointer_deref_read_unnamed_pointee_is_admitted(
     assert read.target.endswith("/pointee")
 
 
-def test_bound_pointer_deref_read_composite_pointee_stays_closed(
+def test_bound_pointer_deref_read_container_param_pointee_admits(
     go_types_helper,
 ):
-    # `*p` on `p *[]int64` — the pointee fact's `elem` reports a
-    # composite kind, so the read stays closed like `*[]T` member
-    # reads do.
+    # `(*p)[0]` on `p := &s` where `s` is a `[]int64` param — the
+    # deref resolves through the param's share group like `s[0]`,
+    # and the caller-memory read records the imported transfer.
     files = {
         "a.go": "package p\nimport \"lib\"\nvar _ = lib.PV\n"
         "func F(s []int64) int64 {\n"
@@ -6568,7 +6563,10 @@ def test_bound_pointer_deref_read_composite_pointee_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    (read,) = [c for c in result.calls if c.imported]
+    assert read.target.endswith("/pointee")
 
 
 def test_bound_pointer_deref_read_struct_pointee_stays_closed(
@@ -10837,11 +10835,11 @@ def test_imported_len_of_channel_element_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_len_of_call_result_stays_closed(
+def test_imported_len_of_call_result_admits(
     go_types_helper,
 ):
-    # `len(g())` — a call result names no imported member: stays
-    # opaque.
+    # `len(g())` — the callee's `[]int64` result admits, so the len
+    # reads its dep-free `nil` backing.
     files = {
         "a.go": "package p\n"
         "func g() []int64 { return nil }\n"
@@ -10851,7 +10849,8 @@ def test_imported_len_of_call_result_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset()
 
 
 def test_imported_len_pins_inner_named_types(go_types_helper):
@@ -18196,20 +18195,22 @@ def test_select_send_case_admits(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
-def test_select_non_identifier_store_stays_closed(go_types_helper):
-    # `a[i] = <-ch` on a PARAMETER container — the signature gate
-    # rejects `[]int64` params outright, so it stays closed.
+def test_select_param_container_elem_store_admits(go_types_helper):
+    # `a[i] = <-ch` on a PARAMETER container — the receive's deps
+    # land on the caller's backing like a local container's.
     result = named(
         *unit(
             go_types_helper,
             "func F(ch chan int64, a []int64) int64 {\n"
             "\tselect {\n"
             "\tcase a[0] = <-ch:\n"
+            "\t\treturn a[0]\n"
             "\t}\n"
             "\treturn 0\n}\n",
         )
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_select_bound_container_elem_store_admits(go_types_helper):
@@ -19103,6 +19104,103 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn c[0]\n}\n",
             frozenset({0, 1}),
         ),
+
+        # A scalar-container PARAMETER registers as its own share
+        # group at entry — `a[0] = x` accumulates on the caller's
+        # dep set, `a[0]` reads carry the ordinal plus stored deps.
+        (
+            "func F(a []int64, x int64) int64 {\n"
+            "\ta[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(a []int64) int64 {\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func F(m map[int64]int64, x int64) int64 {\n"
+            "\tm[0] = x\n"
+            "\treturn m[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(a [][]int64, x int64) int64 {\n"
+            "\ta[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b := a[i]` on a nested param shares the caller's group —
+        # a store through `b` lands on `a` and vice versa.
+        (
+            "func F(a [][]int64, x int64) int64 {\n"
+            "\tb := a[0]\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(a [][]int64, x int64) int64 {\n"
+            "\tb := a[0]\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b := a` on a slice param aliases the caller's backing.
+        (
+            "func F(a []int64, x int64) int64 {\n"
+            "\tb := a\n"
+            "\tb[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # An array param's elements are a local copy — the store
+        # still accumulates on the ordinal the same way.
+        (
+            "func F(a [2]int64, x int64) int64 {\n"
+            "\ta[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a = s` reseats the param onto the local's backing —
+        # the store lands on `s`, not the caller's group.
+        (
+            "func F(a []int64, x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta = s\n"
+            "\ta[0] = x\n"
+            "\treturn s[0]\n}\n",
+            frozenset({1}),
+        ),
+        # `b := append(a[0], x)` on a param — the result may reuse
+        # the caller's backing, so the store lands on `a`.
+        (
+            "func F(a [][]int64, x int64) int64 {\n"
+            "\tb := append(a[0], x)\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A container param's deps compose through the call: `G`'s
+        # `s[0] = 1` leaves the ordinal, and `[]int64{x}` supplies
+        # `x`'s dep.
+        (
+            "func G(s []int64) int64 {\n"
+            "\ts[0] = 1\n"
+            "\treturn s[0]\n}\n"
+            "func F(x int64) int64 {\n"
+            "\treturn G([]int64{x})\n}\n",
+            frozenset({0}),
+        ),
+        # `(*p)[0]` on `p := &s` — the deref read resolves through
+        # the param's share group like `s[0]`.
+        (
+            "func F(s []int64) int64 {\n"
+            "\tp := &s\n"
+            "\treturn (*p)[0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -19116,10 +19214,6 @@ def test_scalar_container_bind_read_write_admits(
 @pytest.mark.parametrize(
     "declarations",
     [
-        # `a[0][0] = x` on a nested param container stays closed —
-        # `_opaque_container_index_target` is one level only.
-        "func F(a [][]int64, x int64) {\n"
-        "\ta[0][0] = x\n}\n",
         # `delete(m, k)` — the builtin has no scalar-container
         # handling and stays opaque.
         "func F(x int64) int64 {\n"
@@ -19132,23 +19226,6 @@ def test_scalar_container_bind_read_write_admits(
         "\ta := []int64{x}\n"
         "\ta = nil\n"
         "\treturn a[0]\n}\n",
-        # `a[0] = x` directly on a param — the param's backing was
-        # never registered (no `b := a` mint), so the store stays
-        # closed.
-        "func F(a []int64, x int64) {\n"
-        "\ta[0] = x\n}\n",
-        # `a := t[0]` — the element of a nested container has no
-        # shareable identity to mint from.
-        "func F(t [][]int64, x int64) int64 {\n"
-        "\ta := t[0]\n"
-        "\ta[0] = x\n"
-        "\treturn a[0]\n}\n",
-        # `b := t[i]` on a BOUND nested param — the param's backing
-        # was never registered, so the extraction stays closed.
-        "func F(t [][]int64, x int64) int64 {\n"
-        "\tb := t[0]\n"
-        "\tb[0] = x\n"
-        "\treturn b[0]\n}\n",
         # `b := a[i]` on `[][4]int64` — the inner element is an
         # array, so `a[0]` is a value copy with no shared backing.
         "func F(x int64) int64 {\n"
@@ -22494,9 +22571,9 @@ def test_call_result_promoted_field_through_value_stays_local(
     assert result.effects == "none_in_supported_fragment"
 
 
-def test_call_result_index_stays_closed(go_types_helper):
-    # `g(a)[0]` — the callee's array result is already closed at
-    # the signature gate, so the caller fails closed too.
+def test_call_result_index_admits(go_types_helper):
+    # `g(a)[0]` — the callee's scalar-element array result admits,
+    # so the index read carries the call's dep set.
     files = {
         "a.go": "package p\n"
         "func g(x int64) [2]int64 { return [2]int64{x, 0} }\n"
@@ -22510,7 +22587,8 @@ def test_call_result_index_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 def test_func_result_return_named_admitted(go_types_helper):
     # `func mk() func() int64 { return G }` — a func-typed result
@@ -25742,9 +25820,9 @@ def test_opaque_composite_literal_deeper_nest_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_opaque_composite_local_callee_stays_closed(go_types_helper):
-    # `s := G(a)` — a same-package callee has no declared result
-    # fact for an opaque fold.
+def test_opaque_composite_local_callee_admits(go_types_helper):
+    # `s := G(a)` — the callee's `[]int64` result admits, so `s`
+    # binds to the returned backing and `s[i]` carries `a` and `i`.
     files = {
         "a.go": "package p\n"
         "func G(x int64) []int64 { return []int64{x} }\n"
@@ -25758,7 +25836,8 @@ def test_opaque_composite_local_callee_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_opaque_composite_multi_result_stays_closed(go_types_helper):
@@ -25788,10 +25867,9 @@ def test_opaque_composite_multi_result_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_call_result_index_read_local_callee_stays_closed(go_types_helper):
-    # `g(a)[i]` on a local callee — a callee returning a composite is
-    # not summarizable, so the call operand keeps the whole function
-    # closed: only imported callees (declared result_types) admit.
+def test_call_result_index_read_local_callee_admits(go_types_helper):
+    # `G(a)[i]` — the `make`'d elements are zero values, so the
+    # index read carries only the index's own deps.
     files = {
         "a.go": "package p\n"
         "func G(x int64) []int64 { return make([]int64, x) }\n"
@@ -25806,7 +25884,8 @@ def test_call_result_index_read_local_callee_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_call_result_index_read_comma_ok(go_types_helper):
@@ -27617,11 +27696,9 @@ def test_len_call_result_func_arg_write_back(go_types_helper):
     assert 0 in result.return_dependencies
 
 
-def test_len_call_result_local_callee_stays_closed(go_types_helper):
-    # `len(G(x))` on a LOCAL composite-returning callee stays
-    # closed — `G` itself cannot produce a summary (a composite
-    # result has no binding model), so the caller reports
-    # `callee_unsupported` rather than admitting the operand.
+def test_len_call_result_local_callee_admits(go_types_helper):
+    # `len(G(x))` — the callee's `[]int64` result admits, so the
+    # len carries the call's dep set.
     files = {
         "a.go": "package p\n"
         "func G(y int64) []int64 { return []int64{y} }\n"
@@ -27633,7 +27710,8 @@ def test_len_call_result_local_callee_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_len_call_result_pointer_operand_stays_closed(go_types_helper):

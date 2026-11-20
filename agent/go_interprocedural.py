@@ -7787,6 +7787,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and fn.receiver.type.elem is not None
                     and fn.receiver.type.elem.kind in {"integer", "boolean"}
                 )
+                and not (
+                    # A scalar-container receiver (`func (a MySlice)
+                    # M()`) admits like the parameter form — the
+                    # conflated share group applies the same way.
+                    self._scalar_elem_collection(fn.receiver.type)
+                    or self._scalar_elem_nested_collection(
+                        fn.receiver.type
+                    )
+                )
             )
             # Pointer-typed parameters/results are admitted too: the
             # dep model tracks the *binding's* index, not the pointee,
@@ -7827,6 +7836,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         p.type.kind in {"slice", "array", "map"}
                         and p.type.elem is not None
                         and p.type.elem.kind == "function"
+                    )
+                    # A scalar-element collection parameter —
+                    # `[]int64` / `map[K]int` / `[][]int64` — admits
+                    # like the struct form: it registers as its own
+                    # share group, so `a[i] = x` lands on the param's
+                    # (caller's) dep set and `a[i]` reads carry the
+                    # ordinal plus whatever the body stored.
+                    or (
+                        self._scalar_elem_collection(p.type)
+                        or self._scalar_elem_nested_collection(p.type)
                     )
                 )
                 for p in fn.parameters
@@ -7871,6 +7890,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         r.type.kind in {"slice", "array", "map"}
                         and r.type.elem is not None
                         and r.type.elem.kind == "function"
+                    )
+                    # A scalar-element collection result —
+                    # `[]int64` / `map[K]int` / `[][]int64` — the
+                    # returned value is a local container, so its
+                    # dep set is the local's conflated one and the
+                    # caller binds the name like any `t := g()`
+                    # container result.
+                    or (
+                        self._scalar_elem_collection(r.type)
+                        or self._scalar_elem_nested_collection(r.type)
                     )
                 )
                 for r in fn.results
@@ -7929,6 +7958,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if p.binding_id and p.type.kind == "struct":
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
+                )
+        # A scalar-element container parameter's elements live in
+        # caller memory — register it as its own share group like
+        # the struct seed above: `a[i] = x` accumulates into the
+        # param's (caller's) dep set, `b := a[i]` shares it, and
+        # reads carry the param ordinal. An array param's elements
+        # are a local copy, but the conflated dep set is honest
+        # either way — the store just also lands on the ordinal.
+        for p in sig_params:
+            if p.binding_id and (
+                self._scalar_elem_collection(p.type)
+                or self._scalar_elem_nested_collection(p.type)
+            ):
+                self._opaque_container_tokens[p.binding_id] = (
+                    frozenset({p.binding_id})
+                )
+                locals_.setdefault(
+                    p.binding_id,
+                    frozenset({params[p.binding_id]}),
                 )
         # Anonymous-struct signature slots declare their fields
         # inside the signature literal — anchor each binding's field

@@ -4003,10 +4003,17 @@ keeps the value copy). `for range s`, `len(s)`/`cap(s)` and a
 rebind `s = lib.G(b)`/`s = t` retarget or drop the backing token —
 a non-container RHS detaches the name so `s[i]` fails closed
 again. Literals, multi-result calls, package container vars and
-non-scalar elements stay closed, as do `param` containers.
-Multi-level index READS (`s[i][j]`) admit one `elem` descent per
-level like the imported-member read; element WRITES stay
-one-level (`s[i] = v` only).
+non-scalar elements stay closed. A scalar-element container
+PARAMETER registers as its own share group at function entry like
+the `struct` seed: `a[i] = x` accumulates on the param's (the
+caller's) dep set, `b := a`/`b := a[i]` share it, `a = s` reseats
+off the caller's backing, and reads carry the param ordinal plus
+whatever the body stored — `a = nil` detaches it the same way. A
+scalar-element collection RESULT (`func G() []int64`) admits too:
+its dep set is the local's conflated one and the caller binds it
+like any `t := g()` container. Multi-level index READS (`s[i][j]`)
+admit one `elem` descent per level like the imported-member read;
+element WRITES stay one-level (`s[i] = v` only).
 A range over a call result — `for _, v := range lib.G(a)` and the
 explicit `for range *lib.P(a)` deref — admits on the same shape:
 the imported member's `result_types` carry the container (or
@@ -4055,8 +4062,7 @@ identities on admit. The element gate keeps the honest closures:
 `[][]int64` admits one level deeper in the nested section below,
 while `[]struct`/`[]func` locals still cannot bind (the
 func-element collection has its own model), `delete(m, k)`/`copy` stay
-opaque builtins, and a parameter container (`a []int64`) is
-rejected by the signature gate before it can ever register.
+opaque builtins.
 
 ### C07 scalar-element *nested* local containers
 
@@ -4097,14 +4103,14 @@ before the reseat). The honest closures stay honest:
 `[][][]int64` (two levels over scalar) and any deeper nesting
 still cannot bind, `b := a[i][j]` (indexing into the
 extracted inner) stays closed,
-extracting from an unbound or parameter operand (`t[i]` on a
-param `t`) stays closed because the operand never joined a
-share group, extracting an element that is itself an ARRAY (`a[i]` on
+extracting from an unbound operand stays closed because the
+operand never joined a share group (a parameter operand now
+registers its own group at entry — see the section above),
+extracting an element that is itself an ARRAY (`a[i]` on
 `[][M]T`/`[N][M]T`) stays closed — it is a value copy with
 no shared backing — `[]func`
-nested shapes keep their own func-element model, and a
-nested parameter container is rejected by the signature
-gate. `append(a[i], v)` binds like any other element
+nested shapes keep their own func-element model.
+`append(a[i], v)` binds like any other element
 carrier: the appended slice may reuse the extracted
 element's backing, so `b := append(a[i], v)` unions the
 root's share-group tokens into `b` beside the fresh result
