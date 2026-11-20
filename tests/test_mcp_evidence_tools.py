@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -860,6 +862,17 @@ class TestVerifyScheduleTool:
 
     def test_core_path_records_evidence_check(self, tmp_path):
         inputs = _schedule_inputs(tmp_path)
+        # The selected adapter emits declared bytes; the stub Core
+        # accepts only their exact sha256 — the fed-bytes binding is
+        # verified, not just the check outcome.
+        expected = "BETA_DECLARED_OUTPUT"
+        expected_sha = hashlib.sha256(expected.encode()).hexdigest()
+        argv_doc = json.loads(Path(inputs["argv_map"]).read_text())
+        argv_doc["beta"] = [
+            sys.executable, "-c",
+            f"import sys; sys.stdout.write({expected!r}); sys.exit(0)",
+        ]
+        Path(inputs["argv_map"]).write_text(json.dumps(argv_doc))
         diagnostic = {
             "schema_version": "mumei.evidence-representation-check/v1",
             "evidence_schema_version": "mumei.verification-evidence/v1",
@@ -875,7 +888,10 @@ class TestVerifyScheduleTool:
         core.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
-            "    cat > /dev/null\n"
+            "    fed=$(mktemp)\n"
+            "    cat > \"$fed\"\n"
+            "    sha=$(sha256sum \"$fed\" | cut -d' ' -f1)\n"
+            '    [ "$sha" = "' + expected_sha + '" ] || exit 1\n'
             "    printf %s '" + json.dumps(diagnostic) + "'\n"
             "    exit 0\n"
             "fi\n"
