@@ -1979,6 +1979,10 @@ class _Builder:
             else None
         )
         member = self._field_identity(f_ref)
+        # `s[i].F` — the field's operand may reach the root through
+        # an index chain when the root is a bound struct-element
+        # container: every element conflates into the root's group,
+        # so the field's slot joins it like `s.F` on a composite.
         root = sel.child_by_field_name("operand")
         while root is not None and root.type in {
             "parenthesized_expression",
@@ -2012,8 +2016,12 @@ class _Builder:
             )
             or root_ref is None
             or root_ref.binding_id is None
-            or not self._is_local_composite(
-                self.bindings.get(root_ref.binding_id)
+            or not (
+                self._is_local_composite(
+                    self.bindings.get(root_ref.binding_id)
+                )
+                or root_ref.binding_id
+                in self._opaque_container_tokens
             )
         ):
             return None, None
