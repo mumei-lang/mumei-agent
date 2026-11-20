@@ -15570,8 +15570,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             root_ref.binding_id
                         )) is not None
                         and root_binding.type is not None
-                        and self._scalar_elem_collection(
-                            root_binding.type
+                        and (
+                            self._scalar_elem_collection(
+                                root_binding.type
+                            )
+                            or self._scalar_elem_nested_collection(
+                                root_binding.type
+                            )
                         )
                     )
                 ):
@@ -15580,6 +15585,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # escaped folds `*p = x` into its conflated set
                     # through the deref-store path, and the sharer
                     # union then lets every alias's `b[j]` read it.
+                    # The nested `&a[0][0]` shape admits identically.
                     self.escaped.add(root_ref.binding_id)
                 ref = (
                     self.references.get(self.node_key(operand))

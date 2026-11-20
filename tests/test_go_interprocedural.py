@@ -18733,6 +18733,16 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `p := &a[0][0]` — a pointer into a nested element folds
+        # `*p = x` into the root's conflated set like `&a[i]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tp := &a[0][0]\n"
+            "\t*p = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
