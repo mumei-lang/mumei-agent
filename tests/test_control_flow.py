@@ -1394,11 +1394,16 @@ def test_goto_label_before_closing_brace_resolves():
     (jump,) = nodes(cfg, "goto")
     (labelled,) = by_text(cfg, body, "L:")
     assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+    # The empty label falls through to the function exit.
+    assert edges_to(cfg, labelled.node_id) == {cfg.exit}
     body = "x := 0; { goto L; x = 1; L: }; after()"
     cfg = graph(body)
     (jump,) = nodes(cfg, "goto")
     (labelled,) = by_text(cfg, body, "L:")
     assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+    # Inside a block, the empty label flows to the statement after `}`.
+    (after,) = by_text(cfg, body, "after()")
+    assert edges_to(cfg, labelled.node_id) == {after.node_id}
 
 
 def test_terminal_fallthrough_edges_into_the_next_case_body():
