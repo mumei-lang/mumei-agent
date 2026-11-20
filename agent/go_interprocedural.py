@@ -6459,7 +6459,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return (
                 binding is not None
                 and binding.kind == "type"
-                and self._scalar_elem_collection(binding.type)
+                and (
+                    self._scalar_elem_collection(binding.type)
+                    or self._scalar_elem_nested_collection(
+                        binding.type
+                    )
+                )
             )
         return False
 

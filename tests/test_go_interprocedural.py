@@ -18743,6 +18743,16 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `make(M, n)` on a named nested type admits like the
+        # literal form.
+        (
+            "type M [][]int64\n"
+            "func F(x int64) int64 {\n"
+            "\ta := make(M, 1)\n"
+            "\ta[0] = []int64{x}\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
