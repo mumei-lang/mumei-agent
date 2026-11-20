@@ -2265,3 +2265,20 @@ def test_reslice_index_result_is_not_a_reslice() -> None:
     facts = flow.facts_for_expression("p")
     assert facts is not None
     assert "p" not in facts.nonnil
+
+
+def test_reslice_with_indexed_bound_propagates_nonnil() -> None:
+    # ``s[:bounds[0]]`` is a reslice whose bound is an index expression —
+    # the result keeps the source's nil state.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if s == nil {\n    return 0\n}\n"
+        "part := s[:bounds[0]]\n"
+        "return part[0]",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("part[0]")
+    assert facts is not None
+    assert "part" in facts.nonnil

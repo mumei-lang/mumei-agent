@@ -2018,8 +2018,7 @@ class _Walker:
                     reslice = (
                         reslice_inner
                         and ":" in reslice_inner_text
-                        and "[" not in reslice_inner_text
-                        and "]" not in reslice_inner_text
+                        and "][" not in reslice_inner_text
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2161,8 +2160,7 @@ class _Walker:
                     reslice = (
                         reslice_inner
                         and ":" in reslice_inner_text
-                        and "[" not in reslice_inner_text
-                        and "]" not in reslice_inner_text
+                        and "][" not in reslice_inner_text
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2251,8 +2249,7 @@ class _Walker:
             slice_source
             and slice_source.group(1) != target
             and ":" in slice_inner
-            and "[" not in slice_inner
-            and "]" not in slice_inner
+            and "][" not in slice_inner
         ):
             # ``x := s[lo:hi]`` re-slices the same backing — the result is
             # nil exactly when the source is, so its nil state carries.
