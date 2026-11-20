@@ -1933,6 +1933,11 @@ class _Builder:
         # backing. Only a scalar-element array isolates the
         # callee's writes.
         elem = getattr(t, "elem", None)
+        if elem is not None and elem.kind == "array":
+            # `[N][M][]T` copies the outer array header but the
+            # innermost slice/map headers still aim at caller
+            # memory — descend until a non-array element.
+            return self._array_arg_shares_memory(elem)
         return elem is not None and elem.kind in {
             "slice",
             "map",

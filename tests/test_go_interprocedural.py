@@ -25732,6 +25732,7 @@ def _opaque_composite_lib():
             "func GAA(x int64) [1][1][]int64 {\n"
             "\treturn [1][1][]int64{{{x}}}\n}\n"
             "func US(a [1][]int64, b int64) {}\n"
+            "func US2(a [1][1][]int64, b int64) {}\n"
             "var VA []int64\n"
         }
     }
@@ -27261,6 +27262,24 @@ def test_opaque_composite_callee_writes_deep_index_arg(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_composite_callee_writes_deep_array_arg(
+    go_types_helper,
+):
+    # `lib.US2(a, y)` on a bound `[1][1][]int64` — the callee
+    # receives copied outer headers whose innermost `[]int64`
+    # still points into the caller's backing, so its writes
+    # land in every sharer's set like `lib.US(a, y)` does.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\ta := [1][1][]int64{{{x}}}\n"
+        "\tlib.US2(a, y)\n"
+        "\treturn a[0][0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_opaque_composite_callee_writes_index_arg(
