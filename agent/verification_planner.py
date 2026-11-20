@@ -62,6 +62,7 @@ _MANIFEST_FIELDS = frozenset(
         "input_formats",
         "required_permissions",
         "probe_argv",
+        "attempt_argv",
     }
 )
 _MANIFEST_REQUIRED = frozenset(
@@ -356,6 +357,7 @@ class AdapterDescriptor:
     input_formats: frozenset[str] = frozenset()
     required_permissions: frozenset[str] | None = None
     probe_argv: tuple[str, ...] | None = None
+    attempt_argv: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -411,6 +413,15 @@ class AdapterDescriptor:
             )
         ):
             raise ValueError("invalid adapter probe declaration")
+        if self.attempt_argv is not None and (
+            not isinstance(self.attempt_argv, tuple)
+            or not self.attempt_argv
+            or any(
+                type(arg) is not str or not arg
+                for arg in self.attempt_argv
+            )
+        ):
+            raise ValueError("invalid adapter attempt declaration")
 
     def to_dict(self) -> dict:
         return {
@@ -440,6 +451,11 @@ class AdapterDescriptor:
             "probe_argv": (
                 list(self.probe_argv)
                 if self.probe_argv is not None
+                else None
+            ),
+            "attempt_argv": (
+                list(self.attempt_argv)
+                if self.attempt_argv is not None
                 else None
             ),
         }
@@ -472,6 +488,9 @@ class AdapterDescriptor:
         probe_argv = manifest.get("probe_argv")
         if probe_argv is not None and type(probe_argv) is not list:
             raise ValueError("invalid adapter probe declaration")
+        attempt_argv = manifest.get("attempt_argv")
+        if attempt_argv is not None and type(attempt_argv) is not list:
+            raise ValueError("invalid adapter attempt declaration")
         return cls(
             adapter_id=manifest["adapter_id"],
             adapter_version=manifest["adapter_version"],
@@ -495,6 +514,9 @@ class AdapterDescriptor:
             ),
             probe_argv=(
                 None if probe_argv is None else tuple(probe_argv)
+            ),
+            attempt_argv=(
+                None if attempt_argv is None else tuple(attempt_argv)
             ),
         )
 

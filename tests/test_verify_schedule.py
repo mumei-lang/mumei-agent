@@ -285,3 +285,81 @@ def test_empty_allowed_locations_is_rejected(inputs, capsys):
     with pytest.raises(SystemExit):
         main_schedule(args)
     assert capsys.readouterr().err.startswith("verify-schedule:")
+
+
+def test_schedule_falls_back_to_manifest_attempt_argv(tmp_path, capsys):
+    # An adapter whose manifest declares ``attempt_argv`` runs that
+    # command when the host argv_map has no entry for it.
+    def write(name, doc):
+        path = tmp_path / f"FAKE_PRIVATE_{name}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    source = tmp_path / "FAKE_PRIVATE_SOURCE.mm"
+    source.write_bytes(SOURCE)
+    request = write(
+        "request",
+        {
+            "profile": PROFILE,
+            "method": "deductive_proof",
+            "result_contract": {
+                "profile": PROFILE,
+                "method": "deductive_proof",
+                "scope": "unbounded",
+                "correspondence_relation": "exact_model",
+                "correspondence_status": "assumed",
+            },
+            "input_format": "mumei.source-text/v1",
+        },
+    )
+    policy = write(
+        "policy",
+        {
+            "allowed_permissions": ["filesystem.read", "process.spawn"],
+            "timeout_ms": 10_000,
+            "selected_adapter": "alpha",
+        },
+    )
+    observations = write(
+        "observations",
+        [
+            {
+                "adapter_id": "alpha",
+                "availability": "available",
+                "tool_version": "1.0.0",
+                "stamp": 1,
+            },
+        ],
+    )
+    adapters = write(
+        "adapters",
+        [
+            manifest(
+                "alpha",
+                attempt_argv=[PY, "-c", "import sys; sys.exit(0)"],
+            )
+        ],
+    )
+    argv_map = write("argv", {})
+    argv = [
+        "--request", request,
+        "--adapters", adapters,
+        "--argv-map", argv_map,
+        "--policy", policy,
+        "--observations", observations,
+        "--source", str(source),
+    ]
+    args = build_schedule_parser().parse_args(argv)
+    result = run_schedule(args)
+    attempts = result["attempts"]
+    assert attempts and attempts[0]["terminal_state"] == "exited"
+    assert attempts[0]["exit_code"] == 0
+
+
+def test_manifest_attempt_argv_rejects_non_list(tmp_path):
+    from agent.verification_planner import AdapterDescriptor
+
+    with pytest.raises(ValueError):
+        AdapterDescriptor.from_manifest(
+            manifest("alpha", attempt_argv="not-a-list")
+        )

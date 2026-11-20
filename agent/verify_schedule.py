@@ -256,13 +256,24 @@ def run_schedule(args: argparse.Namespace) -> dict:
         if args.success_exit_code is None
         else frozenset(args.success_exit_code)
     )
+    def argv_for(adapter_id: str) -> tuple[str, ...] | None:
+        # The host's argv_map wins; a manifest-declared ``attempt_argv``
+        # is the adapter's own fallback command.
+        declared = argv_map.get(adapter_id)
+        if declared is not None:
+            return declared
+        descriptor = registry.descriptor(adapter_id)
+        if descriptor is not None:
+            return descriptor.attempt_argv
+        return None
+
     result = run_attempt_schedule(
         registry,
         request,
         policy,
         source,
         hashlib.sha256(source).hexdigest(),
-        argv_map.get,
+        argv_for,
         observations=observations,
         max_attempts=args.max_attempts,
         success_exit_codes=success,

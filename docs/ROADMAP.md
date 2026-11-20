@@ -6075,6 +6075,35 @@ The lane remains a dispatch record, not an Evidence acceptance:
 `mumei.attempt-schedule/v1` carries fingerprints, terminal states and
 declared exit codes only — adapter stdout never lands in the document.
 
+### C11 manifest-declared attempt argv
+
+`AdapterDescriptor.attempt_argv` lets an adapter manifest declare the
+attempt command itself: `verify-schedule` and the audit
+`--enable-summary-attempts` schedule now fall back to the declared
+`attempt_argv` when the host argv map carries no entry for the
+adapter. The host argv map still wins when both are present, so a host
+can always pin or override the command an adapter shipped with.
+
+The field is a static manifest declaration like `probe_argv` — a tuple
+of argv strings validated at registration, round-tripped through
+`to_dict`/`from_manifest`, and listed in `_MANIFEST_FIELDS`. It is
+never executed at parse time; the scheduled dispatch runs it through
+the same declared boundary as an argv-map entry (plan → dispatch →
+terminal reconciliation), so an adapter that declares its own attempt
+needs no host-side argv declaration to run. A manifest with neither
+still yields `not_dispatched` — the route never guesses a command.
+
+```python
+descriptor = AdapterDescriptor.from_manifest({
+    ...,
+    "attempt_argv": ["/usr/bin/myverifier", "--batch"],
+})
+```
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged — output interpretation
+and Evidence acceptance remain open.
+
 
 ## Roadmap authority and vocabulary
 
