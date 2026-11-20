@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -856,6 +858,64 @@ class TestVerifyScheduleTool:
         assert report["schema_version"] == "mumei.attempt-schedule/v1"
         assert report["outcome"] == "selected"
         assert report["selected_adapter_id"] == "beta"
+        assert "FAKE_PRIVATE" not in json.dumps(report)
+
+    def test_core_path_records_evidence_check(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        # The selected adapter emits declared bytes; the stub Core
+        # accepts only their exact sha256 — the fed-bytes binding is
+        # verified, not just the check outcome.
+        expected = "BETA_DECLARED_OUTPUT"
+        expected_sha = hashlib.sha256(expected.encode()).hexdigest()
+        argv_doc = json.loads(Path(inputs["argv_map"]).read_text())
+        argv_doc["beta"] = [
+            sys.executable, "-c",
+            f"import sys; sys.stdout.write({expected!r}); sys.exit(0)",
+        ]
+        Path(inputs["argv_map"]).write_text(json.dumps(argv_doc))
+        diagnostic = {
+            "schema_version": "mumei.evidence-representation-check/v1",
+            "evidence_schema_version": "mumei.verification-evidence/v1",
+            "representation": "valid",
+            "acceptance": "not_evaluated",
+            "checks_not_performed": [
+                "claim_truth", "file_identity", "freshness",
+                "producer_authenticity", "semantic_correspondence",
+                "artifact_semantics",
+            ],
+        }
+        core = tmp_path / "mumei-stub"
+        # sha via Python — no mktemp/SHA tool dependency across platforms.
+        sha_check = (
+            '"%s" -c "import hashlib, sys; '
+            'd = sys.stdin.buffer.read(); '
+            "sys.exit(0 if hashlib.sha256(d).hexdigest() == '"
+            + expected_sha
+            + "' else 1)"
+            '"'
+        ) % sys.executable
+        core.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
+            "    " + sha_check + " || exit 1\n"
+            "    printf %s '" + json.dumps(diagnostic) + "'\n"
+            "    exit 0\n"
+            "fi\n"
+            "exit 2\n"
+        )
+        core.chmod(0o755)
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"], inputs["adapters"],
+                inputs["argv_map"], inputs["policy"], inputs["source"],
+                observations_path=inputs["observations"],
+                core_path=str(core),
+            )
+        )
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["evidence_check"]["outcome"] == "valid"
+        assert report["evidence_acceptance"]["accepted"] is True
         assert "FAKE_PRIVATE" not in json.dumps(report)
 
     def test_bad_args_are_errors(self, tmp_path):
