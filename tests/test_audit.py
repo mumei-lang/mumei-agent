@@ -4345,25 +4345,30 @@ def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
     }
 
 
-def _scheduled_verification_ctx(tmp_path: Path, both_exit: int | None = None):
+def _scheduled_verification_ctx(
+    tmp_path: Path,
+    both_exit: int | None = None,
+    core: str | None = None,
+):
     files = _scheduled_verification_files(tmp_path, both_exit=both_exit)
-    args = build_parser().parse_args(
-        [
-            "--code-file",
-            str(tmp_path / "placeholder.py"),
-            "--enable-scheduled-verification",
-            "--schedule-request",
-            files["request"],
-            "--schedule-adapters",
-            files["adapters"],
-            "--schedule-argv-map",
-            files["argv_map"],
-            "--schedule-policy",
-            files["policy"],
-            "--schedule-observations",
-            files["observations"],
-        ]
-    )
+    argv = [
+        "--code-file",
+        str(tmp_path / "placeholder.py"),
+        "--enable-scheduled-verification",
+        "--schedule-request",
+        files["request"],
+        "--schedule-adapters",
+        files["adapters"],
+        "--schedule-argv-map",
+        files["argv_map"],
+        "--schedule-policy",
+        files["policy"],
+        "--schedule-observations",
+        files["observations"],
+    ]
+    if core is not None:
+        argv += ["--schedule-core", core]
+    args = build_parser().parse_args(argv)
     return _load_scheduled_verification(args)
 
 
@@ -4554,3 +4559,69 @@ def test_audit_scheduled_verification_load_error_redacts(
         main(args)
     err = capsys.readouterr().err
     assert "FAKE_PRIVATE" not in err
+
+
+def test_audit_scheduled_verification_core_records_evidence(
+    tmp_path: Path,
+) -> None:
+    # Stub Core emitting the v1 representation diagnostic.
+    diagnostic = {
+        "schema_version": "mumei.evidence-representation-check/v1",
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "checks_not_performed": [
+            "claim_truth", "file_identity", "freshness",
+            "producer_authenticity", "semantic_correspondence",
+            "artifact_semantics",
+        ],
+    }
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
+        "    cat > /dev/null\n"
+        "    printf %s '" + json.dumps(diagnostic) + "'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=_scheduled_verification_ctx(
+            tmp_path, core=str(core)
+        ),
+    )
+    schedule = result.scheduled_verification
+    assert schedule["evidence_check"]["outcome"] == "valid"
+    assert schedule["evidence_acceptance"]["accepted"] is True
+    assert "FAKE_PRIVATE" not in json.dumps(schedule)
+
+
+def test_audit_scheduled_verification_core_requires_absolute_path(
+    tmp_path: Path,
+) -> None:
+    files = _scheduled_verification_files(tmp_path)
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(tmp_path / "placeholder.py"),
+            "--enable-scheduled-verification",
+            "--schedule-request",
+            files["request"],
+            "--schedule-adapters",
+            files["adapters"],
+            "--schedule-argv-map",
+            files["argv_map"],
+            "--schedule-policy",
+            files["policy"],
+            "--schedule-core",
+            "relative/mumei",
+        ]
+    )
+    with pytest.raises(ValueError, match="--schedule-core"):
+        _load_scheduled_verification(args)
