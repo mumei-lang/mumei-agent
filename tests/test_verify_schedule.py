@@ -836,8 +836,11 @@ def test_export_evidence_acceptance_drops_a_stale_triple(
     core.chmod(0o755)
     export = tmp_path / "promotable"
     export.mkdir()
-    for name in ("requirement-list.json", "evidence.json", "acceptance.json"):
-        (export / name).write_text("stale", encoding="utf-8")
+    (export / "requirement-list.json").write_text("stale", encoding="utf-8")
+    (export / "evidence.json").write_text("stale", encoding="utf-8")
+    (export / "acceptance.json").write_text(json.dumps({
+        "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+    }), encoding="utf-8")
     args = args_for(
         inputs,
         core=str(core),
@@ -882,6 +885,128 @@ def test_export_evidence_acceptance_refuses_declared_collisions(
             core_requirement_list=str(req),
             export_evidence_acceptance=str(export),
         ))
+
+
+def test_export_evidence_acceptance_refuses_foreign_files(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    foreign = export / "evidence.json"
+    foreign.write_text("ANOTHER_PROCESS_EVIDENCE", encoding="utf-8")
+    # A name the export does not own is a declaration error, never
+    # something to delete.
+    with pytest.raises(ValueError, match="did not write"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+    assert foreign.read_text() == "ANOTHER_PROCESS_EVIDENCE"
+
+
+def test_export_evidence_acceptance_refuses_core_collision(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    os.link(core, export / "evidence.json")
+    with pytest.raises(
+        ValueError, match="must not overwrite a declared input"
+    ):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+    assert (export / "evidence.json").exists()
+
+
+MM_CLAMP = (
+    "atom clamp_nonnegative(x: i64) -> i64\n"
+    "requires: true;\n"
+    "ensures: (x < 0 => result == 0) && (x >= 0 => result == x);\n"
+    "body: { if x < 0 { 0 } else { x } };\n"
+)
+
+
+def test_exported_triple_passes_the_real_claim_gate(
+    inputs, capsys, tmp_path, mumei_bin
+):
+    """End-to-end with the real binary: the exported triple satisfies
+    `mumei claims --require-evidence-acceptance`."""
+    import shlex
+
+    core_argv = shlex.split(mumei_bin)
+    if len(core_argv) != 1:
+        pytest.skip("mumei_bin resolves to a compound command")
+    mumei = core_argv[0]
+    mm = tmp_path / "ev.mm"
+    mm.write_text(MM_CLAMP)
+    verify = subprocess.run(
+        [mumei, "evidence", "verify-source", str(mm), "--json"],
+        capture_output=True,
+    )
+    assert verify.returncode == 0, verify.stderr.decode()
+    record_path = tmp_path / "record.json"
+    record_path.write_bytes(verify.stdout)
+    record = json.loads(verify.stdout)
+    req = tmp_path / "requirements.json"
+    req.write_text(json.dumps({
+        "schema_version": "mumei.evidence-requirement-list/v1",
+        "requirements": [{
+            "schema_version": "mumei.evidence-requirement/v1",
+            "subject_sha256": record["subject"]["sha256"],
+            "obligation_id": record["obligation_id"],
+            "semantics": {
+                "profile": record["semantics"]["profile"],
+                "integer_model": record["semantics"]["integer_model"],
+                "target_triple": record["semantics"]["target_triple"],
+            },
+            "minimum_assurance": "unbounded_proof",
+            "correspondence_status": ["validated", "assumed"],
+            "excluded_assumptions": [],
+        }],
+    }))
+    # The selected attempt emits the evidence record as its output, so
+    # Core accepts it and the promotable triple is exported.
+    argv_map = tmp_path / "argv-real.json"
+    argv_map.write_text(json.dumps({
+        "alpha": [PY, "-c", "import sys; sys.exit(3)"],
+        "beta": [
+            PY, "-c",
+            "import sys; sys.stdout.buffer.write("
+            "open(sys.argv[1], 'rb').read())",
+            str(record_path),
+        ],
+    }))
+    export = tmp_path / "promotable"
+    args = args_for(
+        dict(inputs, argv_map=str(argv_map)),
+        core=mumei,
+        core_requirement_list=str(req),
+        export_evidence_acceptance=str(export),
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == "accepted"
+    claims = subprocess.run(
+        [
+            mumei, "claims", str(mm),
+            "--require-evidence-acceptance",
+            str(export / "requirement-list.json"),
+            str(export / "evidence.json"),
+            str(export / "acceptance.json"),
+        ],
+        capture_output=True,
+    )
+    assert claims.returncode == 0, claims.stderr.decode()
 
 
 def test_export_promotable_pins_the_requirement_list(tmp_path):

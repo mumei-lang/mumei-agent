@@ -343,6 +343,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
             args.argv_map,
             args.policy,
             args.source,
+            args.core,
             requirement or "",
             requirement_list,
         ]

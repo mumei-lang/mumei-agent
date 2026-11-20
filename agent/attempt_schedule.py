@@ -29,6 +29,7 @@ from agent.attempt_runner import (
     memory_bound_enforceable,
 )
 from agent.core_evidence import (
+    MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
     evaluate_evidence_check,
     record_evidence_acceptance,
     record_evidence_acceptance_list,
@@ -213,18 +214,61 @@ _MAX_REQUIREMENT_LIST_BYTES = 65_536
 _EXPORT_FILENAMES = ("requirement-list.json", "evidence.json", "acceptance.json")
 
 
+_ACCEPTANCE_DESCRIPTOR_SCHEMAS = frozenset(
+    {
+        "mumei.evidence-acceptance/v1",
+        "mumei.evidence-requirement-list-acceptance/v1",
+    }
+)
+
+
+def _is_prior_export(export_dir: str) -> bool:
+    """The reserved names hold a complete triple this feature wrote."""
+    try:
+        acceptance_path = os.path.join(export_dir, "acceptance.json")
+        if (
+            os.path.getsize(acceptance_path)
+            > MAX_ACCEPTANCE_DESCRIPTOR_BYTES
+        ):
+            return False
+        with open(acceptance_path, "rb") as handle:
+            acceptance = json.loads(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        type(acceptance) is dict
+        and acceptance.get("schema_version") in _ACCEPTANCE_DESCRIPTOR_SCHEMAS
+    )
+
+
 def _clear_export_dir(export_dir: str) -> None:
-    """Drop any triple left by an earlier run before dispatching.
+    """Drop a triple left by an earlier run before dispatching.
 
     A run that declares export but produces no descriptor — a failed
     or cancelled check — must not leave last run's accepted set in
-    place for automation to pick up as this run's result."""
-    for name in _EXPORT_FILENAMES:
-        path = os.path.join(export_dir, name)
-        if os.path.islink(path):
+    place for automation to pick up as this run's result. Files this
+    feature did not write are never removed: a directory holding
+    anything but a complete, recognizable earlier export under the
+    reserved names is a declaration error, not something to clean up."""
+    present = [
+        name
+        for name in _EXPORT_FILENAMES
+        if os.path.lexists(os.path.join(export_dir, name))
+    ]
+    if not present:
+        return
+    for name in present:
+        if os.path.islink(os.path.join(export_dir, name)):
             raise ValueError("promotable export refuses to touch a link")
-        if os.path.isfile(path):
-            os.unlink(path)
+    if len(present) != len(_EXPORT_FILENAMES) or not _is_prior_export(
+        export_dir
+    ):
+        raise ValueError(
+            "--export-evidence-acceptance directory holds files this "
+            "command did not write"
+        )
+    for name in _EXPORT_FILENAMES:
+        os.unlink(os.path.join(export_dir, name))
 
 
 def _export_promotable(
