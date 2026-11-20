@@ -1111,6 +1111,97 @@ def test_type_switch_case_body_with_fallthrough_stays_unsupported():
     assert "unsupported_fallthrough" in {g.reason for g in result.gaps}
 
 
+def test_type_switch_guard_whitespace_keeps_the_graph():
+    # `x.( type )` is valid Go — the synthesized guard define must
+    # span the source verbatim instead of normalizing it away.
+    for body in (
+        "switch v := x.( type ) { case int: a(v) }; b()",
+        "switch v := x.(\ttype\n) { case int: a(v) }; b()",
+    ):
+        result = control_flow.build_go_cfg(body)
+        assert result.graph is not None, body
+        (define,) = [
+            n for n in result.graph.nodes if n.kind == "define"
+        ]
+        assert body[define.span.start : define.span.end].endswith(")")
+
+
+def test_type_switch_with_initializer_keeps_both_bindings():
+    # `switch n := g(); v := x.(type)` — the SimpleStmt initializer
+    # and the guard binding both enter the graph.
+    cfg, result = facts(
+        "switch n := g(); v := x.(type) { case int: use(v, n) }"
+    )
+    assert {n.kind for n in cfg.nodes} >= {"define", "switch"}
+    defines = nodes(cfg, "define")
+    assert len(defines) == 2
+    texts = [cfg.nodes[d.node_id].span for d in defines]
+    body = "switch n := g(); v := x.(type) { case int: use(v, n) }"
+    assert sorted(body[s.start : s.end] for s in texts) == [
+        "n := g()",
+        "v := x.(type)",
+    ]
+
+
+def test_type_switch_guard_does_not_report_nil_assertion():
+    # `x.(type)` on a nil interface routes to `case nil` — it never
+    # panics, so the guard must not read as a plain type assertion.
+    flow = dataflow_facts.analyze_function(
+        "var x any; switch x.(type) { case nil: return 0; case int: return 1 }; return 2",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
+
+
+def test_type_switch_guard_call_still_checks_nil_function():
+    # `f().(type)` DOES panic when f is a nil func value — the operand
+    # stays visible to the uninit check (evaluated after the init).
+    flow = dataflow_facts.analyze_function(
+        "var f func() any; switch f = f; f().(type) { case int: return 1 }; return 0",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
+    flow = dataflow_facts.analyze_function(
+        "var f func() any; switch f().(type) { case int: return 1 }; return 0",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" in {i.category for i in flow.issues}
+
+
+def test_switch_initializer_shadowing_restores_outer_binding():
+    # `p := …` in a switch init is scoped to the switch: an outer nil
+    # pointer of the same name must still be reported after it.
+    flow = dataflow_facts.analyze_function(
+        "var p *int; switch p := 1; x { case 0: _ = p }; return *p",
+        "go",
+    )
+    assert flow is not None
+    assert "uninitialized_use" in {i.category for i in flow.issues}
+    # An `=` init write, by contrast, updates the outer binding and
+    # persists past the switch.
+    flow = dataflow_facts.analyze_function(
+        "var p *int; q := 1; switch p = &q; x { case 0: }; return *p",
+        "go",
+    )
+    assert flow is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
+
+
+def test_switch_init_result_is_visible_to_guard_checks():
+    # `switch f = fallback; f().(type)` — the guard is checked against
+    # the post-init environment, so the resolved call is not flagged.
+    flow = dataflow_facts.analyze_function(
+        "var f func() any; fallback := func() any { return nil };"
+        " switch f = fallback; f().(type) { case int: return 1 }; return 0",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
+
+
 def test_switch_without_default_edges_to_following():
     cfg = graph("switch x { case 0: a(); case 1: b() }; after()")
     (switch,) = nodes(cfg, "switch")

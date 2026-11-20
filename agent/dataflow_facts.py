@@ -586,6 +586,53 @@ class _Env:
                     self.nilable[target] = held[0]
 
 
+def _copy_name_facts(dst: _Env, src: _Env, name: str) -> None:
+    """Copy every fact mentioning ``name`` from ``src`` into ``dst``.
+
+    Used to restore an outer binding that a switch initializer's ``:=``
+    shadowed for the switch's duration — the outer name regains exactly
+    its pre-switch state (the inner binding cannot have written it).
+    Callers are expected to ``kill`` the name on ``dst`` first.
+    """
+    name = _norm(name)
+    if not name:
+        return
+    pattern = re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
+
+    def mentions(text: str) -> bool:
+        return bool(pattern.search(text)) or text == name or text.startswith(name + ".")
+
+    dst.nonzero |= {t for t in src.nonzero if mentions(t)}
+    dst.nonneg |= {t for t in src.nonneg if mentions(t)}
+    dst.nonnil |= {t for t in src.nonnil if mentions(t)}
+    dst.lt_len |= {p for p in src.lt_len if mentions(p[0]) or mentions(p[1])}
+    for key, value in src.len_ge.items():
+        if mentions(key):
+            dst.len_ge[key] = max(dst.len_ge.get(key, 0), value)
+    for key, value in src.consts.items():
+        if mentions(key):
+            dst.consts.setdefault(key, value)
+    for key, value in src.len_values.items():
+        if mentions(key) or mentions(value[0]):
+            dst.len_values.setdefault(key, value)
+    for key, value in src.aliases.items():
+        if mentions(key) or mentions(value):
+            dst.aliases.setdefault(key, value)
+    dst.held |= {
+        h for h in src.held if mentions(h[1]) or (len(h) == 3 and mentions(h[2]))
+    }
+    dst.slices |= {t for t in src.slices if mentions(t)}
+    for key, value in src.nilable.items():
+        if mentions(key):
+            dst.nilable.setdefault(key, value)
+    if name in src.defined:
+        dst.defined.add(name)
+    else:
+        # ``kill`` leaves ``defined`` untouched — a shadowed name with
+        # no prior binding is still unassigned after the scope ends.
+        dst.defined.discard(name)
+
+
 # ---------------------------------------------------------------------------
 # Condition parsing
 # ---------------------------------------------------------------------------
@@ -1204,7 +1251,9 @@ class _Walker:
                 self._check_uninit_text(value, statement.start, env)
                 self._check_transition_text(value, statement.start, env)
                 self._note_output_args(value, env)
-        elif kind in {"if", "for", "switch"} and statement.condition:
+        elif kind in {"if", "for"} and statement.condition:
+            # ``switch`` defers its condition check into ``_switch`` so
+            # the initializer's writes are visible first.
             self._check_uninit_text(statement.condition, statement.start, env)
             self._check_transition_text(statement.condition, statement.start, env)
             self._note_output_args(statement.condition, env)
@@ -1737,6 +1786,10 @@ class _Walker:
         base = env.copy()
         if statement.init:
             base, _ = self.walk(statement.init, base)
+        if statement.condition:
+            self._check_uninit_text(statement.condition, statement.start, base)
+            self._check_transition_text(statement.condition, statement.start, base)
+            self._note_output_args(statement.condition, base)
         outgoing: list[_Env] = []
         has_default = False
         previous_conditions: list[str] = []
@@ -1807,8 +1860,17 @@ class _Walker:
         for other in outgoing[1:]:
             merged = merged.merge(other)
         if statement.init:
-            for name in self._assigned_names(statement.init):
-                merged.kill(name)
+            for init in statement.init:
+                if init.kind != "define":
+                    # ``=`` writes target the outer binding — they
+                    # persist past the switch.
+                    continue
+                for name in self._assigned_names((init,)):
+                    # A ``:=`` init binding is scoped to the switch:
+                    # the inner facts die with it and an outer binding
+                    # of the same name regains its pre-switch state.
+                    merged.kill(name)
+                    _copy_name_facts(merged, env, name)
         return merged, ""
 
     # -- assignments -----------------------------------------------------
