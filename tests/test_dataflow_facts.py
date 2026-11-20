@@ -2232,3 +2232,21 @@ def test_function_named_channel_is_not_a_chan_cast() -> None:
         "}\n"
     )
     assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+
+def test_parenthesized_chan_cast_keeps_closed_state() -> None:
+    # ``(chan int)(ch)`` / ``chan int(ch)`` convert the same channel —
+    # the closed state must survive even though ``_norm`` erased the
+    # whitespace between the type and the argument.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    sendCh := (chan int)(ch)\n"
+        "    sendCh <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")

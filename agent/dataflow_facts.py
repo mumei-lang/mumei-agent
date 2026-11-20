@@ -2327,8 +2327,12 @@ class _Walker:
         if _NONNEG_CALLS.match(text) and _is_whole_call(text):
             env.nonneg.add(target)
             return
+        # ``_norm`` erased the whitespace that separates ``chan`` from
+        # its element type (``chan int`` → ``chanint``), so the cast is
+        # matched on the raw value where ``channel(ch)`` stays distinct.
         chan_cast = re.match(
-            r"^\(?\s*(?:<-)?chan(?:<-\s*|\s+)[^()]*\)?\s*\((.+)\)$", text
+            r"^\(?\s*(?:<-)?chan(?:<-\s*|\s+)[^()]*\)?\s*\((.+)\)$",
+            value.strip(),
         )
         if chan_cast and re.fullmatch(_IDENT, chan_cast.group(1)):
             # ``chan<- int(ch)`` restricts only the compile-time
