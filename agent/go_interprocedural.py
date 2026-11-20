@@ -483,7 +483,7 @@ class FunctionSummary:
             target
             for call in self.calls
             for target in (call.target, *call.folded_targets)
-            if not target.endswith("/pointee")
+            if not target.endswith(("/pointee", "/caller-backing"))
         )
 
     def to_dict(self) -> dict:
@@ -2151,26 +2151,59 @@ class _Builder:
             if append_toks is not None:
                 return append_toks
             call = self.calls.get(self.node_key(rhs))
-            if call is None or call.kind != "external_or_bodyless":
+            if call is None or call.kind not in {
+                "external_or_bodyless",
+                "direct_local",
+            }:
                 return None
-            _member, fact = self._call_result_fact(rhs)
+            fact = (
+                self._call_result_type(rhs)
+                if call.kind == "direct_local"
+                else self._call_result_fact(rhs)[1]
+            )
             if fact is None or fact.kind not in {
                 "slice",
                 "array",
                 "map",
             }:
                 return None
+            # A local callee answers precisely: the result aliases
+            # only the container params its `return_dependencies`
+            # names. An opaque callee may hand back a slice aliasing
+            # any container argument (`t := lib.Id(s)`), so the
+            # result's backing may-set unions every container arg's
+            # tokens like the dep set unions their deps.
+            alias_ordinals: frozenset[int] | None = None
+            if call.kind == "direct_local":
+                target_fn = self.functions.get(call.target)
+                if (
+                    target_fn is None
+                    or target_fn.receiver is not None
+                ):
+                    return None
+                callee = self.summarize(call.target)
+                if callee is None or not callee.available:
+                    return None
+                alias_ordinals = frozenset(
+                    i
+                    for i in callee.return_dependencies or ()
+                    if i < len(target_fn.parameters)
+                    and self._param_container_shares_memory(
+                        target_fn.parameters[i].type
+                    )
+                )
             toks = {self.node_key(rhs)}
-            # `t := lib.Id(s)` — an opaque callee may hand back a
-            # slice aliasing a container argument, so the result's
-            # backing may-set unions every container arg's tokens
-            # like the dep set unions their deps.
             arguments_node = rhs.child_by_field_name("arguments")
-            for arg in (
+            for arg_index, arg in enumerate(
                 _children(arguments_node)
                 if arguments_node is not None
                 else ()
             ):
+                if (
+                    alias_ordinals is not None
+                    and arg_index not in alias_ordinals
+                ):
+                    continue
                 while (
                     arg is not None
                     and arg.type == "parenthesized_expression"
@@ -2292,6 +2325,20 @@ class _Builder:
             )
             return toks
         return None
+
+    def _param_container_shares_memory(self, t: Any) -> bool:
+        """May a container parameter's backing be caller memory a
+        sibling argument also reaches? A slice or map hands over its
+        header; an array copies — but its elements still share when
+        they are slices, maps or pointers (`[N][]T`, `[N]*T`), while
+        a pure `[N]int64` copies cleanly."""
+        if t is None or t.kind is None:
+            return False
+        if t.kind in {"slice", "map", "pointer"}:
+            return True
+        if t.kind == "array":
+            return self._param_container_shares_memory(t.elem)
+        return False
 
     def _opaque_container_ident_toks(
         self, node: Any
@@ -7852,6 +7899,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and fn.receiver.type.elem is not None
                     and fn.receiver.type.elem.kind in {"integer", "boolean"}
                 )
+                and not (
+                    # A scalar-container receiver (`func (a MySlice)
+                    # M()`) admits like the parameter form — the
+                    # conflated share group applies the same way.
+                    self._scalar_elem_collection(fn.receiver.type)
+                    or self._scalar_elem_nested_collection(
+                        fn.receiver.type
+                    )
+                )
             )
             # Pointer-typed parameters/results are admitted too: the
             # dep model tracks the *binding's* index, not the pointee,
@@ -7892,6 +7948,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         p.type.kind in {"slice", "array", "map"}
                         and p.type.elem is not None
                         and p.type.elem.kind == "function"
+                    )
+                    # A scalar-element collection parameter —
+                    # `[]int64` / `map[K]int` / `[][]int64` — admits
+                    # like the struct form: it registers as its own
+                    # share group, so `a[i] = x` lands on the param's
+                    # (caller's) dep set and `a[i]` reads carry the
+                    # ordinal plus whatever the body stored.
+                    or (
+                        self._scalar_elem_collection(p.type)
+                        or self._scalar_elem_nested_collection(p.type)
                     )
                 )
                 for p in fn.parameters
@@ -7936,6 +8002,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         r.type.kind in {"slice", "array", "map"}
                         and r.type.elem is not None
                         and r.type.elem.kind == "function"
+                    )
+                    # A scalar-element collection result —
+                    # `[]int64` / `map[K]int` / `[][]int64` — the
+                    # returned value is a local container, so its
+                    # dep set is the local's conflated one and the
+                    # caller binds the name like any `t := g()`
+                    # container result.
+                    or (
+                        self._scalar_elem_collection(r.type)
+                        or self._scalar_elem_nested_collection(r.type)
                     )
                 )
                 for r in fn.results
@@ -7995,6 +8071,53 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
                 )
+        # A scalar-element container parameter's elements live in
+        # caller memory — register it like the struct seed above.
+        # Container params that can share backing seed ONE group —
+        # `G(a, a)` hands the same slice to two slots, so a store
+        # through `s[0] = x` must land in `t`'s set too (the same
+        # may-alias conflation the share model uses for locals).
+        # Every slice and map shares; an array joins only when its
+        # elements carry shared memory (`[N][]T`, `[N]*T`) — a pure
+        # `[N]int64` is a local copy and keeps a solo group.
+        shared_container_ids = frozenset(
+            p.binding_id
+            for p in sig_params
+            if p.binding_id
+            and (
+                self._scalar_elem_collection(p.type)
+                or self._scalar_elem_nested_collection(p.type)
+            )
+            and self._param_container_shares_memory(p.type)
+        )
+        for p in sig_params:
+            if p.binding_id and (
+                self._scalar_elem_collection(p.type)
+                or self._scalar_elem_nested_collection(p.type)
+            ):
+                self._opaque_container_tokens[p.binding_id] = (
+                    shared_container_ids
+                    if p.binding_id in shared_container_ids
+                    else frozenset({p.binding_id})
+                )
+                locals_.setdefault(
+                    p.binding_id,
+                    frozenset({params[p.binding_id]}),
+                )
+        # Params whose stores can reach caller memory: a shared-group
+        # container's elements and every `struct` (its conflated set
+        # cannot tell a by-value field from a slice/map/pointer one).
+        # `a[i] = x` accumulates into the param's set; at walk end a
+        # set grown past its seed means caller memory was written.
+        caller_visible_params = {
+            p.binding_id: params[p.binding_id]
+            for p in sig_params
+            if p.binding_id
+            and (
+                p.binding_id in shared_container_ids
+                or p.type.kind == "struct"
+            )
+        }
         # Anonymous-struct signature slots declare their fields
         # inside the signature literal — anchor each binding's field
         # window there (a multi-name `s, t struct{...}` shares the
@@ -8061,6 +8184,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 statements, fn, params, locals_, transfers, count, deps,
                 saw_return, False,
             )
+            # A param's dep set grown past its seed means a store
+            # landed on memory the caller still reads (`s[i] = x` on
+            # a shared-group container, `s.V = x` on a struct). Record
+            # it like the `*p = v` `/pointee` write: an imported
+            # transfer against a synthetic id so `effects` reports
+            # unknown and the caller folds the stored deps into its
+            # arguments' sharers. A reseat (`s = other`) over-flags —
+            # the conflated set cannot tell a rebinding from a
+            # backing write — which stays on the sound side.
+            for pid, ordinal in caller_visible_params.items():
+                if locals_.get(pid, frozenset({ordinal})) != frozenset(
+                    {ordinal}
+                ):
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                fn.body.start,
+                                fn.body.end,
+                            ),
+                            pid + "/caller-backing",
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
         finally:
             pinned = tuple(sorted(self.pinned))
             reads = tuple(
