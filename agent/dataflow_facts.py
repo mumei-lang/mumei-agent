@@ -2004,6 +2004,18 @@ class _Walker:
                         if h[1] == name
                         and h[0] in {"file", "closed_file", "deferred"}
                     }
+                    reslice = _SLICE_EXPR.match(_norm(value)) and re.match(
+                        rf"^({re.escape(_norm(name))})\[", _norm(value)
+                    )
+                    if reslice:
+                        # ``s = s[lo:hi]`` keeps the same backing — its
+                        # nil state survives even though bounds facts are
+                        # gone.
+                        scratch.held |= {
+                            h for h in env.held if h[1] == name
+                        }
+                        if name in env.slices:
+                            scratch.slices.add(name)
                 # The declaration still replaces the outer binding —
                 # drop its facts from ``env`` before the copy-back so
                 # stale entries cannot survive ``setdefault``.
@@ -2123,6 +2135,18 @@ class _Walker:
                         if h[1] == target
                         and h[0] in {"file", "closed_file", "deferred"}
                     }
+                    reslice = _SLICE_EXPR.match(_norm(value)) and re.match(
+                        rf"^({re.escape(_norm(target))})\[", _norm(value)
+                    )
+                    if reslice:
+                        # ``s = s[lo:hi]`` keeps the same backing — its
+                        # nil state survives even though bounds facts are
+                        # gone.
+                        scratch.held |= {
+                            h for h in pre_env.held if h[1] == target
+                        }
+                        if target in pre_env.slices:
+                            scratch.slices.add(target)
                 self._define(target, value, scratch)
                 # Every other pending target is being rewritten — a
                 # fact that mentions it (``i < len(s)`` after
@@ -2191,6 +2215,22 @@ class _Walker:
             nilable = env.nilable[text]
         if nilable is not None:
             env.nilable[target] = nilable
+        slice_source = re.match(rf"^({_IDENT})\[", text)
+        if (
+            slice_source
+            and _SLICE_EXPR.match(text)
+            and slice_source.group(1) != target
+        ):
+            # ``x := s[lo:hi]`` re-slices the same backing — the result is
+            # nil exactly when the source is, so its nil state carries.
+            source = slice_source.group(1)
+            for h in tuple(env.held):
+                if h[1] == source and h[0] in _NILABLE_HELD:
+                    env.held.add((h[0], target))
+            if source in env.slices:
+                env.slices.add(target)
+            if source in env.nonnil:
+                env.nonnil.add(target)
         if text.endswith("(nil)"):
             # ``x := (*T)(nil)`` / ``x = T(nil)`` — an explicit nil cast.
             kind = _nilable_kind(text[: -len("(nil)")].lstrip("(").rstrip(")"))
@@ -2275,6 +2315,15 @@ class _Walker:
             return
         if _NONNEG_CALLS.match(text) and _is_whole_call(text):
             env.nonneg.add(target)
+            return
+        chan_cast = re.match(
+            r"^\(?\s*(?:<-)?chan(?:<-)?[^()]*\)?\s*\((.+)\)$", text
+        )
+        if chan_cast and re.fullmatch(_IDENT, chan_cast.group(1)):
+            # ``chan<- int(ch)`` restricts only the compile-time
+            # direction — the runtime value is the same channel, so
+            # closed/nil state carries over verbatim.
+            env.copy_facts(chan_cast.group(1), target)
             return
         cast = _CAST.match(text)
         if cast:
