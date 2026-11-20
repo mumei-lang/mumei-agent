@@ -1425,14 +1425,25 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
                 label = _decode(source_bytes, child)
             else:
                 inner = child
-        if inner is not None:
-            statement = _go_statement(source_bytes, inner, base, offsets)
-            return (
-                replace(statement, labeled=True, label=label)
-                if statement is not None
-                else None
+        if inner is None:
+            return None
+        statement = _go_statement(source_bytes, inner, base, offsets)
+        if statement is None:
+            # ``L: ;`` — the labelled statement is empty, but the label
+            # still exists as a ``goto`` target. Model it as a no-op
+            # expression statement.
+            return Statement(
+                kind="expr", text=text, start=start,
+                labeled=True, label=label,
             )
-        return None
+        if statement.labeled:
+            # ``L1: L2: stmt`` — both labels exist: carry the outer one
+            # on a block wrapping the inner labelled statement.
+            return Statement(
+                kind="block", text=text, start=start,
+                body=(statement,), labeled=True, label=label,
+            )
+        return replace(statement, labeled=True, label=label)
     if kind == "func_literal":
         return Statement(
             kind="closure",
