@@ -4593,14 +4593,20 @@ def test_audit_scheduled_verification_core_records_evidence(
     expected = "BETA_DECLARED_OUTPUT"
     expected_sha = hashlib.sha256(expected.encode()).hexdigest()
     core = tmp_path / "mumei-stub"
-    # Accepts only the selected adapter's exact captured bytes.
+    # Accepts only the selected adapter's exact captured bytes; sha via
+    # Python — no mktemp/SHA tool dependency across platforms.
+    sha_check = (
+        '"%s" -c "import hashlib, sys; '
+        'd = sys.stdin.buffer.read(); '
+        "sys.exit(0 if hashlib.sha256(d).hexdigest() == '"
+        + expected_sha
+        + "' else 1)"
+        '"'
+    ) % sys.executable
     core.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
-        "    fed=$(mktemp)\n"
-        "    cat > \"$fed\"\n"
-        "    sha=$(sha256sum \"$fed\" | cut -d' ' -f1)\n"
-        '    [ "$sha" = "' + expected_sha + '" ] || exit 1\n'
+        "    " + sha_check + "\n"
         "    printf %s '" + json.dumps(diagnostic) + "'\n"
         "    exit 0\n"
         "fi\n"
