@@ -1,7 +1,7 @@
 """Source-mapped explicit normal flow for a deliberately limited Go profile.
 
-Calls are opaque and assumed to return normally. Panic/recovery, concurrency,
-deferred execution and ``goto`` are not modelled; expression and
+Calls are opaque and assumed to return normally. Panic/recovery, concurrency
+and deferred execution are not modelled; expression and
 type switches are exclusive alternatives with implicit break and a
 type-less match model (a type switch with no default can fall
 through), ``select`` admits its communication cases as the same
@@ -9,7 +9,10 @@ kind of alternative and blocks when it has no ``default``, a terminal
 ``fallthrough`` in a non-final case clause edges into
 the next clause's body (any other position stays a declared gap),
 labelled ``break``/``continue`` resolve only against enclosing
-labelled loops, and ``panic``/``os.Exit``-style terminating calls end
+labelled loops, ``goto`` edges to the named statement's entry
+anywhere in the body (labels are function-scoped by name — the
+jump-legality rules Go places on declarations and blocks are not
+checked), and ``panic``/``os.Exit``-style terminating calls end
 normal flow at the exit (deferred calls and ``recover`` stay
 unmodelled). Unsupported
 syntax produces gaps instead of a misleading partial graph. This is neither a
@@ -108,12 +111,35 @@ def _span(statement: tree_sitter_extract.Statement) -> SourceSpan:
     return SourceSpan(statement.start, statement.start + len(statement.text))
 
 
+def _collect_labels(
+    statements: tuple[tree_sitter_extract.Statement, ...],
+) -> frozenset[str]:
+    """Every label a statement carries, at any depth.
+
+    Go labels are function-scoped, so a ``goto`` resolves against the
+    whole body's label set — not only enclosing statements.
+    """
+    labels: set[str] = set()
+    for statement in statements:
+        if statement.labeled and statement.label:
+            labels.add(statement.label)
+        for group in (
+            statement.init,
+            statement.body,
+            statement.orelse,
+            statement.post,
+        ):
+            labels.update(_collect_labels(group))
+    return frozenset(labels)
+
+
 def _gaps(
     body: str,
     statements: tuple[tree_sitter_extract.Statement, ...],
     in_loop: bool = False,
     in_break: bool = False,
     labels: frozenset[str] = frozenset(),
+    goto_labels: frozenset[str] = frozenset(),
 ) -> list[CFGGap]:
     gaps: list[CFGGap] = []
     for statement in statements:
@@ -126,8 +152,8 @@ def _gaps(
             if kind in {"for", "range"} and statement.label:
                 # A label on a loop is a jump target for its body.
                 body_labels = labels | {statement.label}
-            else:
-                gaps.append(CFGGap("labelled_statement", span))
+            # A label on any statement is also a ``goto`` target —
+            # it is collected function-wide by ``_collect_labels``.
         if kind in {"break", "continue"}:
             parts = statement.text.split()
             if len(parts) == 1:
@@ -137,6 +163,13 @@ def _gaps(
                     gaps.append(CFGGap("jump_without_loop", span))
             elif len(parts) == 2 and _IDENTIFIER.fullmatch(parts[1]):
                 if parts[1] not in labels:
+                    gaps.append(CFGGap("unresolved_label", span))
+            else:
+                gaps.append(CFGGap("labelled_jump", span))
+        elif kind == "goto":
+            parts = statement.text.split()
+            if len(parts) == 2 and _IDENTIFIER.fullmatch(parts[1]):
+                if parts[1] not in goto_labels:
                     gaps.append(CFGGap("unresolved_label", span))
             else:
                 gaps.append(CFGGap("labelled_jump", span))
@@ -158,7 +191,9 @@ def _gaps(
                         gaps.append(CFGGap("unsupported_case", _span(case)))
         elif kind not in _SIMPLE | _STRUCTURED:
             gaps.append(CFGGap(f"unsupported_{kind}", span))
-        gaps.extend(_gaps(body, statement.init, in_loop, in_break, labels))
+        gaps.extend(
+            _gaps(body, statement.init, in_loop, in_break, labels, goto_labels)
+        )
         if kind == "switch":
             cases = statement.body
             for index, case in enumerate(cases):
@@ -177,7 +212,7 @@ def _gaps(
                 ):
                     stmts = stmts[:-1]
                 gaps.extend(
-                    _gaps(body, stmts, in_loop, True, labels)
+                    _gaps(body, stmts, in_loop, True, labels, goto_labels)
                 )
         else:
             in_loop_body = in_loop or kind in {"for", "range"}
@@ -188,13 +223,18 @@ def _gaps(
                     in_loop_body,
                     in_break or kind in {"for", "range"},
                     body_labels,
+                    goto_labels,
                 )
             )
         gaps.extend(
-            _gaps(body, statement.orelse, in_loop, in_break, labels)
+            _gaps(
+                body, statement.orelse, in_loop, in_break, labels, goto_labels
+            )
         )
         gaps.extend(
-            _gaps(body, statement.post, in_loop, in_break, labels)
+            _gaps(
+                body, statement.post, in_loop, in_break, labels, goto_labels
+            )
         )
     return gaps
 
@@ -203,6 +243,12 @@ class _Builder:
     def __init__(self) -> None:
         self.nodes = [CFGNode(0, "entry", None), CFGNode(1, "exit", None)]
         self.edges: list[CFGEdge] = []
+        # ``goto`` resolution: label name → the labelled statement's
+        # entry node, filled as statements finish building. Backward
+        # jumps reach names not yet registered, so they queue here and
+        # are wired once the whole body has been sequenced.
+        self.goto_targets: dict[str, int] = {}
+        self.pending_gotos: list[tuple[int, str]] = []
 
     def node(self, kind: str, statement: tree_sitter_extract.Statement) -> int:
         node_id = len(self.nodes)
@@ -236,6 +282,13 @@ class _Builder:
                 )
                 assert target is not None
                 self.edge(node, target[0 if kind == "break" else 1], kind)
+            elif kind == "goto":
+                label = statement.text.split()[1]
+                target = self.goto_targets.get(label)
+                if target is None:
+                    self.pending_gotos.append((node, label))
+                else:
+                    self.edge(node, target, "goto")
             elif kind == "if":
                 self.edge(
                     node,
@@ -308,16 +361,34 @@ class _Builder:
             else:
                 self.edge(node, following)
             following = self.sequence(statement.init, node, loop, labels)
+            if statement.labeled and statement.label:
+                # The labelled statement's entry is the head of its
+                # init chain (or the node itself when it has none).
+                self.goto_targets[statement.label] = following
         return following
 
 
 def _from_tree(body: str, tree: tree_sitter_extract.StatementTree) -> CFGConstruction:
     try:
-        gaps = _gaps(body, tree.statements)
+        gaps = _gaps(
+            body,
+            tree.statements,
+            goto_labels=_collect_labels(tree.statements),
+        )
         if gaps:
             return CFGConstruction(None, tuple(gaps))
         builder = _Builder()
         builder.edge(0, builder.sequence(tree.statements, 1))
+        for node_id, label in builder.pending_gotos:
+            # ``_gaps`` already required every label, so this can only
+            # be missed by a build-order surprise — keep it a gap
+            # rather than dropping the edge silently.
+            target = builder.goto_targets.get(label)
+            if target is None:
+                return CFGConstruction(
+                    None, (CFGGap("unresolved_label"),)
+                )
+            builder.edge(node_id, target, "goto")
     except RecursionError:
         return CFGConstruction(None, (CFGGap("nesting_limit"),))
     return CFGConstruction(

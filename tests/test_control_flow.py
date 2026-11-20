@@ -119,9 +119,7 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
     "body,reason",
     [
         ("switch v := x.(type) { case int: fallthrough; default: return 1 }", "unsupported_fallthrough"),
-        ("goto done; done: return 0", "unsupported_goto"),
-        ("outer: x := 1; return x", "labelled_statement"),
-        ("outer: if true { return 1 }", "labelled_statement"),
+        ("goto missing; return 0", "unresolved_label"),
         ("for { continue outer }", "unresolved_label"),
         ("for { break missing }", "unresolved_label"),
         ("outer: for { break missing }", "unresolved_label"),
@@ -181,9 +179,11 @@ def test_assignments_kill_guard_facts_and_shadowing_is_local() -> None:
 
 
 def test_gap_does_not_discard_existing_resource_findings() -> None:
-    flow = dataflow_facts.analyze_function("mu.Lock(); outer: x := 1; return x", "go")
+    flow = dataflow_facts.analyze_function(
+        "mu.Lock(); for { break missing }; return x", "go"
+    )
     assert flow is not None and flow.cfg is None
-    assert flow.cfg_gaps[0].reason == "labelled_statement"
+    assert flow.cfg_gaps[0].reason == "unresolved_label"
     assert "lock_held_at_return" in {issue.category for issue in flow.issues}
     assert flow.facts_for_return(2) is None
 
@@ -1277,12 +1277,52 @@ def test_labelled_break_through_switch_targets_the_loop():
     assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"expr"}
 
 
-def test_labelled_switch_statement_remains_a_gap():
-    result = control_flow.build_go_cfg(
-        "outer: switch x { case 0: break }; after()"
-    )
-    assert result.graph is None
-    assert "labelled_statement" in {gap.reason for gap in result.gaps}
+def test_labelled_switch_statement_registers_a_goto_target():
+    # A label on a switch is a legal ``goto`` target and does not change
+    # the unlabelled ``break`` — it still exits to the next statement.
+    body = "outer: switch x { case 0: break }; after()"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "break")
+    (call,) = by_text(cfg, body, "after()")
+    assert edges_to(cfg, jump.node_id) == {call.node_id}
+
+
+def test_goto_forward_jump_skips_unreachable_statements():
+    body = "x := 1; goto end; x = 2; end: return x"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (ret,) = nodes(cfg, "return")
+    assert edges_to(cfg, jump.node_id) == {ret.node_id}
+    (dead,) = by_text(cfg, body, "x = 2")
+    assert dead.node_id not in cfg.reachable()
+    assert ret.node_id in cfg.reachable()
+
+
+def test_goto_backward_jump_targets_the_labelled_statement():
+    body = "i := 0; top: i += 1; if i < 3 { goto top }; return i"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "i += 1")
+    assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+
+
+def test_goto_marks_no_fallthrough_for_the_following_statement():
+    # ``goto`` never falls through — statements after it stay
+    # unreachable until another edge lands on them.
+    body = "goto done; x := 1; done: return x"
+    cfg = graph(body)
+    (dead,) = by_text(cfg, body, "x := 1")
+    assert dead.node_id not in cfg.reachable()
+
+
+def test_goto_resolves_to_a_label_inside_a_nested_block():
+    # Go restricts jumping into blocks, but the CFG models labels as
+    # function-scoped names — the edge lands on the labelled statement.
+    body = "x := 0; if true { inner: x = 1 }; goto inner"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "x = 1")
+    assert edges_to(cfg, jump.node_id) == {labelled.node_id}
 
 
 def test_terminal_fallthrough_edges_into_the_next_case_body():
