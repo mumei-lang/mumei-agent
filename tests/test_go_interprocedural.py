@@ -18492,6 +18492,23 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn c[0]\n}\n",
             frozenset({0}),
         ),
+        # A swap keeps BOTH backings under the root — `t := s`
+        # copies share them, so a write through `s.G`'s old alias
+        # still reaches a `t.F` read after the swap reseated `s.F`
+        # onto that group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64; G []int64 }\n"
+            "\ts.F = []int64{0}\n"
+            "\ts.G = []int64{0}\n"
+            "\tb := s.G\n"
+            "\ts.F, s.G = s.G, s.F\n"
+            "\tb[0] = x\n"
+            "\tt := s\n"
+            "\tc := t.F\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
         # `if c { s.F = t }` — the untaken path keeps `s.F` aimed
         # at `a`'s backing, so `a[0] = x` still lands in `s`'s
         # conflated set and `b`'s read observes it.

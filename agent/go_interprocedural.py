@@ -9938,7 +9938,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 reseat_plan.append(
                     (fkey, root_id, old_toks, new_toks)
                 )
+            reseat_roots: set[str] = set()
             for fkey, root_id, old_toks, new_toks in reseat_plan:
+                reseat_roots.add(root_id)
                 if conditional or self._may_skip > 0:
                     # `if c { s.F = v }` — the untaken path keeps
                     # `s.F` aimed at its old backing, so the reseat
@@ -9963,17 +9965,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # share group dissolves; a later `b := s.F`
                     # mints its own backing like a fresh read.
                     self._opaque_container_tokens.pop(fkey, None)
-                    new_toks = frozenset()
                 else:
                     self._opaque_container_tokens[fkey] = new_toks
-                if old_toks or new_toks:
-                    self._opaque_container_tokens[root_id] = (
-                        self._opaque_container_tokens.get(
-                            root_id, frozenset()
+            if not (conditional or self._may_skip > 0):
+                # The root's token set is exactly the union of its
+                # live field keys — a subtract-per-field update
+                # breaks when a token one field releases is another
+                # field's new backing (`s.F, s.G = s.G, s.F`).
+                for root_id in reseat_roots:
+                    prefix = f"{root_id}\x00"
+                    live: set = set()
+                    for key, toks in (
+                        self._opaque_container_tokens.items()
+                    ):
+                        if key.startswith(prefix):
+                            live |= toks
+                    if live:
+                        self._opaque_container_tokens[root_id] = (
+                            frozenset(live)
                         )
-                        - old_toks
-                        | new_toks
-                    )
+                    else:
+                        self._opaque_container_tokens.pop(
+                            root_id, None
+                        )
             # Go assignments run in two phases — destination operands
             # (pointer indirections and index expressions) and every
             # RHS evaluate against the pre-state before any store
