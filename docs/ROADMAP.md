@@ -3258,8 +3258,10 @@ a container admits the same way (`len(lib.V2[i])` on `[][]int64`,
 indexes' own dependencies, and the member's whole fact tree pins.
 Any other operand (`len(xs)` on a binding, `len(f())`,
 `len(lib.VS2.G)` on a field, `len(lib.VC)` on a channel)
-stays opaque, as does every other builtin (`panic`, `append`,
-`make`, `new`, `complex`, `real`, `imag`, ...).
+stays opaque, as does every other builtin (`panic`, `complex`,
+`real`, `imag`, ...); `copy`/`delete`/`clear` admit on a bound
+scalar-element container operand — see the scalar-element
+container section.
 
 ### C07 compound and tuple assignments
 
@@ -4075,8 +4077,21 @@ closed again). A named collection type pins its declared
 identities on admit. The element gate keeps the honest closures:
 `[][]int64` admits one level deeper in the nested section below,
 while `[]struct`/`[]func` locals still cannot bind (the
-func-element collection has its own model), `delete(m, k)`/`copy` stay
-opaque builtins.
+func-element collection has its own model). The mutating builtins
+`copy`/`delete`/`clear` admit on a bound scalar-element container
+operand: `copy(dst, src)` lands the source's conflated element set
+on every sharer of `dst`'s group like an element store (the source
+takes any evaluable expression), and when the source is itself
+bound the two groups MERGE — `dst[i]` aliases `src[i]`'s backing
+(a `[][]int64` copy shares the inner slices). `delete(m, k)`
+stores the key's deps into the sharers — an element's survival
+depends on `k`, the most the conflated set can say — and `clear(m)`
+mutates without a stored value: the set cannot track removal, so
+a later read keeps its deps (the sound over-approximation). A
+shared-group PARAM operand flags `/caller-backing` unconditionally
+for all three — a dep-free mutation (`clear(m)`, `delete(m, 1)`)
+grows no dep set but still writes caller memory. On an unbound
+operand all three stay opaque.
 
 ### C07 scalar-element *nested* local containers
 

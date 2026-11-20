@@ -8145,6 +8145,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_pending_labels = self._pending_labels
         saved_goto_seen = self._goto_seen
         saved_seen_labels = self._seen_labels
+        saved_caller_visible = getattr(
+            self, "_caller_visible_params", None
+        )
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
@@ -8161,6 +8164,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._defer_result_deps = frozenset()
         self._func_arg_invocations = {}
         self._call_arg_deps = {}
+        # Mutating builtins (`copy`/`delete`/`clear`) consult it to
+        # flag dep-free writes on a caller-visible param — dep
+        # growth cannot see a `clear(m)` or `delete(m, 1)` store.
+        self._caller_visible_params = caller_visible_params
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -8228,6 +8235,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.chan_aliases = saved_chan_aliases
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
+            self._caller_visible_params = saved_caller_visible
             self._defer_result_deps = saved_defer_result_deps
             self._func_arg_invocations = saved_func_args
             self._call_arg_deps = saved_call_arg_deps
@@ -16614,6 +16622,152 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         self.indirect_writes |= store_deps
                     return deps
+                if name in {b"copy", b"delete", b"clear"}:
+                    # Container-mutating builtins on a bound
+                    # scalar-element container. `copy(dst, src)`
+                    # lands the source's conflated element set on
+                    # every sharer of `dst`'s group like an element
+                    # store (the source needs no group — `copy(b,
+                    # "lit")` admits too); when the source is itself
+                    # bound the two groups MERGE, since `dst[i]` now
+                    # aliases `src[i]`'s backing (a `[][]int64` copy
+                    # shares the inner slices). `delete(m, k)`
+                    # stores the key's deps into the sharers — an
+                    # element's survival depends on `k`, the most the
+                    # conflated set can say — and `clear(m)` removes
+                    # elements, a value loss the set cannot
+                    # subtract, so a later element read keeps its
+                    # stored deps, the sound over-approximation. All
+                    # three mutate caller memory when the operand is
+                    # a shared-group param: a dep-free one
+                    # (`clear(m)`, `delete(m, 1)`) grows nothing, so
+                    # the write is flagged unconditionally instead
+                    # of relying on dep growth.
+                    operand = arguments[0] if arguments else None
+                    while (
+                        operand is not None
+                        and operand.type == "parenthesized_expression"
+                    ):
+                        operand = next(
+                            (
+                                c
+                                for c in operand.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    op_ref = (
+                        self.references.get(self.node_key(operand))
+                        if operand is not None
+                        and operand.type == "identifier"
+                        else None
+                    )
+                    op_toks = (
+                        self._opaque_container_tokens.get(
+                            op_ref.binding_id
+                        )
+                        if op_ref is not None and op_ref.binding_id
+                        else None
+                    )
+                    if (
+                        op_toks is None
+                        or len(arguments)
+                        != (1 if name == b"clear" else 2)
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    operand_deps = self.expression(
+                        arguments[0], fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+                    tail_deps = (
+                        frozenset()
+                        if name == b"clear"
+                        else self.expression(
+                            arguments[1], fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                    )
+                    if name == b"copy":
+                        src_op = arguments[1]
+                        while (
+                            src_op is not None
+                            and src_op.type == "parenthesized_expression"
+                        ):
+                            src_op = next(
+                                (
+                                    c
+                                    for c in src_op.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        src_ref = (
+                            self.references.get(
+                                self.node_key(src_op)
+                            )
+                            if src_op is not None
+                            and src_op.type == "identifier"
+                            else None
+                        )
+                        src_toks = (
+                            self._opaque_container_tokens.get(
+                                src_ref.binding_id
+                            )
+                            if src_ref is not None
+                            and src_ref.binding_id
+                            else None
+                        )
+                        if src_toks:
+                            # Union, never replace — a member's
+                            # stored tokens may carry OTHER share
+                            # edges (`c := [][]int64{a, b}` keeps
+                            # `b`'s token), so the merged set is the
+                            # union over every holder of the two
+                            # operand groups, not just the operands'.
+                            merged = op_toks | src_toks
+                            holders = self._opaque_container_holders(
+                                merged
+                            )
+                            merged = frozenset().union(
+                                *(
+                                    self._opaque_container_tokens[
+                                        member_id
+                                    ]
+                                    for member_id in holders
+                                )
+                            )
+                            for member_id in holders:
+                                self._opaque_container_tokens[
+                                    member_id
+                                ] = merged
+                    if name in {b"copy", b"delete"}:
+                        for holder_id in self._opaque_container_sharers(
+                            op_ref.binding_id
+                        ):
+                            self._store(
+                                locals_, params, holder_id,
+                                tail_deps, True,
+                            )
+                        self.indirect_writes |= tail_deps
+                    if op_ref.binding_id in (
+                        self._caller_visible_params or {}
+                    ):
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    fn.body.start,
+                                    fn.body.end,
+                                ),
+                                op_ref.binding_id + "/caller-backing",
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                    return operand_deps | tail_deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
                 if not arguments:

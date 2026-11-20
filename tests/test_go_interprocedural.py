@@ -19468,14 +19468,133 @@ def test_container_param_write_reaches_caller(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `copy(b, a)` lands `a`'s conflated element set on every
+        # sharer of `b`'s group — `b[0]` reads what `a[0]` carried.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\tb := []int64{0}\n"
+            "\tcopy(b, a)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `copy(b, a)` through a param destination writes caller
+        # memory — the callee records the write so the caller's
+        # `x[0]` read carries `a`'s deps.
+        (
+            "func G(s []int64, a []int64) {\n"
+            "\tcopy(s, a)\n"
+            "}\n"
+            "func F(x []int64, y []int64) int64 {\n"
+            "\tG(x, y)\n"
+            "\treturn x[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `delete(m, k)` mutates caller memory but stores nothing —
+        # the conflated set cannot subtract, so `m[0]` keeps the
+        # stored dep (the sound over-approximation).
+        (
+            "func G(m map[int64]int64, v int64) {\n"
+            "\tdelete(m, v)\n"
+            "}\n"
+            "func F(mm map[int64]int64, x int64) int64 {\n"
+            "\tmm[1] = x\n"
+            "\tG(mm, 1)\n"
+            "\treturn mm[1]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `clear(m)` admits like `delete` — every element goes, the
+        # stored deps stay in the conflated set.
+        (
+            "func F(x int64) int64 {\n"
+            "\tm := map[int64]int64{1: x}\n"
+            "\tclear(m)\n"
+            "\treturn m[1]\n}\n",
+            frozenset({0}),
+        ),
+        # `copy(b, s)` — the source needs no group; its evaluated
+        # deps land on `b`'s sharers the same way.
+        (
+            "func F(x int64) int64 {\n"
+            "\tb := []int64{0}\n"
+            "\tcopy(b, []int64{x})\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `delete(m, k)` — whether an element survives depends on
+        # `k`, so `k`'s deps store into `m`'s sharers: `m[1]` reads
+        # {seed, k}.
+        (
+            "func F(m map[int64]int64, k int64) int64 {\n"
+            "\tdelete(m, k)\n"
+            "\treturn m[1]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `copy(b, a)` on `[][]int64` — `b[i]` aliases `a[i]`'s
+        # backing, so the two groups merge: a store through `b`'s
+        # inner slice reaches `a`'s read.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := [][]int64{{0}}\n"
+            "\tcopy(b, a)\n"
+            "\tb[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `copy(d, a)` when `a` already shares through a literal
+        # donor — the merge unions every holder's tokens instead of
+        # replacing them, so `b`'s edge via `c` survives and `b`'s
+        # store still reaches `c[1][0]` (`b`).
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := [][]int64{{0}}\n"
+            "\tc := [][][]int64{a, b}\n"
+            "\td := [][]int64{{0}}\n"
+            "\tcopy(d, a)\n"
+            "\tb[0][0] = x\n"
+            "\treturn c[1][0][0]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_container_mutating_builtins(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+def test_container_builtin_dep_free_param_write_marks_effects(
+    go_types_helper,
+):
+    # `clear(m)` on a shared-group param mutates caller memory but
+    # grows no dep set — the unconditional `/caller-backing` flag
+    # keeps the callee's effects honest.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(m map[int64]int64) int64 {\n"
+            "\tclear(m)\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert result.available
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
-        # `delete(m, k)` — the builtin has no scalar-container
-        # handling and stays opaque.
-        "func F(x int64) int64 {\n"
-        "\tm := map[int64]int64{}\n"
-        "\tdelete(m, x)\n"
-        "\treturn m[0]\n}\n",
+        # `delete(m, k)` on an UNBOUND map — no share group
+        # exists, so the builtin stays opaque.
+        "func F(m map[int64]struct{}, x int64) int64 {\n"
+        "\tdelete(m, 1)\n"
+        "\treturn x\n}\n",
         # `a = nil` drops the backing token — `a[0]` afterwards
         # resolves nothing.
         "func F(x int64) int64 {\n"
