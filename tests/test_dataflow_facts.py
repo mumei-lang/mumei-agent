@@ -1916,3 +1916,438 @@ def test_switch_case_call_arg_establishes_output_param() -> None:
         "}\n"
     )
     assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+# --------------------------------------------------------------------------- #
+# switch initializer self-reference / shadow-restore soundness
+# --------------------------------------------------------------------------- #
+
+
+def test_switch_init_self_assign_keeps_nilable_facts() -> None:
+    # ``switch f = f; f().(type)`` — the init reads ``f`` before writing it,
+    # so its nil state must survive into the guard check.
+    flow = _go(
+        "var f func() any\n"
+        "switch f = f; f().(type) {\n"
+        "case int:\n"
+        "    return 1\n"
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "uninitialized_use" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_multi_assign_swap_reads_pre_assignment_facts() -> None:
+    # ``a, b = b, a`` evaluates both values before either write — ``a`` ends
+    # up holding ``b``'s old (nil) value, so dereferencing it still panics.
+    flow = _go("var a *int\nvar b *int\na = new(int)\na, b = b, a\nreturn *a")
+    assert any(
+        issue.category == "uninitialized_use" and issue.subject == "a"
+        for issue in flow.issues
+    )
+    assert not any(
+        issue.category == "uninitialized_use" and issue.subject == "b"
+        for issue in flow.issues
+    )
+    # ...and ``b`` provably carries ``a``'s old non-nil value.
+    facts = _go(
+        "var a *int\nvar b *int\na = new(int)\na, b = b, a\nreturn *b"
+    ).facts_for_expression("*b")
+    assert facts is not None and "b" in facts.nonnil
+
+
+def test_switch_shadowed_index_does_not_revive_stale_len_bound() -> None:
+    # A case that shrinks ``s`` must not restore the shadowed ``i``'s
+    # pre-switch ``i < len(s)`` bound for the outer ``i``.
+    facts = _facts(
+        "s := []int{1, 2, 3}\n"
+        "i := len(s) - 1\n"
+        "switch i := 0; x {\n"
+        "case 1:\n"
+        "    s = s[:1]\n"
+        "}\n"
+        "return s[i]",
+        "s[i]",
+    )
+    assert ("i", "s") not in facts.lt_len
+
+
+def test_switch_shadowed_index_keeps_bound_when_cases_do_not_write() -> None:
+    # Same shape with no case write: the outer bound must still come back.
+    facts = _facts(
+        "s := []int{1, 2, 3}\n"
+        "i := len(s) - 1\n"
+        "switch i := 0; x {\n"
+        "case 1:\n"
+        "    _ = 0\n"
+        "}\n"
+        "return s[i]",
+        "s[i]",
+    )
+    assert ("i", "s") in facts.lt_len
+
+
+def test_switch_shadowed_handle_keeps_leak_when_case_writes_other_names() -> None:
+    # The held fact's site operand (the ``err`` pairing) being written
+    # inside a case must not drop the outer handle's tracking.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "switch f := 1; x {\n"
+        "case 0:\n"
+        "    err = nil\n"
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_parallel_assign_does_not_revive_stale_len_bound() -> None:
+    # ``i, s = i, s[:1]`` — the bound's other side is a co-target whose
+    # value just changed, so the old ``i < len(s)`` must not come back.
+    facts = _facts(
+        "s := []int{1, 2, 3}\n"
+        "i := len(s) - 1\n"
+        "i, s = i, s[:1]\n"
+        "return s[i]",
+        "s[i]",
+    )
+    assert ("i", "s") not in facts.lt_len
+
+
+def test_err_wrap_inside_failed_open_discharges_handle() -> None:
+    # Inside ``if err != nil`` the open provably failed — rewriting
+    # ``err`` there must drop the held entry, not report a leak on a
+    # file that never opened.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil {\n"
+        '    err = fmt.Errorf("w")\n'
+        "    return 0\n"
+        "}\n"
+        "return f"
+    )
+    assert not any(issue.category == "resource_leak" for issue in flow.issues)
+
+
+def test_err_wrap_after_successful_open_still_reports() -> None:
+    # On the success path ``err`` was nil, so rewriting it loses the
+    # pairing — the file is still open and must keep reporting.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err == nil {\n"
+        '    err = fmt.Errorf("w")\n'
+        "    return 0\n"
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_parallel_assign_element_target_drops_its_nonzero() -> None:
+    # ``i, d[i] = i, 0`` rewrites ``d[i]`` — its old non-zero fact must
+    # not come back through the ``i`` copy-back, or ``10 / d[i]`` is
+    # silently trusted. The guard above the assignment proves ``d[i]``
+    # was known non-zero beforehand.
+    facts = _facts(
+        "d := []int{1, 2}\n"
+        "d[0] = 3\n"
+        "i := 0\n"
+        "if d[i] == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "i, d[i] = i, 0\n"
+        "return 10 / d[i]",
+        "10 / d[i]",
+    )
+    assert "d[i]" not in facts.nonzero
+
+
+def test_self_reslice_keeps_uninitialized_slice_state() -> None:
+    # ``buf = buf[:0]`` re-slices the same backing — a nil slice stays
+    # nil, so ``buf[0]`` still panics.
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    buf = buf[:0]\n"
+        "    return buf[0]\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "uninitialized_use")
+
+
+def test_reslice_result_inherits_source_nil_state() -> None:
+    # ``x := buf[:0]`` is nil exactly when ``buf`` is.
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    x := buf[:0]\n"
+        "    return x[0]\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "uninitialized_use")
+
+
+def test_channel_direction_cast_keeps_closed_state() -> None:
+    # ``chan<- int(ch)`` is the same channel — its closed state must
+    # survive the conversion.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    sendCh := chan<- int(ch)\n"
+        "    sendCh <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_append_to_nil_slice_does_not_report() -> None:
+    # ``buf = append(buf, 1)`` produces a non-nil slice — no nil
+    # index warning may fire on it.
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    buf = append(buf, 1)\n"
+        "    return buf[0]\n"
+        "}\n"
+    )
+    assert not _transition_messages(source, "uninitialized_use")
+
+
+def test_reseated_channel_does_not_keep_closed_state() -> None:
+    # ``ch = make(chan int, cap(ch))`` binds a fresh channel — the old
+    # closed state must not transfer, or the send reports a panic.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int, 1)\n"
+        "    close(ch)\n"
+        "    ch = make(chan int, cap(ch))\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_reseated_map_does_not_keep_nil_state() -> None:
+    # ``m = make(map[string]int, len(m))`` binds a fresh map — the old
+    # nil-map state must not transfer, or the write reports a panic.
+    source = (
+        "package demo\n"
+        "func Put() int {\n"
+        "    var m map[string]int\n"
+        "    m = make(map[string]int, len(m))\n"
+        "    m[\"a\"] = 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "write_to_nil_map") == []
+
+
+def test_field_site_survives_nonnil_root_reseat() -> None:
+    # ``p.err`` pairs the open result with a field — reseating
+    # non-nil ``p`` must not read ``p``'s non-nil as ``p.err``'s.
+    flow = _go(
+        "type T struct{ err error }\n"
+        "p := new(T)\n"
+        'f, p.err := os.Open("p")\n'
+        "p = new(T)\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_shadowed_err_site_survives_scope_exit() -> None:
+    # The inner ``err`` pairs the open; leaving the block restores the
+    # outer non-nil ``err`` — the pairing must be blanked, not read as
+    # the outer variable's proven state.
+    flow = _go(
+        'err := errors.New("x")\n'
+        "{\n"
+        '    f, err := os.Open("p")\n'
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_var_self_reference_drops_outer_facts() -> None:
+    # ``var d = d - 1`` shadows the outer ``d`` — its nonzero/consts
+    # facts must not leak into the inner binding.
+    facts = _facts(
+        "d := 1\n{ var d = d - 1; return 4 / d }\nreturn 0",
+        "4 / d",
+    )
+    assert "d" not in facts.nonzero
+    assert "d" not in facts.consts
+
+
+def test_map_index_with_colon_key_is_not_a_reslice() -> None:
+    # ``m["a:b"]`` is a map index whose key contains a colon — the
+    # reslice propagation must not fire, so ``p`` does not inherit
+    # the map's non-nil state.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if m == nil {\n    return 0\n}\np := m[\"a:b\"]\nreturn p", "go"
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
+
+
+def test_function_named_channel_is_not_a_chan_cast() -> None:
+    # ``channel(ch)`` is an ordinary call — its result must not carry
+    # ``ch``'s closed state, so the send below stays unreported.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    out := channel(ch)\n"
+        "    out <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+
+def test_parenthesized_chan_cast_keeps_closed_state() -> None:
+    # ``(chan int)(ch)`` / ``chan int(ch)`` convert the same channel —
+    # the closed state must survive even though ``_norm`` erased the
+    # whitespace between the type and the argument.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    sendCh := (chan int)(ch)\n"
+        "    sendCh <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+
+def test_reslice_index_result_is_not_a_reslice() -> None:
+    # ``slots[:1][0]`` is an element read off a reslice — the element
+    # must not inherit the slice's non-nil state.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if slots == nil {\n    return 0\n}\np := slots[:1][0]\nreturn p", "go"
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
+
+
+def test_reslice_with_indexed_bound_propagates_nonnil() -> None:
+    # ``s[:bounds[0]]`` is a reslice whose bound is an index expression —
+    # the result keeps the source's nil state.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if s == nil {\n    return 0\n}\n"
+        "part := s[:bounds[0]]\n"
+        "return part[0]",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("part[0]")
+    assert facts is not None
+    assert "part" in facts.nonnil
+
+
+def test_map_key_with_slice_expression_is_not_a_reslice() -> None:
+    # ``m[string(key[:])]`` — the colon sits inside a nested call, so the
+    # expression is a map index, not a reslice of ``m``.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if m == nil {\n    return 0\n}\n"
+        "p := m[string(key[:])]\n"
+        "return *p",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("*p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
+
+
+def test_map_key_with_composite_literal_is_not_a_reslice() -> None:
+    # ``m[Point{X: v}]`` — the colon belongs to the composite literal's
+    # field, so the expression is a map index, not a reslice.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if m == nil {\n    return 0\n}\n"
+        "p := m[Point{X: grid[0][0]}]\n"
+        "return *p",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("*p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
+
+
+def test_reslice_bound_with_raw_string_brace_propagates_nonnil() -> None:
+    # ``s[:len(`{`)]`` — the brace lives inside a backtick raw string, so
+    # it is not structure: the bound still makes this a reslice.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if s == nil {\n    return 0\n}\n"
+        "part := s[:len(`{`)]\n"
+        "return part[0]",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("part[0]")
+    assert facts is not None
+    assert "part" in facts.nonnil
+
+
+def test_quote_inside_raw_string_does_not_swallow_bracket_join() -> None:
+    # ``slots[:f(`"`)][g("h")]`` — the ``"`` inside the backtick raw
+    # string must not open a quoted literal: pairing it with the later
+    # ``"`` would erase the ``][`` join and fake a plain reslice.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if slots == nil {\n    return 0\n}\n"
+        'p := slots[:f(`"`)][g("h")]\n'
+        "return p",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("p")
+    assert facts is not None
+    assert "p" not in facts.nonnil

@@ -1188,7 +1188,75 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
     if kind in {"expression_switch_statement", "type_switch_statement", "select_statement"}:
         init_node = node.child_by_field_name("initializer")
         init_stmt = _go_statement(source_bytes, init_node, base, offsets) if init_node is not None else None
-        value_node = node.child_by_field_name("value") if kind == "expression_switch_statement" else None
+        value_node = (
+            node.child_by_field_name("value")
+            if kind in {"expression_switch_statement", "type_switch_statement"}
+            else None
+        )
+        type_guard = None
+        if kind == "type_switch_statement":
+            # A leading SimpleStmt (``switch n := f(); v := x.(type)``)
+            # is a plain statement child, not an ``initializer`` field.
+            if init_stmt is None:
+                init_node = next(
+                    (
+                        child
+                        for child in node.named_children
+                        if child.type
+                        in {
+                            "short_var_declaration",
+                            "assignment_statement",
+                            "inc_statement",
+                            "dec_statement",
+                            "expression_statement",
+                            "send_statement",
+                        }
+                    ),
+                    None,
+                )
+                init_stmt = (
+                    _go_statement(source_bytes, init_node, base, offsets)
+                    if init_node is not None
+                    else None
+                )
+            # ``v := x.(type)`` — the bound name sits in an
+            # ``expression_list`` child, the value under ``value`` and
+            # ``.(type)`` is anonymous syntax. Synthesize the init
+            # ``define`` so the binding is not silently dropped.
+            expr_list = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type == "expression_list"
+                ),
+                None,
+            )
+            if expr_list is not None and value_node is not None:
+                # The guard ends at the ``)`` closing ``(type)`` — slice
+                # the source verbatim so whitespace and comments inside
+                # the guard still satisfy the span check.
+                close = source_bytes.find(b")", value_node.end_byte)
+                if close != -1:
+                    names = tuple(
+                        _decode(source_bytes, n).strip()
+                        for n in expr_list.named_children
+                        if n.type != "comment"
+                    )
+                    guard_start = offsets[expr_list.start_byte] - base
+                    guard_text = source_bytes[
+                        expr_list.start_byte : close + 1
+                    ].decode("utf-8", "replace")
+                    type_guard = Statement(
+                        kind="define",
+                        text=guard_text,
+                        start=guard_start,
+                        operator=":=",
+                        targets=names,
+                        # Only the operand expression is read — a
+                        # type-switch guard never panics on a nil
+                        # interface (nil routes to ``case nil``).
+                        values=(_decode(source_bytes, value_node).strip(),),
+                    )
         cases: list[Statement] = []
         for child in node.named_children:
             if child.type in {"expression_case", "default_case", "type_case", "communication_case"}:
@@ -1254,7 +1322,9 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
                 if kind == "type_switch_statement"
                 else "expression"
             ),
-            init=(init_stmt,) if init_stmt is not None else (),
+            init=tuple(
+                s for s in (init_stmt, type_guard) if s is not None
+            ),
             body=tuple(cases),
             has_tag=value_node is not None or kind != "expression_switch_statement",
         )

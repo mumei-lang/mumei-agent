@@ -1,9 +1,12 @@
 """Source-mapped explicit normal flow for a deliberately limited Go profile.
 
 Calls are opaque and assumed to return normally. Panic/recovery, concurrency,
-deferred execution, ``select``/type-switches and ``goto`` are not
-modelled; expression switches are exclusive alternatives with implicit
-break, a terminal ``fallthrough`` in a non-final case clause edges into
+deferred execution and ``goto`` are not modelled; expression and
+type switches are exclusive alternatives with implicit break and a
+type-less match model (a type switch with no default can fall
+through), ``select`` admits its communication cases as the same
+kind of alternative and blocks when it has no ``default``, a terminal
+``fallthrough`` in a non-final case clause edges into
 the next clause's body (any other position stays a declared gap),
 labelled ``break``/``continue`` resolve only against enclosing
 labelled loops, and ``panic``/``os.Exit``-style terminating calls end
@@ -138,9 +141,10 @@ def _gaps(
             else:
                 gaps.append(CFGGap("labelled_jump", span))
         elif kind == "switch":
-            if statement.operator == "type":
-                gaps.append(CFGGap("unsupported_type_switch", span))
-            elif statement.operator == "select":
+            if statement.operator in {"select", "type"}:
+                # Type cases carry their types in the clause text, not
+                # ``values`` — the extractor leaves ``values`` empty for
+                # them, so only the case kind is checked.
                 for case in statement.body:
                     if case.kind not in {"case", "default"}:
                         gaps.append(
@@ -161,11 +165,12 @@ def _gaps(
                 # Case bodies may break the switch; continue still
                 # needs an enclosing loop. A terminal fallthrough in a
                 # non-final clause is modelled, so it is not walked as
-                # an unsupported statement. Select cases never carry
-                # fallthrough — one there stays unsupported.
+                # an unsupported statement. Select and type-switch
+                # cases never carry fallthrough — one there stays
+                # unsupported.
                 stmts = case.body
                 if (
-                    statement.operator != "select"
+                    statement.operator not in {"select", "type"}
                     and stmts
                     and stmts[-1].kind == "fallthrough"
                     and index < len(cases) - 1
@@ -254,6 +259,9 @@ class _Builder:
                 entries = [0] * len(cases)
                 for index in range(len(cases) - 1, -1, -1):
                     stmts = cases[index].body
+                    # Select and type switches reject fallthrough in
+                    # ``_gaps`` already; only expression switches can
+                    # reach this modelled branch.
                     if (
                         stmts
                         and stmts[-1].kind == "fallthrough"

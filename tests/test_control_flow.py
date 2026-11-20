@@ -118,7 +118,7 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
 @pytest.mark.parametrize(
     "body,reason",
     [
-        ("switch v := x.(type) { case int: return 1 }", "unsupported_type_switch"),
+        ("switch v := x.(type) { case int: fallthrough; default: return 1 }", "unsupported_fallthrough"),
         ("goto done; done: return 0", "unsupported_goto"),
         ("outer: x := 1; return x", "labelled_statement"),
         ("outer: if true { return 1 }", "labelled_statement"),
@@ -181,9 +181,9 @@ def test_assignments_kill_guard_facts_and_shadowing_is_local() -> None:
 
 
 def test_gap_does_not_discard_existing_resource_findings() -> None:
-    flow = dataflow_facts.analyze_function("mu.Lock(); switch v := x.(type) { case int: _ = v }; return 0", "go")
+    flow = dataflow_facts.analyze_function("mu.Lock(); outer: x := 1; return x", "go")
     assert flow is not None and flow.cfg is None
-    assert flow.cfg_gaps[0].reason == "unsupported_type_switch"
+    assert flow.cfg_gaps[0].reason == "labelled_statement"
     assert "lock_held_at_return" in {issue.category for issue in flow.issues}
     assert flow.facts_for_return(2) is None
 
@@ -1050,6 +1050,157 @@ def test_select_case_body_with_fallthrough_stays_unsupported():
     result = control_flow.build_go_cfg(body)
     assert result.graph is None
     assert "unsupported_fallthrough" in {g.reason for g in result.gaps}
+
+
+def test_type_switch_cases_edge_like_switch_alternatives():
+    # Type cases are exclusive alternatives joined at the
+    # following statement — same shape as an expression switch.
+    body = "switch v := x.(type) { case int: a(v); case string, bool: b(); default: c() }; d()"
+    result = control_flow.build_go_cfg(body)
+    assert result.graph is not None
+    cfg = result.graph
+    switch_node = next(n for n in cfg.nodes if n.kind == "switch")
+    case_targets = {
+        e.target for e in cfg.edges if e.source == switch_node.node_id
+    }
+    assert len(case_targets) == 3  # two type cases + default
+    assert all(
+        cfg.nodes[t].kind in {"case", "default"} for t in case_targets
+    )
+    # A type switch with no default CAN fall through when no case
+    # type matches — keep the edge to the following statement.
+    body2 = "switch x.(type) { case int: a() }; b()"
+    cfg2 = graph(body2)
+    (switch2,) = nodes(cfg2, "switch")
+    assert any(
+        e.kind != "case" for e in cfg2.edges if e.source == switch2.node_id
+    )
+
+
+def test_type_switch_init_binding_and_break_exit():
+    cfg = graph(
+        "for { switch v := x.(type) { case int: break; default: c() }; after() }; done()"
+    )
+    (jump,) = nodes(cfg, "break")
+    body = "for { switch v := x.(type) { case int: break; default: c() }; after() }; done()"
+    (after,) = by_text(cfg, body, "after()")
+    assert edges_to(cfg, jump.node_id) == {after.node_id}
+    # `v := x.(type)` binds in the initializer before the case fan-out.
+    (define,) = [
+        n for n in nodes(cfg, "define") if ":=" in body[n.span.start : n.span.end]
+    ]
+    (switch,) = nodes(cfg, "switch")
+    assert any(e.target == switch.node_id for e in cfg.edges if e.source == define.node_id)
+
+
+def test_type_switch_assignment_facts_merge_over_cases():
+    cfg, result = facts(
+        "switch v := x.(type) { case int: y = 1; case string: y = 2 }; use(y)"
+    )
+    # `y` is assigned on some path through the switch.
+    (use,) = nodes(cfg, "expr")
+    assert "y" in result[use.node_id].some_path
+
+
+def test_type_switch_case_body_with_fallthrough_stays_unsupported():
+    # `fallthrough` is not legal in type cases — one parsed
+    # anyway stays unmodelled rather than silently edged.
+    body = "switch v := x.(type) { case int: fallthrough; default: a() }"
+    result = control_flow.build_go_cfg(body)
+    assert result.graph is None
+    assert "unsupported_fallthrough" in {g.reason for g in result.gaps}
+
+
+def test_type_switch_guard_whitespace_keeps_the_graph():
+    # `x.( type )` is valid Go — the synthesized guard define must
+    # span the source verbatim instead of normalizing it away.
+    for body in (
+        "switch v := x.( type ) { case int: a(v) }; b()",
+        "switch v := x.(\ttype\n) { case int: a(v) }; b()",
+    ):
+        result = control_flow.build_go_cfg(body)
+        assert result.graph is not None, body
+        (define,) = [
+            n for n in result.graph.nodes if n.kind == "define"
+        ]
+        assert body[define.span.start : define.span.end].endswith(")")
+
+
+def test_type_switch_with_initializer_keeps_both_bindings():
+    # `switch n := g(); v := x.(type)` — the SimpleStmt initializer
+    # and the guard binding both enter the graph.
+    cfg, result = facts(
+        "switch n := g(); v := x.(type) { case int: use(v, n) }"
+    )
+    assert {n.kind for n in cfg.nodes} >= {"define", "switch"}
+    defines = nodes(cfg, "define")
+    assert len(defines) == 2
+    texts = [cfg.nodes[d.node_id].span for d in defines]
+    body = "switch n := g(); v := x.(type) { case int: use(v, n) }"
+    assert sorted(body[s.start : s.end] for s in texts) == [
+        "n := g()",
+        "v := x.(type)",
+    ]
+
+
+def test_type_switch_guard_does_not_report_nil_assertion():
+    # `x.(type)` on a nil interface routes to `case nil` — it never
+    # panics, so the guard must not read as a plain type assertion.
+    flow = dataflow_facts.analyze_function(
+        "var x any; switch x.(type) { case nil: return 0; case int: return 1 }; return 2",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
+
+
+def test_type_switch_guard_call_still_checks_nil_function():
+    # `f().(type)` DOES panic when f is a nil func value — the operand
+    # stays visible to the uninit check (evaluated after the init).
+    flow = dataflow_facts.analyze_function(
+        "var f func() any; switch f = f; f().(type) { case int: return 1 }; return 0",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    # `f = f` reads `f` before writing it, so its nil state survives.
+    assert "uninitialized_use" in {i.category for i in flow.issues}
+    flow = dataflow_facts.analyze_function(
+        "var f func() any; switch f().(type) { case int: return 1 }; return 0",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" in {i.category for i in flow.issues}
+
+
+def test_switch_initializer_shadowing_restores_outer_binding():
+    # `p := …` in a switch init is scoped to the switch: an outer nil
+    # pointer of the same name must still be reported after it.
+    flow = dataflow_facts.analyze_function(
+        "var p *int; switch p := 1; x { case 0: _ = p }; return *p",
+        "go",
+    )
+    assert flow is not None
+    assert "uninitialized_use" in {i.category for i in flow.issues}
+    # An `=` init write, by contrast, updates the outer binding and
+    # persists past the switch.
+    flow = dataflow_facts.analyze_function(
+        "var p *int; q := 1; switch p = &q; x { case 0: }; return *p",
+        "go",
+    )
+    assert flow is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
+
+
+def test_switch_init_result_is_visible_to_guard_checks():
+    # `switch f = fallback; f().(type)` — the guard is checked against
+    # the post-init environment, so the resolved call is not flagged.
+    flow = dataflow_facts.analyze_function(
+        "var f func() any; fallback := func() any { return nil };"
+        " switch f = fallback; f().(type) { case int: return 1 }; return 0",
+        "go",
+    )
+    assert flow is not None and flow.cfg is not None
+    assert "uninitialized_use" not in {i.category for i in flow.issues}
 
 
 def test_switch_without_default_edges_to_following():

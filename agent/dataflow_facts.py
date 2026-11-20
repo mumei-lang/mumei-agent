@@ -69,6 +69,7 @@ GO_UNSIGNED_TYPES = frozenset(
 
 _LOCK_METHODS = {"Lock", "RLock"}
 # Calls whose integer result is documented to be non-negative.
+_NONNIL_ERROR_CALLS = re.compile(r"^(?:errors\.New|fmt\.Errorf)\(")
 _NONNEG_CALLS = re.compile(
     r"^(?:len|cap|copy|sort\.Search\w*|sortSearch|bits\.(?:Len|OnesCount|TrailingZeros|LeadingZeros)\w*|"
     r"strings\.Count|bytes\.Count|utf8\.RuneCount\w*)\("
@@ -366,6 +367,35 @@ _MAKE_SIZE = re.compile(r"^make\(\[\][^,]+,\s*(\w+)(?:,[^)]*)?\)$")
 _MAKE_GROW = re.compile(rf"^make\(\[\][^,]+,\s*({_IDENT})\+(\w+)(?:,[^)]*)?\)$")
 _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*)\{")
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
+def _strip_go_literals(text: str) -> str:
+    """Remove Go string/rune/raw-string literals in one lexical pass.
+
+    Whichever quote opens first wins — a ``"`` inside a backtick raw
+    string is raw text, not the start of a quoted literal, so regex
+    passes would mis-pair it and swallow real structure (``][`` and all).
+    """
+    out: list[str] = []
+    i = 0
+    end = len(text)
+    while i < end:
+        ch = text[i]
+        if ch == "`":
+            close = text.find("`", i + 1)
+            i = end if close == -1 else close + 1
+        elif ch in "\"'":
+            j = i + 1
+            while j < end:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == ch:
+                    break
+                j += 1
+            i = j + 1 if j < end else end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 _SLICE_LITERAL = re.compile(r"^\[\][^{]+\{(.*)\}$", re.DOTALL)
 _CAST = re.compile(rf"^(?:{'|'.join(sorted(_GO_INT_TYPES))})\((.+)\)$")
 _GO_INT_CAST = re.compile(rf"\b(?:{'|'.join(sorted(_GO_INT_TYPES))}|uintptr|byte|rune)\(")
@@ -473,6 +503,10 @@ class _Env:
         def mentions(text: str) -> bool:
             return bool(pattern.search(text)) or text == name or text.startswith(name + ".")
 
+        # Snapshot before the filters below drop ``name`` from ``nonnil`` —
+        # a site variable that was already provably non-nil proves the open
+        # failed, so rewriting it discharges the held entry entirely.
+        pre_nonnil = self.nonnil
         self.nonzero = {t for t in self.nonzero if not mentions(t)}
         self.nonneg = {t for t in self.nonneg if not mentions(t)}
         self.nonnil = {t for t in self.nonnil if not mentions(t)}
@@ -485,13 +519,21 @@ class _Env:
         self.aliases = {
             k: v for k, v in self.aliases.items() if not (mentions(k) or mentions(v))
         }
-        self.held = {
-            # A redefined error variable no longer tells us whether the handle
-            # is nil, so the ("file", handle, err) entry keeps only the handle.
-            (h[0], h[1], "") if len(h) == 3 and mentions(h[2]) else h
-            for h in self.held
-            if not mentions(h[1])
-        }
+        new_held = set()
+        for h in self.held:
+            if mentions(h[1]):
+                continue
+            if len(h) == 3 and mentions(h[2]):
+                if h[2] in pre_nonnil:
+                    # The site variable was provably non-nil before this
+                    # write — the open already failed, so there is no
+                    # handle to leak: drop the entry, don't blank it.
+                    continue
+                # A redefined error variable no longer tells us whether
+                # the handle is nil, so the entry keeps only the handle.
+                h = (h[0], h[1], "")
+            new_held.add(h)
+        self.held = new_held
         self.slices = {t for t in self.slices if not mentions(t)}
 
     # -- helpers ---------------------------------------------------------
@@ -584,6 +626,84 @@ class _Env:
                 self.held.add((held[0], target))
                 if held[0] in _NILABLE_HELD:
                     self.nilable[target] = held[0]
+
+
+def _copy_name_facts(
+    dst: _Env,
+    src: _Env,
+    name: str,
+    changed: frozenset[str] = frozenset(),
+) -> None:
+    """Copy every fact mentioning ``name`` from ``src`` into ``dst``.
+
+    Used to restore an outer binding that a switch initializer's ``:=``
+    shadowed for the switch's duration — the outer name regains exactly
+    its pre-switch state (the inner binding cannot have written it).
+    Callers are expected to ``kill`` the name on ``dst`` first.
+
+    ``changed`` is the set of names the switch may have written. A fact
+    that mentions one of them — ``i < len(s)`` after a case shrunk
+    ``s``, an alias whose target was reassigned — no longer describes
+    the post-switch state, so it is not restored.
+    """
+    name = _norm(name)
+    if not name:
+        return
+    pattern = re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
+    changed_pattern = (
+        re.compile(
+            r"(?<![\w.])(?:"
+            + "|".join(re.escape(c) for c in sorted(changed))
+            + r")(?![\w])"
+        )
+        if changed
+        else None
+    )
+
+    def mentions(text: str) -> bool:
+        return bool(pattern.search(text)) or text == name or text.startswith(name + ".")
+
+    def stable(text: str) -> bool:
+        return changed_pattern is None or not changed_pattern.search(text)
+
+    dst.nonzero |= {t for t in src.nonzero if mentions(t) and stable(t)}
+    dst.nonneg |= {t for t in src.nonneg if mentions(t) and stable(t)}
+    dst.nonnil |= {t for t in src.nonnil if mentions(t) and stable(t)}
+    dst.lt_len |= {
+        p
+        for p in src.lt_len
+        if (mentions(p[0]) or mentions(p[1])) and stable(p[0]) and stable(p[1])
+    }
+    for key, value in src.len_ge.items():
+        if mentions(key) and stable(key):
+            dst.len_ge[key] = max(dst.len_ge.get(key, 0), value)
+    for key, value in src.consts.items():
+        if mentions(key) and stable(key):
+            dst.consts.setdefault(key, value)
+    for key, value in src.len_values.items():
+        if (mentions(key) or mentions(value[0])) and stable(key) and stable(value[0]):
+            dst.len_values.setdefault(key, value)
+    for key, value in src.aliases.items():
+        if (mentions(key) or mentions(value)) and stable(key) and stable(value):
+            dst.aliases.setdefault(key, value)
+    # The site operand (``h[2]``, e.g. the paired ``err`` name) is
+    # provenance, not state — writing it does not invalidate the handle.
+    dst.held |= {
+        h
+        for h in src.held
+        if (mentions(h[1]) or (len(h) == 3 and mentions(h[2])))
+        and stable(h[1])
+    }
+    dst.slices |= {t for t in src.slices if mentions(t) and stable(t)}
+    for key, value in src.nilable.items():
+        if mentions(key) and stable(key):
+            dst.nilable.setdefault(key, value)
+    if name in src.defined:
+        dst.defined.add(name)
+    else:
+        # ``kill`` leaves ``defined`` untouched — a shadowed name with
+        # no prior binding is still unassigned after the scope ends.
+        dst.defined.discard(name)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1187,28 @@ class FunctionDataflow:
 # ---------------------------------------------------------------------------
 
 
+
+def _reslice_inner(inner: str) -> bool:
+    """True when ``inner`` slices: a ``:`` at bracket depth 0 only.
+
+    ``s[:bounds[0]]`` keeps its colon at depth 0 even though the bound is
+    an index expression; ``slots[:1][0]`` drives depth negative at the
+    ``][`` join, ``m[string(key[:])]`` buries its colon inside a call and
+    ``m[Point{X: v}]`` buries it inside a composite literal.
+    """
+    depth = 0
+    sliced = False
+    for ch in inner:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif ch == ":" and depth == 0:
+            sliced = True
+    return sliced and depth == 0
+
 class _Walker:
     def __init__(
         self,
@@ -1204,7 +1346,9 @@ class _Walker:
                 self._check_uninit_text(value, statement.start, env)
                 self._check_transition_text(value, statement.start, env)
                 self._note_output_args(value, env)
-        elif kind in {"if", "for", "switch"} and statement.condition:
+        elif kind in {"if", "for"} and statement.condition:
+            # ``switch`` defers its condition check into ``_switch`` so
+            # the initializer's writes are visible first.
             self._check_uninit_text(statement.condition, statement.start, env)
             self._check_transition_text(statement.condition, statement.start, env)
             self._note_output_args(statement.condition, env)
@@ -1592,6 +1736,7 @@ class _Walker:
         if not names:
             return
         held = set(inner.held)
+        discharged = {name for name in names if name in inner.nonnil}
         for name in names:
             inner.nilable.pop(name, None)
             inner.kill(name)
@@ -1614,7 +1759,19 @@ class _Walker:
             )
             inner.slices |= {t for t in outer.slices if mentions(t)}
             inner.nilable.update({k: v for k, v in outer.nilable.items() if k == name})
-        inner.held = held
+        inner.held = {
+            # A site name whose inner variable was provably non-nil at
+            # scope exit belonged to a failed open — drop the entry
+            # rather than blanking it into an unconditional report.
+            h for h in held
+            if not (len(h) == 3 and h[2] in discharged)
+        }
+        # A site name declared inside the block refers to the outer
+        # binding again — the pairing is gone, so keep only the handle.
+        inner.held = {
+            (h[0], h[1], "") if len(h) == 3 and h[2] in names else h
+            for h in inner.held
+        }
 
     def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:
         outer = env.copy()
@@ -1737,6 +1894,10 @@ class _Walker:
         base = env.copy()
         if statement.init:
             base, _ = self.walk(statement.init, base)
+        if statement.condition:
+            self._check_uninit_text(statement.condition, statement.start, base)
+            self._check_transition_text(statement.condition, statement.start, base)
+            self._note_output_args(statement.condition, base)
         outgoing: list[_Env] = []
         has_default = False
         previous_conditions: list[str] = []
@@ -1807,8 +1968,33 @@ class _Walker:
         for other in outgoing[1:]:
             merged = merged.merge(other)
         if statement.init:
-            for name in self._assigned_names(statement.init):
-                merged.kill(name)
+            shadowed = {
+                _norm(target)
+                for init in statement.init
+                if init.kind == "define"
+                for target in init.targets
+            }
+            # Names written while a ``:=`` binding was in scope are the
+            # inner binding's — only ``=`` init writes and case-body
+            # writes to other names can mutate outer state.
+            changed = (
+                self._assigned_names(
+                    tuple(s for s in statement.init if s.kind != "define")
+                    + statement.body
+                )
+                - shadowed
+            )
+            for init in statement.init:
+                if init.kind != "define":
+                    # ``=`` writes target the outer binding — they
+                    # persist past the switch.
+                    continue
+                for name in self._assigned_names((init,)):
+                    # A ``:=`` init binding is scoped to the switch:
+                    # the inner facts die with it and an outer binding
+                    # of the same name regains its pre-switch state.
+                    merged.kill(name)
+                    _copy_name_facts(merged, env, name, changed)
         return merged, ""
 
     # -- assignments -----------------------------------------------------
@@ -1850,10 +2036,57 @@ class _Walker:
 
     def _var_one(self, name: str, type_text: str, value: str, env: _Env) -> None:
         type_text = _norm(type_text)
-        env.kill(name)
         if value and _norm(value) != "nil":
+            if _root_name(name) in {
+                _root_name(token) for token in re.findall(_IDENT, value)
+            }:
+                # ``var f = f`` reads the pre-declaration binding —
+                # evaluate it before the declaration's own kill.
+                scratch = env.copy()
+                if _norm(value) != _norm(name):
+                    scratch.kill(name)
+                    # ``var f = bufio.NewReader(f)`` wraps the resource
+                    # but does not close it — keep its held tracking on
+                    # the shadowed name so the open file still reports.
+                    # Only file-side entries transfer: a channel, map or
+                    # mutex write replaces the object itself.
+                    scratch.held |= {
+                        h for h in env.held
+                        if h[1] == name
+                        and h[0] in {"file", "closed_file", "deferred"}
+                    }
+                    reslice_inner = re.match(
+                        rf"^{re.escape(_norm(name))}\[(.*)\]$", _norm(value)
+                    )
+                    reslice_inner_text = (
+                        _strip_go_literals(reslice_inner.group(1))
+                        if reslice_inner
+                        else ""
+                    )
+                    reslice = (
+                        reslice_inner
+                        and _reslice_inner(reslice_inner_text)
+                    )
+                    if reslice:
+                        # ``s = s[lo:hi]`` keeps the same backing — its
+                        # nil state survives even though bounds facts are
+                        # gone.
+                        scratch.held |= {
+                            h for h in env.held if h[1] == name
+                        }
+                        if name in env.slices:
+                            scratch.slices.add(name)
+                # The declaration still replaces the outer binding —
+                # drop its facts from ``env`` before the copy-back so
+                # stale entries cannot survive ``setdefault``.
+                env.kill(name)
+                self._define(name, value, scratch)
+                _copy_name_facts(env, scratch, name)
+                return
+            env.kill(name)
             self._define(name, value, env)
             return
+        env.kill(name)
         if not self._reliable(name):
             return
         kind = _nilable_kind(type_text)
@@ -1909,6 +2142,14 @@ class _Walker:
         pending: list[tuple[str, str]] = []
         if len(targets) == len(values):
             pending = list(zip(targets, values))
+        pre_env = env.copy()
+        target_roots = {
+            _root_name(_norm(target)) for target in targets if target != "_"
+        }
+        # A fact about a rewritten target text is stale — an element
+        # write (``d[i] = v``) kills ``d[i]`` facts — but it does not
+        # rewrite the container, so the root name alone is not included.
+        all_targets = {_norm(target) for target in targets if target != "_"}
         for target in targets:
             if target != "_":
                 env.kill(target)
@@ -1932,6 +2173,57 @@ class _Walker:
             return
         for target, value in pending:
             if target == "_" or not re.fullmatch(_IDENT, target):
+                self._escape(value, env)
+                continue
+            if target_roots & {
+                _root_name(token) for token in re.findall(_IDENT, value)
+            }:
+                # The value reads a name this assignment also writes
+                # (``f = f``, ``a, b = b, a``) — evaluate it against
+                # the pre-assignment state the kills already erased.
+                scratch = pre_env.copy()
+                if _norm(value) != _norm(target):
+                    # A pure ``f = f`` is a no-op: ``f``'s own facts are
+                    # what the value reads, so they must survive.
+                    scratch.kill(target)
+                    # A self-wrap (``f = bufio.NewReader(f)``) leaves the
+                    # wrapped resource open — keep its held tracking.
+                    # Only file-side entries transfer: a channel, map or
+                    # mutex write replaces the object itself.
+                    scratch.held |= {
+                        h for h in pre_env.held
+                        if h[1] == target
+                        and h[0] in {"file", "closed_file", "deferred"}
+                    }
+                    reslice_inner = re.match(
+                        rf"^{re.escape(_norm(target))}\[(.*)\]$",
+                        _norm(value),
+                    )
+                    reslice_inner_text = (
+                        _strip_go_literals(reslice_inner.group(1))
+                        if reslice_inner
+                        else ""
+                    )
+                    reslice = (
+                        reslice_inner
+                        and _reslice_inner(reslice_inner_text)
+                    )
+                    if reslice:
+                        # ``s = s[lo:hi]`` keeps the same backing — its
+                        # nil state survives even though bounds facts are
+                        # gone.
+                        scratch.held |= {
+                            h for h in pre_env.held if h[1] == target
+                        }
+                        if target in pre_env.slices:
+                            scratch.slices.add(target)
+                self._define(target, value, scratch)
+                # Every other pending target is being rewritten — a
+                # fact that mentions it (``i < len(s)`` after
+                # ``i, s = i, s[:1]``) no longer describes the new state.
+                _copy_name_facts(
+                    env, scratch, target, all_targets - {_norm(target)}
+                )
                 self._escape(value, env)
                 continue
             self._define(target, value, env)
@@ -1972,7 +2264,6 @@ class _Walker:
         if literal is not None:
             return literal >= 0
         return text in env.nonneg or text in env.consts and env.consts[text] >= 0
-
     def _define(self, target: str, value: str, env: _Env) -> None:
         text = _norm(value)
         self._escape(value, env)
@@ -1993,6 +2284,28 @@ class _Walker:
             nilable = env.nilable[text]
         if nilable is not None:
             env.nilable[target] = nilable
+        slice_source = re.match(rf"^({_IDENT})\[(.*)\]$", text)
+        slice_inner = (
+            _strip_go_literals(slice_source.group(2))
+            if slice_source
+            else ""
+        )
+        if (
+            slice_source
+            and slice_source.group(1) != target
+            and _reslice_inner(slice_inner)
+        ):
+            # ``x := s[lo:hi]`` re-slices the same backing — the result is
+            # nil exactly when the source is, so its nil state carries.
+            # ``m["a:b"]`` is a map index, not a reslice.
+            source = slice_source.group(1)
+            for h in tuple(env.held):
+                if h[1] == source and h[0] in _NILABLE_HELD:
+                    env.held.add((h[0], target))
+            if source in env.slices:
+                env.slices.add(target)
+            if source in env.nonnil:
+                env.nonnil.add(target)
         if text.endswith("(nil)"):
             # ``x := (*T)(nil)`` / ``x = T(nil)`` — an explicit nil cast.
             kind = _nilable_kind(text[: -len("(nil)")].lstrip("(").rstrip(")"))
@@ -2070,8 +2383,26 @@ class _Walker:
                             env.nonneg.add(target)
                             env.add_lt_len(target, container)
                             return
+        if _NONNIL_ERROR_CALLS.match(text) and _is_whole_call(text):
+            # ``errors.New`` / ``fmt.Errorf`` never return nil — an
+            # ``err`` rewritten with one still proves the open failed.
+            env.nonnil.add(target)
+            return
         if _NONNEG_CALLS.match(text) and _is_whole_call(text):
             env.nonneg.add(target)
+            return
+        # ``_norm`` erased the whitespace that separates ``chan`` from
+        # its element type (``chan int`` → ``chanint``), so the cast is
+        # matched on the raw value where ``channel(ch)`` stays distinct.
+        chan_cast = re.match(
+            r"^\(?\s*(?:<-)?chan(?:<-\s*|\s+)[^()]*\)?\s*\((.+)\)$",
+            value.strip(),
+        )
+        if chan_cast and re.fullmatch(_IDENT, chan_cast.group(1)):
+            # ``chan<- int(ch)`` restricts only the compile-time
+            # direction — the runtime value is the same channel, so
+            # closed/nil state carries over verbatim.
+            env.copy_facts(chan_cast.group(1), target)
             return
         cast = _CAST.match(text)
         if cast:
