@@ -325,7 +325,14 @@ def test_undeclared_argv_is_not_dispatched_and_nothing_runs(tmp_path):
         tmp_path,
         adapters=[_manifest("alpha"), _manifest("beta")],
         argv_map={
-            "alpha": ["/bin/sh", "-c", f"touch {marker}"],
+            # Pass the marker as a single argv element: a shell form
+            # would split paths containing spaces and mask a wrong
+            # spawn.
+            "alpha": [
+                sys.executable,
+                "-c",
+                f"open({str(marker)!r}, 'w').write('x')",
+            ],
             # beta intentionally undeclared — and even a pathological
             # argv touching a marker file cannot run.
         },
@@ -361,8 +368,11 @@ def test_no_secret_or_source_in_descriptor_or_output(tmp_path):
     doc = json.loads(written)
     assert SECRET not in json.dumps(doc)
     assert SECRET not in written
+    assert SECRET not in out.stdout
     assert SECRET not in out.stderr
     assert SOURCE_BYTES.decode() not in json.dumps(doc)
+    assert SOURCE_BYTES.decode() not in out.stdout
+    assert SOURCE_BYTES.decode() not in out.stderr
     assert SOURCE_BYTES.decode() not in written
 
 
