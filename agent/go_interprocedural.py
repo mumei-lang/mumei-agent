@@ -1787,6 +1787,7 @@ class _Builder:
         node: Any,
         locals_: dict[str, frozenset[int]],
         gate: Any = None,
+        allow_index: bool = False,
     ) -> str | None:
         """`append(fs, ...)` — the builtin append whose first argument
         names a bound func-element container local. Returns the
@@ -1794,7 +1795,9 @@ class _Builder:
         param container stays closed like an element store does: its
         elements live in caller memory. `gate` overrides the element
         collection check (`_scalar_elem_collection` admits the scalar
-        form)."""
+        form). `allow_index` also admits `append(a[i], v)` on a bound
+        nested container, resolving the share group to the ROOT's
+        binding — the extracted element is what the append may reuse."""
         if gate is None:
             gate = self._func_elem_collection
         while (
@@ -1834,6 +1837,25 @@ class _Builder:
             arg0 is not None and arg0.type == "parenthesized_expression"
         ):
             arg0 = next(iter(arg0.named_children), None)
+        if arg0 is not None and arg0.type == "index_expression" and (
+            allow_index
+        ):
+            # `append(a[i], v)` — the extracted element names a
+            # bound nested root's backing; the result may reuse
+            # it, so the resolver hands back the ROOT's binding
+            # (its share group is the backing the append grows).
+            if not self._opaque_container_index_sharer_toks(arg0):
+                return None
+            target = self._opaque_container_index_target(arg0)
+            if target is None or target[2] is not None:
+                return None
+            ref = target[0]
+            bound = self.bindings.get(ref.binding_id)
+            if bound is None or bound.type is None or not gate(
+                bound.type.elem
+            ):
+                return None
+            return ref.binding_id
         if arg0 is None or arg0.type != "identifier":
             return None
         ref = self.references.get(self.node_key(arg0))
@@ -1960,6 +1982,91 @@ class _Builder:
             return None, None
         return root_ref.binding_id, member
 
+    def _opaque_append_bind_toks(
+        self, rhs: Any
+    ) -> frozenset[tuple[int, int, int]] | None:
+        """The token set a `b := append(s, v)`/`b := append(a[i], v)`
+        result binds — a fresh backing beside the operand's share
+        group, or None when `rhs` is not a builtin `append` call.
+        Reading `_opaque_container_tokens` at call time makes the
+        share resolve against whichever state is live — the
+        parallel-assignment pre-pass calls this at pre-state so
+        `a, b = sub, append(a, v)` lands `b` on `a`'s OLD group."""
+        call = self.calls.get(self.node_key(rhs))
+        if call is None or call.kind != "builtin":
+            return None
+        callee_node = rhs.child_by_field_name("function")
+        while (
+            callee_node is not None
+            and callee_node.type == "parenthesized_expression"
+        ):
+            callee_node = next(
+                (
+                    c
+                    for c in callee_node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if callee_node is None or callee_node.text != b"append":
+            return None
+        # `a = append(b, x)` — append may reuse `b`'s array,
+        # so the result aims at `b`'s backing and a fresh
+        # one alike.
+        toks = {self.node_key(rhs)}
+        arguments_node = rhs.child_by_field_name("arguments")
+        args = (
+            _children(arguments_node)
+            if arguments_node is not None
+            else []
+        )
+        if args:
+            arg0 = args[0]
+            while (
+                arg0 is not None
+                and arg0.type == "parenthesized_expression"
+            ):
+                arg0 = next(
+                    (
+                        c
+                        for c in arg0.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if arg0 is not None and (
+                arg0.type == "index_expression"
+            ):
+                # `b = append(a[i], v)` — the appended
+                # element names a bound nested root's
+                # backing; the result may reuse it, so the
+                # root's share group unions in beside the
+                # fresh token. An unbound/deeper/array
+                # operand has no group.
+                toks |= self._opaque_container_index_sharer_toks(
+                    arg0
+                )
+            if arg0 is not None and arg0.type == "identifier":
+                arg_ref = self.references.get(self.node_key(arg0))
+                arg_binding = (
+                    self.bindings.get(arg_ref.binding_id)
+                    if arg_ref is not None
+                    else None
+                )
+                if (
+                    arg_binding is not None
+                    and arg_binding.type is not None
+                    and arg_binding.type.kind == "slice"
+                    and self._scalar_elem_collection(
+                        arg_binding.type
+                    )
+                ):
+                    toks |= self._opaque_container_tokens.get(
+                        arg_ref.binding_id,
+                        frozenset({arg_ref.binding_id}),
+                    )
+        return frozenset(toks)
+
     def _opaque_container_bind(
         self, rhs: Any
     ) -> frozenset[tuple[int, int, int]] | None:
@@ -1982,69 +2089,10 @@ class _Builder:
             if rhs is None:
                 return None
         if rhs.type == "call_expression":
+            append_toks = self._opaque_append_bind_toks(rhs)
+            if append_toks is not None:
+                return append_toks
             call = self.calls.get(self.node_key(rhs))
-            if call is not None and call.kind == "builtin":
-                callee_node = rhs.child_by_field_name("function")
-                while (
-                    callee_node is not None
-                    and callee_node.type == "parenthesized_expression"
-                ):
-                    callee_node = next(
-                        (
-                            c
-                            for c in callee_node.named_children
-                            if c.type != "comment"
-                        ),
-                        None,
-                    )
-                if callee_node is None or callee_node.text != b"append":
-                    return None
-                # `a = append(b, x)` — append may reuse `b`'s array,
-                # so the result aims at `b`'s backing and a fresh
-                # one alike.
-                toks = {self.node_key(rhs)}
-                arguments_node = rhs.child_by_field_name("arguments")
-                args = (
-                    _children(arguments_node)
-                    if arguments_node is not None
-                    else []
-                )
-                if args:
-                    arg0 = args[0]
-                    while (
-                        arg0 is not None
-                        and arg0.type == "parenthesized_expression"
-                    ):
-                        arg0 = next(
-                            (
-                                c
-                                for c in arg0.named_children
-                                if c.type != "comment"
-                            ),
-                            None,
-                        )
-                    if arg0 is not None and arg0.type == "identifier":
-                        arg_ref = self.references.get(
-                            self.node_key(arg0)
-                        )
-                        arg_binding = (
-                            self.bindings.get(arg_ref.binding_id)
-                            if arg_ref is not None
-                            else None
-                        )
-                        if (
-                            arg_binding is not None
-                            and arg_binding.type is not None
-                            and arg_binding.type.kind == "slice"
-                            and self._scalar_elem_collection(
-                                arg_binding.type
-                            )
-                        ):
-                            toks |= self._opaque_container_tokens.get(
-                                arg_ref.binding_id,
-                                frozenset({arg_ref.binding_id}),
-                            )
-                return frozenset(toks)
             if call is None or call.kind != "external_or_bodyless":
                 return None
             _member, fact = self._call_result_fact(rhs)
@@ -10552,6 +10600,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             pre_container_toks[pre_i] = frozenset(
                                 pre_toks
                             )
+                    elif (
+                        pre_rhs is not None
+                        and pre_rhs.type == "call_expression"
+                    ):
+                        # `a, b = sub, append(a, v)` — the append's
+                        # operand names the backing `a` held at
+                        # pre-state; `b` lands on that OLD group,
+                        # not the one `a`'s reseat produced.
+                        pre_bind = self._opaque_append_bind_toks(
+                            pre_rhs
+                        )
+                        if pre_bind is not None:
+                            pre_container_toks[pre_i] = pre_bind
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -16151,6 +16212,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         append_cont = self._func_elem_append_target(
                             node, locals_,
                             self._scalar_elem_collection,
+                            allow_index=True,
                         )
                         scalar_cont = append_cont is not None
                         if append_cont is None:
@@ -16256,14 +16318,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # so `_ = append(a, x)` (or `b := append(a,
                         # x)` where `b` only MAY share) still lets
                         # `a`'s sharers read `x`.
+                        store_deps = appended
+                        s_arg0 = arguments[0]
+                        while (
+                            s_arg0 is not None
+                            and s_arg0.type
+                            == "parenthesized_expression"
+                        ):
+                            s_arg0 = next(
+                                iter(s_arg0.named_children), None
+                            )
+                        if (
+                            s_arg0 is not None
+                            and s_arg0.type == "index_expression"
+                        ):
+                            # `append(a[i], x)` — WHICH element's
+                            # backing the append grew depended on
+                            # `i`, so its deps land in the sharers'
+                            # sets like an `a[i][0] = x` write's
+                            # (deps already unions arg0's eval —
+                            # the group deps it adds are a no-op
+                            # for the group's own holders).
+                            store_deps |= deps
                         for holder_id in self._opaque_container_sharers(
                             append_cont
                         ):
                             self._store(
-                                locals_, params, holder_id, appended,
-                                True,
+                                locals_, params, holder_id,
+                                store_deps, True,
                             )
-                        self.indirect_writes |= appended
+                        self.indirect_writes |= store_deps
                     return deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))

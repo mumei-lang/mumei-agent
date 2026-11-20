@@ -4103,10 +4103,16 @@ share group, `a := s.F` on a `[][]int64` field stays closed
 (the field share gate requires a scalar-element member),
 extracting an element that is itself an ARRAY (`a[i]` on
 `[][M]T`/`[N][M]T`) stays closed — it is a value copy with
-no shared backing — `append(a[i], v)` stays closed, `[]func`
+no shared backing — `[]func`
 nested shapes keep their own func-element model, and a
 nested parameter container is rejected by the signature
-gate. The same share applies wherever an index operand
+gate. `append(a[i], v)` binds like any other element
+carrier: the appended slice may reuse the extracted
+element's backing, so `b := append(a[i], v)` unions the
+root's share-group tokens into `b` beside the fresh result
+token (an `a[i][j]` or unbound/array operand stays closed),
+and the appended elements' deps land in the root's sharers
+like the plain `append(a, v)` slice case. The same share applies wherever an index operand
 carries the element: a literal donor (`c :=
 [][]int64{a[0]}`), a slot store (`a[i] = a2[j]`), and an
 opaque-callee argument (`lib.U(a[i], v)` — its writes land
