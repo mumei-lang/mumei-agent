@@ -2071,7 +2071,12 @@ class _Walker:
                     # what the value reads, so they must survive.
                     scratch.kill(target)
                 self._define(target, value, scratch)
-                _copy_name_facts(env, scratch, target)
+                # Every other pending target is being rewritten — a
+                # fact that mentions it (``i < len(s)`` after
+                # ``i, s = i, s[:1]``) no longer describes the new state.
+                _copy_name_facts(
+                    env, scratch, target, target_roots - {_root_name(target)}
+                )
                 self._escape(value, env)
                 continue
             self._define(target, value, env)

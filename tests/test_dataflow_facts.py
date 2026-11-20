@@ -1952,6 +1952,11 @@ def test_multi_assign_swap_reads_pre_assignment_facts() -> None:
         issue.category == "uninitialized_use" and issue.subject == "b"
         for issue in flow.issues
     )
+    # ...and ``b`` provably carries ``a``'s old non-nil value.
+    facts = _go(
+        "var a *int\nvar b *int\na = new(int)\na, b = b, a\nreturn *b"
+    ).facts_for_expression("*b")
+    assert facts is not None and "b" in facts.nonnil
 
 
 def test_switch_shadowed_index_does_not_revive_stale_len_bound() -> None:
@@ -2000,3 +2005,16 @@ def test_switch_shadowed_handle_keeps_leak_when_case_writes_other_names() -> Non
         issue.category == "resource_leak" and issue.subject == "f"
         for issue in flow.issues
     )
+
+
+def test_parallel_assign_does_not_revive_stale_len_bound() -> None:
+    # ``i, s = i, s[:1]`` — the bound's other side is a co-target whose
+    # value just changed, so the old ``i < len(s)`` must not come back.
+    facts = _facts(
+        "s := []int{1, 2, 3}\n"
+        "i := len(s) - 1\n"
+        "i, s = i, s[:1]\n"
+        "return s[i]",
+        "s[i]",
+    )
+    assert ("i", "s") not in facts.lt_len
