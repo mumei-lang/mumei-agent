@@ -18822,6 +18822,27 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[1][0]\n}\n",
             frozenset({0}),
         ),
+        # `c := [][]int64{a[0]}` — the index donor carries the
+        # extracted slice header, so `c[0][0] = x` reaches `a`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tc := [][]int64{a[0]}\n"
+            "\tc[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[0] = a2[0]` — storing an extracted slice header makes
+        # the slot share `a2`'s backing both ways.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\ta2 := [][]int64{{0}}\n"
+            "\ta[0] = a2[0]\n"
+            "\ta2[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -18868,6 +18889,13 @@ def test_scalar_container_bind_read_write_admits(
         "\tb := t[0]\n"
         "\tb[0] = x\n"
         "\treturn b[0]\n}\n",
+        # `b := a[i]` on `[][4]int64` — the inner element is an
+        # array, so `a[0]` is a value copy with no shared backing.
+        "func F(x int64) int64 {\n"
+        "\ta := [][4]int64{{0}}\n"
+        "\tb := a[0]\n"
+        "\tb[0] = x\n"
+        "\treturn a[0][0]\n}\n",
         # `[][][]int64` — two levels of nesting stays closed; the
         # model admits exactly one.
         "func F(x int64) int64 {\n"
@@ -26793,6 +26821,23 @@ def test_opaque_composite_callee_writes_container_arg(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_callee_writes_index_arg(
+    go_types_helper,
+):
+    # `lib.U(a[0], x)` — `a[0]` hands the callee a slice header
+    # sharing the bound root's backing, so its writes land in
+    # every sharer's set like a caller-side `a[0][0] = x`.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\ta := [][]int64{{0}}\n"
+        "\tlib.U(a[0], x)\n"
+        "\treturn a[0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_opaque_composite_range_rejoins_body_writes(go_types_helper):
