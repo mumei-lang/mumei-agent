@@ -3352,7 +3352,6 @@ def test_evidence_check_rejects_invalid_metadata():
         {"request_fingerprint": FINGERPRINT, "output_fingerprint": "a" * 63},
         {"request_fingerprint": FINGERPRINT, "output_fingerprint": 0},
         {"request_fingerprint": FINGERPRINT, "output_fingerprint": None},
-        {"outcome": "accepted"},
         {"outcome": "proved"},
         {"outcome": ""},
         {"outcome": 1},
@@ -3396,7 +3395,7 @@ def test_evidence_check_records_the_declared_outcome(outcome):
     }
 
 
-@pytest.mark.parametrize("outcome", ["accepted", "passed", "true", 1, None])
+@pytest.mark.parametrize("outcome", ["passed", "true", "VALID", 1, None])
 def test_evidence_check_rejects_undeclared_outcomes(outcome):
     sequence, output = exited_sequence_and_output(prepared_source())
     selected = sequence.select_result(output)

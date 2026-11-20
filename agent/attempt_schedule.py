@@ -29,6 +29,7 @@ from agent.attempt_runner import (
 )
 from agent.core_evidence import (
     evaluate_evidence_check,
+    record_evidence_acceptance,
     record_evidence_check,
 )
 from agent.verification_attempt import (
@@ -224,6 +225,7 @@ def run_attempt_schedule(
     success_exit_codes: frozenset[int] = frozenset({0}),
     cancel_event: "threading.Event | None" = None,
     core_executable: str | None = None,
+    core_requirement: str | None = None,
     memory_bound_mb: int | None = None,
     stdin_for=None,
 ) -> AttemptScheduleResult:
@@ -275,6 +277,14 @@ def run_attempt_schedule(
         type(core_executable) is not str or not core_executable
     ):
         raise ValueError("attempt schedule evidence check requires a core path")
+    if core_requirement is not None and (
+        type(core_requirement) is not str
+        or not core_requirement
+        or core_executable is None
+    ):
+        raise ValueError(
+            "attempt schedule evidence acceptance requires a requirement path and a core"
+        )
     active_runner = runner or AttemptRunner()
 
     entries: list[ScheduledAttemptEntry] = []
@@ -388,25 +398,51 @@ def run_attempt_schedule(
                 selected_adapter_id = adapter_id
                 if core_executable is not None:
                     # Same produce+consume pair as verify-attempt: select
-                    # the captured bytes, run the Core representation
-                    # check and normalize it into an acceptance
-                    # descriptor — representation-level only.
+                    # the captured bytes and run the declared Core check
+                    # — the requirement-declared `evidence accept` when a
+                    # requirement is declared, else the representation
+                    # check — normalized into an acceptance descriptor.
                     selected = dispatch.sequence.select_result(
                         dispatch.captured_output()
                     )
                     sequences[-1] = selected
-                    evidence_check = record_evidence_check(
-                        selected,
-                        dispatch.captured_output(),
-                        core_executable=core_executable,
-                        # The representation check is its own bounded
-                        # call — capped like verify-attempt's check.
-                        timeout_ms=min(policy.timeout_ms, 60_000),
-                        cancel_event=cancel_event,
-                    )
-                    evidence_acceptance = evaluate_evidence_check(
-                        selected, evidence_check
-                    )
+                    if core_requirement is not None:
+                        evidence_check, descriptor = (
+                            record_evidence_acceptance(
+                                selected,
+                                dispatch.captured_output(),
+                                core_executable=core_executable,
+                                requirement_path=core_requirement,
+                                timeout_ms=min(policy.timeout_ms, 60_000),
+                                cancel_event=cancel_event,
+                            )
+                        )
+                        evidence_acceptance = evaluate_evidence_check(
+                            selected,
+                            evidence_check,
+                            # The fingerprint Core emitted — the bytes it
+                            # actually evaluated, so a requirement edited
+                            # between spawn and return cannot mislabel
+                            # which requirement the verdict answered.
+                            requirement_fingerprint=(
+                                descriptor["requirement_fingerprint"]
+                                if descriptor is not None
+                                else None
+                            ),
+                        )
+                    else:
+                        evidence_check = record_evidence_check(
+                            selected,
+                            dispatch.captured_output(),
+                            core_executable=core_executable,
+                            # The representation check is its own bounded
+                            # call — capped like verify-attempt's check.
+                            timeout_ms=min(policy.timeout_ms, 60_000),
+                            cancel_event=cancel_event,
+                        )
+                        evidence_acceptance = evaluate_evidence_check(
+                            selected, evidence_check
+                        )
                 break
             if terminal == "cancelled":
                 outcome = "cancelled"

@@ -248,6 +248,15 @@ def build_schedule_parser(
         ),
     )
     parser.add_argument(
+        "--core-requirement", metavar="PATH", default=None,
+        help=(
+            "Optional declared mumei.evidence-requirement/v1 document: "
+            "requires --core; the selected attempt's check becomes the "
+            "requirement-declared `evidence accept` and the recorded "
+            "outcome is Core's verdict."
+        ),
+    )
+    parser.add_argument(
         "--output", metavar="PATH",
         help="Write the schedule document here instead of stdout.",
     )
@@ -272,6 +281,16 @@ def run_schedule(args: argparse.Namespace) -> dict:
         or not Path(core).is_file()
     ):
         raise ValueError("--core must be an absolute path to a regular file")
+    requirement = getattr(args, "core_requirement", None)
+    if requirement is not None and (
+        core is None
+        or not os.path.isabs(requirement)
+        or "\x00" in requirement
+        or not Path(requirement).is_file()
+    ):
+        raise ValueError(
+            "--core-requirement requires --core and an absolute path to a regular file"
+        )
     source = declared.read_bytes()
     success = (
         frozenset({0})
@@ -314,6 +333,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
         memory_bound_mb=args.memory_bound_mb,
         stdin_for=stdin_for,
         core_executable=core,
+        core_requirement=requirement,
     )
     return result.to_dict()
 
@@ -323,6 +343,8 @@ def _declared_paths(args: argparse.Namespace) -> list[str]:
              args.source]
     if getattr(args, "core", None) is not None:
         paths.append(args.core)
+    if getattr(args, "core_requirement", None) is not None:
+        paths.append(args.core_requirement)
     if args.observations is not None:
         paths.append(args.observations)
     if args.output is not None:
@@ -437,6 +459,8 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                 inputs.append(args.observations)
             if getattr(args, "core", None) is not None:
                 inputs.append(args.core)
+            if getattr(args, "core_requirement", None) is not None:
+                inputs.append(args.core_requirement)
             if any(
                 os.path.realpath(p) == target
                 or os.path.exists(args.output)

@@ -6262,6 +6262,28 @@ observation on `mumei.attempt-schedule/v1`, never a grade or claim
 verdict. C11 stays partial; Evidence acceptance remains open.
 
 
+### C11 scheduled-attempt evidence acceptance
+
+`run_attempt_schedule(..., core_requirement=PATH)` and the
+`verify-schedule --core-requirement PATH` flag declare a
+`mumei.evidence-requirement/v1` document for the selected attempt's
+check: instead of the representation check, the captured output runs
+through `core evidence accept --stdin --json --requirement PATH`
+(`record_evidence_acceptance`), and the recorded `evidence_check`
+outcome is Core's declared verdict — `accepted` / `rejected` /
+`inconclusive`, `failed` or `cancelled`. The acceptance descriptor
+echoes the `requirement_fingerprint` Core itself emitted — the
+requirement bytes it actually evaluated — so consumers pin which
+requirement the verdict answered.
+`--core-requirement` requires `--core` and must be an absolute path to
+a regular file; a verdict that disagrees with Core's exit code is a
+`failed` check, never a verdict — and no outcome blocks the selection.
+
+C11 stays partial; verdict-bearing grade promotion, C12's demand gate
+and the audit/MCP ports are unchanged — Evidence acceptance remains
+open.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

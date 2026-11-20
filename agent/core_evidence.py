@@ -92,8 +92,12 @@ def check_evidence_representation(
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
     try:
-        stdout = _run_check(output.stdout, core_executable, timeout_ms, cancel_event)
+        stdout, code = _run_check(
+            output.stdout, core_executable, timeout_ms, cancel_event
+        )
         _check_cancelled(cancel_event)
+        if code != 0:
+            raise ValueError
         # Preserve pairs to reject duplicates without depending on key order.
         pairs = json.loads(stdout.decode("utf-8"), object_pairs_hook=tuple)
         if (
@@ -160,40 +164,197 @@ def record_evidence_check(
     return sequence.evidence_check(candidate, outcome)
 
 
+# The `mumei evidence accept` verdict ↔ exit-code contract: the check
+# descriptor on stdout is authoritative, but a descriptor whose verdict
+# disagrees with the process exit code is a check failure, not a verdict.
+_VERDICT_EXIT_CODES = {
+    "accepted": 0,
+    "rejected": 1,
+    "inconclusive": 3,
+}
+
+
+def check_evidence_requirement(
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    requirement_path: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+    attempt_sequence: AttemptSequence | None = None,
+) -> dict:
+    """Send original bytes to `core evidence accept`; return its descriptor.
+
+    Runs `[core, "evidence", "accept", "--stdin", "--json", "--requirement",
+    path]` under the same spawn/cancellation/lineage contract as
+    `check_evidence_representation`. Returns the validated
+    `mumei.evidence-acceptance/v1` descriptor only when: it is a
+    duplicate-free JSON object declaring `acceptance: "evaluated"`; its
+    `verdict` (`"accepted"` / `"rejected"` / `"inconclusive"`) agrees
+    with the process exit code (0/1/3); `requirement_fingerprint` is a
+    64-char hex pin of the requirement bytes Core itself evaluated; and
+    `evidence_fingerprint` is the sha256 of the bytes fed on stdin — a
+    descriptor answering different bytes is not this check's verdict.
+    Anything else raises `CoreCheckFailed`; an invalid representation is
+    a failure too — Core rejects it on the decode gate before any
+    verdict exists. The check is a host-declared observation only: no
+    Evidence, proof or grade is produced and semantic-check content
+    stays Core-side."""
+    if (
+        os.name != "posix"
+        or type(output) is not AttemptOutput
+        or type(core_executable) is not str
+        or not os.path.isabs(core_executable)
+        or "\x00" in core_executable
+        or type(requirement_path) is not str
+        or not os.path.isabs(requirement_path)
+        or "\x00" in requirement_path
+        or type(timeout_ms) is not int
+        or not 1 <= timeout_ms <= MAX_CHECK_TIMEOUT_MS
+        or (cancel_event is not None and type(cancel_event) is not threading.Event)
+        or (
+            attempt_sequence is not None
+            and type(attempt_sequence) is not AttemptSequence
+        )
+    ):
+        raise ValueError("unsupported Core requirement check request")
+    if attempt_sequence is not None:
+        attempt_sequence.check_output_binding(output)
+    try:
+        stdout, code = _run_check(
+            output.stdout,
+            core_executable,
+            timeout_ms,
+            cancel_event,
+            argv_tail=(
+                "accept",
+                "--stdin",
+                "--json",
+                "--requirement",
+                requirement_path,
+            ),
+        )
+        _check_cancelled(cancel_event)
+        pairs = json.loads(stdout.decode("utf-8"), object_pairs_hook=tuple)
+        if (
+            type(pairs) is not tuple
+            or len(pairs) != len({key for key, _ in pairs})
+        ):
+            raise ValueError
+        descriptor = dict(pairs)
+        verdict = descriptor.get("verdict")
+        if (
+            descriptor.get("schema_version")
+            != "mumei.evidence-acceptance/v1"
+            or descriptor.get("acceptance") != "evaluated"
+            or _VERDICT_EXIT_CODES.get(verdict) != code
+            or not _is_fingerprint(descriptor.get("requirement_fingerprint"))
+            or descriptor.get("evidence_fingerprint")
+            != hashlib.sha256(output.stdout).hexdigest()
+        ):
+            raise ValueError
+        _check_cancelled(cancel_event)
+        return descriptor
+    except CoreCheckCancelled:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
+        raise CoreCheckFailed(
+            "Core Evidence requirement check failed"
+        ) from None
+
+
+def record_evidence_acceptance(
+    sequence: AttemptSequence,
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    requirement_path: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[AttemptEvidenceCheck, dict | None]:
+    """Run the requirement-declared Core check; record the Core verdict.
+
+    Same contract as `record_evidence_check`, but the record's outcome is
+    the Core `evidence accept` verdict (`"accepted"` / `"rejected"` /
+    `"inconclusive"`) — or `"failed"`/`"cancelled"` when no verdict
+    exists — and the validated descriptor is returned alongside (None
+    when no descriptor exists), so the caller can pin the
+    `requirement_fingerprint` Core actually evaluated rather than
+    re-reading the file. The verdict is Core's declared judgement under
+    the host-declared requirement; recording stays a host declaration,
+    not acceptance."""
+    if type(sequence) is not AttemptSequence:
+        raise ValueError("unsupported Core requirement check request")
+    candidate = sequence.evidence_candidate()
+    sequence.check_output_binding(output)
+    if output.to_dict()["output_fingerprint"] != candidate.output_fingerprint:
+        raise ValueError("evidence check output is not the selected result")
+    try:
+        descriptor = check_evidence_requirement(
+            output,
+            core_executable=core_executable,
+            requirement_path=requirement_path,
+            timeout_ms=timeout_ms,
+            cancel_event=cancel_event,
+            attempt_sequence=sequence,
+        )
+    except CoreCheckCancelled:
+        outcome, descriptor = "cancelled", None
+    except CoreCheckFailed:
+        outcome, descriptor = "failed", None
+    else:
+        outcome = descriptor["verdict"]
+    return sequence.evidence_check(candidate, outcome), descriptor
+
+
 def evaluate_evidence_check(
-    sequence: AttemptSequence, check: AttemptEvidenceCheck
+    sequence: AttemptSequence,
+    check: AttemptEvidenceCheck,
+    *,
+    requirement_fingerprint: str | None = None,
 ) -> dict:
     """Normalize a declared check record into an acceptance descriptor.
 
     Emits ``mumei.evidence-check-acceptance/v1``: whether the record binds
     the sequence's CURRENT `evidence_candidate()` (`candidate_match` — a
     stale or foreign check never counts) and `accepted`, which holds only
-    when the record is current AND its outcome is `"valid"`. This is
-    representation-level acceptance only — the six semantic checks remain
-    listed in `checks_not_performed`, and nothing here is Evidence,
-    a verdict or a grade promotion. A sequence with no selected result
-    raises `ValueError`: there is no current candidate to evaluate."""
+    when the record is current AND its outcome is `"valid"` or the
+    requirement-declared Core verdict `"accepted"`. A declared
+    `requirement_fingerprint` (sha256 of the requirement bytes the check
+    ran under) is echoed so consumers pin which requirement the verdict
+    answered. This is representation-level acceptance only — the six
+    semantic checks remain listed in `checks_not_performed`, and nothing
+    here is Evidence, a verdict or a grade promotion. A sequence with no
+    selected result raises `ValueError`: there is no current candidate to
+    evaluate."""
     if (
         type(sequence) is not AttemptSequence
         or type(check) is not AttemptEvidenceCheck
     ):
         raise ValueError("unsupported evidence check evaluation request")
+    if requirement_fingerprint is not None and not _is_fingerprint(
+        requirement_fingerprint
+    ):
+        raise ValueError("invalid requirement fingerprint")
     candidate = sequence.evidence_candidate()
     match = (
         check.request_fingerprint == candidate.request_fingerprint
         and check.attempt_number == candidate.attempt_number
         and check.output_fingerprint == candidate.output_fingerprint
     )
-    return {
+    evaluation = {
         "schema_version": "mumei.evidence-check-acceptance/v1",
         "request_fingerprint": check.request_fingerprint,
         "attempt_number": check.attempt_number,
         "output_fingerprint": check.output_fingerprint,
         "outcome": check.outcome,
         "candidate_match": match,
-        "accepted": match and check.outcome == "valid",
+        "accepted": match and check.outcome in {"valid", "accepted"},
         "checks_not_performed": list(_DIAGNOSTIC["checks_not_performed"]),
     }
+    if requirement_fingerprint is not None:
+        evaluation["requirement_fingerprint"] = requirement_fingerprint
+    return evaluation
 
 
 def _check_cancelled(cancel_event: threading.Event | None) -> None:
@@ -212,12 +373,16 @@ def _wait_timeout(deadline: float, cancel_event: threading.Event | None) -> floa
 
 
 def _run_check(
-    body: bytes, executable: str, timeout_ms: int, cancel_event: threading.Event | None
-) -> bytes:
+    body: bytes,
+    executable: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None,
+    argv_tail: tuple[str, ...] = ("check", "--stdin", "--json"),
+) -> tuple[bytes, int]:
     _check_cancelled(cancel_event)
     deadline = time.monotonic() + timeout_ms / 1000
     process = subprocess.Popen(
-        [executable, "evidence", "check", "--stdin", "--json"],
+        [executable, "evidence", *argv_tail],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -284,9 +449,9 @@ def _run_check(
                     if cancel_event is None:
                         raise
             _check_cancelled(cancel_event)
-            if code != 0 or buffers["stderr"]:
+            if buffers["stderr"]:
                 raise ValueError
-        return bytes(buffers["stdout"])
+        return bytes(buffers["stdout"]), code
     finally:
         for stream in streams.values():
             if stream is not None:
