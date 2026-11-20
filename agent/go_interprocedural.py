@@ -4811,9 +4811,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for holder_id in self._opaque_container_sharers(
                     ref.binding_id
                 ):
+                    # An element store accumulates like `s[i] = v`
+                    # does: `_store(..., True)` unions the backing's
+                    # existing element deps — replacing would drop
+                    # every element landed before the receive.
                     self._store(
                         locals_, params, holder_id, elem_value,
-                        conditional,
+                        True,
                     )
                 self.indirect_writes |= elem_value
             elif entry[0] == "alias":
