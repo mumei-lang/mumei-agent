@@ -2126,6 +2126,67 @@ class _Builder:
             return toks
         return None
 
+    def _opaque_container_ident_toks(
+        self, node: Any
+    ) -> frozenset[tuple[int, int, int]]:
+        """`s`'s backing tokens when `s` names a bound slice/map;
+        empty for anything else. An uninitialised binding minted
+        `{id}` at bind, so the fallback never invents a backing."""
+        while node is not None and node.type == "literal_element":
+            node = next(
+                (c for c in node.named_children), None
+            )
+        while (
+            node is not None
+            and node.type == "parenthesized_expression"
+        ):
+            node = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if node is None or node.type != "identifier":
+            return frozenset()
+        ref = self.references.get(self.node_key(node))
+        if ref is None or ref.binding_id is None:
+            return frozenset()
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind not in {"slice", "array", "map"}
+        ):
+            return frozenset()
+        return self._opaque_container_tokens.get(
+            ref.binding_id, frozenset({ref.binding_id})
+        )
+
+    def _opaque_container_elem_toks(
+        self, node: Any
+    ) -> frozenset[tuple[int, int, int]]:
+        """Backing tokens of inner-container identifiers inside a
+        nested literal — `[][]int64{s}` binds sharing `s`'s
+        backing (`s[0] = x` must reach `a[0][0]` reads and
+        `a[0][0] = x` must reach `s[0]`), so the element's tokens
+        join the bound name's share group."""
+        body = (
+            node.child_by_field_name("body")
+            if node is not None
+            else None
+        )
+        toks: set = set()
+        for child in (
+            body.named_children if body is not None else ()
+        ):
+            elem = child
+            if elem.type == "keyed_element":
+                elem = elem.child_by_field_name("value")
+            toks |= self._opaque_container_ident_toks(elem)
+        return frozenset(toks)
+
     def _opaque_call_container(
         self, node: Any, call: Any
     ) -> tuple[Any, Any] | None:
@@ -8210,10 +8271,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             raise _Unsupported(
                                 "binding_unavailable", _span(node)
                             )
-                    self._opaque_container_tokens[binding.id] = (
+                    new_container_toks = (
                         opaque_toks
                         if opaque_toks is not None
                         else frozenset({binding.id})
+                    )
+                    if (
+                        opaque_toks is None
+                        and self._scalar_elem_nested_collection(
+                            binding.type
+                        )
+                    ):
+                        # `a := [][]int64{s}` — `a[0]` shares `s`'s
+                        # backing: its tokens join `a`'s group so
+                        # `s[0] = x` and `a[0][0] = x` reach both.
+                        new_container_toks |= (
+                            self._opaque_container_elem_toks(rhs_node)
+                        )
+                    self._opaque_container_tokens[binding.id] = (
+                        new_container_toks
                     )
                 elif (
                     binding.type.kind
@@ -8847,10 +8923,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 raise _Unsupported(
                                     "binding_unavailable", _span(spec)
                                 )
-                        self._opaque_container_tokens[binding.id] = (
+                        new_container_toks = (
                             opaque_toks
                             if opaque_toks is not None
                             else frozenset({binding.id})
+                        )
+                        if (
+                            opaque_toks is None
+                            and value_nodes
+                            and self._scalar_elem_nested_collection(
+                                binding.type
+                            )
+                        ):
+                            # `var a [][]int64 = {s}` — same
+                            # inner-backing share as `a :=`.
+                            new_container_toks |= (
+                                self._opaque_container_elem_toks(
+                                    rhs_node
+                                )
+                            )
+                        self._opaque_container_tokens[binding.id] = (
+                            new_container_toks
                         )
                     elif (
                         binding.type.kind
@@ -10871,10 +10964,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # `a = []int64{x}` / `a = make([]int64, n)`
                             # — a fresh literal/make backing replaces
                             # the old one like `a :=` does; `a = nil`
-                            # drops the token below instead.
+                            # drops the token below instead. A nested
+                            # literal's inner-container elements join
+                            # the group like at bind time.
+                            fresh_toks = {self.node_key(reseat_rhs)}
+                            if self._scalar_elem_nested_collection(
+                                bound.type
+                            ):
+                                fresh_toks |= (
+                                    self._opaque_container_elem_toks(
+                                        reseat_rhs
+                                    )
+                                )
                             self._opaque_container_tokens[
                                 ref.binding_id
-                            ] = frozenset({self.node_key(reseat_rhs)})
+                            ] = frozenset(fresh_toks)
                         else:
                             self._opaque_container_tokens.pop(
                                 ref.binding_id, None
@@ -10923,6 +11027,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             True,
                         )
                     self.indirect_writes |= elem_value
+                    # `a[i] = s` storing an inner container — the
+                    # slot shares `s`'s backing, so `s`'s tokens
+                    # join `a`'s group: a later `s[j] = y` store
+                    # reaches `a[i][j]` reads and vice versa.
+                    inner_toks = (
+                        self._opaque_container_ident_toks(rights[i])
+                        if len(lefts) == len(rights)
+                        else frozenset()
+                    )
+                    if inner_toks:
+                        self._opaque_container_tokens[
+                            ref.binding_id
+                        ] = (
+                            self._opaque_container_tokens.get(
+                                ref.binding_id, frozenset()
+                            )
+                            | inner_toks
+                        )
                 if i in func_elem_targets:
                     # Resolution-time sharers plus landing-time
                     # group — a parallel reseat (`a, a[0] = b, f`)

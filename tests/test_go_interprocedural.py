@@ -18693,6 +18693,35 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `a := [][]int64{s}` — the inner element SHARES `s`'s
+        # backing: `s[0] = x` reaches the `a[0][0]` read.
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta := [][]int64{s}\n"
+            "\ts[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # The other direction — `a[0][0] = x` lands in `s`'s set.
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta := [][]int64{s}\n"
+            "\ta[0][0] = x\n"
+            "\treturn s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i] = s` storing an inner slice shares its backing too.
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta := make([][]int64, 1)\n"
+            "\ta[0] = s\n"
+            "\ts[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
