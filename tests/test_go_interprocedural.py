@@ -18843,6 +18843,111 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `b = a[0]` — a reseat lands `b` on the root's share
+        # group like `b := a[0]` does.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tvar b []int64\n"
+            "\tb = a[0]\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b = m[k]` — the keyed reseat shares identically.
+        (
+            "func F(x int64) int64 {\n"
+            "\tm := map[int64][]int64{0: []int64{0}}\n"
+            "\tvar b []int64\n"
+            "\tb = m[0]\n"
+            "\tb[0] = x\n"
+            "\treturn m[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a2[0]; b = a[0]` — the reseat replaces `b`'s
+        # tokens, detaching it from `a2`'s group: `x` never
+        # reaches `a2`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\ta2 := [][]int64{{0}}\n"
+            "\tb := a2[0]\n"
+            "\tb = a[0]\n"
+            "\tb[0] = x\n"
+            "\treturn a2[0][0]\n}\n",
+            frozenset(),
+        ),
+        # `if c { b = a[0] } else { b = a2[0] }` — the
+        # conditional reseat unions both groups, so `b[0] = y`
+        # reaches either root.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\ta2 := [][]int64{{0}}\n"
+            "\tvar b []int64\n"
+            "\tif x > 0 {\n"
+            "\t\tb = a[0]\n"
+            "\t} else {\n"
+            "\t\tb = a2[0]\n"
+            "\t}\n"
+            "\tb[0] = y\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({1}),
+        ),
+        # `a, b = sub, a[0]` — the index RHS resolves at the
+        # pre-state, so `b` lands on the backing `a` held BEFORE
+        # the reseat, and its writes cannot reach the new `a`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tvar b []int64\n"
+            "\ta, b = [][]int64{{0}}, a[0]\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset(),
+        ),
+        # `b, a[0][0] = a[0], x` — the element store lands on
+        # the backing `b` just joined in the same statement, so
+        # `b` still observes `x` after `a` reseats away.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tvar b []int64\n"
+            "\tb, a[0][0] = a[0], x\n"
+            "\ta = nil\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a, a[0] = arr, x` — assigning an ARRAY copies the
+        # value into `a`'s own storage, so the pre-computed
+        # element pointer still names `a[0]`; the write lands
+        # and `a[0]` reads `x` back.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1]int64{0}\n"
+            "\ta, a[0] = [1]int64{0}, x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Same through an inner ARRAY — `a[0][0]`'s pointer
+        # stays inside `a`'s inline storage across the reseat.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][1]int64{{0}}\n"
+            "\ta, a[0][0] = [1][1]int64{{0}}, x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # But through an inner SLICE the final write goes to
+        # the pre-state header's backing — the reseat detaches
+        # it, and `a[0][0]` reads the new array's slice: no dep.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][]int64{{0}}\n"
+            "\ta, a[0][0] = [1][]int64{{0}}, x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset(),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -18894,6 +18999,14 @@ def test_scalar_container_bind_read_write_admits(
         "func F(x int64) int64 {\n"
         "\ta := [][4]int64{{0}}\n"
         "\tb := a[0]\n"
+        "\tb[0] = x\n"
+        "\treturn a[0][0]\n}\n",
+        # `b = a[0]` on `[][4]int64` — the reseat form stays
+        # closed for the same value-copy reason.
+        "func F(x int64) int64 {\n"
+        "\ta := [][4]int64{{0}}\n"
+        "\tvar b [4]int64\n"
+        "\tb = a[0]\n"
         "\tb[0] = x\n"
         "\treturn a[0][0]\n}\n",
         # `[][][]int64` — two levels of nesting stays closed; the

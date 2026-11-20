@@ -1844,6 +1844,20 @@ class _Builder:
             return None
         return ref.binding_id
 
+    def _opaque_container_holders(
+        self, toks: frozenset
+    ) -> set[str]:
+        """Every binding whose token set intersects `toks` — the
+        current membership of the share group those tokens name."""
+        if not toks:
+            return set()
+        return {
+            member_id
+            for member_id, member_toks
+            in self._opaque_container_tokens.items()
+            if member_toks & toks
+        }
+
     def _opaque_container_sharers(self, binding_id: str) -> set[str]:
         """Every name whose backing set intersects `binding_id`'s —
         `s2 := s` between slice/map containers shares the backing,
@@ -1851,12 +1865,7 @@ class _Builder:
         toks = self._opaque_container_tokens.get(
             binding_id, frozenset()
         )
-        return {
-            member_id
-            for member_id, member_toks
-            in self._opaque_container_tokens.items()
-            if member_toks & toks
-        } | {binding_id}
+        return self._opaque_container_holders(toks) | {binding_id}
 
     def _opaque_container_deps(
         self, binding_id: str, locals_: dict[str, frozenset[int]]
@@ -2143,6 +2152,13 @@ class _Builder:
             fresh = frozenset({self.node_key(rhs)})
             self._opaque_container_tokens[ref.binding_id] = fresh
             return fresh
+        if rhs.type == "index_expression":
+            # `b = a[i]` — the extracted element of a bound nested
+            # container names the root's whole share group, so the
+            # reseat lands `b` on it like `b := a[i]` does. An
+            # unbound/deeper/scalar-element operand has no group.
+            sharer = self._opaque_container_index_sharer_toks(rhs)
+            return frozenset(sharer) if sharer else None
         if rhs.type in {"selector_expression", "field_expression"}:
             root_id, member = self._scalar_container_field(rhs)
             if root_id is None:
@@ -9721,14 +9737,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
             func_elem_targets: set[int] = set()
             # `s[i] = v` — an element store into a bound opaque
             # container (`s := lib.G(a)`) unions the stored value's
-            # deps into every name sharing the backing. The sharer
-            # set resolves at LHS-eval like the destination operand
+            # deps into every name sharing the backing. The BACKING
+            # resolves at LHS-eval like the destination operand
             # itself — `s, s[0] = t, b` writes the slice `s` named
-            # BEFORE its own store, so the pre-state members are
-            # snapshotted here — and the index's deps join the
-            # stored value like a read's.
-            opaque_elem_targets: dict[int, frozenset[str]] = {}
+            # BEFORE its own store — so the operand's token set is
+            # snapshotted here. The membership expands lazily at
+            # store time: a name joining that same backing in this
+            # very statement (`b, a[0][0] = a[0], x`) receives the
+            # write, while a reseated operand drops out of its old
+            # group — and the index's deps join the stored value
+            # like a read's.
+            opaque_elem_targets: dict[int, frozenset] = {}
             opaque_elem_index_deps: dict[int, frozenset[int]] = {}
+            # `a, a[0] = arr, x` — assigning an ARRAY copies the
+            # value into the variable's own storage, which keeps
+            # naming the element the LHS pointer was computed
+            # against. The snapshot's holders is empty once `a`'s
+            # reseat replaces its tokens, so such an operand also
+            # expands holders over its CURRENT token set at store
+            # landing. That only holds while the final write lands
+            # in the root's inline storage — a one-level index, or
+            # an inner index through an inner ARRAY (`[1][1]int64`):
+            # through a slice/map (`[1][]int64`'s `a[0][0]`) the
+            # write goes to the pre-state header's backing, which
+            # the reseat detaches like any slice operand's. Record
+            # the qualifying array operand's root binding here.
+            opaque_elem_array_roots: dict[int, str] = {}
             # An element store's holder set resolves like the
             # destination operand itself — against the pre-state —
             # but a name an earlier parallel store re-shared
@@ -10108,10 +10142,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     refs.append(oref)
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(
-                        self._opaque_container_sharers(
-                            oref.binding_id
+                        self._opaque_container_tokens.get(
+                            oref.binding_id, frozenset()
                         )
                     )
+                    obound = self.bindings.get(oref.binding_id)
+                    if (
+                        obound is not None
+                        and obound.type is not None
+                        and obound.type.kind == "array"
+                        and (
+                            inner_index is None
+                            or (
+                                obound.type.elem is not None
+                                and obound.type.elem.kind == "array"
+                            )
+                        )
+                    ):
+                        opaque_elem_array_roots[ri] = oref.binding_id
                     opaque_elem_index_deps[ri] = frozenset()
                     if (
                         oindex is not None
@@ -10487,6 +10535,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self._opaque_container_tokens.get(
                                     pre_ref.binding_id
                                 )
+                            )
+                    elif (
+                        pre_rhs is not None
+                        and pre_rhs.type == "index_expression"
+                    ):
+                        # `a, b = sub, a[0]` — `a[0]` names the
+                        # share group `a` held BEFORE `a` reseated
+                        # to `sub`, not the one it lands on.
+                        pre_toks = (
+                            self._opaque_container_index_sharer_toks(
+                                pre_rhs
+                            )
+                        )
+                        if pre_toks:
+                            pre_container_toks[pre_i] = frozenset(
+                                pre_toks
                             )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
@@ -11125,7 +11189,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         value
                         | opaque_elem_index_deps.get(i, frozenset())
                     )
-                    for holder_id in opaque_elem_targets[i]:
+                    elem_holders = self._opaque_container_holders(
+                        opaque_elem_targets[i]
+                    )
+                    array_root = opaque_elem_array_roots.get(i)
+                    if array_root is not None:
+                        # An array reseat copied a new value into
+                        # the same storage — the store lands on
+                        # whoever holds the root's CURRENT tokens.
+                        elem_holders |= (
+                            self._opaque_container_holders(
+                                self._opaque_container_tokens.get(
+                                    array_root, frozenset()
+                                )
+                            )
+                        )
+                    for holder_id in elem_holders:
                         self._store(
                             locals_, params, holder_id, elem_value,
                             True,
