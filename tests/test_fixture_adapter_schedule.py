@@ -317,12 +317,15 @@ def test_invalid_settings_fail_statically(tmp_path):
 def test_undeclared_argv_is_not_dispatched_and_nothing_runs(tmp_path):
     # beta is registered but has no declared argv: it must be recorded
     # not_dispatched — the lane never guesses or installs a command.
+    # alpha's declared argv touches a marker on spawn: any wrong
+    # dispatch (alpha run despite `missing`, or alpha's argv borrowed
+    # for beta's round) leaves the marker behind.
     marker = tmp_path / "spawned.marker"
     paths = _write_docs(
         tmp_path,
         adapters=[_manifest("alpha"), _manifest("beta")],
         argv_map={
-            "alpha": stub_argv("--exit", 0),
+            "alpha": ["/bin/sh", "-c", f"touch {marker}"],
             # beta intentionally undeclared — and even a pathological
             # argv touching a marker file cannot run.
         },
