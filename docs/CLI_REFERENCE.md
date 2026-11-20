@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 34 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 35 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -298,6 +298,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--schedule-memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per scheduled attempt child. |
 | `--schedule-core` | `<PATH>` | no | — | Optional Core executable: when a scheduled verification selects an attempt, run the Core representation check on its captured output and record the mumei.evidence-check-acceptance/v1 descriptor on the schedule record (use --json for the full record; text output shows only the schedule outcome). |
 | `--schedule-core-requirement` | `<PATH>` | no | — | Optional mumei.evidence-requirement/v1 document: with --schedule-core, run the Core evidence-acceptance check (`core evidence accept --stdin --json --requirement PATH`) on the selected attempt's captured output instead of the representation check, and record Core's declared verdict as the evidence_check outcome. |
+| `--schedule-core-requirement-list` | `<PATH>` | no | — | Optional mumei.evidence-requirement-list/v1 document: with --schedule-core, run the conjunctive Core evidence-acceptance check (`core evidence accept --stdin --json --requirement-list PATH`) on the selected attempt's captured output instead of the representation check, and record Core's declared verdict as the evidence_check outcome. Conflicts with --schedule-core-requirement. |
 
 
 ## `mumei-agent extract-spec`
