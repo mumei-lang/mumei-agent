@@ -2490,6 +2490,28 @@ The model is positional, not a Go type check: a fallthrough the compiler
 would reject can still be graphed, and select/type-switches stay
 unmodelled entirely.
 
+### C05 type-switch alternatives
+
+`switch v := x.(type) { ... }` now builds the same exclusive-alternative
+fan-out as an expression switch: one `case` edge per clause, bodies
+ending at the following statement, `break` exiting the switch and
+`continue` targeting an enclosing loop. The match itself is type-less —
+the graph does not evaluate types, so a type switch with no `default`
+keeps a fall-through edge (no case matching is always possible) while a
+`select` without `default` still blocks. The guard binding is no longer
+dropped: the extractor synthesizes the initializer `define` for
+`v := x.(type)` (the bound name lives in an `expression_list` child and
+`.(type)` is anonymous syntax), so `v`'s assignment and the cases' uses
+of it join the graph like any other `:=`.
+
+Boundaries: this is a control-flow model, not a type analysis — case
+types are not compared, narrowed per-clause bindings (single-type cases
+re-bind `v` with that type in Go) are not distinguished, and
+`fallthrough` is not legal in type switches, so one parsed there stays
+the declared `unsupported_fallthrough` gap instead of being edged like
+an expression switch. Labelled type switches, `goto` and the remaining
+unmodelled constructs still produce their existing gaps.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using

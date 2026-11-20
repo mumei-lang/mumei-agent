@@ -1188,7 +1188,47 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
     if kind in {"expression_switch_statement", "type_switch_statement", "select_statement"}:
         init_node = node.child_by_field_name("initializer")
         init_stmt = _go_statement(source_bytes, init_node, base, offsets) if init_node is not None else None
-        value_node = node.child_by_field_name("value") if kind == "expression_switch_statement" else None
+        value_node = (
+            node.child_by_field_name("value")
+            if kind in {"expression_switch_statement", "type_switch_statement"}
+            else None
+        )
+        type_guard = None
+        if kind == "type_switch_statement":
+            # ``v := x.(type)`` — the bound name sits in an
+            # ``expression_list`` child, the value under ``value`` and
+            # ``.(type)`` is anonymous syntax. Synthesize the init
+            # ``define`` so the binding is not silently dropped.
+            expr_list = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type == "expression_list"
+                ),
+                None,
+            )
+            if expr_list is not None and value_node is not None:
+                names = tuple(
+                    _decode(source_bytes, n).strip()
+                    for n in expr_list.named_children
+                    if n.type != "comment"
+                )
+                value_text = _decode(source_bytes, value_node).strip()
+                guard_start = offsets[expr_list.start_byte] - base
+                guard_text = (
+                    source_bytes[
+                        expr_list.start_byte : value_node.end_byte
+                    ].decode("utf-8", "replace").strip()
+                    + ".(type)"
+                )
+                type_guard = Statement(
+                    kind="define",
+                    text=guard_text,
+                    start=guard_start,
+                    operator=":=",
+                    targets=names,
+                    values=(f"{value_text}.(type)",),
+                )
         cases: list[Statement] = []
         for child in node.named_children:
             if child.type in {"expression_case", "default_case", "type_case", "communication_case"}:
@@ -1254,7 +1294,13 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
                 if kind == "type_switch_statement"
                 else "expression"
             ),
-            init=(init_stmt,) if init_stmt is not None else (),
+            init=(
+                (init_stmt,)
+                if init_stmt is not None
+                else (type_guard,)
+                if type_guard is not None
+                else ()
+            ),
             body=tuple(cases),
             has_tag=value_node is not None or kind != "expression_switch_statement",
         )
