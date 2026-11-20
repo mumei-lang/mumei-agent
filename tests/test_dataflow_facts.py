@@ -2216,3 +2216,19 @@ def test_map_index_with_colon_key_is_not_a_reslice() -> None:
     facts = flow.facts_for_expression("p")
     assert facts is not None
     assert "p" not in facts.nonnil
+
+
+def test_function_named_channel_is_not_a_chan_cast() -> None:
+    # ``channel(ch)`` is an ordinary call — its result must not carry
+    # ``ch``'s closed state, so the send below stays unreported.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    out := channel(ch)\n"
+        "    out <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []

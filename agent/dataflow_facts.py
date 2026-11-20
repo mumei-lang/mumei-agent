@@ -2328,7 +2328,7 @@ class _Walker:
             env.nonneg.add(target)
             return
         chan_cast = re.match(
-            r"^\(?\s*(?:<-)?chan(?:<-)?[^()]*\)?\s*\((.+)\)$", text
+            r"^\(?\s*(?:<-)?chan(?:<-\s*|\s+)[^()]*\)?\s*\((.+)\)$", text
         )
         if chan_cast and re.fullmatch(_IDENT, chan_cast.group(1)):
             # ``chan<- int(ch)`` restricts only the compile-time
