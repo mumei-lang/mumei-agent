@@ -1685,6 +1685,7 @@ class _Walker:
         if not names:
             return
         held = set(inner.held)
+        discharged = {name for name in names if name in inner.nonnil}
         for name in names:
             inner.nilable.pop(name, None)
             inner.kill(name)
@@ -1707,7 +1708,19 @@ class _Walker:
             )
             inner.slices |= {t for t in outer.slices if mentions(t)}
             inner.nilable.update({k: v for k, v in outer.nilable.items() if k == name})
-        inner.held = held
+        inner.held = {
+            # A site name whose inner variable was provably non-nil at
+            # scope exit belonged to a failed open — drop the entry
+            # rather than blanking it into an unconditional report.
+            h for h in held
+            if not (len(h) == 3 and h[2] in discharged)
+        }
+        # A site name declared inside the block refers to the outer
+        # binding again — the pairing is gone, so keep only the handle.
+        inner.held = {
+            (h[0], h[1], "") if len(h) == 3 and h[2] in names else h
+            for h in inner.held
+        }
 
     def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:
         outer = env.copy()
