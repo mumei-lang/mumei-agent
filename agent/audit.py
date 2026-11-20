@@ -1310,6 +1310,19 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "attempt child."
         ),
     )
+    parser.add_argument(
+        "--schedule-core",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Optional Core executable: when a scheduled verification "
+            "selects an attempt, run the Core representation check on its "
+            "captured output and record the "
+            "mumei.evidence-check-acceptance/v1 descriptor on the "
+            "schedule record (use --json for the full record; text "
+            "output shows only the schedule outcome)."
+        ),
+    )
     return parser
 
 @dataclass(frozen=True)
@@ -1328,6 +1341,7 @@ class _ScheduledVerification:
     max_attempts: int
     success_exit_codes: frozenset[int]
     memory_bound_mb: int | None
+    core_executable: str | None
     declared: tuple[str, ...]
 
 
@@ -1340,7 +1354,24 @@ def _scheduled_verification_declared_paths(args: argparse.Namespace) -> tuple[st
     ]
     if getattr(args, "schedule_observations", None) is not None:
         paths.append(args.schedule_observations)
+    if getattr(args, "schedule_core", None) is not None:
+        paths.append(args.schedule_core)
     return tuple(paths)
+
+
+def _validated_schedule_core(path: str | None) -> str | None:
+    if path is None:
+        return None
+    if (
+        type(path) is not str
+        or not os.path.isabs(path)
+        or "\x00" in path
+        or not Path(path).is_file()
+    ):
+        raise ValueError(
+            "--schedule-core must be an absolute path to a regular file"
+        )
+    return path
 
 
 def _load_scheduled_verification(args: argparse.Namespace) -> _ScheduledVerification:
@@ -1369,6 +1400,7 @@ def _load_scheduled_verification(args: argparse.Namespace) -> _ScheduledVerifica
             else frozenset(args.schedule_success_exit_code)
         ),
         memory_bound_mb=args.schedule_memory_bound_mb,
+        core_executable=_validated_schedule_core(args.schedule_core),
         declared=_scheduled_verification_declared_paths(args),
     )
 
@@ -1417,6 +1449,7 @@ def _run_scheduled_verification(
             success_exit_codes=context.success_exit_codes,
             memory_bound_mb=context.memory_bound_mb,
             stdin_for=stdin_for,
+            core_executable=context.core_executable,
         )
     except (OSError, ValueError) as exc:
         # A scheduling failure is not evidence against the audited code, so it
@@ -1474,6 +1507,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 "schedule_max_attempts",
                 "schedule_success_exit_code",
                 "schedule_memory_bound_mb",
+                "schedule_core",
             )
         )
     )
@@ -1501,8 +1535,17 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             raise SystemExit(2)
         if getattr(args, "output", None) is not None:
             target = os.path.realpath(args.output)
+
+            def _is_declared(path: str) -> bool:
+                if os.path.realpath(path) == target:
+                    return True
+                try:
+                    return os.path.samefile(path, args.output)
+                except OSError:
+                    return False
+
             if any(
-                os.path.realpath(path) == target
+                _is_declared(path)
                 for path in _scheduled_verification_declared_paths(args)
             ):
                 print(

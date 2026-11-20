@@ -1,7 +1,9 @@
 """Tests for integrated code audit pipeline."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -4273,7 +4275,11 @@ def test_summary_plan_flag_gating(tmp_path: Path) -> None:
     assert default.summary_plan_histories is None
 
 
-def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
+def _scheduled_verification_files(
+    tmp_path: Path,
+    both_exit: int | None = None,
+    beta_stdout: str | None = None,
+):
     """Declared inputs for the --enable-scheduled-verification lane."""
     def write(name: str, doc: object) -> str:
         path = tmp_path / f"FAKE_PRIVATE_SCHED_{name}.json"
@@ -4303,6 +4309,12 @@ def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
 
     alpha_exit = both_exit if both_exit is not None else 3
     beta_exit = both_exit if both_exit is not None else 0
+    beta_code = f"import sys; sys.exit({beta_exit})"
+    if beta_stdout is not None:
+        beta_code = (
+            f"import sys; sys.stdout.write({beta_stdout!r}); "
+            f"sys.exit({beta_exit})"
+        )
     return {
         "request": write(
             "request",
@@ -4318,7 +4330,7 @@ def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
             "argv",
             {
                 "alpha": [sys.executable, "-c", f"import sys; sys.exit({alpha_exit})"],
-                "beta": [sys.executable, "-c", f"import sys; sys.exit({beta_exit})"],
+                "beta": [sys.executable, "-c", beta_code],
             },
         ),
         "policy": write(
@@ -4345,25 +4357,33 @@ def _scheduled_verification_files(tmp_path: Path, both_exit: int | None = None):
     }
 
 
-def _scheduled_verification_ctx(tmp_path: Path, both_exit: int | None = None):
-    files = _scheduled_verification_files(tmp_path, both_exit=both_exit)
-    args = build_parser().parse_args(
-        [
-            "--code-file",
-            str(tmp_path / "placeholder.py"),
-            "--enable-scheduled-verification",
-            "--schedule-request",
-            files["request"],
-            "--schedule-adapters",
-            files["adapters"],
-            "--schedule-argv-map",
-            files["argv_map"],
-            "--schedule-policy",
-            files["policy"],
-            "--schedule-observations",
-            files["observations"],
-        ]
+def _scheduled_verification_ctx(
+    tmp_path: Path,
+    both_exit: int | None = None,
+    core: str | None = None,
+    beta_stdout: str | None = None,
+):
+    files = _scheduled_verification_files(
+        tmp_path, both_exit=both_exit, beta_stdout=beta_stdout
     )
+    argv = [
+        "--code-file",
+        str(tmp_path / "placeholder.py"),
+        "--enable-scheduled-verification",
+        "--schedule-request",
+        files["request"],
+        "--schedule-adapters",
+        files["adapters"],
+        "--schedule-argv-map",
+        files["argv_map"],
+        "--schedule-policy",
+        files["policy"],
+        "--schedule-observations",
+        files["observations"],
+    ]
+    if core is not None:
+        argv += ["--schedule-core", core]
+    args = build_parser().parse_args(argv)
     return _load_scheduled_verification(args)
 
 
@@ -4528,6 +4548,15 @@ def test_audit_scheduled_verification_output_overwrite_rejected(
         )
     assert "must not overwrite" in capsys.readouterr().err
 
+    # A hardlink is a different path onto the same inode.
+    hard = tmp_path / "policy_hardlink.json"
+    os.link(Path(files["policy"]), hard)
+    with pytest.raises(SystemExit):
+        main(
+            build_parser().parse_args(base_args + ["--output", str(hard)])
+        )
+    assert "must not overwrite" in capsys.readouterr().err
+
 
 def test_audit_scheduled_verification_load_error_redacts(
     tmp_path: Path, capsys
@@ -4554,3 +4583,81 @@ def test_audit_scheduled_verification_load_error_redacts(
         main(args)
     err = capsys.readouterr().err
     assert "FAKE_PRIVATE" not in err
+
+
+def test_audit_scheduled_verification_core_records_evidence(
+    tmp_path: Path,
+) -> None:
+    # Stub Core emitting the v1 representation diagnostic.
+    diagnostic = {
+        "schema_version": "mumei.evidence-representation-check/v1",
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "checks_not_performed": [
+            "claim_truth", "file_identity", "freshness",
+            "producer_authenticity", "semantic_correspondence",
+            "artifact_semantics",
+        ],
+    }
+    expected = "BETA_DECLARED_OUTPUT"
+    expected_sha = hashlib.sha256(expected.encode()).hexdigest()
+    core = tmp_path / "mumei-stub"
+    # Accepts only the selected adapter's exact captured bytes; sha via
+    # Python — no mktemp/SHA tool dependency across platforms.
+    sha_check = (
+        '"%s" -c "import hashlib, sys; '
+        'd = sys.stdin.buffer.read(); '
+        "sys.exit(0 if hashlib.sha256(d).hexdigest() == '"
+        + expected_sha
+        + "' else 1)"
+        '"'
+    ) % sys.executable
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
+        "    " + sha_check + " || exit 1\n"
+        "    printf %s '" + json.dumps(diagnostic) + "'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=_scheduled_verification_ctx(
+            tmp_path, core=str(core), beta_stdout=expected
+        ),
+    )
+    schedule = result.scheduled_verification
+    assert schedule["evidence_check"]["outcome"] == "valid"
+    assert schedule["evidence_acceptance"]["accepted"] is True
+    assert "FAKE_PRIVATE" not in json.dumps(schedule)
+
+
+def test_audit_scheduled_verification_core_requires_absolute_path(
+    tmp_path: Path,
+) -> None:
+    files = _scheduled_verification_files(tmp_path)
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(tmp_path / "placeholder.py"),
+            "--enable-scheduled-verification",
+            "--schedule-request",
+            files["request"],
+            "--schedule-adapters",
+            files["adapters"],
+            "--schedule-argv-map",
+            files["argv_map"],
+            "--schedule-policy",
+            files["policy"],
+            "--schedule-core",
+            "relative/mumei",
+        ]
+    )
+    with pytest.raises(ValueError, match="--schedule-core"):
+        _load_scheduled_verification(args)

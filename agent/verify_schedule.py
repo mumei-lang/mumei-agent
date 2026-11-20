@@ -437,7 +437,12 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                 inputs.append(args.observations)
             if getattr(args, "core", None) is not None:
                 inputs.append(args.core)
-            if any(os.path.realpath(p) == target for p in inputs):
+            if any(
+                os.path.realpath(p) == target
+                or os.path.exists(args.output)
+                and os.path.samefile(p, args.output)
+                for p in inputs
+            ):
                 raise ValueError(
                     "--output must not overwrite a declared input"
                 )
