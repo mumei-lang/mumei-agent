@@ -367,6 +367,9 @@ _MAKE_SIZE = re.compile(r"^make\(\[\][^,]+,\s*(\w+)(?:,[^)]*)?\)$")
 _MAKE_GROW = re.compile(rf"^make\(\[\][^,]+,\s*({_IDENT})\+(\w+)(?:,[^)]*)?\)$")
 _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*)\{")
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
+_GO_STRING_LIT = re.compile(
+    r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'"
+)
 _SLICE_LITERAL = re.compile(r"^\[\][^{]+\{(.*)\}$", re.DOTALL)
 _CAST = re.compile(rf"^(?:{'|'.join(sorted(_GO_INT_TYPES))})\((.+)\)$")
 _GO_INT_CAST = re.compile(rf"\b(?:{'|'.join(sorted(_GO_INT_TYPES))}|uintptr|byte|rune)\(")
@@ -2004,8 +2007,11 @@ class _Walker:
                         if h[1] == name
                         and h[0] in {"file", "closed_file", "deferred"}
                     }
-                    reslice = _SLICE_EXPR.match(_norm(value)) and re.match(
-                        rf"^({re.escape(_norm(name))})\[", _norm(value)
+                    reslice_inner = re.match(
+                        rf"^{re.escape(_norm(name))}\[(.*)\]$", _norm(value)
+                    )
+                    reslice = reslice_inner and ":" in _GO_STRING_LIT.sub(
+                        "", reslice_inner.group(1)
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2135,8 +2141,12 @@ class _Walker:
                         if h[1] == target
                         and h[0] in {"file", "closed_file", "deferred"}
                     }
-                    reslice = _SLICE_EXPR.match(_norm(value)) and re.match(
-                        rf"^({re.escape(_norm(target))})\[", _norm(value)
+                    reslice_inner = re.match(
+                        rf"^{re.escape(_norm(target))}\[(.*)\]$",
+                        _norm(value),
+                    )
+                    reslice = reslice_inner and ":" in _GO_STRING_LIT.sub(
+                        "", reslice_inner.group(1)
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2215,14 +2225,15 @@ class _Walker:
             nilable = env.nilable[text]
         if nilable is not None:
             env.nilable[target] = nilable
-        slice_source = re.match(rf"^({_IDENT})\[", text)
+        slice_source = re.match(rf"^({_IDENT})\[(.*)\]$", text)
         if (
             slice_source
-            and _SLICE_EXPR.match(text)
             and slice_source.group(1) != target
+            and ":" in _GO_STRING_LIT.sub("", slice_source.group(2))
         ):
             # ``x := s[lo:hi]`` re-slices the same backing — the result is
             # nil exactly when the source is, so its nil state carries.
+            # ``m["a:b"]`` is a map index, not a reslice.
             source = slice_source.group(1)
             for h in tuple(env.held):
                 if h[1] == source and h[0] in _NILABLE_HELD:

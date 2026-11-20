@@ -2201,3 +2201,18 @@ def test_var_self_reference_drops_outer_facts() -> None:
     )
     assert "d" not in facts.nonzero
     assert "d" not in facts.consts
+
+
+def test_map_index_with_colon_key_is_not_a_reslice() -> None:
+    # ``m["a:b"]`` is a map index whose key contains a colon — the
+    # reslice propagation must not fire, so ``p`` does not inherit
+    # the map's non-nil state.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if m == nil {\n    return 0\n}\np := m[\"a:b\"]\nreturn p", "go"
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
