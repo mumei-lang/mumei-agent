@@ -19212,6 +19212,53 @@ def test_scalar_container_bind_read_write_admits(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # A callee's store through a container parameter reaches
+        # caller memory — `G` records the write like `*p = v`, so
+        # the caller folds the args' deps into `a`'s sharers.
+        (
+            "func G(s []int64, v int64) {\n"
+            "\ts[0] = v\n"
+            "}\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Sibling container params seed one share group — `G(a, a)`
+        # hands the same backing to both slots, so a store through
+        # `s` lands in `t`'s set and `return t[0]` observes it.
+        (
+            "func G(s []int64, t []int64, v int64) int64 {\n"
+            "\ts[0] = v\n"
+            "\treturn t[0]\n"
+            "}\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\treturn G(a, a, x)\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A pure scalar array param is a local copy — `b[0] = x`
+        # lands only in `b`'s own seeded set (the conflated set
+        # reports the ordinal alongside the store's deps) and no
+        # `/caller-backing` transfer records the write.
+        (
+            "func F(b [2]int64, x int64) int64 {\n"
+            "\tb[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_container_param_write_reaches_caller(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # `delete(m, k)` — the builtin has no scalar-container

@@ -4004,12 +4004,26 @@ rebind `s = lib.G(b)`/`s = t` retarget or drop the backing token —
 a non-container RHS detaches the name so `s[i]` fails closed
 again. Literals, multi-result calls, package container vars and
 non-scalar elements stay closed. A scalar-element container
-PARAMETER registers as its own share group at function entry like
-the `struct` seed: `a[i] = x` accumulates on the param's (the
+PARAMETER registers as a share group at function entry like the
+`struct` seed: `a[i] = x` accumulates on the param's (the
 caller's) dep set, `b := a`/`b := a[i]` share it, `a = s` reseats
 off the caller's backing, and reads carry the param ordinal plus
-whatever the body stored — `a = nil` detaches it the same way. A
-scalar-element collection RESULT (`func G() []int64`) admits too:
+whatever the body stored — `a = nil` detaches it the same way.
+Container params that can share backing (slices, maps, and arrays
+of shared-memory elements like `[N][]T`) seed ONE group — a store
+through `s` lands in `t`'s set so `G(a, a)` stays honest; a pure
+`[N]int64` is a local copy and keeps a solo group. A param whose
+dep set grows past its seed — a store landed on caller-visible
+memory — records an imported `/caller-backing` transfer like the
+`*p = v` `/pointee` write, so `effects` reports unknown and the
+caller's `_store_call_writes` folds the argument deps into the
+container arg's sharers: `G(s, v) { s[0] = v }` makes
+`G(a, x); return a[0]` read `{0, 1}` — and a local callee's
+`return s` unions the named params' arg tokens into the result's
+backing, so `t := G(a)` joins `a`'s group (`return []int64{s[0]}`
+over-joins the same way, the conflated `return_dependencies`
+trade-off). A scalar-element collection RESULT (`func G()
+[]int64`) admits too:
 its dep set is the local's conflated one and the caller binds it
 like any `t := g()` container. Multi-level index READS (`s[i][j]`)
 admit one `elem` descent per level like the imported-member read;
