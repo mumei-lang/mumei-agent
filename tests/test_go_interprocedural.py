@@ -18466,6 +18466,58 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0]\n}\n",
             frozenset({0}),
         ),
+        # `s.F, s.G = s.G, s.F` swaps the fields' backings — `a`
+        # still aliases the slice `s.F` named at pre-state, and
+        # `s.G` reseated onto that same group, so the store reaches
+        # a `b := s.G` bound after the swap.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64; G []int64 }\n"
+            "\ta := s.F\n"
+            "\ts.F, s.G = s.G, s.F\n"
+            "\tb := s.G\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The other direction of the same swap — `b` aliases
+        # `s.G`'s old backing and `s.F` reseated onto it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64; G []int64 }\n"
+            "\tb := s.G\n"
+            "\ts.F, s.G = s.G, s.F\n"
+            "\tc := s.F\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `if c { s.F = t }` — the untaken path keeps `s.F` aimed
+        # at `a`'s backing, so `a[0] = x` still lands in `s`'s
+        # conflated set and `b`'s read observes it.
+        (
+            "func F(x int64, c bool) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tvar t []int64\n"
+            "\tif c {\n\t\ts.F = t\n\t}\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A conditional `s.F = nil` likewise leaves the old backing
+        # a candidate — the untaken path never dissolved the group.
+        (
+            "func F(x int64, c bool) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tif c {\n\t\ts.F = nil\n\t}\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
         # `_ = append(a, x)` — a discarded append may still reuse
         # `a`'s array, so its elements land in the backing.
         (

@@ -9939,6 +9939,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     (fkey, root_id, old_toks, new_toks)
                 )
             for fkey, root_id, old_toks, new_toks in reseat_plan:
+                if conditional or self._may_skip > 0:
+                    # `if c { s.F = v }` — the untaken path keeps
+                    # `s.F` aimed at its old backing, so the reseat
+                    # unions the new tokens like `_store`'s
+                    # conditional join (never pops or subtracts).
+                    if new_toks:
+                        self._opaque_container_tokens[fkey] = (
+                            self._opaque_container_tokens.get(
+                                fkey, frozenset()
+                            )
+                            | new_toks
+                        )
+                        self._opaque_container_tokens[root_id] = (
+                            self._opaque_container_tokens.get(
+                                root_id, frozenset()
+                            )
+                            | new_toks
+                        )
+                    continue
                 if new_toks is None:
                     # `s.F = nil` or an untracked RHS — the field's
                     # share group dissolves; a later `b := s.F`
