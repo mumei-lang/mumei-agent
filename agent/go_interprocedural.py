@@ -1481,6 +1481,27 @@ class _Builder:
             self._pin_fact_identities(fact)
         return collection
 
+    def _scalar_elem_nested_collection(self, fact: Any) -> bool:
+        """A `[][]T`/`map[K][]T`/`[N][]T` local — exactly one level
+        of nesting over a scalar-element collection. It rides the
+        same backing-token model with a ONE-LEVEL conflation like
+        the func-element collection-of-collection: every inner
+        element lands in the root binding's conflated dep set —
+        `a[i][j] = v` stores into the backing every sharer reads,
+        `a[i][j]` unions the sharers' sets with both indexes' deps,
+        and `a[i] = inner` replaces a slot while its deps join the
+        same set. Extracting an inner container (`b := a[i]`) or a
+        deeper nest stays closed."""
+        collection = (
+            fact is not None
+            and fact.kind in {"slice", "array", "map"}
+            and getattr(fact, "elem", None) is not None
+            and self._scalar_elem_collection(fact.elem)
+        )
+        if collection:
+            self._pin_fact_identities(fact)
+        return collection
+
     def _func_elem_nested_operand(
         self, operand: Any
     ) -> tuple[str, Any, Any | None] | None:
@@ -1641,11 +1662,14 @@ class _Builder:
 
     def _opaque_container_index_target(
         self, lhs: Any
-    ) -> tuple[Any, Any | None] | None:
+    ) -> tuple[Any, Any | None, Any | None] | None:
         """`s[i]` as an element-store LHS whose operand names a bound
         opaque container (`s := lib.G(a)`). Returns the operand's
-        reference and the index node — one level only: a nested
-        `s[i][j]` operand is an index expression, not an identifier."""
+        reference, the index node, and — for a nested `a[i][j]` on
+        a bound scalar-nested collection — the inner index node
+        (the elements conflate under the root `a` like the
+        func-element collection-of-collection). A deeper nest or a
+        computed operand stays closed."""
         if lhs is None or lhs.type != "index_expression":
             return None
         operand = lhs.child_by_field_name("operand")
@@ -1654,7 +1678,23 @@ class _Builder:
             and operand.type == "parenthesized_expression"
         ):
             operand = operand.child_by_field_name("operand")
-        if operand is None or operand.type != "identifier":
+        if operand is None:
+            return None
+        inner_index = None
+        if operand.type == "index_expression":
+            # `a[i][j]` — the inner operand must name a bound
+            # scalar-nested collection; the store lands in the
+            # root's backing.
+            inner_index = operand.child_by_field_name("index")
+            operand = operand.child_by_field_name("operand")
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = operand.child_by_field_name("operand")
+            if operand is None or operand.type != "identifier":
+                return None
+        if operand.type != "identifier":
             return None
         ref = self.references.get(self.node_key(operand))
         if (
@@ -1663,7 +1703,13 @@ class _Builder:
             or ref.binding_id not in self._opaque_container_tokens
         ):
             return None
-        return ref, lhs.child_by_field_name("index")
+        if inner_index is not None:
+            bound = self.bindings.get(ref.binding_id)
+            if bound is None or not self._scalar_elem_nested_collection(
+                bound.type
+            ):
+                return None
+        return ref, lhs.child_by_field_name("index"), inner_index
 
     def _func_elem_index_target(
         self, lhs: Any, locals_: dict[str, frozenset[int]]
@@ -4824,10 +4870,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 continue
             opaque_elem = self._opaque_container_index_target(lhs)
             if opaque_elem is not None:
-                ref, index_node = opaque_elem
+                ref, index_node, inner_index = opaque_elem
                 # `a[i] = <-ch` — a store into a bound container's
                 # backing lands the received deps (plus the index's
                 # own) in every sharer's set, like `a[i] = v` does.
+                # `a[i][j] = <-ch` unions the inner index's deps too.
                 index_deps = (
                     self.expression(
                         index_node, fn, params, locals_,
@@ -4836,6 +4883,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if index_node is not None
                     else frozenset()
                 )
+                if inner_index is not None:
+                    index_deps |= self.expression(
+                        inner_index, fn, params, locals_,
+                        transfers, count, 0,
+                    )
                 self._record_read(index_deps)
                 pending.append(("elem", ref, index_deps))
                 continue
@@ -8106,8 +8158,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if (
                         opaque_toks is None
                         or not self._opaque_container_fact(binding.type)
-                    ) and not self._scalar_elem_collection(
-                        binding.type
+                    ) and not (
+                        self._scalar_elem_collection(binding.type)
+                        or self._scalar_elem_nested_collection(
+                            binding.type
+                        )
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
@@ -8743,8 +8798,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or not self._opaque_container_fact(
                                 binding.type
                             )
-                        ) and not self._scalar_elem_collection(
-                            binding.type
+                        ) and not (
+                            self._scalar_elem_collection(binding.type)
+                            or self._scalar_elem_nested_collection(
+                                binding.type
+                            )
                         ):
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
@@ -9849,7 +9907,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     lhs
                 )
                 if opaque_elem_lhs is not None:
-                    oref, oindex = opaque_elem_lhs
+                    oref, oindex, inner_index = opaque_elem_lhs
                     refs.append(oref)
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(
@@ -9865,6 +9923,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         opaque_elem_index_deps[ri] = self.expression(
                             oindex, fn, params, locals_,
                             transfers, count, 0,
+                        )
+                        self._record_read(
+                            opaque_elem_index_deps[ri]
+                        )
+                    if (
+                        inner_index is not None
+                        and inner_index.type not in _INDEX_LITERALS
+                    ):
+                        opaque_elem_index_deps[ri] |= (
+                            self.expression(
+                                inner_index, fn, params, locals_,
+                                transfers, count, 0,
+                            )
                         )
                         self._record_read(
                             opaque_elem_index_deps[ri]
@@ -10787,7 +10858,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 ref.binding_id
                             ] = new_toks
                         elif (
-                            self._scalar_elem_collection(bound.type)
+                            (
+                                self._scalar_elem_collection(bound.type)
+                                or self._scalar_elem_nested_collection(
+                                    bound.type
+                                )
+                            )
                             and reseat_rhs is not None
                             and reseat_rhs.type
                             in {"composite_literal", "call_expression"}
@@ -13402,7 +13478,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 return
             opaque_elem = self._opaque_container_index_target(operand)
             if opaque_elem is not None:
-                ref, index_node = opaque_elem
+                ref, index_node, inner_index = opaque_elem
                 # `a[i]++` — the stored value's provenance is the
                 # element's own (the backing's conflated set) plus
                 # the index that picked the slot; both union back
@@ -13410,11 +13486,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 elem_value = self._opaque_container_deps(
                     ref.binding_id, locals_
                 )
-                if index_node is not None:
-                    elem_value = elem_value | self.expression(
-                        index_node, fn, params, locals_,
-                        transfers, count, 0,
-                    )
+                for idx in (index_node, inner_index):
+                    if idx is not None:
+                        elem_value = elem_value | self.expression(
+                            idx, fn, params, locals_,
+                            transfers, count, 0,
+                        )
                 for holder_id in self._opaque_container_sharers(
                     ref.binding_id
                 ):
