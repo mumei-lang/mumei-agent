@@ -1824,6 +1824,58 @@ class _Builder:
             "struct",
         }
 
+    def _scalar_container_field(
+        self, sel: Any
+    ) -> tuple[str | None, Any]:
+        """`s.F` (or a nested `s.W.F`) naming a scalar-element
+        collection field on a local-composite root — returns
+        (root binding id, member), else (None, None). An array
+        member is included: callers decide whether its copy
+        semantics admit a shared backing token."""
+        field = sel.child_by_field_name("field")
+        f_ref = (
+            self.references.get(self.node_key(field))
+            if field is not None
+            else None
+        )
+        member = self._field_identity(f_ref)
+        root = sel.child_by_field_name("operand")
+        while root is not None and root.type in {
+            "parenthesized_expression",
+            "selector_expression",
+            "field_expression",
+            "index_expression",
+            "dereference_expression",
+        }:
+            if root.type == "parenthesized_expression":
+                root = next(
+                    (
+                        c
+                        for c in root.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            else:
+                root = root.child_by_field_name("operand")
+        root_ref = (
+            self.references.get(self.node_key(root))
+            if root is not None and root.type == "identifier"
+            else None
+        )
+        if (
+            member is None
+            or member.type is None
+            or not self._scalar_elem_collection(member.type)
+            or root_ref is None
+            or root_ref.binding_id is None
+            or not self._is_local_composite(
+                self.bindings.get(root_ref.binding_id)
+            )
+        ):
+            return None, None
+        return root_ref.binding_id, member
+
     def _opaque_container_bind(
         self, rhs: Any
     ) -> frozenset[tuple[int, int, int]] | None:
@@ -2001,58 +2053,16 @@ class _Builder:
             self._opaque_container_tokens[ref.binding_id] = fresh
             return fresh
         if rhs.type in {"selector_expression", "field_expression"}:
-            # `a := s.F` — an alias for a composite's container
-            # field. Two reads of the same field name the same
-            # backing (`a := s.F; b := s.F`), so the group keys on
-            # the (root, member) pair and the root joins the
-            # sharers: a store through `a` lands on `s`'s conflated
-            # set where `s.F[j]` reads it. A selector into
-            # anything else (a package operand, a computed base)
-            # has no per-instance identity to key on and stays
-            # closed at the gate.
-            field = rhs.child_by_field_name("field")
-            f_ref = (
-                self.references.get(self.node_key(field))
-                if field is not None
-                else None
-            )
-            member = self._field_identity(f_ref)
-            root = rhs.child_by_field_name("operand")
-            while root is not None and root.type in {
-                "parenthesized_expression",
-                "selector_expression",
-                "field_expression",
-                "index_expression",
-                "dereference_expression",
-            }:
-                if root.type == "parenthesized_expression":
-                    root = next(
-                        (
-                            c
-                            for c in root.named_children
-                            if c.type != "comment"
-                        ),
-                        None,
-                    )
-                else:
-                    root = root.child_by_field_name("operand")
-            root_ref = (
-                self.references.get(self.node_key(root))
-                if root is not None and root.type == "identifier"
-                else None
-            )
-            if (
-                member is None
-                or member.type is None
-                or not self._scalar_elem_collection(member.type)
-                or root_ref is None
-                or root_ref.binding_id is None
-                or not self._is_local_composite(
-                    self.bindings.get(root_ref.binding_id)
-                )
-            ):
+            root_id, member = self._scalar_container_field(rhs)
+            if root_id is None:
                 return None
-            field_key = f"{root_ref.binding_id}\x00{member.id}"
+            if member.type.kind == "array":
+                # `a := s.F` on an array field is a value copy —
+                # each extraction mints its own backing. Sharing
+                # the field's token (or joining `s`'s group) would
+                # leak `a[i] = x` into an independent `b`'s reads.
+                return frozenset({self.node_key(rhs)})
+            field_key = f"{root_id}\x00{member.id}"
             toks = self._opaque_container_tokens.get(field_key)
             if not toks:
                 toks = frozenset({self.node_key(rhs)})
@@ -2061,9 +2071,9 @@ class _Builder:
             # the group so `a[i] = x` lands on the slot `s.F[j]`
             # reads. Different fields mint different token sets but
             # all reach `s`, matching the composite's own conflation.
-            self._opaque_container_tokens[root_ref.binding_id] = (
+            self._opaque_container_tokens[root_id] = (
                 self._opaque_container_tokens.get(
-                    root_ref.binding_id, frozenset()
+                    root_id, frozenset()
                 )
                 | toks
             )

@@ -18420,6 +18420,17 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0]\n}\n",
             frozenset(),
         ),
+        # `a := s.F` on an ARRAY field copies — `b` is an
+        # independent value, so `a[0] = x` never reaches it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [4]int64 }\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset(),
+        ),
         # `_ = append(a, x)` — a discarded append may still reuse
         # `a`'s array, so its elements land in the backing.
         (
