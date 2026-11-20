@@ -15159,6 +15159,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # st's conflated set, so letting a pointer alias it
                 # would under-approximate the read.
                 root = operand
+                saw_index = False
                 while root is not None and root.type in {
                     "parenthesized_expression",
                     "selector_expression",
@@ -15174,6 +15175,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             None,
                         )
                     else:
+                        if root.type == "index_expression":
+                            saw_index = True
                         root = root.child_by_field_name("operand")
                 # `&P{...}` stays closed too: the literal carries the
                 # initializer's deps, but the bound-pointer field read
@@ -15190,6 +15193,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self.bindings.get(root_ref.binding_id)
                 ):
                     raise _Unsupported("unsupported_operator", _span(node))
+                if (
+                    saw_index
+                    and root_ref is not None
+                    and root_ref.binding_id
+                    in self._opaque_container_tokens
+                    and (
+                        (root_binding := self.bindings.get(
+                            root_ref.binding_id
+                        )) is not None
+                        and root_binding.type is not None
+                        and self._scalar_elem_collection(
+                            root_binding.type
+                        )
+                    )
+                ):
+                    # `p := &a[i]` — a pointer into a bound scalar
+                    # container's backing. Marking the container
+                    # escaped folds `*p = x` into its conflated set
+                    # through the deref-store path, and the sharer
+                    # union then lets every alias's `b[j]` read it.
+                    self.escaped.add(root_ref.binding_id)
                 ref = (
                     self.references.get(self.node_key(operand))
                     if operand is not None
