@@ -63,7 +63,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `verify-accept` | 8 | Run a declared Core source-evidence acceptance evaluation as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
-| `verify-schedule` | 12 | Run the declared plan/dispatch/observe/fallback schedule over declared adapter manifests and emit mumei.attempt-schedule/v1. The schedule is a dispatch record, not an Evidence acceptance. |
+| `verify-schedule` | 14 | Run the declared plan/dispatch/observe/fallback schedule over declared adapter manifests and emit mumei.attempt-schedule/v1. The schedule is a dispatch record, not an Evidence acceptance. |
 | `verify-plan` | 5 | Plan one declared route through the adapter registry and emit mumei.verification-plan/v1 — the selected adapter, its effective non-secret settings, per-candidate selection/exclusion reasons and the fallback origin. Planning only: nothing is spawned, dispatched or accepted. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
@@ -982,6 +982,8 @@ Run the declared plan/dispatch/observe/fallback schedule over declared adapter m
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per attempt child. |
 | `--core` | `<PATH>` | no | — | Optional Core executable: when a schedule selects an attempt, run the Core representation check on its captured output and record the mumei.evidence-check-acceptance/v1 descriptor. |
 | `--core-requirement` | `<PATH>` | no | — | Optional declared mumei.evidence-requirement/v1 document: requires --core; the selected attempt's check becomes the requirement-declared `evidence accept` and the recorded outcome is Core's verdict. |
+| `--core-requirement-list` | `<PATH>` | no | — | Optional declared mumei.evidence-requirement-list/v1 document: requires --core and conflicts with --core-requirement; the selected attempt's check becomes the conjunctive requirement-declared `evidence accept` and the descriptor is promotable gate input. |
+| `--export-evidence-acceptance` | `<DIR>` | no | — | Optional export directory: requires --core-requirement-list; writes the promotable gate triple (requirement-list.json, evidence.json, acceptance.json) for `mumei claims --require-evidence-acceptance`. |
 | `--output` | `<PATH>` | no | — | Write the schedule document here instead of stdout. |
 
 

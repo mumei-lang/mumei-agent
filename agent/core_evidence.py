@@ -263,6 +263,134 @@ def check_evidence_requirement(
         ) from None
 
 
+def check_evidence_requirement_list(
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    requirement_list_path: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+    attempt_sequence: AttemptSequence | None = None,
+) -> dict:
+    """Send original bytes to `core evidence accept --requirement-list`.
+
+    Same spawn/cancellation/lineage contract as
+    `check_evidence_requirement`, but the declared requirement is a
+    `mumei.evidence-requirement-list/v1` document and the returned
+    descriptor is `mumei.evidence-requirement-list-acceptance/v1` — the
+    conjunctive, promotable shape a downstream gate consumes. The
+    descriptor is validated just as strictly: duplicate-free object,
+    `acceptance: "evaluated"`, verdict agreeing with the exit code,
+    64-char `requirement_list_fingerprint`, the requirement-list and
+    record schema pins, and `evidence_fingerprint` bound to the bytes
+    fed on stdin. The check stays a host-declared observation only."""
+    if (
+        os.name != "posix"
+        or type(output) is not AttemptOutput
+        or type(core_executable) is not str
+        or not os.path.isabs(core_executable)
+        or "\x00" in core_executable
+        or type(requirement_list_path) is not str
+        or not os.path.isabs(requirement_list_path)
+        or "\x00" in requirement_list_path
+        or type(timeout_ms) is not int
+        or not 1 <= timeout_ms <= MAX_CHECK_TIMEOUT_MS
+        or (cancel_event is not None and type(cancel_event) is not threading.Event)
+        or (
+            attempt_sequence is not None
+            and type(attempt_sequence) is not AttemptSequence
+        )
+    ):
+        raise ValueError("unsupported Core requirement check request")
+    if attempt_sequence is not None:
+        attempt_sequence.check_output_binding(output)
+    try:
+        stdout, code = _run_check(
+            output.stdout,
+            core_executable,
+            timeout_ms,
+            cancel_event,
+            argv_tail=(
+                "accept",
+                "--stdin",
+                "--json",
+                "--requirement-list",
+                requirement_list_path,
+            ),
+        )
+        _check_cancelled(cancel_event)
+        pairs = json.loads(stdout.decode("utf-8"), object_pairs_hook=tuple)
+        if (
+            type(pairs) is not tuple
+            or len(pairs) != len({key for key, _ in pairs})
+        ):
+            raise ValueError
+        descriptor = dict(pairs)
+        verdict = descriptor.get("verdict")
+        if (
+            descriptor.get("schema_version")
+            != "mumei.evidence-requirement-list-acceptance/v1"
+            or descriptor.get("acceptance") != "evaluated"
+            or _VERDICT_EXIT_CODES.get(verdict) != code
+            or not _is_fingerprint(descriptor.get("requirement_list_fingerprint"))
+            or descriptor.get("requirement_schema_version")
+            != "mumei.evidence-requirement-list/v1"
+            or descriptor.get("evidence_schema_version")
+            != "mumei.verification-evidence/v1"
+            or descriptor.get("evidence_fingerprint")
+            != hashlib.sha256(output.stdout).hexdigest()
+            or descriptor.get("list_fingerprint") is not None
+        ):
+            raise ValueError
+        _check_cancelled(cancel_event)
+        return descriptor
+    except CoreCheckCancelled:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
+        raise CoreCheckFailed(
+            "Core Evidence requirement check failed"
+        ) from None
+
+
+def record_evidence_acceptance_list(
+    sequence: AttemptSequence,
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    requirement_list_path: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[AttemptEvidenceCheck, dict | None]:
+    """`record_evidence_acceptance` over a declared requirement list.
+
+    Same contract — the record's outcome is the Core `evidence accept`
+    verdict — but Core evaluates a `mumei.evidence-requirement-list/v1`
+    document and returns the conjunctive
+    `mumei.evidence-requirement-list-acceptance/v1` descriptor."""
+    if type(sequence) is not AttemptSequence:
+        raise ValueError("unsupported Core requirement check request")
+    candidate = sequence.evidence_candidate()
+    sequence.check_output_binding(output)
+    if output.to_dict()["output_fingerprint"] != candidate.output_fingerprint:
+        raise ValueError("evidence check output is not the selected result")
+    try:
+        descriptor = check_evidence_requirement_list(
+            output,
+            core_executable=core_executable,
+            requirement_list_path=requirement_list_path,
+            timeout_ms=timeout_ms,
+            cancel_event=cancel_event,
+            attempt_sequence=sequence,
+        )
+    except CoreCheckCancelled:
+        outcome, descriptor = "cancelled", None
+    except CoreCheckFailed:
+        outcome, descriptor = "failed", None
+    else:
+        outcome = descriptor["verdict"]
+    return sequence.evidence_check(candidate, outcome), descriptor
+
+
 def record_evidence_acceptance(
     sequence: AttemptSequence,
     output: AttemptOutput,

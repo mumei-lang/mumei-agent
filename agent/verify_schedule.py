@@ -257,6 +257,25 @@ def build_schedule_parser(
         ),
     )
     parser.add_argument(
+        "--core-requirement-list", metavar="PATH", default=None,
+        help=(
+            "Optional declared mumei.evidence-requirement-list/v1 "
+            "document: requires --core and conflicts with "
+            "--core-requirement; the selected attempt's check becomes "
+            "the conjunctive requirement-declared `evidence accept` and "
+            "the descriptor is promotable gate input."
+        ),
+    )
+    parser.add_argument(
+        "--export-evidence-acceptance", metavar="DIR", default=None,
+        help=(
+            "Optional export directory: requires "
+            "--core-requirement-list; writes the promotable gate triple "
+            "(requirement-list.json, evidence.json, acceptance.json) "
+            "for `mumei claims --require-evidence-acceptance`."
+        ),
+    )
+    parser.add_argument(
         "--output", metavar="PATH",
         help="Write the schedule document here instead of stdout.",
     )
@@ -290,6 +309,28 @@ def run_schedule(args: argparse.Namespace) -> dict:
     ):
         raise ValueError(
             "--core-requirement requires --core and an absolute path to a regular file"
+        )
+    requirement_list = getattr(args, "core_requirement_list", None)
+    if requirement_list is not None and (
+        core is None
+        or requirement is not None
+        or not os.path.isabs(requirement_list)
+        or "\x00" in requirement_list
+        or not Path(requirement_list).is_file()
+    ):
+        raise ValueError(
+            "--core-requirement-list requires --core, conflicts with "
+            "--core-requirement and needs an absolute path to a regular file"
+        )
+    export_dir = getattr(args, "export_evidence_acceptance", None)
+    if export_dir is not None and (
+        requirement_list is None
+        or not os.path.isabs(export_dir)
+        or "\x00" in export_dir
+    ):
+        raise ValueError(
+            "--export-evidence-acceptance requires --core-requirement-list "
+            "and an absolute directory path"
         )
     source = declared.read_bytes()
     success = (
@@ -334,6 +375,8 @@ def run_schedule(args: argparse.Namespace) -> dict:
         stdin_for=stdin_for,
         core_executable=core,
         core_requirement=requirement,
+        core_requirement_list=requirement_list,
+        export_dir=export_dir,
     )
     return result.to_dict()
 
@@ -345,6 +388,10 @@ def _declared_paths(args: argparse.Namespace) -> list[str]:
         paths.append(args.core)
     if getattr(args, "core_requirement", None) is not None:
         paths.append(args.core_requirement)
+    if getattr(args, "core_requirement_list", None) is not None:
+        paths.append(args.core_requirement_list)
+    if getattr(args, "export_evidence_acceptance", None) is not None:
+        paths.append(args.export_evidence_acceptance)
     if args.observations is not None:
         paths.append(args.observations)
     if args.output is not None:
@@ -461,6 +508,10 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                 inputs.append(args.core)
             if getattr(args, "core_requirement", None) is not None:
                 inputs.append(args.core_requirement)
+            if getattr(args, "core_requirement_list", None) is not None:
+                inputs.append(args.core_requirement_list)
+            if getattr(args, "export_evidence_acceptance", None) is not None:
+                inputs.append(args.export_evidence_acceptance)
             if any(
                 os.path.realpath(p) == target
                 or os.path.exists(args.output)
