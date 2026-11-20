@@ -1934,10 +1934,11 @@ class _Builder:
         self, sel: Any
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
-        collection field on a local-composite root — returns
-        (root binding id, member), else (None, None). An array
-        member is included: callers decide whether its copy
-        semantics admit a shared backing token."""
+        collection field — or its one-level nested form — on a
+        local-composite root — returns (root binding id, member),
+        else (None, None). An array member is included: callers
+        decide whether its copy semantics admit a shared backing
+        token."""
         field = sel.child_by_field_name("field")
         f_ref = (
             self.references.get(self.node_key(field))
@@ -1972,7 +1973,10 @@ class _Builder:
         if (
             member is None
             or member.type is None
-            or not self._scalar_elem_collection(member.type)
+            or not (
+                self._scalar_elem_collection(member.type)
+                or self._scalar_elem_nested_collection(member.type)
+            )
             or root_ref is None
             or root_ref.binding_id is None
             or not self._is_local_composite(
@@ -2211,11 +2215,17 @@ class _Builder:
             root_id, member = self._scalar_container_field(rhs)
             if root_id is None:
                 return None
-            if member.type.kind == "array":
-                # `a := s.F` on an array field is a value copy —
-                # each extraction mints its own backing. Sharing
-                # the field's token (or joining `s`'s group) would
-                # leak `a[i] = x` into an independent `b`'s reads.
+            if member.type.kind == "array" and not (
+                self._type_embeds_collection(member.type)
+            ):
+                # `a := s.F` on a plain array field is a value
+                # copy — each extraction mints its own backing.
+                # Sharing the field's token (or joining `s`'s
+                # group) would leak `a[i] = x` into an independent
+                # `b`'s reads. An array EMBEDDING a collection
+                # (`[1][]int64`) copies the headers along, so the
+                # extracted array aliases the field's inner backing
+                # — it shares the group like a slice member.
                 return frozenset({self.node_key(rhs)})
             field_key = f"{root_id}\x00{member.id}"
             toks = self._opaque_container_tokens.get(field_key)
