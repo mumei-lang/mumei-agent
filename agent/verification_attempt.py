@@ -29,7 +29,12 @@ EVENT_KINDS = frozenset(
 )
 STREAM_KINDS = frozenset({"stdout", "stderr"})
 TERMINAL_STATES = frozenset({"exited", "failed", "timed_out", "cancelled"})
-EVIDENCE_CHECK_OUTCOMES = frozenset({"valid", "failed", "cancelled"})
+# `"valid"`/`"failed"`/`"cancelled"` are Core representation-check
+# outcomes; the three verdict words are a requirement-declared
+# `evidence accept` check's normalized Core verdict.
+EVIDENCE_CHECK_OUTCOMES = frozenset(
+    {"valid", "failed", "cancelled", "accepted", "rejected", "inconclusive"}
+)
 _TRANSITIONS = {
     ("ready", "started"): "running",
     ("ready", "cancelled"): "cancelled",
@@ -593,7 +598,9 @@ class AttemptSequence:
         (Core returned the known v1 diagnostic for the delivered bytes),
         `"failed"` (the check produced no accepted diagnostic — an invalid
         representation, malformed diagnostic and spawn/I/O failure are
-        indistinguishable by design) or `"cancelled"`.
+        indistinguishable by design), `"cancelled"`, or — when the host
+        declared a requirement — the Core `evidence accept` verdict
+        `"accepted"` / `"rejected"` / `"inconclusive"`.
 
         Recording is a host declaration, not acceptance: `"valid"` only means
         Core's representation check passed; truth, freshness, authenticity,
@@ -1102,8 +1109,9 @@ class AttemptEvidenceCheck:
     one declared `outcome` — `"valid"` (Core returned the known v1
     diagnostic for the delivered bytes), `"failed"` (the check produced
     no accepted diagnostic — an invalid representation, a malformed
-    diagnostic and a spawn/I/O failure are indistinguishable by design)
-    or `"cancelled"`.
+    diagnostic and a spawn/I/O failure are indistinguishable by design),
+    `"cancelled"`, or a requirement-declared `evidence accept` verdict
+    (`"accepted"` / `"rejected"` / `"inconclusive"`).
 
     Recording is a host declaration, not acceptance: `"valid"` only means
     Core's representation check passed for the bytes the host delivered.

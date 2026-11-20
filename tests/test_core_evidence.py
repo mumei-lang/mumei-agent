@@ -18,8 +18,17 @@ from agent.core_evidence import (
     MAX_CHECK_TIMEOUT_MS,
     MAX_DIAGNOSTIC_BYTES,
     check_evidence_representation,
+    check_evidence_requirement,
+    record_evidence_acceptance,
+    requirement_fingerprint,
 )
-from agent.verification_attempt import AttemptEvent, AttemptOutput, AttemptRecord, AttemptSequence
+from agent.verification_attempt import (
+    EVIDENCE_CHECK_OUTCOMES,
+    AttemptEvent,
+    AttemptOutput,
+    AttemptRecord,
+    AttemptSequence,
+)
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX Core handoff pilot")
 
@@ -804,10 +813,10 @@ def test_sequence_binding_is_a_snapshot_not_an_atomic_completion_guard(monkeypat
     host = {"sequence": retained}
     before = output.to_dict(), retained.to_dict()
 
-    def run(body, executable, timeout_ms, cancel_event):
+    def run(body, executable, timeout_ms, cancel_event, argv_tail=("check", "--stdin", "--json")):
         assert body is output.stdout and timeout_ms == 2000
         host["sequence"] = retained.begin_attempt()
-        return VALID
+        return VALID, 0
 
     monkeypatch.setattr(core_evidence, "_run_check", run)
     assert (
@@ -1280,3 +1289,193 @@ def test_evidence_check_accept_route_rejects_oversize_document(tmp_path):
         sequence=str(seq_path), check=str(chk_path), output=None
     )
     assert main_accept(args) == 1
+
+
+# --- Requirement-declared `evidence accept` checks (verify-schedule --core-requirement) ---
+
+def _requirement_file(tmp_path, body=None):
+    path = tmp_path / "FAKE_PRIVATE_requirement.json"
+    path.write_text(
+        body
+        if body is not None
+        else json.dumps({"schema_version": "mumei.evidence-requirement/v1"}),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _accept_doc(verdict, fingerprint=None):
+    return json.dumps(
+        {
+            "schema_version": "mumei.evidence-acceptance/v1",
+            "requirement_fingerprint": fingerprint or ("0" * 64),
+            "evidence_fingerprint": hashlib.sha256(PRIVATE).hexdigest(),
+            "acceptance": "evaluated",
+            "verdict": verdict,
+        }
+    ).encode()
+
+
+_ACCEPT_EXIT = {"accepted": 0, "rejected": 1, "inconclusive": 3}
+
+
+def accept_script(verdict, expected_body=PRIVATE, fingerprint=None):
+    doc, code = _accept_doc(verdict, fingerprint), _ACCEPT_EXIT[verdict]
+    return (
+        "import sys\n"
+        "assert sys.argv[1:3] == ['evidence', 'accept']\n"
+        "assert sys.argv[3:5] == ['--stdin', '--json']\n"
+        "assert sys.argv[5] == '--requirement'\n"
+        "import os\nassert os.path.isfile(sys.argv[6])\n"
+        f"assert sys.stdin.buffer.read() == {expected_body!r}\n"
+        f"sys.stdout.buffer.write({doc!r})\n"
+        f"sys.exit({code})\n"
+    )
+
+
+@pytest.mark.parametrize("verdict", ["accepted", "rejected", "inconclusive"])
+def test_check_evidence_requirement_returns_the_core_verdict(
+    executable, tmp_path, verdict
+):
+    requirement = _requirement_file(tmp_path)
+    result = check_evidence_requirement(
+        snapshot(),
+        core_executable=executable(accept_script(verdict)),
+        requirement_path=requirement,
+        timeout_ms=2000,
+    )
+    assert result == verdict
+
+
+@pytest.mark.parametrize("verdict,code", [("accepted", 1), ("rejected", 0), ("inconclusive", 0), ("accepted", 3)])
+def test_check_evidence_requirement_rejects_verdict_exit_mismatch(
+    executable, tmp_path, verdict, code
+):
+    doc = _accept_doc(verdict)
+    script = (
+        "import sys\nsys.stdin.buffer.read()\n"
+        f"sys.stdout.buffer.write({doc!r})\nsys.exit({code})\n"
+    )
+    with pytest.raises(ValueError, match="requirement check failed"):
+        check_evidence_requirement(
+            snapshot(),
+            core_executable=executable(script),
+            requirement_path=_requirement_file(tmp_path),
+            timeout_ms=2000,
+        )
+
+
+@pytest.mark.parametrize("verdict", ["vindicated", "", "VALID"])
+def test_check_evidence_requirement_rejects_foreign_verdicts(
+    executable, tmp_path, verdict
+):
+    doc = _accept_doc(verdict)
+    script = (
+        "import sys\nsys.stdin.buffer.read()\n"
+        f"sys.stdout.buffer.write({doc!r})\nsys.exit(0)\n"
+    )
+    with pytest.raises(ValueError, match="requirement check failed"):
+        check_evidence_requirement(
+            snapshot(),
+            core_executable=executable(script),
+            requirement_path=_requirement_file(tmp_path),
+            timeout_ms=2000,
+        )
+
+
+@pytest.mark.parametrize("verdict,code", [("accepted", 0), ("rejected", 1)])
+def test_record_evidence_acceptance_records_the_core_verdict(
+    executable, tmp_path, verdict, code
+):
+    output = snapshot()
+    sequence = matching_sequence(output).select_result(output)
+    check = record_evidence_acceptance(
+        sequence,
+        output,
+        core_executable=executable(accept_script(verdict)),
+        requirement_path=_requirement_file(tmp_path),
+        timeout_ms=2000,
+    )
+    assert check.outcome == verdict
+    acceptance = evaluate_evidence_check(sequence, check)
+    assert acceptance["accepted"] is (verdict == "accepted")
+    assert "requirement_fingerprint" not in acceptance
+
+
+def test_record_evidence_acceptance_records_failed_and_cancelled(
+    executable, tmp_path
+):
+    output = snapshot()
+    sequence = matching_sequence(output).select_result(output)
+    check = record_evidence_acceptance(
+        sequence,
+        output,
+        core_executable=executable(
+            "import sys\nsys.stdin.buffer.read()\nsys.exit(2)\n"
+        ),
+        requirement_path=_requirement_file(tmp_path),
+        timeout_ms=2000,
+    )
+    assert check.outcome == "failed"
+
+    output2 = snapshot()
+    sequence2 = matching_sequence(output2).select_result(output2)
+    event = threading.Event()
+    event.set()
+    check2 = record_evidence_acceptance(
+        sequence2,
+        output2,
+        core_executable=executable("import sys\nsys.exit(0)\n"),
+        requirement_path=_requirement_file(tmp_path),
+        timeout_ms=2000,
+        cancel_event=event,
+    )
+    assert check2.outcome == "cancelled"
+
+
+def test_record_evidence_acceptance_rejects_malformed_requests(tmp_path):
+    output = snapshot()
+    sequence = matching_sequence(output).select_result(output)
+    requirement = _requirement_file(tmp_path)
+    base = {
+        "core_executable": "/abs/core",
+        "requirement_path": requirement,
+        "timeout_ms": 2000,
+    }
+    for bad in (
+        {"core_executable": "relative/core"},
+        {"requirement_path": "rel/req.json"},
+        {"requirement_path": ""},
+        {"timeout_ms": 0},
+        {"timeout_ms": 60_001},
+        {"cancel_event": object()},
+    ):
+        with pytest.raises(ValueError):
+            record_evidence_acceptance(sequence, output, **{**base, **bad})
+
+
+def test_requirement_fingerprint_pins_the_document_bytes(tmp_path):
+    requirement = _requirement_file(tmp_path, body='{"a": 1}')
+    assert requirement_fingerprint(requirement) == hashlib.sha256(
+        b'{"a": 1}'
+    ).hexdigest()
+    for bad in ("", "relative/path.json", str(tmp_path / "missing.json")):
+        with pytest.raises(ValueError):
+            requirement_fingerprint(bad)
+
+
+def test_evaluate_evidence_check_emits_the_declared_requirement_pin(tmp_path):
+    output = snapshot()
+    sequence = matching_sequence(output).select_result(output)
+    candidate = sequence.evidence_candidate()
+    for outcome in EVIDENCE_CHECK_OUTCOMES:
+        check = sequence.evidence_check(candidate, outcome)
+        acceptance = evaluate_evidence_check(
+            sequence, check, requirement_fingerprint="b" * 64
+        )
+        assert acceptance["requirement_fingerprint"] == "b" * 64
+        assert acceptance["accepted"] is (outcome in {"valid", "accepted"})
+    with pytest.raises(ValueError):
+        evaluate_evidence_check(
+            sequence, check, requirement_fingerprint="not-hex"
+        )

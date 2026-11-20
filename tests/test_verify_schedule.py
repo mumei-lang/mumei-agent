@@ -579,3 +579,114 @@ def test_core_flag_requires_absolute_existing_path(inputs):
     args = args_for(inputs, core="relative/mumei")
     with pytest.raises(ValueError):
         run_schedule(args)
+
+
+def _requirement(tmp_path):
+    req = tmp_path / "requirement.json"
+    req.write_text(
+        json.dumps({"schema_version": "mumei.evidence-requirement/v1"}),
+        encoding="utf-8",
+    )
+    return req
+
+
+def _accept_core(tmp_path, verdict):
+    # Stub Core `evidence accept`: binds the descriptor's evidence
+    # fingerprint to the stdin bytes it was fed, then emits the verdict
+    # with its matching exit code (accepted→0, rejected→1).
+    code = 0 if verdict == "accepted" else 1 if verdict == "rejected" else 3
+    core = tmp_path / f"mumei-stub-accept-{verdict}"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+        '    [ "$5" = "--requirement" ] || exit 4\n'
+        '    [ -f "$6" ] || exit 5\n'
+        "    sum=$(sha256sum | cut -d' ' -f1)\n"
+        '    printf %s "{\\"schema_version\\":\\"mumei.evidence-acceptance/v1\\",'
+        '\\"requirement_fingerprint\\":\\"f000\\",'
+        '\\"evidence_fingerprint\\":\\"$sum\\",'
+        '\\"acceptance\\":\\"evaluated\\",'
+        '\\"verdict\\":\\"' + verdict + '\\"}"\n'
+        f"    exit {code}\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    return core
+
+
+@pytest.mark.parametrize("verdict,accepted", [
+    ("accepted", True), ("rejected", False), ("inconclusive", False),
+])
+def test_core_requirement_records_the_core_verdict(
+    inputs, capsys, tmp_path, verdict, accepted
+):
+    req = _requirement(tmp_path)
+    core = _accept_core(tmp_path, verdict)
+    args = args_for(
+        inputs, core=str(core), core_requirement=str(req)
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == verdict
+    assert doc["evidence_acceptance"]["accepted"] is accepted
+    assert doc["evidence_acceptance"]["requirement_fingerprint"] == (
+        hashlib.sha256(req.read_bytes()).hexdigest()
+    )
+
+
+def test_core_requirement_failed_check_records_failed(
+    inputs, capsys, tmp_path
+):
+    req = _requirement(tmp_path)
+    core = tmp_path / "mumei-stub-accept-bad"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+        "    cat > /dev/null\n"
+        "    printf %s 'not-a-descriptor'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    args = args_for(
+        inputs, core=str(core), core_requirement=str(req)
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == "failed"
+    assert doc["evidence_acceptance"]["accepted"] is False
+
+
+def test_core_requirement_needs_core(inputs):
+    req_args = args_for(inputs, core_requirement="/tmp/req.json")
+    with pytest.raises(ValueError, match="--core-requirement"):
+        run_schedule(req_args)
+
+
+def test_core_requirement_needs_absolute_existing_path(inputs, tmp_path):
+    core = _accept_core(tmp_path, "accepted")
+    for bad in ("relative/req.json", str(tmp_path / "missing.json")):
+        args = args_for(
+            inputs, core=str(core), core_requirement=bad
+        )
+        with pytest.raises(ValueError, match="--core-requirement"):
+            run_schedule(args)
+
+
+def test_output_must_not_overwrite_the_requirement(inputs, tmp_path):
+    req = _requirement(tmp_path)
+    core = _accept_core(tmp_path, "accepted")
+    # --output hardlinks the declared requirement — same inode through a
+    # different name must still trip the overwrite guard.
+    out = tmp_path / "req.json"
+    os.link(req, out)
+    args = args_for(
+        inputs,
+        core=str(core),
+        core_requirement=str(req),
+        output=str(out),
+    )
+    with pytest.raises(SystemExit):
+        main_schedule(args)
