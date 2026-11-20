@@ -4093,35 +4093,58 @@ scalar-element collection. A plain `b = a[i]` reseat (and
 tokens, so reseating away detaches `b` from the group it
 left, and a parallel-assignment RHS resolves `a[i]` at the
 pre-state (`a, b = sub, a[0]` names the group `a` held
-before the reseat). The honest closures stay honest:
-`[][][]int64` (two levels over scalar) and any deeper nesting
-still cannot bind, `b := a[i][j]` (indexing into the
-extracted inner) stays closed,
-extracting from an unbound or parameter operand (`t[i]` on a
-param `t`) stays closed because the operand never joined a
-share group, extracting an element that is itself an ARRAY (`a[i]` on
-`[][M]T`/`[N][M]T`) stays closed — it is a value copy with
-no shared backing — `[]func`
-nested shapes keep their own func-element model, and a
-nested parameter container is rejected by the signature
-gate. `append(a[i], v)` binds like any other element
-carrier: the appended slice may reuse the extracted
-element's backing, so `b := append(a[i], v)` unions the
-root's share-group tokens into `b` beside the fresh result
-token (an `a[i][j]` or unbound/array operand stays closed),
+before the reseat). The nesting generalises to ARBITRARY
+depth: `[][][]int64` and deeper scalar-element chains bind
+the same way (each level pins its declared identities), a
+store `a[i][j][k] = v` unions every index's deps into the
+root's backing, `a[i][j][k]++` and `a[i][j][k] = <-ch`
+follow identically, and multi-level extraction
+(`b := a[i][j]`, `b = a[i][j]`, donors like
+`[][]int64{a[i][j]}` or `[][][]int64{sub}` — including the
+elided `{{sub}}` form — and the
+opaque-callee argument `lib.U(a[i][j], v)`) joins the
+root's share group whenever the extracted value still
+shares the backing's headers — a slice/map element, or an
+array embedding one (`b := a[i]` on `[N][M][]T` copies
+`[M][]T` headers that alias the root's backing). The honest
+closures stay honest: extracting from an unbound or
+parameter operand (`t[i][j]` on a param `t`) stays closed
+because the operand never joined a share group, extracting
+an element that shares nothing (`a[i]` on `[][M]T`,
+`a[i][j]` on `[][M][K]T`) stays closed — it is a pure value
+copy with no shared backing — `[]func` nested shapes keep
+their own func-element model, and a nested parameter
+container is rejected by the signature gate.
+`append(a[i], v)` and the deeper `append(a[i][j], v)` bind
+like any other element carrier: the appended slice may
+reuse the extracted element's backing, so `b := append(a[i], v)`
+unions the root's share-group tokens into `b` beside the
+fresh result token (an unbound/array operand stays closed),
 and the appended elements' deps land in the root's sharers
-like the plain `append(a, v)` slice case. A FIELD on a
-local composite shares the same way — `a := s.F` on a
-`[][]int64`/`map[K][]T`/`[N][]T` member binds `a` into the
-field's group like the single-level form, and an array
-member EMBEDDING a collection (`[1][]int64`) shares its
-copied header instead of minting a fresh value copy —
-while `[][][]T` members and deeper stay closed. The same
+like the plain `append(a, v)` slice case; an appended
+SLICE or MAP element (`append(a[i][j], sub)`) unions the
+element's share group into the result's, so a store through
+either side reaches the other, while a spread `sub...` or
+array element copies and stays detached. A FIELD member
+shares the same way at any depth — `a := s.F`
+on a `[][]int64`/`[][][]int64`/`map[K][]T`/`[N][]T` member binds
+`a` into the field's group like the single-level form, and an
+array member EMBEDDING a collection (`[1][]int64`) shares its
+copied header instead of minting a fresh value copy. A whole
+deep array arg (`[1][1][]int64`) handed to an opaque callee
+shares caller memory through its innermost `[]int64` headers,
+so the callee's writes land in every sharer's set. The same
 share applies wherever an index operand
 carries the element: a literal donor (`c :=
 [][]int64{a[0]}`), a slot store (`a[i] = a2[j]`), and an
 opaque-callee argument (`lib.U(a[i], v)` — its writes land
-in every sharer's set like `a[i][0] = v`).
+in every sharer's set like `a[i][0] = v`). An element
+store through a chain that crosses a slice/map level is
+never treated as inline-array storage — the array-roots
+gate only applies while every crossed container level is
+an array (`a[i][j] = v` on `[N][M][]T` stays inline; a
+slice level anywhere in the chain leaves the conflated
+holder model).
 
 ### C07 per-statement read attribution
 
