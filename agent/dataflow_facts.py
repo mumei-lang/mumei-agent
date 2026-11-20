@@ -2010,8 +2010,16 @@ class _Walker:
                     reslice_inner = re.match(
                         rf"^{re.escape(_norm(name))}\[(.*)\]$", _norm(value)
                     )
-                    reslice = reslice_inner and ":" in _GO_STRING_LIT.sub(
-                        "", reslice_inner.group(1)
+                    reslice_inner_text = (
+                        _GO_STRING_LIT.sub("", reslice_inner.group(1))
+                        if reslice_inner
+                        else ""
+                    )
+                    reslice = (
+                        reslice_inner
+                        and ":" in reslice_inner_text
+                        and "[" not in reslice_inner_text
+                        and "]" not in reslice_inner_text
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2145,8 +2153,16 @@ class _Walker:
                         rf"^{re.escape(_norm(target))}\[(.*)\]$",
                         _norm(value),
                     )
-                    reslice = reslice_inner and ":" in _GO_STRING_LIT.sub(
-                        "", reslice_inner.group(1)
+                    reslice_inner_text = (
+                        _GO_STRING_LIT.sub("", reslice_inner.group(1))
+                        if reslice_inner
+                        else ""
+                    )
+                    reslice = (
+                        reslice_inner
+                        and ":" in reslice_inner_text
+                        and "[" not in reslice_inner_text
+                        and "]" not in reslice_inner_text
                     )
                     if reslice:
                         # ``s = s[lo:hi]`` keeps the same backing — its
@@ -2226,10 +2242,17 @@ class _Walker:
         if nilable is not None:
             env.nilable[target] = nilable
         slice_source = re.match(rf"^({_IDENT})\[(.*)\]$", text)
+        slice_inner = (
+            _GO_STRING_LIT.sub("", slice_source.group(2))
+            if slice_source
+            else ""
+        )
         if (
             slice_source
             and slice_source.group(1) != target
-            and ":" in _GO_STRING_LIT.sub("", slice_source.group(2))
+            and ":" in slice_inner
+            and "[" not in slice_inner
+            and "]" not in slice_inner
         ):
             # ``x := s[lo:hi]`` re-slices the same backing — the result is
             # nil exactly when the source is, so its nil state carries.

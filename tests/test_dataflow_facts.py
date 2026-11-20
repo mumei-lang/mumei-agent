@@ -2250,3 +2250,18 @@ def test_parenthesized_chan_cast_keeps_closed_state() -> None:
         "}\n"
     )
     assert _transition_messages(source, "send_on_closed_channel")
+
+
+
+def test_reslice_index_result_is_not_a_reslice() -> None:
+    # ``slots[:1][0]`` is an element read off a reslice — the element
+    # must not inherit the slice's non-nil state.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if slots == nil {\n    return 0\n}\np := slots[:1][0]\nreturn p", "go"
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("p")
+    assert facts is not None
+    assert "p" not in facts.nonnil
