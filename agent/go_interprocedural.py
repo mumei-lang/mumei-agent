@@ -2097,26 +2097,59 @@ class _Builder:
             if append_toks is not None:
                 return append_toks
             call = self.calls.get(self.node_key(rhs))
-            if call is None or call.kind != "external_or_bodyless":
+            if call is None or call.kind not in {
+                "external_or_bodyless",
+                "direct_local",
+            }:
                 return None
-            _member, fact = self._call_result_fact(rhs)
+            fact = (
+                self._call_result_type(rhs)
+                if call.kind == "direct_local"
+                else self._call_result_fact(rhs)[1]
+            )
             if fact is None or fact.kind not in {
                 "slice",
                 "array",
                 "map",
             }:
                 return None
+            # A local callee answers precisely: the result aliases
+            # only the container params its `return_dependencies`
+            # names. An opaque callee may hand back a slice aliasing
+            # any container argument (`t := lib.Id(s)`), so the
+            # result's backing may-set unions every container arg's
+            # tokens like the dep set unions their deps.
+            alias_ordinals: frozenset[int] | None = None
+            if call.kind == "direct_local":
+                target_fn = self.functions.get(call.target)
+                if (
+                    target_fn is None
+                    or target_fn.receiver is not None
+                ):
+                    return None
+                callee = self.summarize(call.target)
+                if callee is None or not callee.available:
+                    return None
+                alias_ordinals = frozenset(
+                    i
+                    for i in callee.return_dependencies or ()
+                    if i < len(target_fn.parameters)
+                    and self._param_container_shares_memory(
+                        target_fn.parameters[i].type
+                    )
+                )
             toks = {self.node_key(rhs)}
-            # `t := lib.Id(s)` — an opaque callee may hand back a
-            # slice aliasing a container argument, so the result's
-            # backing may-set unions every container arg's tokens
-            # like the dep set unions their deps.
             arguments_node = rhs.child_by_field_name("arguments")
-            for arg in (
+            for arg_index, arg in enumerate(
                 _children(arguments_node)
                 if arguments_node is not None
                 else ()
             ):
+                if (
+                    alias_ordinals is not None
+                    and arg_index not in alias_ordinals
+                ):
+                    continue
                 while (
                     arg is not None
                     and arg.type == "parenthesized_expression"

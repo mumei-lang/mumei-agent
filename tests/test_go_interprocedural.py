@@ -19238,6 +19238,34 @@ def test_scalar_container_bind_read_write_admits(
             "\treturn G(a, a, x)\n}\n",
             frozenset({0, 1}),
         ),
+        # A local callee returning a container parameter aliases
+        # the argument's backing — `t := G(a)` joins `a`'s group,
+        # so `t[0] = x` reaches `a[0]`'s read.
+        (
+            "func G(s []int64) []int64 {\n"
+            "\treturn s\n"
+            "}\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\tt := G(a)\n"
+            "\tt[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `return []int64{s[0]}` mints a fresh backing, but the
+        # conflated `return_dependencies` still names `s` — the
+        # may-alias model keeps `t` on `a`'s group, so the write
+        # over-approximates into `a`'s set. Sound direction: the
+        # read reports `x` even though `t` owns its own memory.
+        (
+            "func G(s []int64) []int64 {\n"
+            "\treturn []int64{s[0]}\n"
+            "}\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\tt := G(a)\n"
+            "\tt[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
         # A pure scalar array param is a local copy — `b[0] = x`
         # lands only in `b`'s own seeded set (the conflated set
         # reports the ordinal alongside the store's deps) and no
