@@ -28,6 +28,7 @@ from agent.attempt_runner import (
 )
 from agent.verification_attempt import AttemptSequence
 from agent.verification_planner import (
+    VERDICT_OUTCOMES,
     AdapterRegistry,
     PlannerPolicy,
     PreparedSourceRequest,
@@ -75,6 +76,7 @@ class ScheduledAttemptEntry:
     request_fingerprint: str | None
     terminal_state: str
     exit_code: int | None
+    reported_outcome: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.ordinal) is not int or not 1 <= self.ordinal <= MAX_SCHEDULE_ATTEMPTS:
@@ -102,6 +104,11 @@ class ScheduledAttemptEntry:
             raise ValueError("invalid schedule entry terminal state")
         if self.exit_code is not None and type(self.exit_code) is not int:
             raise ValueError("invalid schedule entry exit code")
+        if self.reported_outcome is not None and (
+            type(self.reported_outcome) is not str
+            or self.reported_outcome not in VERDICT_OUTCOMES
+        ):
+            raise ValueError("invalid schedule entry reported outcome")
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +118,7 @@ class ScheduledAttemptEntry:
             "request_fingerprint": self.request_fingerprint,
             "terminal_state": self.terminal_state,
             "exit_code": self.exit_code,
+            "reported_outcome": self.reported_outcome,
         }
 
 
@@ -282,6 +290,21 @@ def run_attempt_schedule(
             sequences.append(dispatch.sequence)
             record = dispatch.run.record
             exit_code = record.events[-1].exit_code
+            descriptor = registry.descriptor(adapter_id)
+            reported = None
+            if descriptor is not None and record.state == "exited":
+                # Declared interpretation: the adapter's own markers map
+                # its raw output onto its declared outcome vocabulary —
+                # a self-report, never Evidence acceptance.
+                for marker in descriptor.verdict_markers:
+                    blob = (
+                        dispatch.run.stdout
+                        if marker.stream == "stdout"
+                        else dispatch.run.stderr
+                    )
+                    if marker.contains.encode("utf-8") in blob:
+                        reported = marker.outcome
+                        break
             entries.append(
                 ScheduledAttemptEntry(
                     ordinal,
@@ -290,6 +313,7 @@ def run_attempt_schedule(
                     prepared.to_dict()["request_fingerprint"],
                     record.state,
                     exit_code,
+                    reported,
                 )
             )
             terminal = record.state

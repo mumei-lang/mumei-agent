@@ -32,6 +32,10 @@ SOURCE_INPUT_FORMAT = "mumei.source-text/v1"
 MAX_SOURCE_BYTES = 1_048_576
 MAX_STAMP = (1 << 63) - 1
 MAX_PLAN_HISTORY = 256
+VERDICT_OUTCOMES = frozenset({"valid", "failed", "inconclusive"})
+MARKER_STREAMS = frozenset({"stdout", "stderr"})
+MAX_VERDICT_MARKERS = 32
+MAX_MARKER_BYTES = 256
 PERMISSIONS = frozenset(
     {
         "filesystem.read",
@@ -63,6 +67,7 @@ _MANIFEST_FIELDS = frozenset(
         "required_permissions",
         "probe_argv",
         "attempt_argv",
+        "verdict_markers",
     }
 )
 _MANIFEST_REQUIRED = frozenset(
@@ -339,6 +344,35 @@ class RouteRequirements:
 
 
 @dataclass(frozen=True)
+class VerdictMarker:
+    """One manifest-declared output marker: ``contains`` bytes on ``stream``
+    mean the adapter reports ``outcome`` — a declared self-report, never
+    Evidence acceptance."""
+
+    stream: str
+    contains: str
+    outcome: str
+
+    def __post_init__(self) -> None:
+        if self.stream not in MARKER_STREAMS:
+            raise ValueError("unsupported verdict marker stream")
+        if (
+            type(self.contains) is not str
+            or not self.contains
+            or len(self.contains.encode("utf-8")) > MAX_MARKER_BYTES
+        ):
+            raise ValueError("invalid verdict marker content")
+        if self.outcome not in VERDICT_OUTCOMES:
+            raise ValueError("unsupported verdict marker outcome")
+
+    def to_dict(self) -> dict:
+        return {
+            "stream": self.stream,
+            "contains": self.contains,
+            "outcome": self.outcome,
+        }
+
+@dataclass(frozen=True)
 class AdapterDescriptor:
     adapter_id: str
     adapter_version: str
@@ -358,6 +392,7 @@ class AdapterDescriptor:
     required_permissions: frozenset[str] | None = None
     probe_argv: tuple[str, ...] | None = None
     attempt_argv: tuple[str, ...] | None = None
+    verdict_markers: tuple[VerdictMarker, ...] = ()
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -422,6 +457,15 @@ class AdapterDescriptor:
             )
         ):
             raise ValueError("invalid adapter attempt declaration")
+        if (
+            not isinstance(self.verdict_markers, tuple)
+            or len(self.verdict_markers) > MAX_VERDICT_MARKERS
+            or any(
+                not isinstance(marker, VerdictMarker)
+                for marker in self.verdict_markers
+            )
+        ):
+            raise ValueError("invalid adapter verdict declaration")
 
     def to_dict(self) -> dict:
         return {
@@ -458,6 +502,9 @@ class AdapterDescriptor:
                 if self.attempt_argv is not None
                 else None
             ),
+            "verdict_markers": [
+                marker.to_dict() for marker in self.verdict_markers
+            ],
         }
 
     @classmethod
@@ -491,6 +538,13 @@ class AdapterDescriptor:
         attempt_argv = manifest.get("attempt_argv")
         if attempt_argv is not None and type(attempt_argv) is not list:
             raise ValueError("invalid adapter attempt declaration")
+        verdict_markers = manifest.get("verdict_markers") or []
+        if type(verdict_markers) is not list or any(
+            type(marker) is not dict
+            or set(marker) != {"stream", "contains", "outcome"}
+            for marker in verdict_markers
+        ):
+            raise ValueError("invalid adapter verdict declaration")
         return cls(
             adapter_id=manifest["adapter_id"],
             adapter_version=manifest["adapter_version"],
@@ -517,6 +571,12 @@ class AdapterDescriptor:
             ),
             attempt_argv=(
                 None if attempt_argv is None else tuple(attempt_argv)
+            ),
+            verdict_markers=tuple(
+                VerdictMarker(
+                    marker["stream"], marker["contains"], marker["outcome"]
+                )
+                for marker in verdict_markers
             ),
         )
 
