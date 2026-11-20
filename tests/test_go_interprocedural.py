@@ -19880,6 +19880,52 @@ def test_scalar_container_nested_index_eval_order(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_scalar_container_alias_field_slot(go_types_helper):
+    # `t := s` — the aliases share one backing, so a store through
+    # `s`'s field extraction must be visible to `t`'s. The field
+    # slot resolves to the canonical (mint-earliest) root name, so
+    # either alias can seed it first.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type St struct{ F []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []St{{F: make([]int64, 2)}}\n"
+            "\tt := s\n"
+            "\tb := s[0].F\n"
+            "\tb[0] = x\n"
+            "\tc := t[0].F\n"
+            "\treturn c[0]\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_scalar_container_literal_elem_operand(go_types_helper):
+    # `s := []St{{F: v}}` — a field operand embedded in the element
+    # literal shares `v`'s backing, so `v[0] = x` must reach the
+    # field extraction's reads like a direct `s := []St{v2}` does
+    # not (a whole-struct operand copies `v2`'s header, matching the
+    # composite model's own conflated deps).
+    result = named(
+        *unit(
+            go_types_helper,
+            "type St struct{ F []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tv := make([]int64, 2)\n"
+            "\ts := []St{{F: v}}\n"
+            "\tv[0] = x\n"
+            "\tb := s[0].F\n"
+            "\treturn b[0]\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
