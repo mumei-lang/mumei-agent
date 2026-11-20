@@ -370,6 +370,11 @@ _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
 _GO_STRING_LIT = re.compile(
     r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'"
 )
+_GO_RAW_STR = re.compile(r"`[^`]*`")
+
+
+def _strip_go_literals(text: str) -> str:
+    return _GO_RAW_STR.sub("", _GO_STRING_LIT.sub("", text))
 _SLICE_LITERAL = re.compile(r"^\[\][^{]+\{(.*)\}$", re.DOTALL)
 _CAST = re.compile(rf"^(?:{'|'.join(sorted(_GO_INT_TYPES))})\((.+)\)$")
 _GO_INT_CAST = re.compile(rf"\b(?:{'|'.join(sorted(_GO_INT_TYPES))}|uintptr|byte|rune)\(")
@@ -2033,7 +2038,7 @@ class _Walker:
                         rf"^{re.escape(_norm(name))}\[(.*)\]$", _norm(value)
                     )
                     reslice_inner_text = (
-                        _GO_STRING_LIT.sub("", reslice_inner.group(1))
+                        _strip_go_literals(reslice_inner.group(1))
                         if reslice_inner
                         else ""
                     )
@@ -2174,7 +2179,7 @@ class _Walker:
                         _norm(value),
                     )
                     reslice_inner_text = (
-                        _GO_STRING_LIT.sub("", reslice_inner.group(1))
+                        _strip_go_literals(reslice_inner.group(1))
                         if reslice_inner
                         else ""
                     )
@@ -2260,7 +2265,7 @@ class _Walker:
             env.nilable[target] = nilable
         slice_source = re.match(rf"^({_IDENT})\[(.*)\]$", text)
         slice_inner = (
-            _GO_STRING_LIT.sub("", slice_source.group(2))
+            _strip_go_literals(slice_source.group(2))
             if slice_source
             else ""
         )

@@ -2316,3 +2316,20 @@ def test_map_key_with_composite_literal_is_not_a_reslice() -> None:
     facts = flow.facts_for_expression("*p")
     assert facts is not None
     assert "p" not in facts.nonnil
+
+
+def test_reslice_bound_with_raw_string_brace_propagates_nonnil() -> None:
+    # ``s[:len(`{`)]`` — the brace lives inside a backtick raw string, so
+    # it is not structure: the bound still makes this a reslice.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if s == nil {\n    return 0\n}\n"
+        "part := s[:len(`{`)]\n"
+        "return part[0]",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("part[0]")
+    assert facts is not None
+    assert "part" in facts.nonnil
