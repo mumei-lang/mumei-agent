@@ -15821,11 +15821,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         transfers, count, depth + 1,
                     )
                     return deps
-            # `s[i].F` — a field read on a bound container's struct
-            # element: the conflated element set covers the field like
-            # `s[i]` itself, so the read unions the group's deps with
-            # the indexes' own (evaluated into `field_index_deps`
-            # above, in the `member is None` arm this branch shares).
+            # `s[i].F[.G…]` — a field read on a bound container's
+            # struct element: the conflated element set covers the
+            # field like `s[i]` itself, so the read unions the group's
+            # deps with the indexes' own. A selector operand
+            # (`s[i].A.V`) escapes the pre-scan's index evaluation,
+            # so any index the pre-scan never evaluated runs here.
             if member is None:
                 sel_operand = node.child_by_field_name("operand")
                 while (
@@ -15850,9 +15851,64 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     for _ in range(1 + len(container_idx[2] or ())):
                         extracted = getattr(extracted, "elem", None)
                     if extracted is not None and extracted.kind == "struct":
-                        return self._opaque_container_deps(
+                        deps = field_index_deps
+                        for idx_node in (
+                            container_idx[1],
+                            *(container_idx[2] or ()),
+                        ):
+                            if (
+                                idx_node is None
+                                or idx_node.type in _INDEX_LITERALS
+                                or self.node_key(idx_node)
+                                in field_index_nodes
+                            ):
+                                continue
+                            deps |= self.expression(
+                                idx_node, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                        # Walk the selector chain: each resolved
+                        # field pins its declared type identity (a
+                        # regenerated member report flags the summary
+                        # via `stale_dependents`), and a pointer
+                        # member means the leaf lives in pointee
+                        # memory the conflated set cannot cover — an
+                        # aliased store lands in `indirect_writes`,
+                        # so the read unions it.
+                        pointee = False
+                        sel = node
+                        while (
+                            sel is not None
+                            and sel.type == "selector_expression"
+                        ):
+                            fnode = sel.child_by_field_name("field")
+                            fref = (
+                                self.references.get(
+                                    self.node_key(fnode)
+                                )
+                                if fnode is not None
+                                else None
+                            )
+                            fmember = self._field_identity(fref)
+                            if fmember is not None:
+                                if fmember.type is not None:
+                                    self._pin_fact_identities(
+                                        fmember.type
+                                    )
+                                if (
+                                    getattr(
+                                        fmember.type, "kind", None
+                                    )
+                                    == "pointer"
+                                ):
+                                    pointee = True
+                            sel = sel.child_by_field_name("operand")
+                        deps |= self._opaque_container_deps(
                             cref.binding_id, locals_
-                        ) | field_index_deps
+                        )
+                        if pointee:
+                            deps |= self.indirect_writes
+                        return deps
             if (
                 member is None
                 or member.kind != "const"

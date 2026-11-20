@@ -19478,6 +19478,28 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn <-ch\n}\n",
             frozenset({0, 1}),
         ),
+        # `return s[i].A.V` — a selector-operand chain escapes the
+        # pre-scan's index evaluation, so the read evaluates the
+        # index itself: `i`'s dep must land.
+        (
+            "type In struct { V int64 }\n"
+            "type St struct { A In }\n"
+            "func F(s []St, i int) int64 {\n"
+            "\treturn s[i].A.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `s[0].P.V` through a pointer field — an aliased store via
+        # `q := s[0].P` lands in `indirect_writes`, so the read
+        # carries `x`'s dep too.
+        (
+            "type In struct { V int64 }\n"
+            "type St struct { P *In }\n"
+            "func F(s []St, x int64) int64 {\n"
+            "\tq := s[0].P\n"
+            "\tq.V = x\n"
+            "\treturn s[1].P.V\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
