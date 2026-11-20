@@ -69,6 +69,7 @@ GO_UNSIGNED_TYPES = frozenset(
 
 _LOCK_METHODS = {"Lock", "RLock"}
 # Calls whose integer result is documented to be non-negative.
+_NONNIL_ERROR_CALLS = re.compile(r"^(?:errors\.New|fmt\.Errorf)\(")
 _NONNEG_CALLS = re.compile(
     r"^(?:len|cap|copy|sort\.Search\w*|sortSearch|bits\.(?:Len|OnesCount|TrailingZeros|LeadingZeros)\w*|"
     r"strings\.Count|bytes\.Count|utf8\.RuneCount\w*)\("
@@ -473,6 +474,10 @@ class _Env:
         def mentions(text: str) -> bool:
             return bool(pattern.search(text)) or text == name or text.startswith(name + ".")
 
+        # Snapshot before the filters below drop ``name`` from ``nonnil`` —
+        # a site variable that was already provably non-nil proves the open
+        # failed, so rewriting it discharges the held entry entirely.
+        pre_nonnil = self.nonnil
         self.nonzero = {t for t in self.nonzero if not mentions(t)}
         self.nonneg = {t for t in self.nonneg if not mentions(t)}
         self.nonnil = {t for t in self.nonnil if not mentions(t)}
@@ -485,13 +490,21 @@ class _Env:
         self.aliases = {
             k: v for k, v in self.aliases.items() if not (mentions(k) or mentions(v))
         }
-        self.held = {
-            # A redefined error variable no longer tells us whether the handle
-            # is nil, so the ("file", handle, err) entry keeps only the handle.
-            (h[0], h[1], "") if len(h) == 3 and mentions(h[2]) else h
-            for h in self.held
-            if not mentions(h[1])
-        }
+        new_held = set()
+        for h in self.held:
+            if mentions(h[1]):
+                continue
+            if len(h) == 3 and mentions(h[2]):
+                if name in pre_nonnil:
+                    # The site variable was provably non-nil before this
+                    # write — the open already failed, so there is no
+                    # handle to leak: drop the entry, don't blank it.
+                    continue
+                # A redefined error variable no longer tells us whether
+                # the handle is nil, so the entry keeps only the handle.
+                h = (h[0], h[1], "")
+            new_held.add(h)
+        self.held = new_held
         self.slices = {t for t in self.slices if not mentions(t)}
 
     # -- helpers ---------------------------------------------------------
@@ -2234,6 +2247,11 @@ class _Walker:
                             env.nonneg.add(target)
                             env.add_lt_len(target, container)
                             return
+        if _NONNIL_ERROR_CALLS.match(text) and _is_whole_call(text):
+            # ``errors.New`` / ``fmt.Errorf`` never return nil — an
+            # ``err`` rewritten with one still proves the open failed.
+            env.nonnil.add(target)
+            return
         if _NONNEG_CALLS.match(text) and _is_whole_call(text):
             env.nonneg.add(target)
             return

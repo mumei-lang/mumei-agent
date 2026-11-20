@@ -2020,6 +2020,38 @@ def test_parallel_assign_does_not_revive_stale_len_bound() -> None:
     assert ("i", "s") not in facts.lt_len
 
 
+def test_err_wrap_inside_failed_open_discharges_handle() -> None:
+    # Inside ``if err != nil`` the open provably failed — rewriting
+    # ``err`` there must drop the held entry, not report a leak on a
+    # file that never opened.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil {\n"
+        '    err = fmt.Errorf("w")\n'
+        "    return 0\n"
+        "}\n"
+        "return f"
+    )
+    assert not any(issue.category == "resource_leak" for issue in flow.issues)
+
+
+def test_err_wrap_after_successful_open_still_reports() -> None:
+    # On the success path ``err`` was nil, so rewriting it loses the
+    # pairing — the file is still open and must keep reporting.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err == nil {\n"
+        '    err = fmt.Errorf("w")\n'
+        "    return 0\n"
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
 def test_var_self_reference_drops_outer_facts() -> None:
     # ``var d = d - 1`` shadows the outer ``d`` — its nonzero/consts
     # facts must not leak into the inner binding.
