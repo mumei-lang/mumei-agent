@@ -18435,6 +18435,93 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0]\n}\n",
             frozenset(),
         ),
+        # `a := s.F` on a NESTED slice field shares like the
+        # single-level form — a write through `a` reaches `b`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [][]int64 }\n"
+            "\ts.F = [][]int64{{0}}\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # A map field whose element is a slice shares the same
+        # way — `a := s.M` binds `a` into the field's group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ M map[int64][]int64 }\n"
+            "\ts.M = map[int64][]int64{0: {0}}\n"
+            "\ta := s.M\n"
+            "\tb := s.M\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s.F = sub` reseats a nested field — `b` names the new
+        # backing while `a` keeps the old one.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [][]int64 }\n"
+            "\ts.F = [][]int64{{0}}\n"
+            "\ta := s.F\n"
+            "\ts.F = [][]int64{{0}}\n"
+            "\tb := s.F\n"
+            "\tb[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset(),
+        ),
+        # `a := s.F` on an array EMBEDDING a collection
+        # (`[1][]int64`) copies the slice header along — the
+        # extracted array still aliases the field's backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [1][]int64 }\n"
+            "\ts.F = [1][]int64{{0}}\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # A pure-scalar nested array field (`[1][1]int64`) is a
+        # value copy like the plain array — nothing shares.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F [1][1]int64 }\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset(),
+        ),
+        # `s.F = [][]int64{sub}` — the literal's inner-container
+        # element joins the field's group, so a later `a := s.F`
+        # shares `sub`'s backing: a write through `sub` reaches
+        # `a`'s reads.
+        (
+            "func F(x int64) int64 {\n"
+            "\tsub := []int64{0}\n"
+            "\tvar s struct{ F [][]int64 }\n"
+            "\ts.F = [][]int64{sub}\n"
+            "\ta := s.F\n"
+            "\tsub[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # The reverse direction — a write through the extracted
+        # `a` lands in `sub`'s shared backing.
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\tsub := []int64{0}\n"
+            "\tvar s struct{ F [][]int64 }\n"
+            "\ts.F = [][]int64{sub}\n"
+            "\ta := s.F\n"
+            "\ta[0][0] = y\n"
+            "\treturn sub[0]\n}\n",
+            frozenset({1}),
+        ),
         # `s.F = …` reseats the field's backing — `a` still aliases
         # the previous slice while `b` names the new one.
         (
@@ -19083,14 +19170,14 @@ def test_scalar_container_bind_read_write_admits(
         "\ta := [][][]int64{{{x}}}\n"
         "\ta[0][0][0] = int64(0)\n"
         "\treturn a[0][0][0]\n}\n",
-        # `a := s.F` where `F` is a non-scalar container — the
-        # selector share only covers scalar-element fields, and the
-        # opaque gate still rejects the nested element.
+        # `a := s.F` where `F` is a two-level container — the
+        # selector share covers scalar-element fields and their
+        # one-level nesting, but `[][][]int64` stays closed.
         "func F(x int64) int64 {\n"
-        "\tvar s struct{ F [][]int64 }\n"
+        "\tvar s struct{ F [][][]int64 }\n"
         "\ta := s.F\n"
-        "\ta[0][0] = x\n"
-        "\treturn a[0][0]\n}\n",
+        "\ta[0][0][0] = x\n"
+        "\treturn a[0][0][0]\n}\n",
         # `a := <-cc` — a container received off a channel has no
         # identity to share; the bind stays closed.
         "func F(cc chan []int64, x int64) int64 {\n"
