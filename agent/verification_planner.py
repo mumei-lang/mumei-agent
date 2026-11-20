@@ -552,6 +552,7 @@ class RuntimeObservation:
 class PlannerPolicy:
     selected_adapter: str | None = None
     allow_fallback: bool = False
+    allow_manifest_attempt_argv: bool = False
     disabled_adapters: frozenset[str] = frozenset()
     allowed_locations: frozenset[str] = frozenset({"local"})
     tool_version_pins: tuple[tuple[str, str], ...] = ()
@@ -569,6 +570,10 @@ class PlannerPolicy:
             _label(self.selected_adapter)
         if type(self.allow_fallback) is not bool:
             raise ValueError("fallback must be explicit Boolean policy")
+        if type(self.allow_manifest_attempt_argv) is not bool:
+            raise ValueError(
+                "manifest attempt argv must be explicit Boolean policy"
+            )
         _labels(self.disabled_adapters, empty=True)
         _labels(self.allowed_locations)
         if not self.allowed_locations <= LOCATIONS:

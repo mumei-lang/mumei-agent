@@ -41,7 +41,8 @@ _CONTRACT_KEYS = frozenset(
 )
 _POLICY_KEYS = frozenset(
     {"selected_adapter", "allow_fallback", "disabled_adapters", "allowed_locations",
-     "tool_version_pins", "timeout_ms", "memory_mb", "allowed_permissions"}
+     "tool_version_pins", "timeout_ms", "memory_mb", "allowed_permissions",
+     "allow_manifest_attempt_argv"}
 )
 _OBSERVATION_KEYS = frozenset({"adapter_id", "availability", "tool_version", "stamp"})
 
@@ -122,6 +123,9 @@ def _load_policy(path: str) -> PlannerPolicy:
     return PlannerPolicy(
         selected_adapter=document.get("selected_adapter"),
         allow_fallback=document.get("allow_fallback", False),
+        allow_manifest_attempt_argv=document.get(
+            "allow_manifest_attempt_argv", False
+        ),
         disabled_adapters=frozenset(document.get("disabled_adapters") or ()),
         allowed_locations=frozenset(
             {"local"} if locations is None else locations
@@ -258,13 +262,15 @@ def run_schedule(args: argparse.Namespace) -> dict:
     )
     def argv_for(adapter_id: str) -> tuple[str, ...] | None:
         # The host's argv_map wins; a manifest-declared ``attempt_argv``
-        # is the adapter's own fallback command.
+        # runs only when the host policy opts in — a manifest must not
+        # plant an executable command by itself.
         declared = argv_map.get(adapter_id)
         if declared is not None:
             return declared
-        descriptor = registry.descriptor(adapter_id)
-        if descriptor is not None:
-            return descriptor.attempt_argv
+        if policy.allow_manifest_attempt_argv:
+            descriptor = registry.descriptor(adapter_id)
+            if descriptor is not None:
+                return descriptor.attempt_argv
         return None
 
     result = run_attempt_schedule(
