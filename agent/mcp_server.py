@@ -2960,6 +2960,7 @@ def verify_schedule(
     observations_path: str | None = None,
     max_attempts: int = 8,
     memory_bound_mb: int | None = None,
+    core_path: str | None = None,
 ) -> str:
     """Run the declared plan/dispatch/observe/fallback schedule.
 
@@ -2987,6 +2988,12 @@ def verify_schedule(
             (at most 8).
         memory_bound_mb: Optional declared RLIMIT_AS ceiling per
             attempt child.
+        core_path: Optional absolute path to a declared Core
+            executable; when the schedule selects an attempt, its
+            captured output runs through the Core representation check
+            and the record carries ``evidence_check`` /
+            ``evidence_acceptance`` — a representation check only,
+            never an Evidence acceptance.
 
     Returns:
         JSON with `report` — the `mumei.attempt-schedule/v1`
@@ -3007,6 +3014,8 @@ def verify_schedule(
     }
     if observations_path is not None:
         paths["observations_path"] = observations_path
+    if core_path is not None:
+        paths["core_path"] = core_path
     for name, path in paths.items():
         if not _valid_declared_path(path):
             return _err(f"{name} must be a nonempty single-line path")
@@ -3031,7 +3040,7 @@ def verify_schedule(
         max_attempts=max_attempts,
         success_exit_code=None,
         memory_bound_mb=memory_bound_mb,
-        core=None,
+        core=core_path,
         output=None,
     )
     try:
