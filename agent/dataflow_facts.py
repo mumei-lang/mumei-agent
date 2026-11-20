@@ -1968,6 +1968,10 @@ class _Walker:
                 scratch = env.copy()
                 if _norm(value) != _norm(name):
                     scratch.kill(name)
+                    # ``var f = bufio.NewReader(f)`` wraps the resource
+                    # but does not close it — keep its held tracking on
+                    # the shadowed name so the open file still reports.
+                    scratch.held |= {h for h in env.held if h[1] == name}
                 # The declaration still replaces the outer binding —
                 # drop its facts from ``env`` before the copy-back so
                 # stale entries cannot survive ``setdefault``.
@@ -2074,6 +2078,9 @@ class _Walker:
                     # A pure ``f = f`` is a no-op: ``f``'s own facts are
                     # what the value reads, so they must survive.
                     scratch.kill(target)
+                    # A self-wrap (``f = bufio.NewReader(f)``) leaves the
+                    # wrapped resource open — keep its held tracking.
+                    scratch.held |= {h for h in pre_env.held if h[1] == target}
                 self._define(target, value, scratch)
                 # Every other pending target is being rewritten — a
                 # fact that mentions it (``i < len(s)`` after
