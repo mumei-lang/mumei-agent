@@ -1711,6 +1711,35 @@ class _Builder:
                 return None
         return ref, lhs.child_by_field_name("index"), inner_index
 
+    def _opaque_container_index_sharer_toks(
+        self, node: Any
+    ) -> frozenset[tuple[int, int, int]]:
+        """`a[i]`/`m[k]` on a bound nested scalar container — the
+        extracted element shares the root's backing, so its tokens
+        join the bound name's share group (`b := a[i]` then
+        `b[0] = x` reaches `a[0][0]` and `a[0][0] = x` reaches
+        `b[0]`). Empty for anything else: an unbound operand, a
+        deeper nest (`a[i][j]`), or a non-container element."""
+        target = self._opaque_container_index_target(node)
+        if target is None or target[2] is not None:
+            return frozenset()
+        ref = target[0]
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type is None
+            or not self._scalar_elem_nested_collection(binding.type)
+            or binding.type.elem is None
+            or binding.type.elem.kind not in {"slice", "map"}
+        ):
+            # An inner ARRAY (`a[i]` on `[][M]T`/`[N][M]T`) is a
+            # value copy — it shares no backing, so extraction
+            # stays closed like an unbound operand.
+            return frozenset()
+        return self._opaque_container_tokens.get(
+            ref.binding_id, frozenset()
+        )
+
     def _func_elem_index_target(
         self, lhs: Any, locals_: dict[str, frozenset[int]]
     ) -> tuple[Any, Any | None, Any | None] | None:
@@ -2164,6 +2193,11 @@ class _Builder:
                 ),
                 None,
             )
+        if node is not None and node.type == "index_expression":
+            # `[][]int64{a[0]}` / `a[i] = a2[j]` — the index donor
+            # carries the extracted element's slice header, which
+            # shares its root's backing.
+            return self._opaque_container_index_sharer_toks(node)
         if node is None or node.type != "identifier":
             return frozenset()
         ref = self.references.get(self.node_key(node))
@@ -4139,7 +4173,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or fact is None
             or fact.kind not in container_kinds
             or elem is None
-            or elem.kind not in {"integer", "boolean", "pointer"}
+            or (
+                elem.kind not in {"integer", "boolean", "pointer"}
+                and not (
+                    opaque_composite is not None
+                    and self._scalar_elem_collection(elem)
+                )
+            )
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
         if member is not None:
@@ -8300,6 +8340,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     rhs_node.type == "identifier"
                                     and rhs_node.text == b"nil"
                                 )
+                                and not (
+                                    rhs_node.type
+                                    == "index_expression"
+                                    and self._opaque_container_index_sharer_toks(
+                                        rhs_node
+                                    )
+                                )
                             )
                         ):
                             raise _Unsupported(
@@ -8321,6 +8368,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `s[0] = x` and `a[0][0] = x` reach both.
                         new_container_toks |= (
                             self._opaque_container_elem_toks(rhs_node)
+                        )
+                    if opaque_toks is None:
+                        # `b := a[i]` — the extracted element shares
+                        # `a`'s backing group.
+                        new_container_toks |= (
+                            self._opaque_container_index_sharer_toks(
+                                rhs_node
+                            )
                         )
                     self._opaque_container_tokens[binding.id] = (
                         new_container_toks
@@ -8952,6 +9007,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         rhs_node.type == "identifier"
                                         and rhs_node.text == b"nil"
                                     )
+                                    and not (
+                                        rhs_node.type
+                                        == "index_expression"
+                                        and self._opaque_container_index_sharer_toks(
+                                            rhs_node
+                                        )
+                                    )
                                 )
                             ):
                                 raise _Unsupported(
@@ -8973,6 +9035,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # inner-backing share as `a :=`.
                             new_container_toks |= (
                                 self._opaque_container_elem_toks(
+                                    rhs_node
+                                )
+                            )
+                        if opaque_toks is None and value_nodes:
+                            # `var b = a[i]` — the extracted element
+                            # shares `a`'s backing group.
+                            new_container_toks |= (
+                                self._opaque_container_index_sharer_toks(
                                     rhs_node
                                 )
                             )
@@ -19611,6 +19681,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_, params, holder_id, stored, True
                         )
                     self.indirect_writes |= stored
+            elif arg_node.type == "index_expression":
+                # `lib.U(a[i], v)` — `a[i]` hands the callee a slice
+                # header sharing the bound root's backing: the
+                # callee's `q[0] = v` lands in every sharer's set
+                # like a caller-side `a[i][0] = v`.
+                target = self._opaque_container_index_target(arg_node)
+                if target is not None and target[2] is None:
+                    binding = self.bindings.get(target[0].binding_id)
+                    if (
+                        binding is not None
+                        and binding.type is not None
+                        and self._scalar_elem_nested_collection(
+                            binding.type
+                        )
+                        and binding.type.elem is not None
+                        and binding.type.elem.kind
+                        in {"slice", "map"}
+                    ):
+                        for holder_id in self._opaque_container_sharers(
+                            target[0].binding_id
+                        ):
+                            self._store(
+                                locals_, params, holder_id, stored,
+                                True,
+                            )
+                        self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the

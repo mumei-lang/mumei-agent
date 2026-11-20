@@ -18774,6 +18774,75 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset(),
         ),
+        # `b := a[i]` — the extracted element shares `a`'s backing:
+        # `b[0] = x` reaches the `a[0][0]` read.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := a[0]\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # The other direction — `a[0][0] = x` lands in `b`'s set.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := a[0]\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := m[k]` — the same extraction keyed by map slot.
+        (
+            "func F(x int64) int64 {\n"
+            "\tm := map[int64][]int64{0: []int64{0}}\n"
+            "\tb := m[0]\n"
+            "\tb[0] = x\n"
+            "\treturn m[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var b = a[i]` — the declared form shares identically.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [2][]int64{{0}}\n"
+            "\tvar b = a[0]\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b, c := a[0], a[1]` — every extracted element joins the
+        # share group.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}, {0}}\n"
+            "\tb, c := a[0], a[1]\n"
+            "\tc[0] = x\n"
+            "\t_ = b\n"
+            "\treturn a[1][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `c := [][]int64{a[0]}` — the index donor carries the
+        # extracted slice header, so `c[0][0] = x` reaches `a`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tc := [][]int64{a[0]}\n"
+            "\tc[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[0] = a2[0]` — storing an extracted slice header makes
+        # the slot share `a2`'s backing both ways.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\ta2 := [][]int64{{0}}\n"
+            "\ta[0] = a2[0]\n"
+            "\ta2[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -18814,13 +18883,19 @@ def test_scalar_container_bind_read_write_admits(
         "\ta := t[0]\n"
         "\ta[0] = x\n"
         "\treturn a[0]\n}\n",
-        # `b := a[0]` on a BOUND nested local — inner-container
-        # extraction stays closed even though `a` is tracked.
-        "func F(x int64) int64 {\n"
-        "\ta := [][]int64{{0}}\n"
-        "\tb := a[0]\n"
+        # `b := t[i]` on a BOUND nested param — the param's backing
+        # was never registered, so the extraction stays closed.
+        "func F(t [][]int64, x int64) int64 {\n"
+        "\tb := t[0]\n"
         "\tb[0] = x\n"
         "\treturn b[0]\n}\n",
+        # `b := a[i]` on `[][4]int64` — the inner element is an
+        # array, so `a[0]` is a value copy with no shared backing.
+        "func F(x int64) int64 {\n"
+        "\ta := [][4]int64{{0}}\n"
+        "\tb := a[0]\n"
+        "\tb[0] = x\n"
+        "\treturn a[0][0]\n}\n",
         # `[][][]int64` — two levels of nesting stays closed; the
         # model admits exactly one.
         "func F(x int64) int64 {\n"
@@ -26746,6 +26821,23 @@ def test_opaque_composite_callee_writes_container_arg(
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_callee_writes_index_arg(
+    go_types_helper,
+):
+    # `lib.U(a[0], x)` — `a[0]` hands the callee a slice header
+    # sharing the bound root's backing, so its writes land in
+    # every sharer's set like a caller-side `a[0][0] = x`.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\ta := [][]int64{{0}}\n"
+        "\tlib.U(a[0], x)\n"
+        "\treturn a[0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_opaque_composite_range_rejoins_body_writes(go_types_helper):
