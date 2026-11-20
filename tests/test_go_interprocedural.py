@@ -18431,6 +18431,41 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0]\n}\n",
             frozenset(),
         ),
+        # `s.F = …` reseats the field's backing — `a` still aliases
+        # the previous slice while `b` names the new one.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\ts.F = []int64{0}\n"
+            "\tb := s.F\n"
+            "\tb[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset(),
+        ),
+        # `s.F = []int64{x}` — the stored literal's elements land
+        # in `s`'s set, and `b := s.F` reads them through the
+        # reseated group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ts.F = []int64{x}\n"
+            "\tb := s.F\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s.F = a` — the field reseats onto `a`'s backing, so
+        # `a[0] = x` is visible through `b`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := []int64{0}\n"
+            "\ts.F = a\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
         # `_ = append(a, x)` — a discarded append may still reuse
         # `a`'s array, so its elements land in the backing.
         (

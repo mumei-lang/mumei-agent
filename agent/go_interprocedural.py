@@ -9502,6 +9502,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `(*p)[k], r = 1, (*p)[0]` reads `(*p)[0]` without
             # `k`'s deps.
             pending_map_key_deps = frozenset()
+            # `s.F = v` field reseats: LHS position → (root binding
+            # id, member id). Applied at pre-state — after every LHS
+            # resolves but before `values` or any store runs.
+            field_container_reseats: dict[int, tuple[str, str]] = {}
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -9608,6 +9612,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # (`p.Next.V = v`) — computing the destination
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
+                    field_root, field_member = (
+                        self._scalar_container_field(lhs)
+                    )
+                    if field_root is not None:
+                        # `s.F = v` — the field's share group
+                        # reseats onto the RHS's own backing once
+                        # the LHS pre-pass finishes (pre-state).
+                        field_container_reseats[len(refs) - 1] = (
+                            field_root,
+                            field_member.id,
+                        )
                     field_chan = self._bound_field_chan(
                         lhs, locals_, params
                     )
@@ -9896,6 +9911,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
+            # `s.F = v` reseats the field's share group onto the
+            # RHS's own backing: a `a := s.F` bound before the store
+            # keeps the OLD tokens (it still aliases the previous
+            # array), while `b := s.F` afterwards mints afresh. The
+            # old tokens come off the root's union too — `s`'s
+            # conflated set only covers the field's current backing.
+            for pos, (root_id, member_id) in (
+                field_container_reseats.items()
+            ):
+                fkey = f"{root_id}\x00{member_id}"
+                old_toks = self._opaque_container_tokens.get(
+                    fkey, frozenset()
+                )
+                src = rights[pos] if pos < len(rights) else None
+                new_toks = (
+                    self._opaque_container_bind(src)
+                    if src is not None
+                    else None
+                )
+                if new_toks is None:
+                    # `s.F = nil` or an untracked RHS — the field's
+                    # share group dissolves; a later `b := s.F`
+                    # mints its own backing like a fresh read.
+                    self._opaque_container_tokens.pop(fkey, None)
+                    new_toks = frozenset()
+                else:
+                    self._opaque_container_tokens[fkey] = new_toks
+                if old_toks or new_toks:
+                    self._opaque_container_tokens[root_id] = (
+                        self._opaque_container_tokens.get(
+                            root_id, frozenset()
+                        )
+                        - old_toks
+                        | new_toks
+                    )
             # Go assignments run in two phases — destination operands
             # (pointer indirections and index expressions) and every
             # RHS evaluate against the pre-state before any store
