@@ -350,14 +350,20 @@ def test_no_secret_or_source_in_descriptor_or_output(tmp_path):
         tmp_path,
         argv_alpha=stub_argv("--emit", SECRET, "--exit", "3"),
     )
-    out = _run(paths)
-    doc = _doc(out)
+    out_file = tmp_path / "schedule-doc.json"
+    out = _run(paths, "--output", str(out_file))
+    assert out.returncode == 0, out.stderr
     # The descriptor is fingerprints only: even when an adapter echoes
     # host secrets or the source bytes, they never reach the document,
-    # stdout of the route (beyond the doc) or stderr.
+    # the --output file, stdout of the route (beyond the doc) or
+    # stderr.
+    written = out_file.read_text(encoding="utf-8")
+    doc = json.loads(written)
     assert SECRET not in json.dumps(doc)
+    assert SECRET not in written
     assert SECRET not in out.stderr
     assert SOURCE_BYTES.decode() not in json.dumps(doc)
+    assert SOURCE_BYTES.decode() not in written
 
 
 def test_adapter_swap_needs_no_core_edit(tmp_path):
