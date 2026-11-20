@@ -495,7 +495,7 @@ class _Env:
             if mentions(h[1]):
                 continue
             if len(h) == 3 and mentions(h[2]):
-                if name in pre_nonnil:
+                if h[2] in pre_nonnil:
                     # The site variable was provably non-nil before this
                     # write — the open already failed, so there is no
                     # handle to leak: drop the entry, don't blank it.
