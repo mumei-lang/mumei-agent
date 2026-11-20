@@ -1968,6 +1968,10 @@ class _Walker:
                 scratch = env.copy()
                 if _norm(value) != _norm(name):
                     scratch.kill(name)
+                # The declaration still replaces the outer binding —
+                # drop its facts from ``env`` before the copy-back so
+                # stale entries cannot survive ``setdefault``.
+                env.kill(name)
                 self._define(name, value, scratch)
                 _copy_name_facts(env, scratch, name)
                 return

@@ -2018,3 +2018,14 @@ def test_parallel_assign_does_not_revive_stale_len_bound() -> None:
         "s[i]",
     )
     assert ("i", "s") not in facts.lt_len
+
+
+def test_var_self_reference_drops_outer_facts() -> None:
+    # ``var d = d - 1`` shadows the outer ``d`` — its nonzero/consts
+    # facts must not leak into the inner binding.
+    facts = _facts(
+        "d := 1\n{ var d = d - 1; return 4 / d }\nreturn 0",
+        "4 / d",
+    )
+    assert "d" not in facts.nonzero
+    assert "d" not in facts.consts
