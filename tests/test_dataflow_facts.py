@@ -2052,6 +2052,85 @@ def test_err_wrap_after_successful_open_still_reports() -> None:
     )
 
 
+def test_parallel_assign_element_target_drops_its_nonzero() -> None:
+    # ``i, d[i] = i, 0`` rewrites ``d[i]`` — its old non-zero fact must
+    # not come back through the ``i`` copy-back, or ``10 / d[i]`` is
+    # silently trusted.
+    facts = _facts(
+        "d := []int{1, 2}\n"
+        "d[0] = 3\n"
+        "i := 0\n"
+        "i, d[i] = i, 0\n"
+        "return 10 / d[i]",
+        "10 / d[i]",
+    )
+    assert "d[i]" not in facts.nonzero
+
+
+def test_reseated_channel_does_not_keep_closed_state() -> None:
+    # ``ch = make(chan int, cap(ch))`` binds a fresh channel — the old
+    # closed state must not transfer, or the send reports a panic.
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int, 1)\n"
+        "    close(ch)\n"
+        "    ch = make(chan int, cap(ch))\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_reseated_map_does_not_keep_nil_state() -> None:
+    # ``m = make(map[string]int, len(m))`` binds a fresh map — the old
+    # nil-map state must not transfer, or the write reports a panic.
+    source = (
+        "package demo\n"
+        "func Put() int {\n"
+        "    var m map[string]int\n"
+        "    m = make(map[string]int, len(m))\n"
+        "    m[\"a\"] = 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "write_to_nil_map") == []
+
+
+def test_field_site_survives_nonnil_root_reseat() -> None:
+    # ``p.err`` pairs the open result with a field — reseating
+    # non-nil ``p`` must not read ``p``'s non-nil as ``p.err``'s.
+    flow = _go(
+        "type T struct{ err error }\n"
+        "p := new(T)\n"
+        'f, p.err := os.Open("p")\n'
+        "p = new(T)\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_shadowed_err_site_survives_scope_exit() -> None:
+    # The inner ``err`` pairs the open; leaving the block restores the
+    # outer non-nil ``err`` — the pairing must be blanked, not read as
+    # the outer variable's proven state.
+    flow = _go(
+        'err := errors.New("x")\n'
+        "{\n"
+        '    f, err := os.Open("p")\n'
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
 def test_var_self_reference_drops_outer_facts() -> None:
     # ``var d = d - 1`` shadows the outer ``d`` — its nonzero/consts
     # facts must not leak into the inner binding.
