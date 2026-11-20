@@ -6355,6 +6355,19 @@ CLI-only — neither surface writes the gate triple.
 C11 stays partial; verdict-bearing grade promotion and C12's demand
 gate are unchanged.
 
+### C11 MCP verification-plan route
+
+The MCP `verify_plan(request_path, adapters_path, policy_path,
+observations_path=None)` tool mirrors the `verify-plan` CLI route:
+declared route requirements, adapter manifests, planner policy and
+optional stamped runtime observations feed `registry.plan`, and the
+`mumei.verification-plan/v1` descriptor is returned as `report` —
+the selected adapter, its effective non-secret settings,
+per-candidate selection/exclusion reasons and the fallback origin.
+Planning only: nothing is spawned, dispatched or accepted. Declared
+inputs join the path validation and error redaction applied to the
+other declared-path tools.
+
 
 ## Roadmap authority and vocabulary
 

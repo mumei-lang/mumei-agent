@@ -3088,6 +3088,69 @@ def verify_schedule(
 
 
 @mcp.tool()
+def verify_plan(
+    request_path: str,
+    adapters_path: str,
+    policy_path: str,
+    observations_path: str | None = None,
+) -> str:
+    """Plan one declared route through the adapter registry.
+
+    The same wiring as the `verify-plan` CLI route: declared route
+    requirements, adapter manifests, planner policy and optional
+    stamped runtime observations feed `registry.plan`, and the
+    `mumei.verification-plan/v1` descriptor is returned — the
+    selected adapter, its effective non-secret settings,
+    per-candidate selection/exclusion reasons and the fallback
+    origin. Planning only: nothing is spawned, dispatched or
+    accepted.
+
+    Args:
+        request_path: Absolute path to the declared
+            RouteRequirements/ResultContract JSON.
+        adapters_path: Absolute path to the declared JSON array of
+            adapter manifests.
+        policy_path: Absolute path to the declared PlannerPolicy JSON.
+        observations_path: Optional absolute path to a declared JSON
+            array of stamped runtime observations.
+
+    Returns:
+        JSON with `report` — the `mumei.verification-plan/v1`
+        descriptor — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.verify_schedule import run_plan
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    paths = {
+        "request_path": request_path,
+        "adapters_path": adapters_path,
+        "policy_path": policy_path,
+    }
+    if observations_path is not None:
+        paths["observations_path"] = observations_path
+    for name, path in paths.items():
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+
+    args = argparse.Namespace(
+        request=request_path,
+        adapters=adapters_path,
+        policy=policy_path,
+        observations=observations_path,
+        output=None,
+    )
+    try:
+        report = run_plan(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), list(paths.values()))
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def evidence_check(
     core_path: str,
     evidence_path: str,

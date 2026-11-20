@@ -1109,3 +1109,50 @@ class TestVerifyScheduleTool:
         for path in inputs.values():
             assert path not in out["error"]
         assert missing not in out["error"]
+
+
+class TestVerifyPlanTool:
+    def test_plan_reports_selected_adapter(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        out = json.loads(
+            mcp_server.verify_plan(
+                inputs["request"], inputs["adapters"],
+                inputs["policy"], observations_path=inputs["observations"],
+            )
+        )
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["schema_version"] == "mumei.verification-plan/v1"
+        assert report["selected"]["adapter_id"] == "alpha"
+        assert "FAKE_PRIVATE" not in json.dumps(report)
+
+    def test_plan_without_observations(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        out = json.loads(
+            mcp_server.verify_plan(
+                inputs["request"], inputs["adapters"], inputs["policy"],
+            )
+        )
+        assert out["status"] == "ok"
+        assert out["report"]["schema_version"] == "mumei.verification-plan/v1"
+
+    def test_plan_rejects_malformed_path(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        out = json.loads(
+            mcp_server.verify_plan("", inputs["adapters"], inputs["policy"])
+        )
+        assert out["status"] == "error"
+        assert "request_path" in out["error"]
+
+    def test_plan_error_redacts_declared_paths(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        missing = str(tmp_path / "missing.json")
+        out = json.loads(
+            mcp_server.verify_plan(
+                missing, inputs["adapters"], inputs["policy"],
+            )
+        )
+        assert out["status"] == "error"
+        for path in inputs.values():
+            assert path not in out["error"]
+        assert missing not in out["error"]
