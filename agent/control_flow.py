@@ -155,21 +155,21 @@ def _gaps(
             # A label on any statement is also a ``goto`` target —
             # it is collected function-wide by ``_collect_labels``.
         if kind in {"break", "continue"}:
-            parts = statement.text.split()
-            if len(parts) == 1:
+            jump_label = _jump_label(statement.text)
+            if jump_label == "":
                 if kind == "continue" and not in_loop:
                     gaps.append(CFGGap("jump_without_loop", span))
                 elif kind == "break" and not (in_loop or in_break):
                     gaps.append(CFGGap("jump_without_loop", span))
-            elif len(parts) == 2 and _IDENTIFIER.fullmatch(parts[1]):
-                if parts[1] not in labels:
+            elif jump_label is not None:
+                if jump_label not in labels:
                     gaps.append(CFGGap("unresolved_label", span))
             else:
                 gaps.append(CFGGap("labelled_jump", span))
         elif kind == "goto":
-            parts = statement.text.split()
-            if len(parts) == 2 and _IDENTIFIER.fullmatch(parts[1]):
-                if parts[1] not in goto_labels:
+            jump_label = _jump_label(statement.text)
+            if jump_label is not None and jump_label != "":
+                if jump_label not in goto_labels:
                     gaps.append(CFGGap("unresolved_label", span))
             else:
                 gaps.append(CFGGap("labelled_jump", span))
@@ -274,16 +274,17 @@ class _Builder:
             elif kind == "terminate":
                 self.edge(node, 1, "terminate")
             elif kind in {"break", "continue"}:
-                parts = statement.text.split()
+                jump_label = _jump_label(statement.text)
                 target = (
                     loop
-                    if len(parts) == 1
-                    else labels.get(parts[1])
+                    if not jump_label
+                    else labels.get(jump_label)
                 )
                 assert target is not None
                 self.edge(node, target[0 if kind == "break" else 1], kind)
             elif kind == "goto":
-                label = statement.text.split()[1]
+                label = _jump_label(statement.text)
+                assert label is not None and label != ""
                 target = self.goto_targets.get(label)
                 if target is None:
                     self.pending_gotos.append((node, label))
@@ -416,6 +417,26 @@ _ASSIGNMENT_KINDS = frozenset(
     {"define", "assign", "inc", "dec", "const", "var", "range"}
 )
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Go labels are identifiers, and Go identifiers are Unicode — ``goto 終了``
+# is valid. ``[^\W\d]`` is a Unicode letter or ``_``.
+_GO_LABEL = re.compile(r"[^\W\d]\w*", re.UNICODE)
+_COMMENT = re.compile(r"//[^\n]*|/\*(?:[^*]|\*(?!/))*\*/")
+
+
+def _jump_label(text: str) -> str | None:
+    """The label operand of ``break``/``continue``/``goto``.
+
+    Returns ``""`` for the bare (unlabelled) form, the label name for a
+    well-formed labelled jump — comments between the keyword and the
+    label are stripped — and ``None`` when the operand is malformed.
+    """
+    parts = _COMMENT.sub(" ", text).split()
+    if len(parts) == 1:
+        return ""
+    if len(parts) == 2 and _GO_LABEL.fullmatch(parts[1]):
+        return parts[1]
+    return None
 
 
 @dataclass(frozen=True)
