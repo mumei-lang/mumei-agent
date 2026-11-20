@@ -1787,6 +1787,7 @@ class _Builder:
         node: Any,
         locals_: dict[str, frozenset[int]],
         gate: Any = None,
+        allow_index: bool = False,
     ) -> str | None:
         """`append(fs, ...)` — the builtin append whose first argument
         names a bound func-element container local. Returns the
@@ -1794,7 +1795,9 @@ class _Builder:
         param container stays closed like an element store does: its
         elements live in caller memory. `gate` overrides the element
         collection check (`_scalar_elem_collection` admits the scalar
-        form)."""
+        form). `allow_index` also admits `append(a[i], v)` on a bound
+        nested container, resolving the share group to the ROOT's
+        binding — the extracted element is what the append may reuse."""
         if gate is None:
             gate = self._func_elem_collection
         while (
@@ -1834,6 +1837,25 @@ class _Builder:
             arg0 is not None and arg0.type == "parenthesized_expression"
         ):
             arg0 = next(iter(arg0.named_children), None)
+        if arg0 is not None and arg0.type == "index_expression" and (
+            allow_index
+        ):
+            # `append(a[i], v)` — the extracted element names a
+            # bound nested root's backing; the result may reuse
+            # it, so the resolver hands back the ROOT's binding
+            # (its share group is the backing the append grows).
+            if not self._opaque_container_index_sharer_toks(arg0):
+                return None
+            target = self._opaque_container_index_target(arg0)
+            if target is None or target[2] is not None:
+                return None
+            ref = target[0]
+            bound = self.bindings.get(ref.binding_id)
+            if bound is None or bound.type is None or not gate(
+                bound.type.elem
+            ):
+                return None
+            return ref.binding_id
         if arg0 is None or arg0.type != "identifier":
             return None
         ref = self.references.get(self.node_key(arg0))
@@ -2022,6 +2044,20 @@ class _Builder:
                                 if c.type != "comment"
                             ),
                             None,
+                        )
+                    if arg0 is not None and (
+                        arg0.type == "index_expression"
+                    ):
+                        # `b = append(a[i], v)` — the appended
+                        # element names a bound nested root's
+                        # backing; the result may reuse it, so the
+                        # root's share group unions in beside the
+                        # fresh token. An unbound/deeper/array
+                        # operand has no group.
+                        toks |= (
+                            self._opaque_container_index_sharer_toks(
+                                arg0
+                            )
                         )
                     if arg0 is not None and arg0.type == "identifier":
                         arg_ref = self.references.get(
@@ -16151,6 +16187,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         append_cont = self._func_elem_append_target(
                             node, locals_,
                             self._scalar_elem_collection,
+                            allow_index=True,
                         )
                         scalar_cont = append_cont is not None
                         if append_cont is None:

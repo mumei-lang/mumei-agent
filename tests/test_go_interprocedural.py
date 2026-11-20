@@ -18948,6 +18948,37 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset(),
         ),
+
+        # `b := append(a[i], v)` — the result may reuse the
+        # element's backing, so the root's group unions in: a
+        # write through `b` reaches `a` and vice versa.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := append(a[0], x)\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64, y int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := append(a[0], y)\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `b = append(a[i], v)` — the reseat form shares
+        # identically.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tvar b []int64\n"
+            "\tb = append(a[0], x)\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
