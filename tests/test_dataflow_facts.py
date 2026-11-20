@@ -634,13 +634,16 @@ def test_goto_out_of_a_scope_drops_the_shadows_nil_state() -> None:
 
 def test_goto_before_a_late_declaration_keeps_the_outer_state() -> None:
     # ``m := ...`` sits AFTER the goto and never ran on the jumped path —
-    # the outer nil map's marker must survive to the label.
+    # the outer nil map's marker must survive to the label. The
+    # ``return 0`` kills the fall-through so only the goto path reaches
+    # ``done:``.
     body = (
         "var m map[string]int64\n"
         "if c {\n"
         "    goto done\n"
         "    m := map[string]int64{}\n"
         "}\n"
+        "return 0\n"
         "done:\n"
         "m[\"k\"] = 1\n"
         "return 0\n"
