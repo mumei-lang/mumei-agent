@@ -586,44 +586,74 @@ class _Env:
                     self.nilable[target] = held[0]
 
 
-def _copy_name_facts(dst: _Env, src: _Env, name: str) -> None:
+def _copy_name_facts(
+    dst: _Env,
+    src: _Env,
+    name: str,
+    changed: frozenset[str] = frozenset(),
+) -> None:
     """Copy every fact mentioning ``name`` from ``src`` into ``dst``.
 
     Used to restore an outer binding that a switch initializer's ``:=``
     shadowed for the switch's duration — the outer name regains exactly
     its pre-switch state (the inner binding cannot have written it).
     Callers are expected to ``kill`` the name on ``dst`` first.
+
+    ``changed`` is the set of names the switch may have written. A fact
+    that mentions one of them — ``i < len(s)`` after a case shrunk
+    ``s``, an alias whose target was reassigned — no longer describes
+    the post-switch state, so it is not restored.
     """
     name = _norm(name)
     if not name:
         return
     pattern = re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
+    changed_pattern = (
+        re.compile(
+            r"(?<![\w.])(?:"
+            + "|".join(re.escape(c) for c in sorted(changed))
+            + r")(?![\w])"
+        )
+        if changed
+        else None
+    )
 
     def mentions(text: str) -> bool:
         return bool(pattern.search(text)) or text == name or text.startswith(name + ".")
 
-    dst.nonzero |= {t for t in src.nonzero if mentions(t)}
-    dst.nonneg |= {t for t in src.nonneg if mentions(t)}
-    dst.nonnil |= {t for t in src.nonnil if mentions(t)}
-    dst.lt_len |= {p for p in src.lt_len if mentions(p[0]) or mentions(p[1])}
+    def stable(text: str) -> bool:
+        return changed_pattern is None or not changed_pattern.search(text)
+
+    dst.nonzero |= {t for t in src.nonzero if mentions(t) and stable(t)}
+    dst.nonneg |= {t for t in src.nonneg if mentions(t) and stable(t)}
+    dst.nonnil |= {t for t in src.nonnil if mentions(t) and stable(t)}
+    dst.lt_len |= {
+        p
+        for p in src.lt_len
+        if (mentions(p[0]) or mentions(p[1])) and stable(p[0]) and stable(p[1])
+    }
     for key, value in src.len_ge.items():
-        if mentions(key):
+        if mentions(key) and stable(key):
             dst.len_ge[key] = max(dst.len_ge.get(key, 0), value)
     for key, value in src.consts.items():
-        if mentions(key):
+        if mentions(key) and stable(key):
             dst.consts.setdefault(key, value)
     for key, value in src.len_values.items():
-        if mentions(key) or mentions(value[0]):
+        if (mentions(key) or mentions(value[0])) and stable(key) and stable(value[0]):
             dst.len_values.setdefault(key, value)
     for key, value in src.aliases.items():
-        if mentions(key) or mentions(value):
+        if (mentions(key) or mentions(value)) and stable(key) and stable(value):
             dst.aliases.setdefault(key, value)
     dst.held |= {
-        h for h in src.held if mentions(h[1]) or (len(h) == 3 and mentions(h[2]))
+        h
+        for h in src.held
+        if (mentions(h[1]) or (len(h) == 3 and mentions(h[2])))
+        and stable(h[1])
+        and (len(h) != 3 or stable(h[2]))
     }
-    dst.slices |= {t for t in src.slices if mentions(t)}
+    dst.slices |= {t for t in src.slices if mentions(t) and stable(t)}
     for key, value in src.nilable.items():
-        if mentions(key):
+        if mentions(key) and stable(key):
             dst.nilable.setdefault(key, value)
     if name in src.defined:
         dst.defined.add(name)
@@ -1860,6 +1890,22 @@ class _Walker:
         for other in outgoing[1:]:
             merged = merged.merge(other)
         if statement.init:
+            shadowed = {
+                _norm(target)
+                for init in statement.init
+                if init.kind == "define"
+                for target in init.targets
+            }
+            # Names written while a ``:=`` binding was in scope are the
+            # inner binding's — only ``=`` init writes and case-body
+            # writes to other names can mutate outer state.
+            changed = (
+                self._assigned_names(
+                    tuple(s for s in statement.init if s.kind != "define")
+                    + statement.body
+                )
+                - shadowed
+            )
             for init in statement.init:
                 if init.kind != "define":
                     # ``=`` writes target the outer binding — they
@@ -1870,7 +1916,7 @@ class _Walker:
                     # the inner facts die with it and an outer binding
                     # of the same name regains its pre-switch state.
                     merged.kill(name)
-                    _copy_name_facts(merged, env, name)
+                    _copy_name_facts(merged, env, name, changed)
         return merged, ""
 
     # -- assignments -----------------------------------------------------

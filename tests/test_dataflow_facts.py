@@ -1916,3 +1916,39 @@ def test_switch_case_call_arg_establishes_output_param() -> None:
         "}\n"
     )
     assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+# --------------------------------------------------------------------------- #
+# switch initializer shadow-restore soundness
+# --------------------------------------------------------------------------- #
+
+
+def test_switch_shadowed_index_does_not_revive_stale_len_bound() -> None:
+    # A case that shrinks ``s`` must not restore the shadowed ``i``'s
+    # pre-switch ``i < len(s)`` bound for the outer ``i``.
+    facts = _facts(
+        "s := []int{1, 2, 3}\n"
+        "i := len(s) - 1\n"
+        "switch i := 0; x {\n"
+        "case 1:\n"
+        "    s = s[:1]\n"
+        "}\n"
+        "return s[i]",
+        "s[i]",
+    )
+    assert ("i", "s") not in facts.lt_len
+
+
+def test_switch_shadowed_index_keeps_bound_when_cases_do_not_write() -> None:
+    # Same shape with no case write: the outer bound must still come back.
+    facts = _facts(
+        "s := []int{1, 2, 3}\n"
+        "i := len(s) - 1\n"
+        "switch i := 0; x {\n"
+        "case 1:\n"
+        "    _ = 0\n"
+        "}\n"
+        "return s[i]",
+        "s[i]",
+    )
+    assert ("i", "s") in facts.lt_len
