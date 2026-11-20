@@ -552,7 +552,6 @@ class RuntimeObservation:
 class PlannerPolicy:
     selected_adapter: str | None = None
     allow_fallback: bool = False
-    allow_manifest_attempt_argv: bool = False
     disabled_adapters: frozenset[str] = frozenset()
     allowed_locations: frozenset[str] = frozenset({"local"})
     tool_version_pins: tuple[tuple[str, str], ...] = ()
@@ -562,6 +561,7 @@ class PlannerPolicy:
         default=(), repr=False
     )
     allowed_permissions: frozenset[str] | None = None
+    allow_manifest_attempt_argv: bool = False
 
     def __post_init__(self) -> None:
         if self.allowed_permissions is not None:
