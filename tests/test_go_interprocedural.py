@@ -19005,6 +19005,17 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn c[0]\n}\n",
             frozenset({0, 1}),
         ),
+        # `_ = append(a[i], x)` — the discarded result still
+        # grows SOME element's backing; which one depended on
+        # `i`, so the index's deps land in the sharers' sets.
+        (
+            "func F(x int64, i int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tc := a[i]\n"
+            "\t_ = append(a[i], x)\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(

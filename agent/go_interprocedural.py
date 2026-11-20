@@ -16318,14 +16318,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # so `_ = append(a, x)` (or `b := append(a,
                         # x)` where `b` only MAY share) still lets
                         # `a`'s sharers read `x`.
+                        store_deps = appended
+                        s_arg0 = arguments[0]
+                        while (
+                            s_arg0 is not None
+                            and s_arg0.type
+                            == "parenthesized_expression"
+                        ):
+                            s_arg0 = next(
+                                iter(s_arg0.named_children), None
+                            )
+                        if (
+                            s_arg0 is not None
+                            and s_arg0.type == "index_expression"
+                        ):
+                            # `append(a[i], x)` — WHICH element's
+                            # backing the append grew depended on
+                            # `i`, so its deps land in the sharers'
+                            # sets like an `a[i][0] = x` write's
+                            # (deps already unions arg0's eval —
+                            # the group deps it adds are a no-op
+                            # for the group's own holders).
+                            store_deps |= deps
                         for holder_id in self._opaque_container_sharers(
                             append_cont
                         ):
                             self._store(
                                 locals_, params, holder_id,
-                                appended, True,
+                                store_deps, True,
                             )
-                        self.indirect_writes |= appended
+                        self.indirect_writes |= store_deps
                     return deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
