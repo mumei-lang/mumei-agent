@@ -16614,6 +16614,72 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         self.indirect_writes |= store_deps
                     return deps
+                if name in {b"copy", b"delete", b"clear"}:
+                    # Container-mutating builtins on a bound
+                    # scalar-element container. `copy(dst, src)`
+                    # lands the source's conflated element set on
+                    # every sharer of `dst`'s group like an element
+                    # store (the source needs no group — `copy(b,
+                    # "lit")` admits too). `delete(m, k)` and
+                    # `clear(m)` remove elements — a value loss the
+                    # conflated set cannot subtract, so they only
+                    # evaluate the reads and a later element read
+                    # keeps its stored deps, the sound
+                    # over-approximation.
+                    operand = arguments[0] if arguments else None
+                    while (
+                        operand is not None
+                        and operand.type == "parenthesized_expression"
+                    ):
+                        operand = next(
+                            (
+                                c
+                                for c in operand.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    op_ref = (
+                        self.references.get(self.node_key(operand))
+                        if operand is not None
+                        and operand.type == "identifier"
+                        else None
+                    )
+                    op_toks = (
+                        self._opaque_container_tokens.get(
+                            op_ref.binding_id
+                        )
+                        if op_ref is not None and op_ref.binding_id
+                        else None
+                    )
+                    if (
+                        op_toks is None
+                        or len(arguments)
+                        != (1 if name == b"clear" else 2)
+                    ):
+                        raise _Unsupported(
+                            "unresolved_or_opaque_call", _span(node)
+                        )
+                    operand_deps = self.expression(
+                        arguments[0], fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+                    if name == b"clear":
+                        return operand_deps
+                    tail_deps = self.expression(
+                        arguments[1], fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+                    if name == b"copy":
+                        for holder_id in self._opaque_container_sharers(
+                            op_ref.binding_id
+                        ):
+                            self._store(
+                                locals_, params, holder_id,
+                                tail_deps, True,
+                            )
+                        self.indirect_writes |= tail_deps
+                    return operand_deps | tail_deps
                 if name not in {b"min", b"max", b"len", b"cap"}:
                     raise _Unsupported("unresolved_or_opaque_call", _span(node))
                 if not arguments:
