@@ -2299,3 +2299,20 @@ def test_map_key_with_slice_expression_is_not_a_reslice() -> None:
     facts = flow.facts_for_expression("*p")
     assert facts is not None
     assert "p" not in facts.nonnil
+
+
+def test_map_key_with_composite_literal_is_not_a_reslice() -> None:
+    # ``m[Point{X: v}]`` — the colon belongs to the composite literal's
+    # field, so the expression is a map index, not a reslice.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if m == nil {\n    return 0\n}\n"
+        "p := m[Point{X: grid[0][0]}]\n"
+        "return *p",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("*p")
+    assert facts is not None
+    assert "p" not in facts.nonnil

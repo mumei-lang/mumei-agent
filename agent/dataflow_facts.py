@@ -1167,14 +1167,15 @@ def _reslice_inner(inner: str) -> bool:
 
     ``s[:bounds[0]]`` keeps its colon at depth 0 even though the bound is
     an index expression; ``slots[:1][0]`` drives depth negative at the
-    ``][`` join and ``m[string(key[:])]`` buries its colon inside a call.
+    ``][`` join, ``m[string(key[:])]`` buries its colon inside a call and
+    ``m[Point{X: v}]`` buries it inside a composite literal.
     """
     depth = 0
     sliced = False
     for ch in inner:
-        if ch in "([":
+        if ch in "([{":
             depth += 1
-        elif ch in ")]":
+        elif ch in ")]}":
             depth -= 1
             if depth < 0:
                 return False
