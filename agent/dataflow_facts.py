@@ -1301,6 +1301,9 @@ class _Walker:
         # so a ``goto:`` termination propagates up to that frame only.
         self._label_frames: dict[str, int] = {}
         self._collect_label_frames(tree.statements)
+        # (statement-list id, names it declares) for every open frame —
+        # a ``goto`` strips the names of the scopes it exits.
+        self._scope_stack: list[tuple[int, frozenset[str]]] = []
 
     def _collect_label_frames(
         self, statements: tuple[tree_sitter_extract.Statement, ...]
@@ -1403,38 +1406,45 @@ class _Walker:
         kind of statement that left the block (``"return"``, ``"terminate"``,
         ``"break"``, ``"continue"``, ``"fallthrough"``, ``"goto:<label>"``).
         """
-        index = 0
-        while index < len(statements):
-            statement = statements[index]
-            env, terminated = self.statement(statement, env)
-            index += 1
-            if not terminated:
-                continue
-            if terminated.startswith("goto:") and self._label_frames.get(
-                terminated[5:]
-            ) == id(statements):
-                # The label lives in this list: the jumped path is dead
-                # here but the walk continues toward it — its env is
-                # already recorded, and intersecting with the site env at
-                # the label keeps must-facts conservative.
-                continue
-            # Every path that reaches this point in the list is dead — but
-            # a recorded ``goto`` can still land on a labelled sibling, so
-            # resume the walk there with the recorded environments as the
-            # only live state (the dead path does not fall through).
-            for ahead in range(index, len(statements)):
-                later = statements[ahead]
-                if (
-                    later.labeled
-                    and later.label
-                    and self.goto_carried.get(later.label)
-                ):
-                    env = None
-                    index = ahead
-                    break
-            else:
-                return env, terminated
-        return env, ""
+        self._scope_stack.append(
+            (id(statements), frozenset(self._declared_names(statements)))
+        )
+        try:
+            index = 0
+            while index < len(statements):
+                statement = statements[index]
+                env, terminated = self.statement(statement, env)
+                index += 1
+                if not terminated:
+                    continue
+                if terminated.startswith("goto:") and self._label_frames.get(
+                    terminated[5:]
+                ) != id(statements):
+                    # The label lives in an enclosing list — bubble up to
+                    # the frame that owns it.
+                    return env, terminated
+                # The path is dead: a ``goto`` whose label lives here was
+                # absorbed, or control left by return/break/continue. The
+                # dead path does NOT keep walking — statements after it
+                # never ran (a skipped ``defer`` must not register), but a
+                # recorded ``goto`` can still land on a labelled sibling,
+                # so resume there with the recorded envs as the only live
+                # state.
+                for ahead in range(index, len(statements)):
+                    later = statements[ahead]
+                    if (
+                        later.labeled
+                        and later.label
+                        and self.goto_carried.get(later.label)
+                    ):
+                        env = None
+                        index = ahead
+                        break
+                else:
+                    return env, terminated
+            return env, ""
+        finally:
+            self._scope_stack.pop()
 
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         if statement.labeled and statement.label:
@@ -1499,7 +1509,27 @@ class _Walker:
             if not label:
                 # ``_forward_goto_plan`` already rejects malformed operands.
                 return env, "terminate"
-            self.goto_carried.setdefault(label, []).append(env.copy())
+            carried = env.copy()
+            # The label lives in this frame or an enclosing one, so every
+            # scope the jump exits dies with it — facts about names
+            # declared in those scopes must not land at the label (an
+            # inner ``d := 1`` that shadows a parameter would otherwise
+            # carry its nonzero fact into the outer ``d``).
+            label_frame = self._label_frames[label]
+            strip: frozenset[str] = frozenset()
+            for depth, (frame_id, declared) in enumerate(self._scope_stack):
+                if frame_id == label_frame:
+                    strip = frozenset().union(
+                        *(d for _, d in self._scope_stack[depth + 1 :])
+                    )
+                    break
+            else:
+                strip = frozenset().union(
+                    *(d for _, d in self._scope_stack)
+                )
+            if strip:
+                self._strip_scoped_names(carried, strip)
+            self.goto_carried.setdefault(label, []).append(carried)
             return env, f"goto:{label}"
         if kind in {"continue", "fallthrough"}:
             return env, kind
@@ -1904,6 +1934,48 @@ class _Walker:
             (h[0], h[1], "") if len(h) == 3 and h[2] in names else h
             for h in inner.held
         }
+
+    @staticmethod
+    def _strip_scoped_names(env: _Env, names: frozenset[str]) -> None:
+        """Drop every fact bound to ``names`` — the environment of a
+        ``goto`` that exits those names' scopes cannot mention them at the
+        label: a shadowed outer name would otherwise inherit the dead
+        inner binding's facts. Unlike ``_leave_scope`` nothing is
+        re-established: what the outer scope knows is recovered from the
+        surviving paths' envs at the merge, not fabricated here."""
+        for name in names:
+            pattern = re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
+
+            def mentions(text: str) -> bool:
+                return bool(pattern.search(text)) or text.startswith(name + ".")
+
+            env.nonzero = {t for t in env.nonzero if not mentions(t)}
+            env.nonneg = {t for t in env.nonneg if not mentions(t)}
+            env.nonnil = {t for t in env.nonnil if not mentions(t)}
+            env.lt_len = {
+                p for p in env.lt_len
+                if not mentions(p[0]) and not mentions(p[1])
+            }
+            env.len_ge = {
+                k: v for k, v in env.len_ge.items() if not mentions(k)
+            }
+            env.consts = {
+                k: v for k, v in env.consts.items() if not mentions(k)
+            }
+            env.len_values = {
+                k: v for k, v in env.len_values.items()
+                if not mentions(k) and not mentions(v[0])
+            }
+            env.aliases = {
+                k: v for k, v in env.aliases.items()
+                if not mentions(k) and not mentions(v)
+            }
+            env.slices = {t for t in env.slices if not mentions(t)}
+            env.nilable = {
+                k: v for k, v in env.nilable.items() if k != name
+            }
+            env.held = {h for h in env.held if not mentions(h[1])}
+            env.defined = {d for d in env.defined if d != name}
 
     def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:
         outer = env.copy()
