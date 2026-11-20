@@ -6106,8 +6106,50 @@ descriptor = AdapterDescriptor.from_manifest({
 ```
 
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
-any default audit/CLI/MCP route are unchanged — output interpretation
-and Evidence acceptance remain open.
+any default audit/CLI/MCP route are unchanged — declared output
+interpretation is covered by `verdict_markers` below while Evidence
+acceptance remains open.
+
+### C11 manifest-declared output verdict markers
+
+`AdapterDescriptor.verdict_markers` lets an adapter manifest declare
+how its own output self-reports an outcome: an ordered tuple of
+`{stream, contains, outcome}` where `stream` is `stdout` or `stderr`,
+`contains` is a bounded byte string, and `outcome` is one of `valid` /
+`failed` / `inconclusive`. After a dispatch reaches `exited`, the
+schedule scans the captured stream for the first matching marker and
+records it as the attempt entry's `reported_outcome` on
+`mumei.attempt-schedule/v1`.
+
+The reported outcome is the adapter's own declared self-report — the
+schedule interprets bytes only through the manifest's declared
+markers, never through a guessed format. `reported_outcome` is not a
+selection signal (exit codes still decide `selected`), not an
+evidence-check outcome, and never Evidence acceptance — Core owns the
+meaning of what an adapter claims.
+
+```python
+descriptor = AdapterDescriptor.from_manifest({
+    ...,
+    "verdict_markers": [
+        {"stream": "stdout", "contains": "VERIFIED", "outcome": "valid"},
+    ],
+})
+```
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged.
+
+Markers scan only the captured prefix of each stream: the output
+collector keeps at most the first 64 KiB of stdout and stderr, so a
+marker that appears only beyond the byte bound records `null`
+(indistinguishable from no match — the run's `complete` flag declares
+stdout's completeness, `stderr_complete` stderr's, so a stderr marker
+that misses is checked against `stderr_complete`).
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged — Evidence acceptance
+remains open.
 
 
 ## Roadmap authority and vocabulary

@@ -2149,3 +2149,20 @@ def test_replan_keeps_policy_budgets_and_permissions():
     assert second.policy.allowed_permissions == frozenset({"filesystem.read"})
     assert second.policy.selected_adapter is None
     assert first.selected.adapter_id in second.policy.disabled_adapters
+
+
+def test_manifest_verdict_markers_rejects_falsy_non_list():
+    from agent.verification_planner import AdapterDescriptor
+
+    base = {
+        "schema_version": "mumei.verifier-adapter/v1",
+        "adapter_id": "alpha",
+        "adapter_version": "1.0.0",
+        "profiles": ["mumei.test/v1"],
+        "methods": ["deductive_proof"],
+    }
+    for bad in ({}, False, "nope"):
+        with pytest.raises(ValueError):
+            AdapterDescriptor.from_manifest(
+                {**base, "verdict_markers": bad}
+            )

@@ -352,3 +352,122 @@ def test_descriptor_stays_fingerprint_only(capsys):
         for entry in doc["attempts"]
         if entry["request_fingerprint"] is not None
     )
+
+
+def _argv_spew(text, code=0):
+    return (
+        PY,
+        "-c",
+        f"import sys; sys.stdout.write({text!r}); sys.exit({code})",
+    )
+
+
+def test_verdict_marker_reports_declared_outcome():
+    from agent.verification_planner import VerdictMarker
+
+    registry = AdapterRegistry()
+    registry.register(
+        AdapterDescriptor(
+            "alpha",
+            "1.0.0",
+            frozenset({PROFILE}),
+            frozenset({CONTRACT.method}),
+            priority=0,
+            result_contracts=(CONTRACT,),
+            input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+            required_permissions=frozenset(),
+            verdict_markers=(
+                VerdictMarker("stdout", "VERIFIED", "valid"),
+                VerdictMarker("stdout", "REFUTED", "failed"),
+            ),
+        )
+    )
+    result = schedule(
+        registry, ["alpha"], {"alpha": _argv_spew("REFUTED\n")}
+    )
+    entry = result.entries[0]
+    assert entry.terminal_state == "exited"
+    assert entry.reported_outcome == "failed"
+
+
+def test_verdict_marker_first_match_wins_and_no_match_is_null():
+    from agent.verification_planner import VerdictMarker
+
+    registry = AdapterRegistry()
+    registry.register(
+        AdapterDescriptor(
+            "alpha",
+            "1.0.0",
+            frozenset({PROFILE}),
+            frozenset({CONTRACT.method}),
+            priority=0,
+            result_contracts=(CONTRACT,),
+            input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+            required_permissions=frozenset(),
+            verdict_markers=(
+                VerdictMarker("stdout", "OK", "valid"),
+                VerdictMarker("stdout", "OKAY", "failed"),
+            ),
+        )
+    )
+    matched = schedule(
+        registry, ["alpha"], {"alpha": _argv_spew("OKAY")}
+    )
+    assert matched.entries[0].reported_outcome == "valid"
+
+    quiet = schedule(
+        registry, ["alpha"], {"alpha": _argv_spew("nothing here")}
+    )
+    assert quiet.entries[0].reported_outcome is None
+
+
+def test_verdict_marker_stderr_stream():
+    from agent.verification_planner import VerdictMarker
+
+    registry = AdapterRegistry()
+    registry.register(
+        AdapterDescriptor(
+            "alpha",
+            "1.0.0",
+            frozenset({PROFILE}),
+            frozenset({CONTRACT.method}),
+            priority=0,
+            result_contracts=(CONTRACT,),
+            input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+            required_permissions=frozenset(),
+            verdict_markers=(
+                VerdictMarker("stderr", "UNSAT", "failed"),
+            ),
+        )
+    )
+    argv_err = (
+        PY,
+        "-c",
+        "import sys; sys.stderr.write('UNSAT'); sys.exit(0)",
+    )
+    result = schedule(registry, ["alpha"], {"alpha": argv_err})
+    assert result.entries[0].reported_outcome == "failed"
+
+
+def test_verdict_marker_validation():
+    from agent.verification_planner import VerdictMarker
+
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        VerdictMarker("stdin", "x", "valid")
+    with _pytest.raises(ValueError):
+        VerdictMarker("stdout", "", "valid")
+    with _pytest.raises(ValueError):
+        VerdictMarker("stdout", "x", "bogus")
+    with _pytest.raises(ValueError):
+        AdapterDescriptor.from_manifest(
+            {
+                "schema_version": "mumei.verifier-adapter/v1",
+                "adapter_id": "alpha",
+                "adapter_version": "1.0.0",
+                "profiles": [PROFILE],
+                "methods": ["deductive_proof"],
+                "verdict_markers": [{"stream": "stdout"}],
+            }
+        )
