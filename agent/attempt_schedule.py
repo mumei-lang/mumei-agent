@@ -292,7 +292,9 @@ def run_attempt_schedule(
                 runner=active_runner,
                 cancel_event=cancel_event,
                 memory_bound_mb=memory_bound_mb,
-                feed_bytes=feed,
+                # No declared feed means a closed pipe — a scheduled child
+                # must never inherit the parent's stdin and block on it.
+                feed_bytes=feed if feed is not None else b"",
             )
             sequences.append(dispatch.sequence)
             record = dispatch.run.record

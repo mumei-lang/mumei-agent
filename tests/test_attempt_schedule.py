@@ -493,3 +493,17 @@ def test_stdin_for_feeds_the_attempt_process():
     assert fed.outcome == "selected"
     unfed = schedule(registry, ("alpha",), {"alpha": probe})
     assert unfed.outcome == "exhausted"
+
+
+def test_no_feed_closes_stdin_instead_of_inheriting():
+    # With no declared feed the child's stdin is a closed pipe — the
+    # probe sees EOF immediately rather than inheriting the parent's.
+    registry = registry_with("alpha")
+    probe = (
+        PY,
+        "-c",
+        "import sys;"
+        "sys.exit(0 if sys.stdin.buffer.read() == b'' else 5)",
+    )
+    result = schedule(registry, ("alpha",), {"alpha": probe})
+    assert result.outcome == "selected"
