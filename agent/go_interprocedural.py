@@ -2086,8 +2086,19 @@ class _Builder:
             if binding.type.kind == "array":
                 # `s = a` copies the array — the reseat never
                 # aliases `a`'s backing, so the destination mints
-                # its own token.
-                return frozenset({self.node_key(rhs)})
+                # its own token. A nested `[N][]T` copy still
+                # shares every inner slice's backing, so the
+                # source's tokens union in: `a[0][0] = x` reaches
+                # `b[0][0]` reads (and `b[0] = sub` stays a
+                # conflated may-write on `a`'s group).
+                fresh = {self.node_key(rhs)}
+                if self._scalar_elem_nested_collection(
+                    binding.type
+                ):
+                    fresh |= self._opaque_container_tokens.get(
+                        ref.binding_id, frozenset()
+                    )
+                return frozenset(fresh)
             toks = self._opaque_container_tokens.get(ref.binding_id)
             if toks:
                 return toks

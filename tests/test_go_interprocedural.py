@@ -18663,8 +18663,9 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
-        # `b := a` on a nested ARRAY copies — `b[0][0]` never sees
-        # `a`'s stores.
+        # `b := a` on a nested ARRAY copies the array header but
+        # the inner slices still share `a`'s backings — `b[0][0]`
+        # sees `a`'s nested stores.
         (
             "func F(x int64) int64 {\n"
             "\tvar a [4][]int64\n"
@@ -18672,7 +18673,7 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\tb := a\n"
             "\ta[0][0] = x\n"
             "\treturn b[0][0]\n}\n",
-            frozenset(),
+            frozenset({0}),
         ),
         # `a = [][]int64{x}` — a literal reseat on a nested local
         # replaces the backing like the scalar form.
@@ -18720,6 +18721,16 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\ta[0] = s\n"
             "\ts[0] = x\n"
             "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` on a `[N][]T` literal — the inner slices share
+        # `a`'s backings through the copy.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][]int64{{0}}\n"
+            "\tb := a\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
             frozenset({0}),
         ),
     ],
