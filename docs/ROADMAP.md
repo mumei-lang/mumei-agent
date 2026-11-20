@@ -4088,10 +4088,15 @@ per-slot distinction, so `b` reads and writes the whole
 backing the root and its other sharers see), and an element
 read on a bound nested operand is admitted by the
 imported-index-read gate since its element is itself a
-scalar-element collection. The honest closures stay honest:
+scalar-element collection. A plain `b = a[i]` reseat (and
+`b = m[k]`) lands `b` on the same group — it replaces `b`'s
+tokens, so reseating away detaches `b` from the group it
+left, and a parallel-assignment RHS resolves `a[i]` at the
+pre-state (`a, b = sub, a[0]` names the group `a` held
+before the reseat). The honest closures stay honest:
 `[][][]int64` (two levels over scalar) and any deeper nesting
-still cannot bind, a plain `b = a[i]` reseat and `b :=
-a[i][j]` (indexing into the extracted inner) stay closed,
+still cannot bind, `b := a[i][j]` (indexing into the
+extracted inner) stays closed,
 extracting from an unbound or parameter operand (`t[i]` on a
 param `t`) stays closed because the operand never joined a
 share group, `a := s.F` on a `[][]int64` field stays closed

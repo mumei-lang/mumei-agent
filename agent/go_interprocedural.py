@@ -2143,6 +2143,13 @@ class _Builder:
             fresh = frozenset({self.node_key(rhs)})
             self._opaque_container_tokens[ref.binding_id] = fresh
             return fresh
+        if rhs.type == "index_expression":
+            # `b = a[i]` — the extracted element of a bound nested
+            # container names the root's whole share group, so the
+            # reseat lands `b` on it like `b := a[i]` does. An
+            # unbound/deeper/scalar-element operand has no group.
+            sharer = self._opaque_container_index_sharer_toks(rhs)
+            return frozenset(sharer) if sharer else None
         if rhs.type in {"selector_expression", "field_expression"}:
             root_id, member = self._scalar_container_field(rhs)
             if root_id is None:
@@ -10487,6 +10494,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self._opaque_container_tokens.get(
                                     pre_ref.binding_id
                                 )
+                            )
+                    elif (
+                        pre_rhs is not None
+                        and pre_rhs.type == "index_expression"
+                    ):
+                        # `a, b = sub, a[0]` — `a[0]` names the
+                        # share group `a` held BEFORE `a` reseated
+                        # to `sub`, not the one it lands on.
+                        pre_toks = (
+                            self._opaque_container_index_sharer_toks(
+                                pre_rhs
+                            )
+                        )
+                        if pre_toks:
+                            pre_container_toks[pre_i] = frozenset(
+                                pre_toks
                             )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
