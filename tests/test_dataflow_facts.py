@@ -507,9 +507,168 @@ def test_break_inside_if_in_switch_keeps_path() -> None:
     assert "d" not in facts.nonzero
 
 
-def test_goto_disables_analysis() -> None:
-    body = "if d == 0 {\n    goto done\n}\nreturn n / d\ndone:\nreturn 0\n"
-    assert dataflow_facts.analyze_function(body, "go", param_names={"n", "d"}) is None
+def test_forward_goto_merges_recorded_paths_at_the_label() -> None:
+    # The fall-through assigns ``d = 1`` but the goto path skips it, so the
+    # merged env at ``done`` cannot prove ``d`` nonzero.
+    body = "if d == 0 {\n    goto done\n}\nd = 1\ndone:\nreturn n / d\n"
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" not in facts.nonzero
+
+
+def test_forward_goto_resumes_past_a_dead_fallthrough() -> None:
+    # ``return 0`` kills the fall-through, but the recorded goto path keeps
+    # ``done:`` live — and its guarded env is the only one that lands there.
+    body = "if d != 0 {\n    goto checked\n}\nreturn 0\nchecked:\nreturn n / d\n"
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" in facts.nonzero
+
+
+def test_goto_out_of_a_loop_to_a_later_label() -> None:
+    body = (
+        "for i := 0; i < 3; i++ {\n"
+        "    if i == 2 {\n"
+        "        goto done\n"
+        "    }\n"
+        "}\n"
+        "return n / d\n"
+        "done:\n"
+        "return n / d\n"
+    )
+    flow = _go(body, param_names={"n", "d"})
+    facts = flow.facts_for_expression("n / d")
+    assert facts is not None
+
+
+def test_backward_goto_stays_unanalysed() -> None:
+    body = "again:\n    x = 1\n    goto again\n"
+    assert dataflow_facts.analyze_function(body, "go", param_names={"x"}) is None
+
+
+def test_goto_to_an_undeclared_label_stays_unanalysed() -> None:
+    body = "goto nowhere\nreturn 0\n"
+    assert dataflow_facts.analyze_function(body, "go") is None
+
+
+def test_goto_into_an_inner_block_stays_unanalysed() -> None:
+    # Illegal in Go (a jump cannot enter a block); fail closed.
+    body = "goto inside\nif c {\ninside:\n    x = 1\n}\nreturn x\n"
+    assert dataflow_facts.analyze_function(body, "go", param_names={"x", "c"}) is None
+
+
+def test_goto_carried_resource_state_survives_the_jump() -> None:
+    # ``mu.Lock`` held on the goto path is still held at the label, so the
+    # fall-through return keeps reporting it.
+    body = (
+        "mu.Lock()\n"
+        "if c {\n"
+        "    goto done\n"
+        "}\n"
+        "mu.Unlock()\n"
+        "done:\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
+
+
+def test_goto_strips_facts_for_scope_local_names() -> None:
+    # The inner ``d := 1`` shadows the parameter and dies at the jump —
+    # its nonzero fact must not land on the outer ``d`` at the label.
+    body = "if d == 0 {\n    d := 1\n    goto done\n}\nreturn 0\ndone:\nreturn n / d\n"
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" not in facts.nonzero
+
+
+def test_goto_never_walks_the_statements_it_skips() -> None:
+    # The ``defer`` after ``goto`` never runs on the jumped path, so the
+    # lock is still held at ``done`` — no deferred release may register.
+    body = (
+        "mu.Lock()\n"
+        "goto done\n"
+        "defer mu.Unlock()\n"
+        "done:\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names=set())
+    assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
+
+
+def test_outer_goto_still_analyses_a_pending_inner_label() -> None:
+    # ``goto inner`` recorded a path to the label inside the block —
+    # ``goto done`` ending the walk early must not skip it.
+    body = (
+        "if c {\n"
+        "    if d != 0 {\n"
+        "        goto inner\n"
+        "    }\n"
+        "    goto done\n"
+        "inner:\n"
+        "    return n / d\n"
+        "}\n"
+        "done:\n"
+        "return 0\n"
+    )
+    facts = _facts(body, "n / d", param_names={"c", "d", "n"})
+    assert facts is not None
+    assert "d" in facts.nonzero
+
+
+def test_goto_out_of_a_scope_drops_the_shadows_nil_state() -> None:
+    # The inner ``var m`` nil-map marker dies with the shadowed binding —
+    # the outer initialized map must not report nil_map_write.
+    body = (
+        "m := map[string]int64{}\n"
+        "if c {\n"
+        "    var m map[string]int64\n"
+        "    goto done\n"
+        "}\n"
+        "done:\n"
+        "m[\"k\"] = 1\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert not any(
+        issue.category == "nil_map_write" for issue in flow.issues
+    )
+
+
+def test_goto_before_a_late_declaration_keeps_the_outer_state() -> None:
+    # ``m := ...`` sits AFTER the goto and never ran on the jumped path —
+    # the outer nil map's marker must survive to the label. The
+    # ``return 0`` kills the fall-through so only the goto path reaches
+    # ``done:``.
+    body = (
+        "var m map[string]int64\n"
+        "if c {\n"
+        "    goto done\n"
+        "    m := map[string]int64{}\n"
+        "}\n"
+        "return 0\n"
+        "done:\n"
+        "m[\"k\"] = 1\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert any(issue.category == "nil_map_write" for issue in flow.issues)
+
+
+def test_goto_out_of_a_scope_keeps_the_held_resource() -> None:
+    # The inner ``mu := M(); mu.Lock()`` handle is still open past the
+    # jump — its lock stays held at the return even though the name died.
+    body = (
+        "if c {\n"
+        "    mu := M()\n"
+        "    mu.Lock()\n"
+        "    goto done\n"
+        "}\n"
+        "return 0\n"
+        "done:\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
+
+
 
 
 def test_fallthrough_enters_next_case_without_its_guard() -> None:

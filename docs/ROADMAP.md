@@ -2512,6 +2512,37 @@ the declared `unsupported_fallthrough` gap instead of being edged like
 an expression switch. Labelled type switches, `goto` and the remaining
 unmodelled constructs still produce their existing gaps.
 
+### C05 forward `goto` in the dataflow walker
+
+`dataflow_facts` now analyses bodies that contain forward `goto`
+instead of declining them wholesale. A `goto L` records the current
+environment against the label and leaves its path dead: the recorded
+environment merges into the env at the labelled statement (must-facts
+intersect, `held` union — the usual join), so a jump that skips an
+assignment or an `Unlock` correctly keeps the merged env conservative.
+A `goto` can also be the only path that reaches a label (the
+fall-through `return`s first): the walk then resumes at the labelled
+sibling with the recorded environments as the only live state.
+
+Admissibility is checked up front (`_forward_goto_plan`): every `goto`
+must name a label that is declared later in document order inside the
+goto's own statement list or an enclosing one. Backward jumps (real
+loops through a label), undeclared or duplicate labels, malformed
+operands and jumps into a non-ancestor block still return `None` —
+unmodelled shapes stay unanalysed rather than partially correct, the
+same fail-closed posture the CFG layer keeps for its own gaps.
+Dead-path continuation after an absorbed `goto` under-approximates
+must-facts, which is the safe direction for every consumer
+(`facts_for_expression`, resource-state and reaching-definition
+issues).
+
+Tests cover the label merge (skipped assignments lose facts), the
+resume past a dead fall-through (the guarded env is the only live
+one), jumps out of loops, carried resource state across a jump, and
+each bail shape (backward / undeclared / into an inner block).
+Remaining limits: backward `goto` and labels crossed by non-ancestor
+frames stay unanalysed.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
@@ -6956,7 +6987,9 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   位置代入で満たすため対象外、`r := …` のシャドーイングは確立とみなさない、`*out` への
   書き込み・`f(out)` 呼出し引数は確立とみなすが、変数自体の再代入
   （`out = &x`）や `f(&out)`（`**T` は pointee を書かない）は確立とみなさない）。
-  既知の制限: `goto` を含む関数は全体未解析（従来仕様）、ループ内 `continue` のみ先行する
+  既知の制限: 後方 `goto` / 未宣言ラベル / 非祖先ブロックへの `goto` を含む関数は
+  全体未解析（従来仕様。前方 `goto` はラベルで環境を合流して解析済み）、ループ内
+  `continue` のみ先行する
   経路の代入は exit 交差マージで未確立扱いになり得る（偽陽性側）、`for` post 句での
   呼出し引数書き込みは 0 回実行があり得るため確立とみなさない。これで A-6 の拡張種別は
   全件対応。データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
