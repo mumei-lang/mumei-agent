@@ -6215,6 +6215,25 @@ C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
 remains open.
 
+### C11 scheduled-attempt evidence check
+
+`run_attempt_schedule(..., core_executable=PATH)` and the
+`verify-schedule --core PATH` flag close the same produce+consume loop
+as `verify-attempt` for a scheduled selection: when the schedule
+selects an attempt, the dispatch's captured output is canonically
+selected on the sequence, the Core representation check is run against
+the declared executable (`record_evidence_check`, bounded like
+verify-attempt's check), and `evaluate_evidence_check` normalizes it
+into the schedule record's `evidence_check` /
+`evidence_acceptance` fields — null when no `--core` is declared or no
+attempt is selected. `--core` must be an absolute path to a regular
+file; a failed or cancelled check records its outcome with
+`accepted: false` — it never blocks the selection.
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged — Evidence acceptance
+remains open.
+
 
 ## Roadmap authority and vocabulary
 

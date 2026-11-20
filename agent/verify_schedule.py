@@ -240,6 +240,14 @@ def build_schedule_parser(
         help="Optional declared POSIX RLIMIT_AS ceiling per attempt child.",
     )
     parser.add_argument(
+        "--core", metavar="PATH", default=None,
+        help=(
+            "Optional Core executable: when a schedule selects an attempt, "
+            "run the Core representation check on its captured output and "
+            "record the mumei.evidence-check-acceptance/v1 descriptor."
+        ),
+    )
+    parser.add_argument(
         "--output", metavar="PATH",
         help="Write the schedule document here instead of stdout.",
     )
@@ -257,6 +265,12 @@ def run_schedule(args: argparse.Namespace) -> dict:
     declared = Path(args.source)
     if not declared.is_file():
         raise ValueError("source requires a regular declared file")
+    if args.core is not None and (
+        not os.path.isabs(args.core)
+        or "\x00" in args.core
+        or not Path(args.core).is_file()
+    ):
+        raise ValueError("--core must be an absolute path to a regular file")
     source = declared.read_bytes()
     success = (
         frozenset({0})
@@ -298,6 +312,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
         success_exit_codes=success,
         memory_bound_mb=args.memory_bound_mb,
         stdin_for=stdin_for,
+        core_executable=args.core,
     )
     return result.to_dict()
 
@@ -305,6 +320,8 @@ def run_schedule(args: argparse.Namespace) -> dict:
 def _declared_paths(args: argparse.Namespace) -> list[str]:
     paths = [args.request, args.adapters, args.argv_map, args.policy,
              args.source]
+    if args.core is not None:
+        paths.append(args.core)
     if args.observations is not None:
         paths.append(args.observations)
     if args.output is not None:

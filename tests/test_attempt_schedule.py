@@ -537,3 +537,96 @@ def test_manifest_memory_bound_skipped_without_posix_mechanism(monkeypatch):
     probe = (PY, "-c", "import sys; sys.exit(0)")
     result = schedule(registry, ("alpha",), {"alpha": probe})
     assert result.outcome == "selected"
+
+_CORE_DIAGNOSTIC = {
+    "schema_version": "mumei.evidence-representation-check/v1",
+    "evidence_schema_version": "mumei.verification-evidence/v1",
+    "representation": "valid",
+    "acceptance": "not_evaluated",
+    "checks_not_performed": [
+        "claim_truth",
+        "file_identity",
+        "freshness",
+        "producer_authenticity",
+        "semantic_correspondence",
+        "artifact_semantics",
+    ],
+}
+
+
+def _core_stub(tmp_path, exit_code=0):
+    # Stub Core: `evidence check` drains stdin and emits the v1
+    # diagnostic — or exits `exit_code` with no diagnostic.
+    core = tmp_path / "mumei-stub"
+    body = (
+        "    printf %s '" + json.dumps(_CORE_DIAGNOSTIC) + "'\n    exit 0\n"
+        if exit_code == 0
+        else f"    exit {exit_code}\n"
+    )
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
+        "    cat > /dev/null\n"
+        + body +
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    return str(core)
+
+
+def test_selected_attempt_records_evidence_check_and_acceptance(tmp_path):
+    registry = registry_with("alpha")
+    core = _core_stub(tmp_path)
+    result = schedule(
+        registry, ("alpha",), {"alpha": argv(0)}, core_executable=core
+    )
+    assert result.outcome == "selected"
+    assert result.evidence_check is not None
+    assert result.evidence_check.outcome == "valid"
+    assert result.evidence_acceptance["accepted"] is True
+    assert result.evidence_acceptance["schema_version"] == (
+        "mumei.evidence-check-acceptance/v1"
+    )
+    # The selected sequence gained the canonical-result selection.
+    assert result.sequences[-1].selected_result is not None
+    doc = result.to_dict()
+    assert doc["evidence_check"]["schema_version"] == (
+        "mumei.verifier-evidence-check/v1"
+    )
+    assert doc["evidence_acceptance"]["accepted"] is True
+
+
+def test_no_core_leaves_evidence_fields_absent():
+    registry = registry_with("alpha")
+    result = schedule(registry, ("alpha",), {"alpha": argv(0)})
+    assert result.outcome == "selected"
+    assert result.evidence_check is None
+    assert result.evidence_acceptance is None
+    doc = result.to_dict()
+    assert doc["evidence_check"] is None
+    assert doc["evidence_acceptance"] is None
+
+
+def test_failed_check_records_outcome_without_acceptance(tmp_path):
+    registry = registry_with("alpha")
+    core = _core_stub(tmp_path, exit_code=1)
+    result = schedule(
+        registry, ("alpha",), {"alpha": argv(0)}, core_executable=core
+    )
+    assert result.outcome == "selected"
+    assert result.evidence_check.outcome == "failed"
+    assert result.evidence_acceptance["accepted"] is False
+
+
+def test_unselected_attempt_runs_no_check(tmp_path):
+    registry = registry_with("alpha")
+    core = _core_stub(tmp_path)
+    result = schedule(
+        registry, ("alpha",), {"alpha": argv(1)},
+        policy=policy(allow_fallback=False),
+        core_executable=core,
+    )
+    assert result.outcome != "selected"
+    assert result.evidence_check is None
+    assert result.evidence_acceptance is None
