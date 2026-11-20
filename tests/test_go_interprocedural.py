@@ -18753,6 +18753,27 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset({0}),
         ),
+        # `b := a` on `[1][1]int64` — the inner element is itself
+        # an array, so the copy is deep: `a[0][0] = x` must NOT
+        # reach `b[0][0]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][1]int64{{0}}\n"
+            "\tb := a\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset(),
+        ),
+        # `[1][1]int64{sub}` embeds a COPY of `sub` — the array
+        # donor shares no backing with `a`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tsub := [1]int64{0}\n"
+            "\ta := [1][1]int64{sub}\n"
+            "\tsub[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset(),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(

@@ -2090,10 +2090,15 @@ class _Builder:
                 # shares every inner slice's backing, so the
                 # source's tokens union in: `a[0][0] = x` reaches
                 # `b[0][0]` reads (and `b[0] = sub` stays a
-                # conflated may-write on `a`'s group).
+                # conflated may-write on `a`'s group). An inner
+                # ARRAY (`[N][M]T`) is a value copy itself — the
+                # copy shares nothing, so no tokens union.
                 fresh = {self.node_key(rhs)}
                 if self._scalar_elem_nested_collection(
                     binding.type
+                ) and (
+                    binding.type.elem is not None
+                    and binding.type.elem.kind in {"slice", "map"}
                 ):
                     fresh |= self._opaque_container_tokens.get(
                         ref.binding_id, frozenset()
@@ -2168,8 +2173,11 @@ class _Builder:
         if (
             binding is None
             or binding.type is None
-            or binding.type.kind not in {"slice", "array", "map"}
+            or binding.type.kind not in {"slice", "map"}
         ):
+            # An array-typed donor copies into the slot that
+            # embeds it — `a := [1][1]int64{sub}` shares no memory
+            # with `sub`, so its tokens must not join the group.
             return frozenset()
         return self._opaque_container_tokens.get(
             ref.binding_id, frozenset({ref.binding_id})
