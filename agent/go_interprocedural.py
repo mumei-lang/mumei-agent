@@ -2170,18 +2170,28 @@ class _Builder:
         if ref is None or ref.binding_id is None:
             return frozenset()
         binding = self.bindings.get(ref.binding_id)
-        if (
-            binding is None
-            or binding.type is None
-            or binding.type.kind not in {"slice", "map"}
+        if binding is None or not self._type_embeds_collection(
+            binding.type
         ):
-            # An array-typed donor copies into the slot that
-            # embeds it — `a := [1][1]int64{sub}` shares no memory
-            # with `sub`, so its tokens must not join the group.
+            # An array of scalars copies into the slot that embeds
+            # it — `a := [1][1]int64{sub}` shares no memory with
+            # `sub`, so its tokens must not join the group. An
+            # array whose chain bottoms in a slice/map header
+            # (`[1][]int64`) shares that header's backing.
             return frozenset()
         return self._opaque_container_tokens.get(
             ref.binding_id, frozenset({ref.binding_id})
         )
+
+    def _type_embeds_collection(self, fact: Any) -> bool:
+        """Whether a value of this type shares memory when copied —
+        a slice/map header shares directly; an array shares when
+        the headers inside it are copied along (`[1][]int64`
+        shares its inner slice, `[1][1]int64` shares nothing)."""
+        t = fact
+        while t is not None and t.kind == "array":
+            t = getattr(t, "elem", None)
+        return t is not None and t.kind in {"slice", "map"}
 
     def _opaque_container_elem_toks(
         self, node: Any

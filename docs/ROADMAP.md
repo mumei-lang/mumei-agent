@@ -4076,7 +4076,12 @@ multi-index descent (a `select` receive `a[i][j] = <-ch` and
 shares the backing, `a = [][]int64{...}`/`a = make(...)` reseat
 mints a fresh one, and a one-level element store (`a[i] =
 sub-slice`) lands the inner container's deps in the root's set
-like any element write. The honest closures stay honest:
+like any element write. A donor whose type is an array still
+shares when its element chain bottoms in a slice/map header —
+`s[0] = sub` on `[1][1][]int64` with `sub : [1][]int64`
+embeds `sub`'s headers, so `sub[0][0] = x` reaches
+`s[0][0][0]` reads (`[1][1]int64` donors keep the value-copy
+closure). The honest closures stay honest:
 `[][][]int64` (two levels over scalar) and any deeper nesting
 still cannot bind, extracting an inner container (`b := a[i]`,
 `b := m[k]`) stays closed since the element is itself a

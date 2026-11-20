@@ -25233,6 +25233,8 @@ def _opaque_composite_lib():
             "func U(s []int64, b int64) {}\n"
             "func UA(a [4]int64, b int64) {}\n"
             "func GAS(x int64) [1][]int64 { return [1][]int64{{x}} }\n"
+            "func GAA(x int64) [1][1][]int64 {\n"
+            "\treturn [1][1][]int64{{{x}}}\n}\n"
             "func US(a [1][]int64, b int64) {}\n"
             "var VA []int64\n"
         }
@@ -26890,6 +26892,25 @@ def test_opaque_composite_array_of_slices_arg_shares_elem_memory(
         "\ts := lib.GAS(a)\n"
         "\tlib.US(s, b)\n"
         "\treturn s[0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_nested_array_slot_shares_donor_slices(
+    go_types_helper,
+):
+    # `s[0] = sub` on `[1][1][]int64` embeds `sub`'s inner slice
+    # headers — the array copy still shares their backing, so a
+    # later `sub[0][0] = b` write reaches `s[0][0][0]` reads.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.GAA(a)\n"
+        "\tsub := lib.GAS(a)\n"
+        "\ts[0] = sub\n"
+        "\tsub[0][0] = b\n"
+        "\treturn s[0][0][0]\n}",
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
