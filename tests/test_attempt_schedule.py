@@ -316,6 +316,8 @@ def test_static_rejections():
         lambda: run_attempt_schedule(registry, request(), policy(), SOURCE, sha, lambda a: argv(0), success_exit_codes={0}),
         lambda: run_attempt_schedule(registry, request(), policy(), SOURCE, sha, lambda a: argv(0), success_exit_codes=frozenset({"0"})),
         lambda: run_attempt_schedule(registry, request(), policy(), SOURCE, sha, lambda a: argv(0), cancel_event=object()),
+        lambda: run_attempt_schedule(registry, request(), policy(), SOURCE, sha, lambda a: argv(0), stdin_for="x"),
+        lambda: run_attempt_schedule(registry, request(), policy(), SOURCE, sha, lambda a: argv(0), stdin_for=lambda a: "not-bytes", observations=observations("alpha")),
     ):
         with pytest.raises(ValueError):
             bad()
@@ -471,3 +473,37 @@ def test_verdict_marker_validation():
                 "verdict_markers": [{"stream": "stdout"}],
             }
         )
+
+
+def test_stdin_for_feeds_the_attempt_process():
+    # A byte probe exits 0 only when the declared payload reaches stdin.
+    registry = registry_with("alpha")
+    probe = (
+        PY,
+        "-c",
+        "import sys;"
+        "sys.exit(0 if sys.stdin.buffer.read() == b'FEED' else 3)",
+    )
+    fed = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": probe},
+        stdin_for=lambda adapter_id: b"FEED",
+    )
+    assert fed.outcome == "selected"
+    unfed = schedule(registry, ("alpha",), {"alpha": probe})
+    assert unfed.outcome == "exhausted"
+
+
+def test_no_feed_closes_stdin_instead_of_inheriting():
+    # With no declared feed the child's stdin is a closed pipe — the
+    # probe sees EOF immediately rather than inheriting the parent's.
+    registry = registry_with("alpha")
+    probe = (
+        PY,
+        "-c",
+        "import sys;"
+        "sys.exit(0 if sys.stdin.buffer.read() == b'' else 5)",
+    )
+    result = schedule(registry, ("alpha",), {"alpha": probe})
+    assert result.outcome == "selected"

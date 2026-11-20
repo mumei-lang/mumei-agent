@@ -428,3 +428,103 @@ def test_manifest_attempt_argv_needs_policy_optin(tmp_path):
     args = build_schedule_parser().parse_args(argv)
     result = run_schedule(args)
     assert result["attempts"][0]["terminal_state"] == "not_dispatched"
+
+
+def _stdin_case(tmp_path, opt_in):
+    def write(name, doc):
+        path = tmp_path / f"FAKE_PRIVATE_{name}.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    source = tmp_path / "FAKE_PRIVATE_SOURCE.mm"
+    source.write_bytes(SOURCE)
+    request = write(
+        "request",
+        {
+            "profile": PROFILE,
+            "method": "deductive_proof",
+            "result_contract": {
+                "profile": PROFILE,
+                "method": "deductive_proof",
+                "scope": "unbounded",
+                "correspondence_relation": "exact_model",
+                "correspondence_status": "assumed",
+            },
+            "input_format": "mumei.source-text/v1",
+        },
+    )
+    policy_doc = {
+        "allowed_permissions": ["filesystem.read", "process.spawn"],
+        "timeout_ms": 10_000,
+        "selected_adapter": "alpha",
+        # The command itself is also manifest-declared, so argv opt-in is
+        # needed either way; stdin opt-in stays the variable under test.
+        "allow_manifest_attempt_argv": True,
+    }
+    if opt_in:
+        policy_doc["allow_manifest_attempt_stdin"] = True
+    policy = write("policy", policy_doc)
+    observations = write(
+        "observations",
+        [
+            {
+                "adapter_id": "alpha",
+                "availability": "available",
+                "tool_version": "1.0.0",
+                "stamp": 1,
+            },
+        ],
+    )
+    probe = (
+        "import sys;"
+        "sys.exit(0 if sys.stdin.buffer.read() == b'FEED' else 3)"
+    )
+    adapters = write(
+        "adapters",
+        [
+            manifest(
+                "alpha",
+                attempt_argv=[PY, "-c", probe],
+                attempt_stdin="FEED",
+            )
+        ],
+    )
+    argv_map = write("argv", {})
+    argv = [
+        "--request", request,
+        "--adapters", adapters,
+        "--argv-map", argv_map,
+        "--policy", policy,
+        "--observations", observations,
+        "--source", str(source),
+    ]
+    return build_schedule_parser().parse_args(argv)
+
+
+def test_manifest_attempt_stdin_feeds_attempt_with_optin(tmp_path):
+    # With ``allow_manifest_attempt_stdin`` the declared text is piped to
+    # the attempt process (the probe exits 0 only on b"FEED").
+    args = _stdin_case(tmp_path, True)
+    result = run_schedule(args)
+    assert result["attempts"][0]["terminal_state"] == "exited"
+    assert result["attempts"][0]["exit_code"] == 0
+    assert result["outcome"] == "selected"
+
+
+def test_manifest_attempt_stdin_needs_policy_optin(tmp_path):
+    # Without the opt-in the declared stdin stays inert — the probe
+    # reads EOF, exits 3 and the schedule is not selected.
+    args = _stdin_case(tmp_path, False)
+    result = run_schedule(args)
+    assert result["attempts"][0]["exit_code"] == 3
+    assert result["outcome"] != "selected"
+
+
+def test_manifest_attempt_stdin_rejects_non_string():
+    from agent.verification_planner import AdapterDescriptor
+
+    for bad in (["x"], 7, {"v": 1}):
+        with pytest.raises(ValueError):
+            AdapterDescriptor.from_manifest(
+                manifest("alpha", attempt_stdin=bad)
+            )

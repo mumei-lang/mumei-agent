@@ -195,6 +195,7 @@ def run_attempt_schedule(
     success_exit_codes: frozenset[int] = frozenset({0}),
     cancel_event: "threading.Event | None" = None,
     memory_bound_mb: int | None = None,
+    stdin_for=None,
 ) -> AttemptScheduleResult:
     """Plan → dispatch → observe → fall back, bounded by `max_attempts`.
 
@@ -223,6 +224,8 @@ def run_attempt_schedule(
         raise ValueError("invalid expected source identity")
     if not callable(argv_for):
         raise ValueError("attempt scheduling requires an argv provider")
+    if stdin_for is not None and not callable(stdin_for):
+        raise ValueError("attempt scheduling stdin requires a provider")
     if runner is not None and type(runner) is not AttemptRunner:
         raise ValueError("attempt scheduling requires an attempt runner")
     if not isinstance(observations, tuple):
@@ -280,12 +283,18 @@ def run_attempt_schedule(
             terminal = NOT_DISPATCHED
         else:
             sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+            feed = stdin_for(adapter_id) if stdin_for is not None else None
+            if feed is not None and type(feed) is not bytes:
+                raise ValueError("attempt stdin must be bytes or absent")
             dispatch = dispatch_attempt(
                 sequence,
                 argv,
                 runner=active_runner,
                 cancel_event=cancel_event,
                 memory_bound_mb=memory_bound_mb,
+                # No declared feed means a closed pipe — a scheduled child
+                # must never inherit the parent's stdin and block on it.
+                feed_bytes=feed if feed is not None else b"",
             )
             sequences.append(dispatch.sequence)
             record = dispatch.run.record
