@@ -18929,6 +18929,25 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0]\n}\n",
             frozenset({0}),
         ),
+        # Same through an inner ARRAY — `a[0][0]`'s pointer
+        # stays inside `a`'s inline storage across the reseat.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][1]int64{{0}}\n"
+            "\ta, a[0][0] = [1][1]int64{{0}}, x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # But through an inner SLICE the final write goes to
+        # the pre-state header's backing — the reseat detaches
+        # it, and `a[0][0]` reads the new array's slice: no dep.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][]int64{{0}}\n"
+            "\ta, a[0][0] = [1][]int64{{0}}, x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset(),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(

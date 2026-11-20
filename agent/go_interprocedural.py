@@ -9753,11 +9753,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # value into the variable's own storage, which keeps
             # naming the element the LHS pointer was computed
             # against. The snapshot's holders is empty once `a`'s
-            # reseat replaces its tokens, so an array operand also
+            # reseat replaces its tokens, so such an operand also
             # expands holders over its CURRENT token set at store
-            # landing — slice/map operands detach their backing on
-            # reseat and keep the snapshot only. Record the array
-            # operand's root binding here.
+            # landing. That only holds while the final write lands
+            # in the root's inline storage — a one-level index, or
+            # an inner index through an inner ARRAY (`[1][1]int64`):
+            # through a slice/map (`[1][]int64`'s `a[0][0]`) the
+            # write goes to the pre-state header's backing, which
+            # the reseat detaches like any slice operand's. Record
+            # the qualifying array operand's root binding here.
             opaque_elem_array_roots: dict[int, str] = {}
             # An element store's holder set resolves like the
             # destination operand itself — against the pre-state —
@@ -10147,6 +10151,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         obound is not None
                         and obound.type is not None
                         and obound.type.kind == "array"
+                        and (
+                            inner_index is None
+                            or (
+                                obound.type.elem is not None
+                                and obound.type.elem.kind == "array"
+                            )
+                        )
                     ):
                         opaque_elem_array_roots[ri] = oref.binding_id
                     opaque_elem_index_deps[ri] = frozenset()
