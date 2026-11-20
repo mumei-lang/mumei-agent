@@ -1252,6 +1252,9 @@ def test_impure_builtins_stay_opaque(go_types_helper, declarations):
         # continue, to a non-loop construct) is outside the fragment.
         "func F(x int64) int64 { for i:=x; i>0; i-- { break L }; return x }",
         "func F(x int64) int64 { L: switch x { case 0: continue L }; return x }",
+        # A backward goto re-executes folded statements — it needs a
+        # fixed point the fragment does not compute.
+        "func F(x int64) int64 { L: x++; if x < 3 { goto L }; return x }",
         # defer/go are effect-bearing and stay outside the fragment.
         "func F(x int64) int64 { defer F(0); return x }",
         "func F(x int64) int64 { go F(0); return x }",
@@ -1331,9 +1334,10 @@ def test_control_statement_shapes_stay_unsupported(
             frozenset({0}),
         ),
         # `break L` from an inner loop abandons the inner construct AND
-        # the outer loop's tail — y = 0 is conditional.
+        # the outer loop's tail — y = 0 is conditional and unions with
+        # the y = x write before it.
         (
-            "func F(x int64) int64 { var y int64; L: for { for { break L }; y = 0 }; return y }",
+            "func F(x int64) int64 { var y int64; L: for { y = x; for { break L }; y = 0 }; return y }",
             frozenset({0}),
         ),
         # An unlabelled break in the inner loop is still consumed by it —
@@ -1356,6 +1360,20 @@ def test_control_statement_shapes_stay_unsupported(
         # Statements after the label still see both paths' writes.
         (
             "func F(x, c int64) int64 { var y int64; if c > 0 { goto L }; y = 1; L: y = x; return y }",
+            frozenset({0}),
+        ),
+        # A goto inside a nested function literal must not leak its
+        # "rest of function is conditional" mark into the caller — the
+        # write after the literal is unconditional.
+        (
+            "func F(x int64) int64 { _ = func() { goto L; L: }; y := x; return y }",
+            frozenset({0}),
+        ),
+        # A `break L` from inside a nested loop of the labelled loop
+        # resolves to the labelled outer loop — the label is consumed
+        # by the outer frame alone, so the inner for does not shadow it.
+        (
+            "func F(x int64) int64 { var y int64; L: for { for { break L }; y = x }; return y }",
             frozenset({0}),
         ),
     ],
