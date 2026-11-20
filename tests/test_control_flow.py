@@ -1325,6 +1325,67 @@ def test_goto_resolves_to_a_label_inside_a_nested_block():
     assert edges_to(cfg, jump.node_id) == {labelled.node_id}
 
 
+def test_goto_dead_assignment_stays_a_definite_unassigned_use():
+    # The skipped ``y = 1`` must not leak ``y`` into the live
+    # ``some_path`` pre-state at the label — only reachable
+    # predecessors feed a use.
+    body = "x := 0; goto done; y = 1; done: return x + y"
+    cfg = graph(body)
+    (use,) = control_flow.unassigned_uses(body, cfg)
+    assert (use.name, use.definite) == ("y", True)
+
+
+def test_goto_label_parses_unicode_and_commented_operands():
+    # Go identifiers are Unicode, and comments may sit between the
+    # keyword and the label — both forms resolve to the same edge.
+    for body in (
+        "x := 0; goto 終了; x = 1; 終了: _ = x",
+        "x := 0; goto /* c */ done; x = 1; done: _ = x",
+        "x := 0; goto // c\ndone; x = 1; done: _ = x",
+    ):
+        cfg = graph(body)
+        (jump,) = nodes(cfg, "goto")
+        (labelled,) = by_text(cfg, body, "_ = x")
+        assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+
+
+def test_goto_labelled_break_and_continue_share_the_parser():
+    # Labelled loop jumps take the same comment/Unicode operand forms.
+    body = (
+        "x := 0; L1: for true { break /* c */ L1 }; "
+        "L2: for true { continue L2 }; x = 1"
+    )
+    cfg = graph(body)
+    (leave,) = nodes(cfg, "break")
+    (again,) = nodes(cfg, "continue")
+    assert edges_to(cfg, leave.node_id) != set()
+    assert edges_to(cfg, again.node_id) != set()
+
+
+def test_stacked_and_empty_labels_both_resolve():
+    # ``L1: L2: stmt`` keeps both labels; ``L: ;`` keeps the label on
+    # an empty statement — neither reports unresolved_label. The outer
+    # label lands on a wrapping block that leads to the statement; the
+    # inner one lands on the statement itself.
+    body = "x := 0; goto L2; x = 1; L1: L2: _ = x"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "_ = x")
+    assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+    body = "x := 0; goto L1; x = 1; L1: L2: _ = x"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "_ = x")
+    # the block the outer label lands on flows straight into the statement
+    (block_target,) = edges_to(cfg, jump.node_id)
+    assert edges_to(cfg, block_target) == {labelled.node_id}
+    body = "x := 0; goto L; x = 1; L: ;"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "goto")
+    (labelled,) = by_text(cfg, body, "L: ;")
+    assert edges_to(cfg, jump.node_id) == {labelled.node_id}
+
+
 def test_terminal_fallthrough_edges_into_the_next_case_body():
     # `case 0: fallthrough` falls into case 1's body, so `a()` is
     # reached through the case-0 alternative too.
