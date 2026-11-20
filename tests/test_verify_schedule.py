@@ -971,13 +971,16 @@ def test_exported_triple_passes_the_real_claim_gate(
     if len(core_argv) != 1:
         pytest.skip("mumei_bin resolves to a compound command")
     mumei = core_argv[0]
-    # --core requires an absolute path; a PATH-resolved bare name must
-    # be resolved before the schedule declares it.
+    # --core requires an absolute path; a PATH-resolved name (which can
+    # itself be relative, e.g. './bin/mumei') must be made absolute
+    # before the schedule or the claims subprocess declares it.
     import shutil
 
-    core_path = shutil.which(mumei)
-    if core_path is None:
+    resolved = shutil.which(mumei)
+    if resolved is None:
         pytest.skip("mumei binary is not executable")
+    mumei = os.path.abspath(resolved)
+    core_path = mumei
     mm = tmp_path / "ev.mm"
     mm.write_text(MM_CLAMP)
     verify = subprocess.run(
