@@ -1248,10 +1248,6 @@ def test_impure_builtins_stay_opaque(go_types_helper, declarations):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # A labelled jump whose label resolves to nothing (or, for
-        # continue, to a non-loop construct) is outside the fragment.
-        "func F(x int64) int64 { for i:=x; i>0; i-- { break L }; return x }",
-        "func F(x int64) int64 { L: switch x { case 0: continue L }; return x }",
         # A backward goto re-executes folded statements — it needs a
         # fixed point the fragment does not compute.
         "func F(x int64) int64 { L: x++; if x < 3 { goto L }; return x }",
@@ -1341,9 +1337,10 @@ def test_control_statement_shapes_stay_unsupported(
             frozenset({0}),
         ),
         # An unlabelled break in the inner loop is still consumed by it —
-        # the labelled outer loop keeps its unconditional tail.
+        # the labelled outer loop keeps its unconditional tail. (The
+        # label names the conditional exit so it is used, as Go requires.)
         (
-            "func F(x int64) int64 { var y int64; L: for { for { break }; y = 0 }; return y }",
+            "func F(x int64) int64 { var y int64; L: for { for { break }; y = 0; if y > 1 { break L } }; return y }",
             frozenset(),
         ),
         # A goto skips the write before its label — the landing read sees
@@ -1374,6 +1371,19 @@ def test_control_statement_shapes_stay_unsupported(
         # by the outer frame alone, so the inner for does not shadow it.
         (
             "func F(x int64) int64 { var y int64; L: for { for { break L }; y = x }; return y }",
+            frozenset({0}),
+        ),
+        # A forward goto inside a loop body is re-walked on every
+        # fixed-point pass — the label it names must not read as
+        # backward on the second pass.
+        (
+            "func F(x int64) int64 { var y int64; for { goto D; y = 0; D: y = x; break }; return y }",
+            frozenset({0}),
+        ),
+        # A fallthrough target's body is walked twice (carried chain +
+        # fresh alternative) — a forward goto inside it stays forward.
+        (
+            "func F(x int64) int64 { var y int64; switch x { case 0: fallthrough; case 1: goto D; y = 0; D: y = x }; return y }",
             frozenset({0}),
         ),
     ],
