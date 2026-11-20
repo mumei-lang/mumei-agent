@@ -18374,6 +18374,100 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn m[k]\n}\n",
             frozenset({0, 1}),
         ),
+        # `case b[0] = <-ch` accumulates like `s[i] = v` — the
+        # backing's prior element deps survive the receive.
+        (
+            "func F(ch chan int64, x int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\tb := a\n"
+            "\tselect {\n"
+            "\tcase b[0] = <-ch:\n"
+            "\t}\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `a := s.F; b := s.F` — two reads of the same composite
+        # field share one backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tb := s.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The field backing persists across binds — a second `b :=
+        # s.F` after the store still shares it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\ta[0] = x\n"
+            "\tb := s.F\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Distinct instances keep distinct field backings —
+        # `a := s.F` and `b := t.F` do not share.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar s struct{ F []int64 }\n"
+            "\tvar t struct{ F []int64 }\n"
+            "\ta := s.F\n"
+            "\tb := t.F\n"
+            "\ta[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset(),
+        ),
+        # `_ = append(a, x)` — a discarded append may still reuse
+        # `a`'s array, so its elements land in the backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 4)\n"
+            "\t_ = append(a, x)\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 4)\n"
+            "\tb := a\n"
+            "\t_ = append(a, x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a, b = b, a` swaps the backings — after the swap `b` still
+        # shares `c`'s backing (it now names `a`'s original array).
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tb := []int64{0}\n"
+            "\tc := a\n"
+            "\ta, b = b, a\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a = ([]int64{x})` — a parenthesized literal reseat still
+        # replaces the backing.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\ta = ([]int64{x})\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `p := &a[0]; *p = x` — the pointer write folds into the
+        # container's conflated set through the escaped binding.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tp := &a[0]\n"
+            "\t*p = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -18413,6 +18507,26 @@ def test_scalar_container_bind_read_write_admits(
         # closed.
         "func F(a []int64, x int64) {\n"
         "\ta[0] = x\n}\n",
+        # `a := t[0]` — the element of a nested container has no
+        # shareable identity to mint from.
+        "func F(t [][]int64, x int64) int64 {\n"
+        "\ta := t[0]\n"
+        "\ta[0] = x\n"
+        "\treturn a[0]\n}\n",
+        # `a := s.F` where `F` is a non-scalar container — the
+        # selector share only covers scalar-element fields, and the
+        # opaque gate still rejects the nested element.
+        "func F(x int64) int64 {\n"
+        "\tvar s struct{ F [][]int64 }\n"
+        "\ta := s.F\n"
+        "\ta[0][0] = x\n"
+        "\treturn a[0][0]\n}\n",
+        # `a := <-cc` — a container received off a channel has no
+        # identity to share; the bind stays closed.
+        "func F(cc chan []int64, x int64) int64 {\n"
+        "\ta := <-cc\n"
+        "\ta[0] = x\n"
+        "\treturn a[0]\n}\n",
     ],
 )
 def test_scalar_container_unsupported_stays_closed(
