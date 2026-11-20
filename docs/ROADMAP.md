@@ -6075,7 +6075,6 @@ The lane remains a dispatch record, not an Evidence acceptance:
 `mumei.attempt-schedule/v1` carries fingerprints, terminal states and
 declared exit codes only — adapter stdout never lands in the document.
 
->>>>>>> 652c143e (C11: test-user-adapter E2E lane — checked-in stub adapter through verify-schedule)
 
 ## Roadmap authority and vocabulary
 
