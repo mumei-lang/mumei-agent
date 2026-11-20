@@ -528,3 +528,41 @@ def test_manifest_attempt_stdin_rejects_non_string():
             AdapterDescriptor.from_manifest(
                 manifest("alpha", attempt_stdin=bad)
             )
+
+
+def test_core_flag_records_evidence_acceptance(inputs, capsys, tmp_path):
+    # Stub Core emitting the v1 representation diagnostic for `evidence
+    # check`; the selected attempt's captured output is fed to it.
+    diagnostic = {
+        "schema_version": "mumei.evidence-representation-check/v1",
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "checks_not_performed": [
+            "claim_truth", "file_identity", "freshness",
+            "producer_authenticity", "semantic_correspondence",
+            "artifact_semantics",
+        ],
+    }
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
+        "    cat > /dev/null\n"
+        "    printf %s '" + json.dumps(diagnostic) + "'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    args = args_for(inputs, core=str(core))
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == "valid"
+    assert doc["evidence_acceptance"]["accepted"] is True
+
+
+def test_core_flag_requires_absolute_existing_path(inputs):
+    args = args_for(inputs, core="relative/mumei")
+    with pytest.raises(ValueError):
+        run_schedule(args)

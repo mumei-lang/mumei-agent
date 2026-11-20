@@ -240,6 +240,14 @@ def build_schedule_parser(
         help="Optional declared POSIX RLIMIT_AS ceiling per attempt child.",
     )
     parser.add_argument(
+        "--core", metavar="PATH", default=None,
+        help=(
+            "Optional Core executable: when a schedule selects an attempt, "
+            "run the Core representation check on its captured output and "
+            "record the mumei.evidence-check-acceptance/v1 descriptor."
+        ),
+    )
+    parser.add_argument(
         "--output", metavar="PATH",
         help="Write the schedule document here instead of stdout.",
     )
@@ -257,6 +265,13 @@ def run_schedule(args: argparse.Namespace) -> dict:
     declared = Path(args.source)
     if not declared.is_file():
         raise ValueError("source requires a regular declared file")
+    core = getattr(args, "core", None)
+    if core is not None and (
+        not os.path.isabs(core)
+        or "\x00" in core
+        or not Path(core).is_file()
+    ):
+        raise ValueError("--core must be an absolute path to a regular file")
     source = declared.read_bytes()
     success = (
         frozenset({0})
@@ -298,6 +313,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
         success_exit_codes=success,
         memory_bound_mb=args.memory_bound_mb,
         stdin_for=stdin_for,
+        core_executable=core,
     )
     return result.to_dict()
 
@@ -305,6 +321,8 @@ def run_schedule(args: argparse.Namespace) -> dict:
 def _declared_paths(args: argparse.Namespace) -> list[str]:
     paths = [args.request, args.adapters, args.argv_map, args.policy,
              args.source]
+    if getattr(args, "core", None) is not None:
+        paths.append(args.core)
     if args.observations is not None:
         paths.append(args.observations)
     if args.output is not None:
@@ -417,6 +435,8 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                       args.policy, args.source]
             if args.observations is not None:
                 inputs.append(args.observations)
+            if getattr(args, "core", None) is not None:
+                inputs.append(args.core)
             if any(os.path.realpath(p) == target for p in inputs):
                 raise ValueError(
                     "--output must not overwrite a declared input"

@@ -27,7 +27,14 @@ from agent.attempt_runner import (
     dispatch_attempt,
     memory_bound_enforceable,
 )
-from agent.verification_attempt import AttemptSequence
+from agent.core_evidence import (
+    evaluate_evidence_check,
+    record_evidence_check,
+)
+from agent.verification_attempt import (
+    AttemptEvidenceCheck,
+    AttemptSequence,
+)
 from agent.verification_planner import (
     VERDICT_OUTCOMES,
     AdapterRegistry,
@@ -137,6 +144,8 @@ class AttemptScheduleResult:
     outcome: str
     fallback_permitted: bool
     max_attempts: int
+    evidence_check: AttemptEvidenceCheck | None = None
+    evidence_acceptance: dict | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, tuple) or not all(
@@ -166,6 +175,19 @@ class AttemptScheduleResult:
             raise ValueError("invalid schedule attempt bound")
         if len(self.entries) > self.max_attempts:
             raise ValueError("schedule entries exceed the declared bound")
+        if self.evidence_check is not None and (
+            type(self.evidence_check) is not AttemptEvidenceCheck
+            or self.outcome != "selected"
+        ):
+            raise ValueError("invalid schedule evidence check record")
+        if self.evidence_acceptance is not None and (
+            type(self.evidence_acceptance) is not dict
+            or self.evidence_acceptance.get("schema_version")
+            != "mumei.evidence-check-acceptance/v1"
+        ):
+            raise ValueError("invalid schedule evidence acceptance")
+        if self.evidence_check is None and self.evidence_acceptance is not None:
+            raise ValueError("schedule acceptance requires a check record")
 
     def to_dict(self) -> dict:
         return {
@@ -175,6 +197,12 @@ class AttemptScheduleResult:
             "fallback_permitted": self.fallback_permitted,
             "max_attempts": self.max_attempts,
             "attempts": [entry.to_dict() for entry in self.entries],
+            "evidence_check": (
+                self.evidence_check.to_dict()
+                if self.evidence_check is not None
+                else None
+            ),
+            "evidence_acceptance": self.evidence_acceptance,
         }
 
 
@@ -195,6 +223,7 @@ def run_attempt_schedule(
     max_attempts: int = MAX_SCHEDULE_ATTEMPTS,
     success_exit_codes: frozenset[int] = frozenset({0}),
     cancel_event: "threading.Event | None" = None,
+    core_executable: str | None = None,
     memory_bound_mb: int | None = None,
     stdin_for=None,
 ) -> AttemptScheduleResult:
@@ -242,11 +271,17 @@ def run_attempt_schedule(
         raise ValueError("invalid schedule success declaration")
     if cancel_event is not None and type(cancel_event) is not threading.Event:
         raise ValueError("attempt schedule cancellation requires an event")
+    if core_executable is not None and (
+        type(core_executable) is not str or not core_executable
+    ):
+        raise ValueError("attempt schedule evidence check requires a core path")
     active_runner = runner or AttemptRunner()
 
     entries: list[ScheduledAttemptEntry] = []
     plans: list[VerificationPlan] = []
     sequences: list[AttemptSequence] = []
+    evidence_check: AttemptEvidenceCheck | None = None
+    evidence_acceptance: dict | None = None
     excluded: list[str] = []
     current_observations = observations
     ordinal = 0
@@ -351,6 +386,27 @@ def run_attempt_schedule(
             if terminal == "exited" and exit_code in success_exit_codes:
                 outcome = "selected"
                 selected_adapter_id = adapter_id
+                if core_executable is not None:
+                    # Same produce+consume pair as verify-attempt: select
+                    # the captured bytes, run the Core representation
+                    # check and normalize it into an acceptance
+                    # descriptor — representation-level only.
+                    selected = dispatch.sequence.select_result(
+                        dispatch.captured_output()
+                    )
+                    sequences[-1] = selected
+                    evidence_check = record_evidence_check(
+                        selected,
+                        dispatch.captured_output(),
+                        core_executable=core_executable,
+                        # The representation check is its own bounded
+                        # call — capped like verify-attempt's check.
+                        timeout_ms=min(policy.timeout_ms, 60_000),
+                        cancel_event=cancel_event,
+                    )
+                    evidence_acceptance = evaluate_evidence_check(
+                        selected, evidence_check
+                    )
                 break
             if terminal == "cancelled":
                 outcome = "cancelled"
@@ -378,4 +434,6 @@ def run_attempt_schedule(
         outcome,
         _fallback_permitted(policy),
         max_attempts,
+        evidence_check,
+        evidence_acceptance,
     )
