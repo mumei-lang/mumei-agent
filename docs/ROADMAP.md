@@ -4081,14 +4081,24 @@ shares when its element chain bottoms in a slice/map header —
 `s[0] = sub` on `[1][1][]int64` with `sub : [1][]int64`
 embeds `sub`'s headers, so `sub[0][0] = x` reaches
 `s[0][0][0]` reads (`[1][1]int64` donors keep the value-copy
-closure). The honest closures stay honest:
+closure). Extracting an inner container by
+index — `b := a[i]`, `b := m[k]`, `var b = a[i]` — binds `b`
+into the root's share group (the conflated model makes no
+per-slot distinction, so `b` reads and writes the whole
+backing the root and its other sharers see), and an element
+read on a bound nested operand is admitted by the
+imported-index-read gate since its element is itself a
+scalar-element collection. The honest closures stay honest:
 `[][][]int64` (two levels over scalar) and any deeper nesting
-still cannot bind, extracting an inner container (`b := a[i]`,
-`b := m[k]`) stays closed since the element is itself a
-collection, `a := s.F` on a `[][]int64` field stays closed (the
-field share gate requires a scalar-element member), `[]func`
-nested shapes keep their own func-element model, and a nested
-parameter container is rejected by the signature gate.
+still cannot bind, a plain `b = a[i]` reseat and `b :=
+a[i][j]` (indexing into the extracted inner) stay closed,
+extracting from an unbound or parameter operand (`t[i]` on a
+param `t`) stays closed because the operand never joined a
+share group, `a := s.F` on a `[][]int64` field stays closed
+(the field share gate requires a scalar-element member),
+`append(a[i], v)` stays closed, `[]func` nested shapes keep
+their own func-element model, and a nested parameter
+container is rejected by the signature gate.
 
 ### C07 per-statement read attribution
 

@@ -18774,6 +18774,54 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset(),
         ),
+        # `b := a[i]` — the extracted element shares `a`'s backing:
+        # `b[0] = x` reaches the `a[0][0]` read.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := a[0]\n"
+            "\tb[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # The other direction — `a[0][0] = x` lands in `b`'s set.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := a[0]\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := m[k]` — the same extraction keyed by map slot.
+        (
+            "func F(x int64) int64 {\n"
+            "\tm := map[int64][]int64{0: []int64{0}}\n"
+            "\tb := m[0]\n"
+            "\tb[0] = x\n"
+            "\treturn m[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var b = a[i]` — the declared form shares identically.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [2][]int64{{0}}\n"
+            "\tvar b = a[0]\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b, c := a[0], a[1]` — every extracted element joins the
+        # share group.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}, {0}}\n"
+            "\tb, c := a[0], a[1]\n"
+            "\tc[0] = x\n"
+            "\t_ = b\n"
+            "\treturn a[1][0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -18814,11 +18862,10 @@ def test_scalar_container_bind_read_write_admits(
         "\ta := t[0]\n"
         "\ta[0] = x\n"
         "\treturn a[0]\n}\n",
-        # `b := a[0]` on a BOUND nested local — inner-container
-        # extraction stays closed even though `a` is tracked.
-        "func F(x int64) int64 {\n"
-        "\ta := [][]int64{{0}}\n"
-        "\tb := a[0]\n"
+        # `b := t[i]` on a BOUND nested param — the param's backing
+        # was never registered, so the extraction stays closed.
+        "func F(t [][]int64, x int64) int64 {\n"
+        "\tb := t[0]\n"
         "\tb[0] = x\n"
         "\treturn b[0]\n}\n",
         # `[][][]int64` — two levels of nesting stays closed; the
