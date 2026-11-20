@@ -6045,6 +6045,37 @@ missing tools, unregistered selections, effective settings exposure,
 closed-shape rejection, the output guard, secret-free output and
 CLI/library document equality.
 
+### C11 test-user-adapter E2E lane
+
+`tests/fixtures/stub_adapter.py` is a checked-in test user adapter: a
+small executable whose entire behavior is declared on its argv
+(`--exit`, `--sleep`, `--emit`, `--err`, `--spew`, `--alloc-mb`,
+`--die`). `tests/test_fixture_adapter_schedule.py` drives it through
+the real `python -m agent verify-schedule` subprocess, so the whole
+lane a user faces when adding an adapter — manifest registration,
+argv declaration, plan/dispatch, real spawn, terminal reconciliation,
+fallback — is exercised end to end **with no core edit**: adding,
+swapping or replacing an adapter is a manifest plus an argv-map
+entry.
+
+The matrix covers the acceptance negatives: a missing tool records a
+`failed` round then falls back; an observation whose `tool_version`
+violates a declared `tool_version_pins` is never scheduled; a sleeping
+stub times out at the declared `timeout_ms`; an over-allocating stub
+dies under `--memory-bound-mb`; malformed, partial or conflicting
+adapter output is recorded as terminal state + exit code and never as
+content; explicit `selected_adapter` dispatch honors `allow_fallback:
+false` as `fallback_denied`; an undeclared argv is `not_dispatched`
+— the route never guesses, installs or probes a command. Two host
+guards hold throughout: a sentinel env secret and the source bytes
+appear nowhere in the descriptor or stderr, and the stub itself reads
+no environment, opens no file, spawns no child and touches no network.
+
+The lane remains a dispatch record, not an Evidence acceptance:
+`mumei.attempt-schedule/v1` carries fingerprints, terminal states and
+declared exit codes only — adapter stdout never lands in the document.
+
+>>>>>>> 652c143e (C11: test-user-adapter E2E lane — checked-in stub adapter through verify-schedule)
 
 ## Roadmap authority and vocabulary
 
