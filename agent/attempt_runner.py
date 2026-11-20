@@ -198,6 +198,15 @@ def _detect_ulimit_sh() -> "str | None":
 _SH = _detect_ulimit_sh()
 
 
+def memory_bound_enforceable() -> bool:
+    """Whether any POSIX bound mechanism can cap a child's address space.
+
+    `resource`+`preexec_fn`, `prlimit` or a POSIX `sh` each suffice; on
+    a platform with none (e.g. Windows without a shell) a declared bound
+    cannot be applied and `run` would reject it statically."""
+    return resource is not None or _PRLIMIT is not None or _SH is not None
+
+
 def memory_bound_spawn_thread_safe() -> bool:
     """Whether a memory-bound spawn avoids `preexec_fn`.
 

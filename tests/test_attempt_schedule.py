@@ -34,7 +34,7 @@ def argv(code):
     return (PY, "-c", f"import sys; sys.exit({code})")
 
 
-def descriptor(adapter_id, priority=0):
+def descriptor(adapter_id, priority=0, **overrides):
     return AdapterDescriptor(
         adapter_id,
         "1.0.0",
@@ -44,6 +44,7 @@ def descriptor(adapter_id, priority=0):
         result_contracts=(CONTRACT,),
         input_formats=frozenset({SOURCE_INPUT_FORMAT}),
         required_permissions=frozenset(),
+        **overrides,
     )
 
 
@@ -474,7 +475,6 @@ def test_verdict_marker_validation():
             }
         )
 
-
 def test_stdin_for_feeds_the_attempt_process():
     # A byte probe exits 0 only when the declared payload reaches stdin.
     registry = registry_with("alpha")
@@ -505,5 +505,35 @@ def test_no_feed_closes_stdin_instead_of_inheriting():
         "import sys;"
         "sys.exit(0 if sys.stdin.buffer.read() == b'' else 5)",
     )
+    result = schedule(registry, ("alpha",), {"alpha": probe})
+    assert result.outcome == "selected"
+
+
+def test_manifest_memory_bound_caps_the_attempt():
+    # With no host ``memory_bound_mb`` the adapter's declared
+    # ``max_memory_mb`` is the child's ceiling: a probe that allocates
+    # past it fails instead of running unbounded.
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", max_memory_mb=64))
+    probe = (PY, "-c", "x = bytearray(256 * 1024 * 1024); import sys; sys.exit(0)")
+    result = schedule(registry, ("alpha",), {"alpha": probe})
+    assert result.outcome != "selected"
+    assert result.entries[0].terminal_state in {"exited", "failed", "timed_out"}
+    # The host's declared bound wins over the manifest's.
+    result2 = schedule(
+        registry, ("alpha",), {"alpha": probe}, memory_bound_mb=1024
+    )
+    assert result2.outcome == "selected"
+
+def test_manifest_memory_bound_skipped_without_posix_mechanism(monkeypatch):
+    # A platform with no ``resource``/``prlimit``/``sh`` cannot enforce a
+    # bound — the manifest fallback stays unenforced instead of breaking
+    # the schedule (an explicit host bound still fails statically).
+    monkeypatch.setattr(
+        "agent.attempt_schedule.memory_bound_enforceable", lambda: False
+    )
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", max_memory_mb=64))
+    probe = (PY, "-c", "import sys; sys.exit(0)")
     result = schedule(registry, ("alpha",), {"alpha": probe})
     assert result.outcome == "selected"

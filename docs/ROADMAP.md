@@ -6200,6 +6200,21 @@ C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
 remains open.
 
+### C11 manifest-declared attempt memory bound
+
+When the host declares no `--memory-bound-mb`, a scheduled attempt now
+runs under the adapter's own manifest `max_memory_mb` as its POSIX
+RLIMIT_AS ceiling — the adapter's declared budget enforced as an
+ordinary observed outcome (an over-bound child surfaces as `exited` /
+`failed` / `timed_out`, never diagnosed). The host's declared bound
+always wins when present, so a host can still pin a tighter or looser
+ceiling per route. This needs no opt-in: the bound only limits the
+child, it grants nothing.
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged — Evidence acceptance
+remains open.
+
 
 ## Roadmap authority and vocabulary
 
