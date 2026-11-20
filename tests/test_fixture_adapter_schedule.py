@@ -276,6 +276,22 @@ def test_conflicting_exit_claims_follow_declared_codes(tmp_path):
     assert doc["attempts"][0]["exit_code"] == 7
 
 
+def test_declared_success_exit_code_selects_nonzero_exit(tmp_path):
+    # --success-exit-code is the host's declared mapping: exit 7 declared
+    # as success must select alpha despite the non-zero code, and beta
+    # never runs.
+    paths = _base(
+        tmp_path,
+        argv_alpha=stub_argv("--exit", "7"),
+        argv_beta=stub_argv(),
+    )
+    doc = _doc(_run(paths, "--success-exit-code", "7"))
+    assert doc["outcome"] == "selected"
+    assert doc["selected_adapter_id"] == "alpha"
+    assert [a["adapter_id"] for a in doc["attempts"]] == ["alpha"]
+    assert doc["attempts"][0]["exit_code"] == 7
+
+
 def test_invalid_settings_fail_statically(tmp_path):
     paths = _base(tmp_path)
     bad = tmp_path / "bad.json"
