@@ -2000,6 +2000,74 @@ class _Builder:
             fresh = frozenset({self.node_key(rhs)})
             self._opaque_container_tokens[ref.binding_id] = fresh
             return fresh
+        if rhs.type in {"selector_expression", "field_expression"}:
+            # `a := s.F` — an alias for a composite's container
+            # field. Two reads of the same field name the same
+            # backing (`a := s.F; b := s.F`), so the group keys on
+            # the (root, member) pair and the root joins the
+            # sharers: a store through `a` lands on `s`'s conflated
+            # set where `s.F[j]` reads it. A selector into
+            # anything else (a package operand, a computed base)
+            # has no per-instance identity to key on and stays
+            # closed at the gate.
+            field = rhs.child_by_field_name("field")
+            f_ref = (
+                self.references.get(self.node_key(field))
+                if field is not None
+                else None
+            )
+            member = self._field_identity(f_ref)
+            root = rhs.child_by_field_name("operand")
+            while root is not None and root.type in {
+                "parenthesized_expression",
+                "selector_expression",
+                "field_expression",
+                "index_expression",
+                "dereference_expression",
+            }:
+                if root.type == "parenthesized_expression":
+                    root = next(
+                        (
+                            c
+                            for c in root.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                else:
+                    root = root.child_by_field_name("operand")
+            root_ref = (
+                self.references.get(self.node_key(root))
+                if root is not None and root.type == "identifier"
+                else None
+            )
+            if (
+                member is None
+                or member.type is None
+                or not self._scalar_elem_collection(member.type)
+                or root_ref is None
+                or root_ref.binding_id is None
+                or not self._is_local_composite(
+                    self.bindings.get(root_ref.binding_id)
+                )
+            ):
+                return None
+            field_key = f"{root_ref.binding_id}\x00{member.id}"
+            toks = self._opaque_container_tokens.get(field_key)
+            if not toks:
+                toks = frozenset({self.node_key(rhs)})
+            self._opaque_container_tokens[field_key] = toks
+            # `s`'s conflated set covers every field — join it to
+            # the group so `a[i] = x` lands on the slot `s.F[j]`
+            # reads. Different fields mint different token sets but
+            # all reach `s`, matching the composite's own conflation.
+            self._opaque_container_tokens[root_ref.binding_id] = (
+                self._opaque_container_tokens.get(
+                    root_ref.binding_id, frozenset()
+                )
+                | toks
+            )
+            return toks
         return None
 
     def _opaque_call_container(
@@ -8034,6 +8102,49 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
                         )
+                    if opaque_toks is None:
+                        # A scalar-element literal/make mints its own
+                        # backing; any other tokenless RHS (a field
+                        # read `_opaque_container_bind` could not key,
+                        # a channel receive, an element of a nested
+                        # container) has no shareable identity —
+                        # minting would invent a backing that silently
+                        # misses the real memory's stores.
+                        rhs_node = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        )
+                        while (
+                            rhs_node is not None
+                            and rhs_node.type
+                            == "parenthesized_expression"
+                        ):
+                            rhs_node = next(
+                                (
+                                    c
+                                    for c in rhs_node.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if (
+                            rhs_node is None
+                            or (
+                                rhs_node.type
+                                not in {
+                                    "composite_literal",
+                                    "call_expression",
+                                }
+                                and not (
+                                    rhs_node.type == "identifier"
+                                    and rhs_node.text == b"nil"
+                                )
+                            )
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(node)
+                            )
                     self._opaque_container_tokens[binding.id] = (
                         opaque_toks
                         if opaque_toks is not None
@@ -8628,6 +8739,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
                             )
+                        if opaque_toks is None and value_nodes:
+                            # Same rule as the short-declaration gate:
+                            # a literal/make mints a fresh backing;
+                            # any other tokenless RHS has no
+                            # shareable identity and stays closed.
+                            rhs_node = (
+                                value_nodes[i]
+                                if len(names) == len(value_nodes)
+                                else value_nodes[0]
+                            )
+                            while (
+                                rhs_node is not None
+                                and rhs_node.type
+                                == "parenthesized_expression"
+                            ):
+                                rhs_node = next(
+                                    (
+                                        c
+                                        for c in rhs_node.named_children
+                                        if c.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if (
+                                rhs_node is None
+                                or (
+                                    rhs_node.type
+                                    not in {
+                                        "composite_literal",
+                                        "call_expression",
+                                    }
+                                    and not (
+                                        rhs_node.type == "identifier"
+                                        and rhs_node.text == b"nil"
+                                    )
+                                )
+                            ):
+                                raise _Unsupported(
+                                    "binding_unavailable", _span(spec)
+                                )
                         self._opaque_container_tokens[binding.id] = (
                             opaque_toks
                             if opaque_toks is not None
