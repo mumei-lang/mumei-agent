@@ -2042,6 +2042,14 @@ class _Walker:
         target_roots = {
             _root_name(_norm(target)) for target in targets if target != "_"
         }
+        # Only plain-name targets rewrite the name's state — an element
+        # write (``s[0] = v``) leaves ``len(s)`` and every container fact
+        # about ``s`` valid, so it must not mark ``s`` as changed.
+        name_targets = {
+            _norm(target)
+            for target in targets
+            if target != "_" and re.fullmatch(_IDENT, _norm(target))
+        }
         for target in targets:
             if target != "_":
                 env.kill(target)
@@ -2086,7 +2094,7 @@ class _Walker:
                 # fact that mentions it (``i < len(s)`` after
                 # ``i, s = i, s[:1]``) no longer describes the new state.
                 _copy_name_facts(
-                    env, scratch, target, target_roots - {_root_name(target)}
+                    env, scratch, target, name_targets - {_norm(target)}
                 )
                 self._escape(value, env)
                 continue
