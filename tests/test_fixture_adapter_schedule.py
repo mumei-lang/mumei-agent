@@ -234,6 +234,13 @@ def test_memory_bound_kills_overallocating_adapter(tmp_path):
         doc["attempts"][0]["exit_code"] != 0
     )
     assert doc["selected_adapter_id"] == "beta"
+    # Control: the identical argv without the bound succeeds, so the
+    # kill above is the bound's effect, not a start failure.
+    control = _doc(_run(paths))
+    assert control["attempts"][0]["adapter_id"] == "alpha"
+    assert control["attempts"][0]["terminal_state"] == "exited"
+    assert control["attempts"][0]["exit_code"] == 0
+    assert control["selected_adapter_id"] == "alpha"
 
 
 def test_malformed_adapter_output_is_observed_not_trusted(tmp_path):
