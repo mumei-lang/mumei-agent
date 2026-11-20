@@ -1162,7 +1162,8 @@ def test_type_switch_guard_call_still_checks_nil_function():
         "go",
     )
     assert flow is not None and flow.cfg is not None
-    assert "uninitialized_use" not in {i.category for i in flow.issues}
+    # `f = f` reads `f` before writing it, so its nil state survives.
+    assert "uninitialized_use" in {i.category for i in flow.issues}
     flow = dataflow_facts.analyze_function(
         "var f func() any; switch f().(type) { case int: return 1 }; return 0",
         "go",

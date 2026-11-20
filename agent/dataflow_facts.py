@@ -1958,10 +1958,22 @@ class _Walker:
 
     def _var_one(self, name: str, type_text: str, value: str, env: _Env) -> None:
         type_text = _norm(type_text)
-        env.kill(name)
         if value and _norm(value) != "nil":
+            if _root_name(name) in {
+                _root_name(token) for token in re.findall(_IDENT, value)
+            }:
+                # ``var f = f`` reads the pre-declaration binding —
+                # evaluate it before the declaration's own kill.
+                scratch = env.copy()
+                if _norm(value) != _norm(name):
+                    scratch.kill(name)
+                self._define(name, value, scratch)
+                _copy_name_facts(env, scratch, name)
+                return
+            env.kill(name)
             self._define(name, value, env)
             return
+        env.kill(name)
         if not self._reliable(name):
             return
         kind = _nilable_kind(type_text)
@@ -2017,6 +2029,10 @@ class _Walker:
         pending: list[tuple[str, str]] = []
         if len(targets) == len(values):
             pending = list(zip(targets, values))
+        pre_env = env.copy()
+        target_roots = {
+            _root_name(_norm(target)) for target in targets if target != "_"
+        }
         for target in targets:
             if target != "_":
                 env.kill(target)
@@ -2040,6 +2056,21 @@ class _Walker:
             return
         for target, value in pending:
             if target == "_" or not re.fullmatch(_IDENT, target):
+                self._escape(value, env)
+                continue
+            if target_roots & {
+                _root_name(token) for token in re.findall(_IDENT, value)
+            }:
+                # The value reads a name this assignment also writes
+                # (``f = f``, ``a, b = b, a``) — evaluate it against
+                # the pre-assignment state the kills already erased.
+                scratch = pre_env.copy()
+                if _norm(value) != _norm(target):
+                    # A pure ``f = f`` is a no-op: ``f``'s own facts are
+                    # what the value reads, so they must survive.
+                    scratch.kill(target)
+                self._define(target, value, scratch)
+                _copy_name_facts(env, scratch, target)
                 self._escape(value, env)
                 continue
             self._define(target, value, env)

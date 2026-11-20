@@ -1919,8 +1919,39 @@ def test_switch_case_call_arg_establishes_output_param() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# switch initializer shadow-restore soundness
+# switch initializer self-reference / shadow-restore soundness
 # --------------------------------------------------------------------------- #
+
+
+def test_switch_init_self_assign_keeps_nilable_facts() -> None:
+    # ``switch f = f; f().(type)`` — the init reads ``f`` before writing it,
+    # so its nil state must survive into the guard check.
+    flow = _go(
+        "var f func() any\n"
+        "switch f = f; f().(type) {\n"
+        "case int:\n"
+        "    return 1\n"
+        "}\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "uninitialized_use" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_multi_assign_swap_reads_pre_assignment_facts() -> None:
+    # ``a, b = b, a`` evaluates both values before either write — ``a`` ends
+    # up holding ``b``'s old (nil) value, so dereferencing it still panics.
+    flow = _go("var a *int\nvar b *int\na = new(int)\na, b = b, a\nreturn *a")
+    assert any(
+        issue.category == "uninitialized_use" and issue.subject == "a"
+        for issue in flow.issues
+    )
+    assert not any(
+        issue.category == "uninitialized_use" and issue.subject == "b"
+        for issue in flow.issues
+    )
 
 
 def test_switch_shadowed_index_does_not_revive_stale_len_bound() -> None:
