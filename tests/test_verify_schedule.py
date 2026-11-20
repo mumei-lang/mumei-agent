@@ -608,6 +608,7 @@ def _accept_core(tmp_path, verdict):
         '\\"evidence_fingerprint\\":\\"$sum\\",'
         '\\"acceptance\\":\\"evaluated\\",'
         '\\"verdict\\":\\"' + verdict + '\\"}"\n'
+        '    [ ' + str(code) + " -eq 0 ] || echo 'verdict note' >&2\n"
         f"    exit {code}\n"
         "fi\n"
         "exit 2\n"
@@ -691,3 +692,412 @@ def test_output_must_not_overwrite_the_requirement(inputs, tmp_path):
     )
     with pytest.raises(SystemExit):
         main_schedule(args)
+
+
+def _requirement_list(tmp_path):
+    doc = tmp_path / "requirement-list.json"
+    doc.write_text(
+        json.dumps({
+            "schema_version": "mumei.evidence-requirement-list/v1",
+            "requirements": [{"schema_version": "mumei.evidence-requirement/v1"}],
+        }),
+        encoding="utf-8",
+    )
+    return doc
+
+
+def _accept_list_core(tmp_path, verdict):
+    # Stub Core `evidence accept --requirement-list`: binds the evidence
+    # fingerprint to the stdin bytes and the requirement-list fingerprint
+    # to the declared file, then emits the conjunctive descriptor — with
+    # the same stderr verdict note real Core prints on non-accepted
+    # outcomes, and a descriptor body over the 4 KiB diagnostic bound.
+    code = 0 if verdict == "accepted" else 1 if verdict == "rejected" else 3
+    core = tmp_path / f"mumei-stub-accept-list-{verdict}"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+        '    [ "$5" = "--requirement-list" ] || exit 4\n'
+        '    [ -f "$6" ] || exit 5\n'
+        "    sum=$(sha256sum | cut -d' ' -f1)\n"
+        '    req=$(sha256sum "$6" | cut -d\' \' -f1)\n'
+        '    printf %s "{\\"schema_version\\":\\"mumei.evidence-requirement-list-acceptance/v1\\",'
+        '\\"requirement_schema_version\\":\\"mumei.evidence-requirement-list/v1\\",'
+        '\\"evidence_schema_version\\":\\"mumei.verification-evidence/v1\\",'
+        '\\"requirement_list_fingerprint\\":\\"$req\\",'
+        '\\"evidence_fingerprint\\":\\"$sum\\",'
+        '\\"requirements\\":[{\\"index\\":0,\\"verdict\\":\\"' + verdict + '\\"}],'
+        '\\"acceptance\\":\\"evaluated\\",'
+        '\\"padding\\":\\"' + "x" * 5000 + '\\",'
+        '\\"verdict\\":\\"' + verdict + '\\"}"\n'
+        '    [ ' + str(code) + " -eq 0 ] || echo 'verdict note' >&2\n"
+        f"    exit {code}\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    return core
+
+
+@pytest.mark.parametrize("verdict,accepted", [
+    ("accepted", True), ("rejected", False), ("inconclusive", False),
+])
+def test_core_requirement_list_records_the_core_verdict(
+    inputs, capsys, tmp_path, verdict, accepted
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, verdict)
+    args = args_for(
+        inputs, core=str(core), core_requirement_list=str(req)
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == verdict
+    assert doc["evidence_acceptance"]["accepted"] is accepted
+    assert doc["evidence_acceptance"]["requirement_fingerprint"] == (
+        hashlib.sha256(req.read_bytes()).hexdigest()
+    )
+
+
+def test_export_evidence_acceptance_writes_the_promotable_triple(
+    inputs, capsys, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    args = args_for(
+        inputs,
+        core=str(core),
+        core_requirement_list=str(req),
+        export_evidence_acceptance=str(export),
+    )
+    assert main_schedule(args) == 0
+    assert json.loads(capsys.readouterr().out)["evidence_check"]["outcome"] == "accepted"
+    requirement_list = (export / "requirement-list.json").read_bytes()
+    evidence = (export / "evidence.json").read_bytes()
+    acceptance = json.loads((export / "acceptance.json").read_text())
+    assert requirement_list == req.read_bytes()
+    assert acceptance["schema_version"] == (
+        "mumei.evidence-requirement-list-acceptance/v1"
+    )
+    # The exported descriptor is the raw document Core emitted — nested
+    # objects survive as objects, not pair arrays.
+    assert acceptance["requirements"] == [{"index": 0, "verdict": "accepted"}]
+    assert acceptance["requirement_list_fingerprint"] == (
+        hashlib.sha256(requirement_list).hexdigest()
+    )
+    assert acceptance["evidence_fingerprint"] == (
+        hashlib.sha256(evidence).hexdigest()
+    )
+
+
+def test_export_evidence_acceptance_skips_a_failed_check(
+    inputs, capsys, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = tmp_path / "mumei-stub-accept-list-bad"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+        "    cat > /dev/null\n"
+        "    printf %s 'not-a-descriptor'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    export = tmp_path / "promotable"
+    args = args_for(
+        inputs,
+        core=str(core),
+        core_requirement_list=str(req),
+        export_evidence_acceptance=str(export),
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == "failed"
+    assert not export.exists()
+
+
+def test_export_evidence_acceptance_drops_a_stale_triple(
+    inputs, capsys, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = tmp_path / "mumei-stub-accept-list-bad"
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "evidence" ] && [ "$2" = "accept" ]; then\n'
+        "    cat > /dev/null\n"
+        "    printf %s 'not-a-descriptor'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    export = tmp_path / "promotable"
+    export.mkdir()
+    (export / "requirement-list.json").write_text("stale", encoding="utf-8")
+    (export / "evidence.json").write_text("stale", encoding="utf-8")
+    (export / "acceptance.json").write_text(json.dumps({
+        "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+    }), encoding="utf-8")
+    args = args_for(
+        inputs,
+        core=str(core),
+        core_requirement_list=str(req),
+        export_evidence_acceptance=str(export),
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == "failed"
+    # A failed check leaves no promotable set behind: last run's
+    # accepted triple must not survive as this run's result.
+    for name in ("requirement-list.json", "evidence.json", "acceptance.json"):
+        assert not (export / name).exists()
+
+
+def test_export_evidence_acceptance_refuses_declared_collisions(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    # --output must not overwrite an exported artifact.
+    with pytest.raises(
+        ValueError, match="--output must not overwrite an exported"
+    ):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+            output=str(export / "acceptance.json"),
+        ))
+    # An export target that resolves to a declared input is refused.
+    export.mkdir()
+    os.link(req, export / "requirement-list.json")
+    with pytest.raises(
+        ValueError, match="must not overwrite a declared input"
+    ):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+
+
+def test_export_evidence_acceptance_refuses_foreign_files(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    foreign = export / "evidence.json"
+    foreign.write_text("ANOTHER_PROCESS_EVIDENCE", encoding="utf-8")
+    # A name the export does not own is a declaration error, never
+    # something to delete.
+    with pytest.raises(ValueError, match="did not write"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+    assert foreign.read_text() == "ANOTHER_PROCESS_EVIDENCE"
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="requires FIFO support"
+)
+def test_export_evidence_acceptance_refuses_a_named_pipe(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    os.mkfifo(export / "acceptance.json")
+    (export / "requirement-list.json").write_text("x")
+    (export / "evidence.json").write_text("x")
+    # Opening a writer-less FIFO would hang — the sweep must refuse it
+    # as foreign content without reading.
+    with pytest.raises(ValueError, match="did not write"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+
+
+def test_export_evidence_acceptance_refuses_core_collision(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    os.link(core, export / "evidence.json")
+    with pytest.raises(
+        ValueError, match="must not overwrite a declared input"
+    ):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+    assert (export / "evidence.json").exists()
+
+
+MM_CLAMP = (
+    "atom clamp_nonnegative(x: i64) -> i64\n"
+    "requires: true;\n"
+    "ensures: (x < 0 => result == 0) && (x >= 0 => result == x);\n"
+    "body: { if x < 0 { 0 } else { x } };\n"
+)
+
+
+def test_exported_triple_passes_the_real_claim_gate(
+    inputs, capsys, tmp_path, mumei_bin
+):
+    """End-to-end with the real binary: the exported triple satisfies
+    `mumei claims --require-evidence-acceptance`."""
+    import shlex
+
+    core_argv = shlex.split(mumei_bin)
+    if len(core_argv) != 1:
+        pytest.skip("mumei_bin resolves to a compound command")
+    mumei = core_argv[0]
+    # --core requires an absolute path; a PATH-resolved name (which can
+    # itself be relative, e.g. './bin/mumei') must be made absolute
+    # before the schedule or the claims subprocess declares it.
+    import shutil
+
+    resolved = shutil.which(mumei)
+    if resolved is None:
+        pytest.skip("mumei binary is not executable")
+    mumei = os.path.abspath(resolved)
+    core_path = mumei
+    mm = tmp_path / "ev.mm"
+    mm.write_text(MM_CLAMP)
+    verify = subprocess.run(
+        [mumei, "evidence", "verify-source", str(mm), "--json"],
+        capture_output=True,
+    )
+    assert verify.returncode == 0, verify.stderr.decode()
+    record_path = tmp_path / "record.json"
+    record_path.write_bytes(verify.stdout)
+    record = json.loads(verify.stdout)
+    req = tmp_path / "requirements.json"
+    req.write_text(json.dumps({
+        "schema_version": "mumei.evidence-requirement-list/v1",
+        "requirements": [{
+            "schema_version": "mumei.evidence-requirement/v1",
+            "subject_sha256": record["subject"]["sha256"],
+            "obligation_id": record["obligation_id"],
+            "semantics": {
+                "profile": record["semantics"]["profile"],
+                "integer_model": record["semantics"]["integer_model"],
+                "target_triple": record["semantics"]["target_triple"],
+            },
+            "minimum_assurance": "unbounded_proof",
+            "correspondence_status": ["validated", "assumed"],
+            "excluded_assumptions": [],
+        }],
+    }))
+    # The selected attempt emits the evidence record as its output, so
+    # Core accepts it and the promotable triple is exported.
+    argv_map = tmp_path / "argv-real.json"
+    argv_map.write_text(json.dumps({
+        "alpha": [PY, "-c", "import sys; sys.exit(3)"],
+        "beta": [
+            PY, "-c",
+            "import sys; sys.stdout.buffer.write("
+            "open(sys.argv[1], 'rb').read())",
+            str(record_path),
+        ],
+    }))
+    export = tmp_path / "promotable"
+    args = args_for(
+        dict(inputs, argv_map=str(argv_map)),
+        core=core_path,
+        core_requirement_list=str(req),
+        export_evidence_acceptance=str(export),
+    )
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["evidence_check"]["outcome"] == "accepted"
+    claims = subprocess.run(
+        [
+            mumei, "claims", str(mm),
+            "--require-evidence-acceptance",
+            str(export / "requirement-list.json"),
+            str(export / "evidence.json"),
+            str(export / "acceptance.json"),
+        ],
+        capture_output=True,
+        cwd=tmp_path,
+    )
+    assert claims.returncode == 0, claims.stderr.decode()
+
+
+def test_export_promotable_pins_the_requirement_list(tmp_path):
+    from agent.attempt_schedule import _export_promotable
+
+    req = _requirement_list(tmp_path)
+    descriptor = {"requirement_list_fingerprint": "0" * 64}
+    with pytest.raises(ValueError, match="changed since the check ran"):
+        _export_promotable(
+            str(tmp_path / "out"),
+            str(req),
+            b"evidence",
+            descriptor,
+            b"{}",
+        )
+
+
+def test_core_requirement_list_flag_contract(inputs, tmp_path):
+    core = _accept_list_core(tmp_path, "accepted")
+    req = _requirement_list(tmp_path)
+    single = _requirement(tmp_path)
+    # Conflicts with --core-requirement.
+    with pytest.raises(ValueError, match="--core-requirement-list"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement=str(single),
+            core_requirement_list=str(req),
+        ))
+    # Requires --core.
+    with pytest.raises(ValueError, match="--core-requirement-list"):
+        run_schedule(args_for(inputs, core_requirement_list=str(req)))
+    # Needs an absolute existing path.
+    for bad in ("relative/req.json", str(tmp_path / "missing.json")):
+        with pytest.raises(ValueError, match="--core-requirement-list"):
+            run_schedule(args_for(
+                inputs, core=str(core), core_requirement_list=bad
+            ))
+
+
+def test_export_evidence_acceptance_flag_contract(inputs, tmp_path):
+    core = _accept_list_core(tmp_path, "accepted")
+    req = _requirement_list(tmp_path)
+    export = tmp_path / "promotable"
+    # Requires --core-requirement-list.
+    with pytest.raises(ValueError, match="--export-evidence-acceptance"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            export_evidence_acceptance=str(export),
+        ))
+    # Requires an absolute path.
+    with pytest.raises(ValueError, match="--export-evidence-acceptance"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance="relative/export",
+        ))

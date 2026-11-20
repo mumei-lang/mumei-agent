@@ -20,6 +20,10 @@ from agent.verification_attempt import (
 )
 
 MAX_DIAGNOSTIC_BYTES = 4096
+# Acceptance descriptors repeat per-requirement per-record check
+# outcomes, so `evidence accept` output is bounded separately — 4 MiB
+# matches the descriptor bound the promotable gate itself reads.
+MAX_ACCEPTANCE_DESCRIPTOR_BYTES = 4 * 1024 * 1024
 MAX_CHECK_TIMEOUT_MS = 60_000
 _CANCEL_POLL_SECONDS = 0.05
 _DIAGNOSTIC = {
@@ -221,6 +225,10 @@ def check_evidence_requirement(
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
     try:
+        # `evidence accept` writes a one-line verdict note to stderr on
+        # every non-accepted outcome, and a requirement's check outcomes
+        # can exceed the representation-diagnostic bound — stderr stays
+        # diagnostic and stdout is bounded as a descriptor.
         stdout, code = _run_check(
             output.stdout,
             core_executable,
@@ -233,6 +241,8 @@ def check_evidence_requirement(
                 "--requirement",
                 requirement_path,
             ),
+            tolerate_stderr=True,
+            max_stdout_bytes=MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
         )
         _check_cancelled(cancel_event)
         pairs = json.loads(stdout.decode("utf-8"), object_pairs_hook=tuple)
@@ -261,6 +271,147 @@ def check_evidence_requirement(
         raise CoreCheckFailed(
             "Core Evidence requirement check failed"
         ) from None
+
+
+def check_evidence_requirement_list(
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    requirement_list_path: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+    attempt_sequence: AttemptSequence | None = None,
+) -> tuple[dict, bytes]:
+    """Send original bytes to `core evidence accept --requirement-list`.
+
+    Same spawn/cancellation/lineage contract as
+    `check_evidence_requirement`, but the declared requirement is a
+    `mumei.evidence-requirement-list/v1` document and the returned
+    descriptor is `mumei.evidence-requirement-list-acceptance/v1` — the
+    conjunctive, promotable shape a downstream gate consumes. The
+    descriptor is validated just as strictly: duplicate-free object,
+    `acceptance: "evaluated"`, verdict agreeing with the exit code,
+    64-char `requirement_list_fingerprint`, the requirement-list and
+    record schema pins, and `evidence_fingerprint` bound to the bytes
+    fed on stdin. Returns the validated descriptor together with the
+    raw descriptor bytes, so an exporter can hand over the document
+    exactly as Core emitted it rather than a re-serialized shape. The
+    check stays a host-declared observation only."""
+    if (
+        os.name != "posix"
+        or type(output) is not AttemptOutput
+        or type(core_executable) is not str
+        or not os.path.isabs(core_executable)
+        or "\x00" in core_executable
+        or type(requirement_list_path) is not str
+        or not os.path.isabs(requirement_list_path)
+        or "\x00" in requirement_list_path
+        or type(timeout_ms) is not int
+        or not 1 <= timeout_ms <= MAX_CHECK_TIMEOUT_MS
+        or (cancel_event is not None and type(cancel_event) is not threading.Event)
+        or (
+            attempt_sequence is not None
+            and type(attempt_sequence) is not AttemptSequence
+        )
+    ):
+        raise ValueError("unsupported Core requirement check request")
+    if attempt_sequence is not None:
+        attempt_sequence.check_output_binding(output)
+    try:
+        # `evidence accept` writes a one-line verdict note to stderr on
+        # every non-accepted outcome, so stderr is a diagnostic stream
+        # here — the descriptor contract on stdout carries the verdict.
+        # Its stdout bound is the descriptor bound: the conjunctive
+        # document repeats per-requirement per-record outcomes and is
+        # far larger than a representation diagnostic.
+        stdout, code = _run_check(
+            output.stdout,
+            core_executable,
+            timeout_ms,
+            cancel_event,
+            argv_tail=(
+                "accept",
+                "--stdin",
+                "--json",
+                "--requirement-list",
+                requirement_list_path,
+            ),
+            tolerate_stderr=True,
+            max_stdout_bytes=MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
+        )
+        _check_cancelled(cancel_event)
+        pairs = json.loads(stdout.decode("utf-8"), object_pairs_hook=tuple)
+        if (
+            type(pairs) is not tuple
+            or len(pairs) != len({key for key, _ in pairs})
+        ):
+            raise ValueError
+        descriptor = dict(pairs)
+        verdict = descriptor.get("verdict")
+        if (
+            descriptor.get("schema_version")
+            != "mumei.evidence-requirement-list-acceptance/v1"
+            or descriptor.get("acceptance") != "evaluated"
+            or _VERDICT_EXIT_CODES.get(verdict) != code
+            or not _is_fingerprint(descriptor.get("requirement_list_fingerprint"))
+            or descriptor.get("requirement_schema_version")
+            != "mumei.evidence-requirement-list/v1"
+            or descriptor.get("evidence_schema_version")
+            != "mumei.verification-evidence/v1"
+            or descriptor.get("evidence_fingerprint")
+            != hashlib.sha256(output.stdout).hexdigest()
+            or descriptor.get("list_fingerprint") is not None
+        ):
+            raise ValueError
+        _check_cancelled(cancel_event)
+        return descriptor, stdout
+    except CoreCheckCancelled:
+        raise
+    except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
+        raise CoreCheckFailed(
+            "Core Evidence requirement check failed"
+        ) from None
+
+
+def record_evidence_acceptance_list(
+    sequence: AttemptSequence,
+    output: AttemptOutput,
+    *,
+    core_executable: str,
+    requirement_list_path: str,
+    timeout_ms: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[AttemptEvidenceCheck, dict | None, bytes | None]:
+    """`record_evidence_acceptance` over a declared requirement list.
+
+    Same contract — the record's outcome is the Core `evidence accept`
+    verdict — but Core evaluates a `mumei.evidence-requirement-list/v1`
+    document and returns the conjunctive
+    `mumei.evidence-requirement-list-acceptance/v1` descriptor. The
+    third return is the raw descriptor bytes (None when no descriptor
+    exists) for the promotable export path."""
+    if type(sequence) is not AttemptSequence:
+        raise ValueError("unsupported Core requirement check request")
+    candidate = sequence.evidence_candidate()
+    sequence.check_output_binding(output)
+    if output.to_dict()["output_fingerprint"] != candidate.output_fingerprint:
+        raise ValueError("evidence check output is not the selected result")
+    try:
+        descriptor, raw = check_evidence_requirement_list(
+            output,
+            core_executable=core_executable,
+            requirement_list_path=requirement_list_path,
+            timeout_ms=timeout_ms,
+            cancel_event=cancel_event,
+            attempt_sequence=sequence,
+        )
+    except CoreCheckCancelled:
+        outcome, descriptor, raw = "cancelled", None, None
+    except CoreCheckFailed:
+        outcome, descriptor, raw = "failed", None, None
+    else:
+        outcome = descriptor["verdict"]
+    return sequence.evidence_check(candidate, outcome), descriptor, raw
 
 
 def record_evidence_acceptance(
@@ -378,6 +529,8 @@ def _run_check(
     timeout_ms: int,
     cancel_event: threading.Event | None,
     argv_tail: tuple[str, ...] = ("check", "--stdin", "--json"),
+    tolerate_stderr: bool = False,
+    max_stdout_bytes: int = MAX_DIAGNOSTIC_BYTES,
 ) -> tuple[bytes, int]:
     _check_cancelled(cancel_event)
     deadline = time.monotonic() + timeout_ms / 1000
@@ -428,10 +581,13 @@ def _run_check(
                             stream.close()
                     else:
                         buffer = buffers[name]
+                        bound = (
+                            max_stdout_bytes
+                            if name == "stdout"
+                            else MAX_DIAGNOSTIC_BYTES
+                        )
                         try:
-                            chunk = os.read(
-                                key.fd, MAX_DIAGNOSTIC_BYTES + 1 - len(buffer)
-                            )
+                            chunk = os.read(key.fd, bound + 1 - len(buffer))
                         except BlockingIOError:
                             continue
                         if not chunk:
@@ -439,7 +595,7 @@ def _run_check(
                             stream.close()
                         else:
                             buffer.extend(chunk)
-                            if len(buffer) > MAX_DIAGNOSTIC_BYTES:
+                            if len(buffer) > bound:
                                 raise ValueError
             while True:
                 try:
@@ -449,7 +605,7 @@ def _run_check(
                     if cancel_event is None:
                         raise
             _check_cancelled(cancel_event)
-            if buffers["stderr"]:
+            if buffers["stderr"] and not tolerate_stderr:
                 raise ValueError
         return bytes(buffers["stdout"]), code
     finally:

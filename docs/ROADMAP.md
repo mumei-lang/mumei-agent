@@ -6316,6 +6316,27 @@ C11 stays partial; verdict-bearing grade promotion and C12's demand
 gate are unchanged — Evidence acceptance remains open.
 
 
+### C11 scheduled-attempt promotable export
+
+`run_attempt_schedule(..., core_requirement_list=PATH)` and the
+`verify-schedule --core-requirement-list PATH` flag (requires `--core`,
+conflicts with `--core-requirement`) run the requirement-declared
+check over a `mumei.evidence-requirement-list/v1` document: Core
+answers with the conjunctive
+`mumei.evidence-requirement-list-acceptance/v1` descriptor and the
+recorded `evidence_check` outcome is that verdict. With
+`--export-evidence-acceptance DIR` the schedule also writes the
+promotable gate triple — `requirement-list.json` (the declared
+bytes), `evidence.json` (the captured output Core evaluated) and
+`acceptance.json` (the validated descriptor) — the exact input shape
+`mumei claims --require-evidence-acceptance` pins and gates on. The
+descriptor is exported only when Core produced one; a `failed` or
+`cancelled` check exports nothing. Export is observability, not
+promotion: the schedule records what it dispatched and what Core
+declared, and grade promotion stays with the downstream gate — C11
+stays partial.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

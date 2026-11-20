@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 
@@ -28,8 +29,10 @@ from agent.attempt_runner import (
     memory_bound_enforceable,
 )
 from agent.core_evidence import (
+    MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
     evaluate_evidence_check,
     record_evidence_acceptance,
+    record_evidence_acceptance_list,
     record_evidence_check,
 )
 from agent.verification_attempt import (
@@ -207,6 +210,124 @@ class AttemptScheduleResult:
         }
 
 
+_MAX_REQUIREMENT_LIST_BYTES = 65_536
+_EXPORT_FILENAMES = ("requirement-list.json", "evidence.json", "acceptance.json")
+
+
+_ACCEPTANCE_DESCRIPTOR_SCHEMAS = frozenset(
+    {
+        "mumei.evidence-acceptance/v1",
+        "mumei.evidence-requirement-list-acceptance/v1",
+    }
+)
+
+
+def _is_prior_export(export_dir: str) -> bool:
+    """The reserved names hold a complete triple this feature wrote."""
+    try:
+        acceptance_path = os.path.join(export_dir, "acceptance.json")
+        if not os.path.isfile(acceptance_path):
+            # A FIFO or device under a reserved name would block the
+            # read below forever; it is not a prior export.
+            return False
+        if (
+            os.path.getsize(acceptance_path)
+            > MAX_ACCEPTANCE_DESCRIPTOR_BYTES
+        ):
+            return False
+        with open(acceptance_path, "rb") as handle:
+            acceptance = json.loads(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        type(acceptance) is dict
+        and acceptance.get("schema_version") in _ACCEPTANCE_DESCRIPTOR_SCHEMAS
+    )
+
+
+def _clear_export_dir(export_dir: str) -> None:
+    """Drop a triple left by an earlier run before dispatching.
+
+    A run that declares export but produces no descriptor — a failed
+    or cancelled check — must not leave last run's accepted set in
+    place for automation to pick up as this run's result. Files this
+    feature did not write are never removed: a directory holding
+    anything but a complete, recognizable earlier export under the
+    reserved names is a declaration error, not something to clean up."""
+    present = [
+        name
+        for name in _EXPORT_FILENAMES
+        if os.path.lexists(os.path.join(export_dir, name))
+    ]
+    if not present:
+        return
+    for name in present:
+        if os.path.islink(os.path.join(export_dir, name)):
+            raise ValueError("promotable export refuses to touch a link")
+    if len(present) != len(_EXPORT_FILENAMES) or not _is_prior_export(
+        export_dir
+    ):
+        raise ValueError(
+            "--export-evidence-acceptance directory holds files this "
+            "command did not write"
+        )
+    for name in _EXPORT_FILENAMES:
+        os.unlink(os.path.join(export_dir, name))
+
+
+def _export_promotable(
+    export_dir: str,
+    requirement_list_path: str,
+    evidence_bytes: bytes,
+    descriptor: dict,
+    descriptor_bytes: bytes,
+) -> None:
+    """Write the promotable gate triple the schedule verdict answers.
+
+    With ``--export-evidence-acceptance``, the host asks for the raw
+    inputs and the raw conjunctive descriptor — the exact triple a
+    downstream `mumei claims --require-evidence-acceptance` gate
+    consumes — instead of only the normalized schedule record. The
+    requirement list is the declared file's own bytes (bounded like a
+    declared input) and must still hash to the fingerprint Core
+    evaluated — a file edited between the check and the export is not
+    the requirement this verdict answered. `evidence.json` is the
+    captured output Core evaluated; `acceptance.json` is the raw
+    descriptor bytes, not a re-serialization. A descriptor is exported
+    only when Core produced one — a failed or cancelled check has no
+    promotable verdict to hand over. Export is observability, not
+    promotion: pinning and gating stay with the gate."""
+    if (
+        type(export_dir) is not str
+        or not os.path.isabs(export_dir)
+        or "\x00" in export_dir
+    ):
+        raise ValueError("promotable export requires an absolute directory")
+    requirement_list = open(requirement_list_path, "rb").read(
+        _MAX_REQUIREMENT_LIST_BYTES + 1
+    )
+    if len(requirement_list) > _MAX_REQUIREMENT_LIST_BYTES:
+        raise ValueError("declared requirement list exceeds the input bound")
+    if (
+        hashlib.sha256(requirement_list).hexdigest()
+        != descriptor["requirement_list_fingerprint"]
+    ):
+        raise ValueError(
+            "declared requirement list changed since the check ran"
+        )
+    os.makedirs(export_dir, exist_ok=True)
+    for name, payload in (
+        ("requirement-list.json", requirement_list),
+        ("evidence.json", evidence_bytes),
+        ("acceptance.json", descriptor_bytes),
+    ):
+        path = os.path.join(export_dir, name)
+        if os.path.islink(path):
+            raise ValueError("promotable export refuses to write over a link")
+        with open(path, "wb") as handle:
+            handle.write(payload)
+
+
 def _fallback_permitted(policy: PlannerPolicy) -> bool:
     return policy.selected_adapter is None or policy.allow_fallback
 
@@ -226,6 +347,8 @@ def run_attempt_schedule(
     cancel_event: "threading.Event | None" = None,
     core_executable: str | None = None,
     core_requirement: str | None = None,
+    core_requirement_list: str | None = None,
+    export_dir: str | None = None,
     memory_bound_mb: int | None = None,
     stdin_for=None,
 ) -> AttemptScheduleResult:
@@ -285,6 +408,24 @@ def run_attempt_schedule(
         raise ValueError(
             "attempt schedule evidence acceptance requires a requirement path and a core"
         )
+    if core_requirement_list is not None and (
+        type(core_requirement_list) is not str
+        or not core_requirement_list
+        or core_executable is None
+        or core_requirement is not None
+    ):
+        raise ValueError(
+            "attempt schedule evidence acceptance requires exactly one "
+            "requirement declaration and a core"
+        )
+    if export_dir is not None and (
+        type(export_dir) is not str or core_requirement_list is None
+    ):
+        raise ValueError(
+            "attempt schedule promotable export requires a requirement list"
+        )
+    if export_dir is not None:
+        _clear_export_dir(export_dir)
     active_runner = runner or AttemptRunner()
 
     entries: list[ScheduledAttemptEntry] = []
@@ -430,6 +571,34 @@ def run_attempt_schedule(
                                 else None
                             ),
                         )
+                    elif core_requirement_list is not None:
+                        evidence_check, descriptor, descriptor_raw = (
+                            record_evidence_acceptance_list(
+                                selected,
+                                dispatch.captured_output(),
+                                core_executable=core_executable,
+                                requirement_list_path=core_requirement_list,
+                                timeout_ms=min(policy.timeout_ms, 60_000),
+                                cancel_event=cancel_event,
+                            )
+                        )
+                        evidence_acceptance = evaluate_evidence_check(
+                            selected,
+                            evidence_check,
+                            requirement_fingerprint=(
+                                descriptor["requirement_list_fingerprint"]
+                                if descriptor is not None
+                                else None
+                            ),
+                        )
+                        if export_dir is not None and descriptor is not None:
+                            _export_promotable(
+                                export_dir,
+                                core_requirement_list,
+                                dispatch.captured_output().stdout,
+                                descriptor,
+                                descriptor_raw,
+                            )
                     else:
                         evidence_check = record_evidence_check(
                             selected,
