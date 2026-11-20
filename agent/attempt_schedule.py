@@ -226,6 +226,10 @@ def _is_prior_export(export_dir: str) -> bool:
     """The reserved names hold a complete triple this feature wrote."""
     try:
         acceptance_path = os.path.join(export_dir, "acceptance.json")
+        if not os.path.isfile(acceptance_path):
+            # A FIFO or device under a reserved name would block the
+            # read below forever; it is not a prior export.
+            return False
         if (
             os.path.getsize(acceptance_path)
             > MAX_ACCEPTANCE_DESCRIPTOR_BYTES

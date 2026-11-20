@@ -908,6 +908,30 @@ def test_export_evidence_acceptance_refuses_foreign_files(
     assert foreign.read_text() == "ANOTHER_PROCESS_EVIDENCE"
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="requires FIFO support"
+)
+def test_export_evidence_acceptance_refuses_a_named_pipe(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    os.mkfifo(export / "acceptance.json")
+    (export / "requirement-list.json").write_text("x")
+    (export / "evidence.json").write_text("x")
+    # Opening a writer-less FIFO would hang — the sweep must refuse it
+    # as foreign content without reading.
+    with pytest.raises(ValueError, match="did not write"):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        ))
+
+
 def test_export_evidence_acceptance_refuses_core_collision(
     inputs, tmp_path
 ):
@@ -947,6 +971,13 @@ def test_exported_triple_passes_the_real_claim_gate(
     if len(core_argv) != 1:
         pytest.skip("mumei_bin resolves to a compound command")
     mumei = core_argv[0]
+    # --core requires an absolute path; a PATH-resolved bare name must
+    # be resolved before the schedule declares it.
+    import shutil
+
+    core_path = shutil.which(mumei)
+    if core_path is None:
+        pytest.skip("mumei binary is not executable")
     mm = tmp_path / "ev.mm"
     mm.write_text(MM_CLAMP)
     verify = subprocess.run(
@@ -989,7 +1020,7 @@ def test_exported_triple_passes_the_real_claim_gate(
     export = tmp_path / "promotable"
     args = args_for(
         dict(inputs, argv_map=str(argv_map)),
-        core=mumei,
+        core=core_path,
         core_requirement_list=str(req),
         export_evidence_acceptance=str(export),
     )
