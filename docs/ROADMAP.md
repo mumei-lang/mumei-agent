@@ -6110,6 +6110,33 @@ any default audit/CLI/MCP route are unchanged — declared output
 interpretation is covered by `verdict_markers` below while Evidence
 acceptance remains open.
 
+### C11 manifest-declared attempt stdin
+
+`AdapterDescriptor.attempt_stdin` lets an adapter manifest declare the
+byte payload piped to the attempt process's standard input:
+`verify-schedule` and the audit `--enable-scheduled-verification`
+schedule feed it through `dispatch_attempt`'s `feed_bytes` channel —
+but only when the host planner policy declares
+`allow_manifest_attempt_stdin: true`. Like `attempt_argv`, the field is
+static metadata (a bounded UTF-8 string, at most 64 KiB when encoded,
+validated at registration and round-tripped through
+`to_dict`/`from_manifest`); without the explicit policy opt-in a
+declared `attempt_stdin` is inert and the attempt reads EOF. The opt-in
+is separate from `allow_manifest_attempt_argv` so a host can let a
+manifest carry its command while still refusing planted input, or the
+reverse.
+
+```python
+descriptor = AdapterDescriptor.from_manifest({
+    ...,
+    "attempt_stdin": "{\"problem\": \"...\"}\n",
+})
+```
+
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+any default audit/CLI/MCP route are unchanged — Evidence acceptance
+remains open.
+
 ### C11 manifest-declared output verdict markers
 
 `AdapterDescriptor.verdict_markers` lets an adapter manifest declare

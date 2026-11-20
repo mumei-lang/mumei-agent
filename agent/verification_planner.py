@@ -35,6 +35,7 @@ MAX_PLAN_HISTORY = 256
 VERDICT_OUTCOMES = frozenset({"valid", "failed", "inconclusive"})
 MARKER_STREAMS = frozenset({"stdout", "stderr"})
 MAX_VERDICT_MARKERS = 32
+MAX_ATTEMPT_STDIN_BYTES = 65_536
 MAX_MARKER_BYTES = 256
 PERMISSIONS = frozenset(
     {
@@ -67,6 +68,7 @@ _MANIFEST_FIELDS = frozenset(
         "required_permissions",
         "probe_argv",
         "attempt_argv",
+        "attempt_stdin",
         "verdict_markers",
     }
 )
@@ -393,6 +395,7 @@ class AdapterDescriptor:
     required_permissions: frozenset[str] | None = None
     probe_argv: tuple[str, ...] | None = None
     attempt_argv: tuple[str, ...] | None = None
+    attempt_stdin: str | None = None
     verdict_markers: tuple[VerdictMarker, ...] = ()
 
     def __post_init__(self) -> None:
@@ -458,6 +461,12 @@ class AdapterDescriptor:
             )
         ):
             raise ValueError("invalid adapter attempt declaration")
+        if self.attempt_stdin is not None and (
+            type(self.attempt_stdin) is not str
+            or len(self.attempt_stdin.encode("utf-8"))
+            > MAX_ATTEMPT_STDIN_BYTES
+        ):
+            raise ValueError("invalid adapter attempt stdin declaration")
         if (
             not isinstance(self.verdict_markers, tuple)
             or len(self.verdict_markers) > MAX_VERDICT_MARKERS
@@ -503,6 +512,7 @@ class AdapterDescriptor:
                 if self.attempt_argv is not None
                 else None
             ),
+            "attempt_stdin": self.attempt_stdin,
             "verdict_markers": [
                 marker.to_dict() for marker in self.verdict_markers
             ],
@@ -539,6 +549,9 @@ class AdapterDescriptor:
         attempt_argv = manifest.get("attempt_argv")
         if attempt_argv is not None and type(attempt_argv) is not list:
             raise ValueError("invalid adapter attempt declaration")
+        attempt_stdin = manifest.get("attempt_stdin")
+        if attempt_stdin is not None and type(attempt_stdin) is not str:
+            raise ValueError("invalid adapter attempt stdin declaration")
         verdict_markers = manifest.get("verdict_markers")
         if verdict_markers is None:
             verdict_markers = []
@@ -575,6 +588,7 @@ class AdapterDescriptor:
             attempt_argv=(
                 None if attempt_argv is None else tuple(attempt_argv)
             ),
+            attempt_stdin=attempt_stdin,
             verdict_markers=tuple(
                 VerdictMarker(
                     marker["stream"], marker["contains"], marker["outcome"]
@@ -615,6 +629,8 @@ class RuntimeObservation:
 class PlannerPolicy:
     selected_adapter: str | None = None
     allow_fallback: bool = False
+    allow_manifest_attempt_argv: bool = False
+    allow_manifest_attempt_stdin: bool = False
     disabled_adapters: frozenset[str] = frozenset()
     allowed_locations: frozenset[str] = frozenset({"local"})
     tool_version_pins: tuple[tuple[str, str], ...] = ()
@@ -636,6 +652,10 @@ class PlannerPolicy:
         if type(self.allow_manifest_attempt_argv) is not bool:
             raise ValueError(
                 "manifest attempt argv must be explicit Boolean policy"
+            )
+        if type(self.allow_manifest_attempt_stdin) is not bool:
+            raise ValueError(
+                "manifest attempt stdin must be explicit Boolean policy"
             )
         _labels(self.disabled_adapters, empty=True)
         _labels(self.allowed_locations)

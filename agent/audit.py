@@ -1396,6 +1396,14 @@ def _run_scheduled_verification(
             argv = descriptor.attempt_argv
         return (*argv, str(source_path))
 
+    def stdin_for(adapter_id: str) -> bytes | None:
+        if not context.policy.allow_manifest_attempt_stdin:
+            return None
+        descriptor = context.registry.descriptor(adapter_id)
+        if descriptor is None or descriptor.attempt_stdin is None:
+            return None
+        return descriptor.attempt_stdin.encode("utf-8")
+
     try:
         schedule = run_attempt_schedule(
             context.registry,
@@ -1408,6 +1416,7 @@ def _run_scheduled_verification(
             max_attempts=context.max_attempts,
             success_exit_codes=context.success_exit_codes,
             memory_bound_mb=context.memory_bound_mb,
+            stdin_for=stdin_for,
         )
     except (OSError, ValueError) as exc:
         # A scheduling failure is not evidence against the audited code, so it

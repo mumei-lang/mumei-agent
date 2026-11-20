@@ -42,7 +42,7 @@ _CONTRACT_KEYS = frozenset(
 _POLICY_KEYS = frozenset(
     {"selected_adapter", "allow_fallback", "disabled_adapters", "allowed_locations",
      "tool_version_pins", "timeout_ms", "memory_mb", "allowed_permissions",
-     "allow_manifest_attempt_argv"}
+     "allow_manifest_attempt_argv", "allow_manifest_attempt_stdin"}
 )
 _OBSERVATION_KEYS = frozenset({"adapter_id", "availability", "tool_version", "stamp"})
 
@@ -125,6 +125,9 @@ def _load_policy(path: str) -> PlannerPolicy:
         allow_fallback=document.get("allow_fallback", False),
         allow_manifest_attempt_argv=document.get(
             "allow_manifest_attempt_argv", False
+        ),
+        allow_manifest_attempt_stdin=document.get(
+            "allow_manifest_attempt_stdin", False
         ),
         disabled_adapters=frozenset(document.get("disabled_adapters") or ()),
         allowed_locations=frozenset(
@@ -273,6 +276,16 @@ def run_schedule(args: argparse.Namespace) -> dict:
                 return descriptor.attempt_argv
         return None
 
+    def stdin_for(adapter_id: str) -> bytes | None:
+        # Manifest-declared stdin feeds the attempt only when the host
+        # policy opts in — like argv, a manifest must not plant input.
+        if not policy.allow_manifest_attempt_stdin:
+            return None
+        descriptor = registry.descriptor(adapter_id)
+        if descriptor is None or descriptor.attempt_stdin is None:
+            return None
+        return descriptor.attempt_stdin.encode("utf-8")
+
     result = run_attempt_schedule(
         registry,
         request,
@@ -284,6 +297,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
         max_attempts=args.max_attempts,
         success_exit_codes=success,
         memory_bound_mb=args.memory_bound_mb,
+        stdin_for=stdin_for,
     )
     return result.to_dict()
 
