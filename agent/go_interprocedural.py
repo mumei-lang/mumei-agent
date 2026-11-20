@@ -12215,11 +12215,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # stay put — a repeated snapshot breaks the cycle by
             # dropping the oscillating entries below.
             seen_resolutions: set = set()
+            # Labels inside the body are recorded on every pass, so a
+            # forward goto to one would misread as backward on pass 2+ —
+            # each iteration resets the set to the labels seen BEFORE
+            # the loop.
+            loop_seen_labels = frozenset(self._seen_labels)
             self.frames.append(frame)
             try:
                 while True:
                     mark = len(transfers)
                     frame["exited"] = False
+                    self._seen_labels = set(loop_seen_labels)
                     inner = dict(scope)
                     for range_rejoin in (range_elem, range_key):
                         if range_rejoin is None:
@@ -12610,12 +12616,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `exited` preserved across the chain), once as a
                     # fresh alternative (the direct-match path, which
                     # skips the preceding clause's writes).
+                    clause_seen_labels = set(self._seen_labels)
                     self._branch_sequence(
                         statements, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
                     )
                     chain_exited = frame["exited"]
                     frame["exited"] = False
+                    # The second walk must not see the labels the first
+                    # one recorded — a forward goto inside the clause is
+                    # still forward.
+                    self._seen_labels = clause_seen_labels
                     fresh = dict(scope)
                     ptr_fresh = dict(self._ptr_deps)
                     self._branch_sequence(
