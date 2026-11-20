@@ -2283,10 +2283,14 @@ class _Builder:
             # carries the extracted element's slice header, which
             # shares its root's backing.
             return self._opaque_container_index_sharer_toks(node)
-        if node is not None and node.type == "composite_literal":
+        if node is not None and node.type in {
+            "composite_literal",
+            "literal_value",
+        }:
             # `[][][]int64{{sub}}` — a nested literal's own
             # element donors carry their sharable tokens up one
-            # level like `[][]int64{sub}` does at the root.
+            # level like `[][]int64{sub}` does at the root; the
+            # elided-type inner form is a `literal_value`.
             return self._opaque_container_elem_toks(node)
         if node is None or node.type != "identifier":
             return frozenset()
@@ -2330,6 +2334,10 @@ class _Builder:
             if node is not None
             else None
         )
+        if body is None and node is not None and node.type == "literal_value":
+            # An elided inner literal (`{{sub}}`) has no `body`
+            # field — its elements are its direct children.
+            body = node
         toks: set = set()
         for child in (
             body.named_children if body is not None else ()

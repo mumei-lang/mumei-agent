@@ -27282,6 +27282,24 @@ def test_opaque_composite_callee_writes_deep_array_arg(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_elided_nested_literal_donor_shares(go_types_helper):
+    # `[][][]int64{{sub}}` — the elided inner literal is a
+    # `literal_value`, and `sub`'s tokens still join `a`'s
+    # share group so a later `sub[0] = y` propagates.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x, y int64) int64 {\n"
+            "\tsub := []int64{x}\n"
+            "\ta := [][][]int64{{sub}}\n"
+            "\tsub[0] = y\n"
+            "\treturn a[0][0][0]\n}",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_opaque_composite_callee_writes_index_arg(
     go_types_helper,
 ):
