@@ -2333,3 +2333,21 @@ def test_reslice_bound_with_raw_string_brace_propagates_nonnil() -> None:
     facts = flow.facts_for_expression("part[0]")
     assert facts is not None
     assert "part" in facts.nonnil
+
+
+def test_quote_inside_raw_string_does_not_swallow_bracket_join() -> None:
+    # ``slots[:f(`"`)][g("h")]`` — the ``"`` inside the backtick raw
+    # string must not open a quoted literal: pairing it with the later
+    # ``"`` would erase the ``][`` join and fake a plain reslice.
+    from agent.dataflow_facts import analyze_function
+
+    flow = analyze_function(
+        "if slots == nil {\n    return 0\n}\n"
+        'p := slots[:f(`"`)][g("h")]\n'
+        "return p",
+        "go",
+    )
+    assert flow is not None
+    facts = flow.facts_for_expression("p")
+    assert facts is not None
+    assert "p" not in facts.nonnil

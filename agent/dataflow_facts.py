@@ -367,14 +367,35 @@ _MAKE_SIZE = re.compile(r"^make\(\[\][^,]+,\s*(\w+)(?:,[^)]*)?\)$")
 _MAKE_GROW = re.compile(rf"^make\(\[\][^,]+,\s*({_IDENT})\+(\w+)(?:,[^)]*)?\)$")
 _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*)\{")
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
-_GO_STRING_LIT = re.compile(
-    r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'"
-)
-_GO_RAW_STR = re.compile(r"`[^`]*`")
-
-
 def _strip_go_literals(text: str) -> str:
-    return _GO_RAW_STR.sub("", _GO_STRING_LIT.sub("", text))
+    """Remove Go string/rune/raw-string literals in one lexical pass.
+
+    Whichever quote opens first wins — a ``"`` inside a backtick raw
+    string is raw text, not the start of a quoted literal, so regex
+    passes would mis-pair it and swallow real structure (``][`` and all).
+    """
+    out: list[str] = []
+    i = 0
+    end = len(text)
+    while i < end:
+        ch = text[i]
+        if ch == "`":
+            close = text.find("`", i + 1)
+            i = end if close == -1 else close + 1
+        elif ch in "\"'":
+            j = i + 1
+            while j < end:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == ch:
+                    break
+                j += 1
+            i = j + 1 if j < end else end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 _SLICE_LITERAL = re.compile(r"^\[\][^{]+\{(.*)\}$", re.DOTALL)
 _CAST = re.compile(rf"^(?:{'|'.join(sorted(_GO_INT_TYPES))})\((.+)\)$")
 _GO_INT_CAST = re.compile(rf"\b(?:{'|'.join(sorted(_GO_INT_TYPES))}|uintptr|byte|rune)\(")
