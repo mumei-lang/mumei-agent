@@ -602,6 +602,11 @@ def unassigned_uses(
     predecessors: dict[int, list[int]] = defaultdict(list)
     for edge in graph.edges:
         predecessors[edge.target].append(edge.source)
+    # Only nodes reachable from the entry can feed a use — statements a
+    # ``goto`` jumps over still model their own assignments, so without
+    # this filter a dead ``x = 1`` would leak ``x`` into a live
+    # ``some_path`` pre-state and hide a definite unassigned use.
+    reachable = graph.reachable()
     findings: list[UnassignedUse] = []
     for node in graph.nodes:
         if node.span is None:
@@ -609,7 +614,11 @@ def unassigned_uses(
         statement = by_span.get((node.span.start, node.span.end))
         if statement is None:
             continue
-        incoming = predecessors.get(node.node_id, ())
+        incoming = [
+            pred
+            for pred in predecessors.get(node.node_id, ())
+            if pred in reachable
+        ]
         if node.node_id == graph.entry or not incoming:
             pre = frozenset() if node.node_id == graph.entry else universe
             pre_some = frozenset()
