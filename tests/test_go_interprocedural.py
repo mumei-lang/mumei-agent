@@ -1248,11 +1248,9 @@ def test_impure_builtins_stay_opaque(go_types_helper, declarations):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Labelled jumps stay unmodelled.
-        "func F(x int64) int64 { L: for i:=x; i>0; i-- { break L }; return x }",
-        "func F(x int64) int64 { L: for i:=x; i>0; i-- { continue L }; return x }",
-        # goto is unmodelled.
-        "func F(x int64) int64 { goto L; L: return x }",
+        # A backward goto re-executes folded statements — it needs a
+        # fixed point the fragment does not compute.
+        "func F(x int64) int64 { L: x++; if x < 3 { goto L }; return x }",
         # defer/go are effect-bearing and stay outside the fragment.
         "func F(x int64) int64 { defer F(0); return x }",
         "func F(x int64) int64 { go F(0); return x }",
@@ -1319,6 +1317,74 @@ def test_control_statement_shapes_stay_unsupported(
         (
             "func F(x int64) int64 { x = 1; for { break; x = 0 }; return x }",
             frozenset(),
+        ),
+        # A labelled break targets the labelled loop — writes after it in
+        # that loop's body are may-assignments.
+        (
+            "func F(x int64) int64 { var y int64; L: for { y = x; break L; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        # A labelled continue behaves the same way on a labelled loop.
+        (
+            "func F(x int64) int64 { var y int64; L: for { y = x; continue L; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        # `break L` from an inner loop abandons the inner construct AND
+        # the outer loop's tail — y = 0 is conditional and unions with
+        # the y = x write before it.
+        (
+            "func F(x int64) int64 { var y int64; L: for { y = x; for { break L }; y = 0 }; return y }",
+            frozenset({0}),
+        ),
+        # An unlabelled break in the inner loop is still consumed by it —
+        # the labelled outer loop keeps its unconditional tail. (The
+        # label names the conditional exit so it is used, as Go requires.)
+        (
+            "func F(x int64) int64 { var y int64; L: for { for { break }; y = 0; if y > 1 { break L } }; return y }",
+            frozenset(),
+        ),
+        # A goto skips the write before its label — the landing read sees
+        # the may-union of both paths.
+        (
+            "func F(x int64) int64 { var y int64; goto L; y = x; L: return y }",
+            frozenset({0}),
+        ),
+        # The goto path and the fall-through path union at the label.
+        (
+            "func F(x, c int64) int64 { var y int64; if c > 0 { goto L }; y = x; L: return y }",
+            frozenset({0}),
+        ),
+        # Statements after the label still see both paths' writes.
+        (
+            "func F(x, c int64) int64 { var y int64; if c > 0 { goto L }; y = 1; L: y = x; return y }",
+            frozenset({0}),
+        ),
+        # A goto inside a nested function literal must not leak its
+        # "rest of function is conditional" mark into the caller — the
+        # write after the literal is unconditional.
+        (
+            "func F(x int64) int64 { _ = func() { goto L; L: }; y := x; return y }",
+            frozenset({0}),
+        ),
+        # A `break L` from inside a nested loop of the labelled loop
+        # resolves to the labelled outer loop — the label is consumed
+        # by the outer frame alone, so the inner for does not shadow it.
+        (
+            "func F(x int64) int64 { var y int64; L: for { for { break L }; y = x }; return y }",
+            frozenset({0}),
+        ),
+        # A forward goto inside a loop body is re-walked on every
+        # fixed-point pass — the label it names must not read as
+        # backward on the second pass.
+        (
+            "func F(x int64) int64 { var y int64; for { goto D; y = 0; D: y = x; break }; return y }",
+            frozenset({0}),
+        ),
+        # A fallthrough target's body is walked twice (carried chain +
+        # fresh alternative) — a forward goto inside it stays forward.
+        (
+            "func F(x int64) int64 { var y int64; switch x { case 0: fallthrough; case 1: goto D; y = 0; D: y = x }; return y }",
+            frozenset({0}),
         ),
     ],
 )
@@ -19319,11 +19385,11 @@ def test_label_binding_does_not_break_report(go_types_helper):
     label = next(b for b in snapshot.bindings if b.name == "L")
     assert label.kind == "label"
     assert label.signature_type_ids == ()
-    # CFG construction stays closed on goto — the extractor must
-    # still emit a parseable report instead of internal_error.
+    # The nil-object label binding must not poison the report — and the
+    # forward goto is now inside the fragment.
     summaries = ip.summarize_go_package(files, snapshot)
     result = named_package(files, snapshot, summaries, "F")
-    assert not result.available
+    assert result.available
 
 
 def test_imported_func_typed_var_member_loads(go_types_helper):
