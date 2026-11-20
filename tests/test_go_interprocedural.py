@@ -186,8 +186,8 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
         # A callee mutating a slice's resource state has a non-scalar
         # signature; the composite literal argument is unsupported anyway.
         "func G(s []int64) int64 { s[0] = 1; return s[0] }; func F(x int64) int64 { return G([]int64{x}) }",
-        # A non-scalar-element local still cannot bind.
-        "func F(x int64) int64 { var s [][]int64; _ = s; return x }",
+        # A local nested more than one level still cannot bind.
+        "func F(x int64) int64 { var s [][][]int64; _ = s; return x }",
         # A parenthesized function name is outside the store-RHS
         # position the alias admits — `h := (G)` stays closed.
         "func G(v int64) int64 { return v }; func F(x int64) int64 { h := (G); return h(x) }",
@@ -1235,8 +1235,8 @@ def test_pure_builtin_dependencies(go_types_helper, declarations, expected):
         # bound in the scalar fragment anyway.
         "func F(x int64) int64 { return int64(len(\"ab\")) + x }",
         "func F(x int64) int64 { return int64(cap([3]int64{1, 2, 3})) }",
-        # `make` of a non-scalar-element container cannot bind.
-        "func F(x int64) int64 { s := make([][]int64, 2); _ = s; return x }",
+        # `make` of a twice-nested container cannot bind.
+        "func F(x int64) int64 { s := make([][][]int64, 2); _ = s; return x }",
     ],
 )
 def test_impure_builtins_stay_opaque(go_types_helper, declarations):
@@ -1254,8 +1254,9 @@ def test_impure_builtins_stay_opaque(go_types_helper, declarations):
         # defer/go are effect-bearing and stay outside the fragment.
         "func F(x int64) int64 { defer F(0); return x }",
         "func F(x int64) int64 { go F(0); return x }",
-        # inc/dec on a nested index operand is outside the fragment.
-        "func F(x int64) int64 { a := [][]int64{{x}}; a[0][0]++; return x }",
+        # inc/dec on a twice-nested index operand is outside the
+        # fragment.
+        "func F(x int64) int64 { a := [][][]int64{{{x}}}; a[0][0][0]++; return x }",
     ],
 )
 def test_control_statement_shapes_stay_unsupported(
@@ -7238,10 +7239,12 @@ def test_local_struct_value_boundaries(
 ):
     # A named slice over a scalar element rides the bound
     # scalar-container model like an anonymous `[]int64`; a named
-    # slice over a non-scalar element stays closed.
+    # one-level nest rides the same model, while a second nested
+    # level stays closed.
     for decl, body, available in [
         ("type S []int64", "sl := S{x}; return sl[0]", True),
-        ("type N [][]int64", "sl := N{{x}}; return sl[0][0]", False),
+        ("type N [][]int64", "sl := N{{x}}; return sl[0][0]", True),
+        ("type D [][][]int64", "sl := D{{{x}}}; return sl[0][0][0]", False),
     ]:
         files = {
             "a.go": f"package p\n{decl}\n"
@@ -12550,12 +12553,13 @@ def test_builtin_new_named_pointee_field(
 def test_builtin_make_non_scalar_stays_closed(
     go_types_helper,
 ):
-    # `make([][]int64)` — a composite value whose element the
-    # scalar-container gate rejects stays opaque like before.
+    # `make([][][]int64)` — a composite value whose element nests
+    # one level deeper than the scalar-container gate admits
+    # stays opaque like before.
     files = {
         "a.go": "package p\n"
         "func F(a int64) int64 {\n"
-        "\ts := make([][]int64, 3)\n"
+        "\ts := make([][][]int64, 3)\n"
         "\ts[0] = nil\n"
         "\treturn 0\n}\n"
     }
@@ -16151,7 +16155,7 @@ def test_statement_reads_absent_when_closed(go_types_helper):
         *unit(
             go_types_helper,
             "func F(x int64) int64 {\n"
-            "\ts := make([][]int64, 2)\n\t_ = s\n\treturn x\n}\n",
+            "\ts := make([][][]int64, 2)\n\t_ = s\n\treturn x\n}\n",
         )
     )
     assert not result.available
@@ -18583,6 +18587,193 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0]\n}\n",
             frozenset({0}),
         ),
+        # `a := [][]int64{{x}}` — one nested level rides the same
+        # backing model: `a[0][0] = v` stores into the root's
+        # conflated set and `a[0][0]` reads it back.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{x}}\n"
+            "\ta[0][0] = int64(0)\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` on a nested slice shares the backing — a store
+        # through `a` is read through `b`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tb := a\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var a [4][]int64` — a nested array element is itself a
+        # slice: `a[0] = …` reseats the slot, and the stored
+        # literal's deps land in the root's set.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar a [4][]int64\n"
+            "\ta[0] = []int64{x}\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var m map[int64][]int64` — the same one-level nesting
+        # keyed by map slot.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar m map[int64][]int64\n"
+            "\tm[0] = []int64{x}\n"
+            "\treturn m[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i][j] = x` — both indexes' deps union into the store.
+        (
+            "func F(x, i, j int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\ta[i][j] = x\n"
+            "\treturn a[i][j]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A nested literal's inner elements seed the root's set —
+        # `inner`'s deps read through `a[0][0]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tinner := []int64{x}\n"
+            "\ta := [][]int64{inner}\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `case a[i][j] = <-ch` — the received deps land in the
+        # root's backing like a scalar element store.
+        (
+            "func F(ch chan int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tselect {\n"
+            "\tcase a[0][0] = <-ch:\n"
+            "\t}\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[0][0]++` — the inc/dec reads and rewrites the same
+        # conflated slot.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{x}}\n"
+            "\ta[0][0]++\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` on a nested ARRAY copies the array header but
+        # the inner slices still share `a`'s backings — `b[0][0]`
+        # sees `a`'s nested stores.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar a [4][]int64\n"
+            "\ta[0] = []int64{0}\n"
+            "\tb := a\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a = [][]int64{x}` — a literal reseat on a nested local
+        # replaces the backing like the scalar form.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\ta = [][]int64{{x}}\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var a [][]int64` — an uninitialised nested local binds
+        # an empty backing like the scalar form.
+        (
+            "func F(x int64) int64 {\n"
+            "\tvar a [][]int64\n"
+            "\ta[0] = []int64{0}\n"
+            "\ta[0][0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a := [][]int64{s}` — the inner element SHARES `s`'s
+        # backing: `s[0] = x` reaches the `a[0][0]` read.
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta := [][]int64{s}\n"
+            "\ts[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # The other direction — `a[0][0] = x` lands in `s`'s set.
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta := [][]int64{s}\n"
+            "\ta[0][0] = x\n"
+            "\treturn s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[i] = s` storing an inner slice shares its backing too.
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\ta := make([][]int64, 1)\n"
+            "\ta[0] = s\n"
+            "\ts[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` on a `[N][]T` literal — the inner slices share
+        # `a`'s backings through the copy.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][]int64{{0}}\n"
+            "\tb := a\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `p := &a[0][0]` — a pointer into a nested element folds
+        # `*p = x` into the root's conflated set like `&a[i]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tp := &a[0][0]\n"
+            "\t*p = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `make(M, n)` on a named nested type admits like the
+        # literal form.
+        (
+            "type M [][]int64\n"
+            "func F(x int64) int64 {\n"
+            "\ta := make(M, 1)\n"
+            "\ta[0] = []int64{x}\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` on `[1][1]int64` — the inner element is itself
+        # an array, so the copy is deep: `a[0][0] = x` must NOT
+        # reach `b[0][0]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [1][1]int64{{0}}\n"
+            "\tb := a\n"
+            "\ta[0][0] = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset(),
+        ),
+        # `[1][1]int64{sub}` embeds a COPY of `sub` — the array
+        # donor shares no backing with `a`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tsub := [1]int64{0}\n"
+            "\ta := [1][1]int64{sub}\n"
+            "\tsub[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+            frozenset(),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -18596,11 +18787,6 @@ def test_scalar_container_bind_read_write_admits(
 @pytest.mark.parametrize(
     "declarations",
     [
-        # `var a [][]int64` — a non-scalar element still cannot bind.
-        "func F(x int64) int64 {\n"
-        "\tvar a [][]int64\n"
-        "\ta[0][0] = x\n"
-        "\treturn a[0][0]\n}\n",
         # `a[0][0] = x` on a nested param container stays closed —
         # `_opaque_container_index_target` is one level only.
         "func F(a [][]int64, x int64) {\n"
@@ -18628,6 +18814,19 @@ def test_scalar_container_bind_read_write_admits(
         "\ta := t[0]\n"
         "\ta[0] = x\n"
         "\treturn a[0]\n}\n",
+        # `b := a[0]` on a BOUND nested local — inner-container
+        # extraction stays closed even though `a` is tracked.
+        "func F(x int64) int64 {\n"
+        "\ta := [][]int64{{0}}\n"
+        "\tb := a[0]\n"
+        "\tb[0] = x\n"
+        "\treturn b[0]\n}\n",
+        # `[][][]int64` — two levels of nesting stays closed; the
+        # model admits exactly one.
+        "func F(x int64) int64 {\n"
+        "\ta := [][][]int64{{{x}}}\n"
+        "\ta[0][0][0] = int64(0)\n"
+        "\treturn a[0][0][0]\n}\n",
         # `a := s.F` where `F` is a non-scalar container — the
         # selector share only covers scalar-element fields, and the
         # opaque gate still rejects the nested element.
@@ -22213,7 +22412,7 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     # cannot evaluate, so the outer call fails closed through it.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { m:=map[int][]int{1:nil}; _=m; return nil }; "
+        "func mk() func() int64 { m:=map[int][][]int{1:nil}; _=m; return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
@@ -25034,6 +25233,8 @@ def _opaque_composite_lib():
             "func U(s []int64, b int64) {}\n"
             "func UA(a [4]int64, b int64) {}\n"
             "func GAS(x int64) [1][]int64 { return [1][]int64{{x}} }\n"
+            "func GAA(x int64) [1][1][]int64 {\n"
+            "\treturn [1][1][]int64{{{x}}}\n}\n"
             "func US(a [1][]int64, b int64) {}\n"
             "var VA []int64\n"
         }
@@ -25180,14 +25381,14 @@ def test_opaque_composite_scalar_reseat_closes(go_types_helper):
     assert not result.available
 
 
-def test_opaque_composite_literal_non_scalar_stays_closed(go_types_helper):
-    # `s := [][]int64{{a}}` — a literal with a non-scalar element
-    # still cannot bind a name.
+def test_opaque_composite_literal_deeper_nest_stays_closed(go_types_helper):
+    # `s := [][][]int64{{{a}}}` — a literal nested one level deeper
+    # than the model admits still cannot bind a name.
     files = {
         "a.go": "package p\n"
         "func F(a, j int64) int64 {\n"
-        "\ts := [][]int64{{a}}\n"
-        "\treturn s[j][0]\n}\n"
+        "\ts := [][][]int64{{{a}}}\n"
+        "\treturn s[j][0][0]\n}\n"
     }
     snapshot = load_go_package_snapshot(
         package_report(go_types_helper, files), files, target_arch="amd64"
@@ -26691,6 +26892,25 @@ def test_opaque_composite_array_of_slices_arg_shares_elem_memory(
         "\ts := lib.GAS(a)\n"
         "\tlib.US(s, b)\n"
         "\treturn s[0][0]\n}",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_nested_array_slot_shares_donor_slices(
+    go_types_helper,
+):
+    # `s[0] = sub` on `[1][1][]int64` embeds `sub`'s inner slice
+    # headers — the array copy still shares their backing, so a
+    # later `sub[0][0] = b` write reaches `s[0][0][0]` reads.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(a, b int64) int64 {\n"
+        "\ts := lib.GAA(a)\n"
+        "\tsub := lib.GAS(a)\n"
+        "\ts[0] = sub\n"
+        "\tsub[0][0] = b\n"
+        "\treturn s[0][0][0]\n}",
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})

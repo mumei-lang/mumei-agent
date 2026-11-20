@@ -4052,11 +4052,43 @@ array so the element lands in the shared group, and a definite
 `a :=` does while `a = nil` drops the token (`a[i]` then fails
 closed again). A named collection type pins its declared
 identities on admit. The element gate keeps the honest closures:
-`[][]int64`/`[]struct`/`[]func` locals still cannot bind (the
-func-element collection has its own model), a nested
-`a[i][j] = v` stays one-level-closed, `delete(m, k)`/`copy` stay
+`[][]int64` admits one level deeper in the nested section below,
+while `[]struct`/`[]func` locals still cannot bind (the
+func-element collection has its own model), `delete(m, k)`/`copy` stay
 opaque builtins, and a parameter container (`a []int64`) is
 rejected by the signature gate before it can ever register.
+
+### C07 scalar-element *nested* local containers
+
+Exactly one level of nesting over a scalar-element collection
+admits under the same conflated backing-token model —
+`var a [][]int64`, `a := [][]int64{{x}}`,
+`m := map[K][]int64{...}`, `a := [N][]int64{...}`,
+`a := make([][]int64, n)` and the named-type forms all bind, and
+an uninitialised `var a [][]int64` mints an empty backing like
+the single-level case. A two-index element store
+(`a[i][j] = v`, `m[k][i] = v`) resolves the inner operand
+`a[i]`/`m[k]` back to its bound container, unions both index
+deps with the value's, and lands them in the backing every
+sharer reads; `a[i][j]` reads the conflated set through the
+multi-index descent (a `select` receive `a[i][j] = <-ch` and
+`a[i][j]++` follow the store/read rules identically). `b := a`
+shares the backing, `a = [][]int64{...}`/`a = make(...)` reseat
+mints a fresh one, and a one-level element store (`a[i] =
+sub-slice`) lands the inner container's deps in the root's set
+like any element write. A donor whose type is an array still
+shares when its element chain bottoms in a slice/map header —
+`s[0] = sub` on `[1][1][]int64` with `sub : [1][]int64`
+embeds `sub`'s headers, so `sub[0][0] = x` reaches
+`s[0][0][0]` reads (`[1][1]int64` donors keep the value-copy
+closure). The honest closures stay honest:
+`[][][]int64` (two levels over scalar) and any deeper nesting
+still cannot bind, extracting an inner container (`b := a[i]`,
+`b := m[k]`) stays closed since the element is itself a
+collection, `a := s.F` on a `[][]int64` field stays closed (the
+field share gate requires a scalar-element member), `[]func`
+nested shapes keep their own func-element model, and a nested
+parameter container is rejected by the signature gate.
 
 ### C07 per-statement read attribution
 
