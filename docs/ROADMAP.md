@@ -4026,14 +4026,16 @@ field; consumers treat absence as "not provided".
 the jump marks every construct between the statement and the labelled
 one exited exactly like an unlabelled jump marks its innermost frame, and
 later writes stay may-assignments. A label wrapping any other statement
-is inert syntax. `goto` joins the same over-approximation: it marks all
-open constructs exited and every later statement conditional, since any
-statement between the jump and its label may never have run — the
-walker does not resolve goto targets, so an unreachable or backward
-jump degrades to the conservative may-write model rather than a gap. A
-labelled jump whose name resolves to no enclosing labelled frame (or,
-for `continue`, to a non-loop construct) stays `unsupported_statement`;
-`defer` and `go` remain outside the fragment.
+is inert syntax. A forward `goto` joins the same over-approximation: it
+marks all open constructs exited and every later statement conditional,
+since any statement between the jump and its label may never have run —
+the walker does not resolve goto targets, so an unreachable label
+degrades to the conservative may-write model rather than a gap. A
+backward goto — one whose label was already processed — would need a
+fixed point this fragment does not compute and stays
+`unsupported_statement`, as does a labelled jump whose name resolves to
+no enclosing labelled frame (or, for `continue`, to a non-loop
+construct); `defer` and `go` remain outside the fragment.
 
 ### C06 imported generic instantiations
 

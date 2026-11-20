@@ -39,10 +39,11 @@ exited — every later statement in that body is a may-assignment whose
 writes union instead of replace, because the jump may have skipped them.
 A labelled ``break L``/``continue L`` resolves its label against the
 loop/switch frames a ``labeled_statement`` wraps and marks every
-construct between the jump and the labelled one exited; ``goto``
-conservatively marks all open constructs exited and every later
+construct between the jump and the labelled one exited; a forward
+``goto`` conservatively marks all open constructs exited and every later
 statement conditional, since anything between the jump and its label
-may be skipped (``defer`` and ``go`` stay unmodelled). Scalar
+may be skipped — a backward ``goto`` would need a fixed point and stays
+outside the fragment (``defer`` and ``go`` stay unmodelled). Scalar
 ``const`` declarations and reads are admitted: a constant expression can
 never read a variable (the compiler rejects it before this reader runs),
 so a scalar-typed ``constant`` binding always resolves to an empty
@@ -1081,11 +1082,15 @@ class _Builder:
         # construct so `break L`/`continue L` resolve against it.
         self.frames: list[dict[str, Any]] = []
         # Labels of enclosing ``labeled_statement``s, outermost first —
-        # consumed (peeked) by the next loop/switch frame pushed.
+        # consumed by the next loop/switch frame pushed (a consumed
+        # label cannot re-register on a deeper construct).
         self._pending_labels: list[str] = []
         # Once a `goto` runs, every statement until its label — at any
         # depth — may have been skipped, so all later writes union.
         self._goto_seen = False
+        # Labels already processed — a `goto` to one jumps BACKWARD,
+        # which the may-write model cannot capture, so it stays closed.
+        self._seen_labels: set[str] = set()
         self.raws = raws
         for file, raw in raws.items():
             root = _syntax(raw)
@@ -7436,6 +7441,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_defer_result_deps = self._defer_result_deps
         saved_func_args = self._func_arg_invocations
         saved_call_arg_deps = self._call_arg_deps
+        saved_pending_labels = self._pending_labels
+        saved_goto_seen = self._goto_seen
+        saved_seen_labels = self._seen_labels
+        self._pending_labels = []
+        self._goto_seen = False
+        self._seen_labels = set()
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -7493,6 +7504,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._defer_result_deps = saved_defer_result_deps
             self._func_arg_invocations = saved_func_args
             self._call_arg_deps = saved_call_arg_deps
+            self._pending_labels = saved_pending_labels
+            self._goto_seen = saved_goto_seen
+            self._seen_labels = saved_seen_labels
             self.current_file = previous_file
         if not saw_return[0] and fn.results:
             # A void callee may fall off the end of its body — Go
@@ -12190,7 +12204,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             frame = {
                 "kind": "loop",
                 "exited": False,
-                "label": self._pending_labels[-1]
+                "label": self._pending_labels.pop()
                 if self._pending_labels
                 else None,
             }
@@ -12529,7 +12543,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             frame = {
                 "kind": "switch",
                 "exited": False,
-                "label": self._pending_labels[-1]
+                "label": self._pending_labels.pop()
                 if self._pending_labels
                 else None,
             }
@@ -12646,7 +12660,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     saw_return, conditional,
                 )
             finally:
-                self._pending_labels.pop()
+                # A construct frame may have consumed this label —
+                # remove it only if it is still the innermost pending
+                # one; an outer label beneath a consumed inner label
+                # pops on its own labeled_statement's exit.
+                if (
+                    self._pending_labels
+                    and self._pending_labels[-1] == label
+                ):
+                    self._pending_labels.pop()
+            self._seen_labels.add(label)
             return
         if kind in {"inc_statement", "dec_statement"}:
             operands = _children(node)
@@ -12918,6 +12941,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # Every statement between the jump and its label may never
             # run — mark all open constructs exited and the rest of the
             # function conditional; the label itself is inert.
+            jump = next(
+                (
+                    c
+                    for c in node.named_children
+                    if c.type == "label_name"
+                ),
+                None,
+            )
+            if (
+                jump is not None
+                and jump.text.decode("utf-8", "replace") in self._seen_labels
+            ):
+                # A backward goto re-executes statements the may-write
+                # model already folded — that needs a fixed point this
+                # fragment does not compute.
+                raise _Unsupported("unsupported_statement", _span(node))
             for frame in self.frames:
                 frame["exited"] = True
             self._goto_seen = True
@@ -13020,7 +13059,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             frame = {
                 "kind": "switch",
                 "exited": False,
-                "label": self._pending_labels[-1]
+                "label": self._pending_labels.pop()
                 if self._pending_labels
                 else None,
             }
