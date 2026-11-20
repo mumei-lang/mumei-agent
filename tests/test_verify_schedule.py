@@ -1005,6 +1005,7 @@ def test_exported_triple_passes_the_real_claim_gate(
             str(export / "acceptance.json"),
         ],
         capture_output=True,
+        cwd=tmp_path,
     )
     assert claims.returncode == 0, claims.stderr.decode()
 
