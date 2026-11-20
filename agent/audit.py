@@ -1336,6 +1336,20 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "as the evidence_check outcome."
         ),
     )
+    parser.add_argument(
+        "--schedule-core-requirement-list",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Optional mumei.evidence-requirement-list/v1 document: with "
+            "--schedule-core, run the conjunctive Core evidence-acceptance "
+            "check (`core evidence accept --stdin --json "
+            "--requirement-list PATH`) on the selected attempt's "
+            "captured output instead of the representation check, and "
+            "record Core's declared verdict as the evidence_check "
+            "outcome. Conflicts with --schedule-core-requirement."
+        ),
+    )
     return parser
 
 @dataclass(frozen=True)
@@ -1356,6 +1370,7 @@ class _ScheduledVerification:
     memory_bound_mb: int | None
     core_executable: str | None
     core_requirement: str | None
+    core_requirement_list: str | None
     declared: tuple[str, ...]
 
 
@@ -1372,6 +1387,8 @@ def _scheduled_verification_declared_paths(args: argparse.Namespace) -> tuple[st
         paths.append(args.schedule_core)
     if getattr(args, "schedule_core_requirement", None) is not None:
         paths.append(args.schedule_core_requirement)
+    if getattr(args, "schedule_core_requirement_list", None) is not None:
+        paths.append(args.schedule_core_requirement_list)
     return tuple(paths)
 
 
@@ -1410,6 +1427,29 @@ def _validated_schedule_core_requirement(
     return path
 
 
+def _validated_schedule_core_requirement_list(
+    path: str | None,
+    core_executable: str | None,
+    core_requirement: str | None,
+) -> str | None:
+    if path is None:
+        return None
+    if (
+        type(path) is not str
+        or core_executable is None
+        or core_requirement is not None
+        or not os.path.isabs(path)
+        or "\x00" in path
+        or not Path(path).is_file()
+    ):
+        raise ValueError(
+            "--schedule-core-requirement-list requires --schedule-core, "
+            "conflicts with --schedule-core-requirement and needs an "
+            "absolute path to a regular file"
+        )
+    return path
+
+
 def _load_scheduled_verification(args: argparse.Namespace) -> _ScheduledVerification:
     request = _load_request(args.schedule_request)
     if (
@@ -1440,6 +1480,11 @@ def _load_scheduled_verification(args: argparse.Namespace) -> _ScheduledVerifica
         core_requirement=_validated_schedule_core_requirement(
             args.schedule_core_requirement,
             _validated_schedule_core(args.schedule_core),
+        ),
+        core_requirement_list=_validated_schedule_core_requirement_list(
+            args.schedule_core_requirement_list,
+            _validated_schedule_core(args.schedule_core),
+            args.schedule_core_requirement,
         ),
         declared=_scheduled_verification_declared_paths(args),
     )
@@ -1491,6 +1536,7 @@ def _run_scheduled_verification(
             stdin_for=stdin_for,
             core_executable=context.core_executable,
             core_requirement=context.core_requirement,
+            core_requirement_list=context.core_requirement_list,
         )
     except (OSError, ValueError) as exc:
         # A scheduling failure is not evidence against the audited code, so it
@@ -1550,6 +1596,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 "schedule_memory_bound_mb",
                 "schedule_core",
                 "schedule_core_requirement",
+                "schedule_core_requirement_list",
             )
         )
     )
