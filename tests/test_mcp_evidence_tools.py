@@ -897,7 +897,7 @@ class TestVerifyScheduleTool:
         core.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "evidence" ] && [ "$2" = "check" ]; then\n'
-            "    " + sha_check + "\n"
+            "    " + sha_check + " || exit 1\n"
             "    printf %s '" + json.dumps(diagnostic) + "'\n"
             "    exit 0\n"
             "fi\n"
