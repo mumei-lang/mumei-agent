@@ -1844,6 +1844,20 @@ class _Builder:
             return None
         return ref.binding_id
 
+    def _opaque_container_holders(
+        self, toks: frozenset
+    ) -> set[str]:
+        """Every binding whose token set intersects `toks` — the
+        current membership of the share group those tokens name."""
+        if not toks:
+            return set()
+        return {
+            member_id
+            for member_id, member_toks
+            in self._opaque_container_tokens.items()
+            if member_toks & toks
+        }
+
     def _opaque_container_sharers(self, binding_id: str) -> set[str]:
         """Every name whose backing set intersects `binding_id`'s —
         `s2 := s` between slice/map containers shares the backing,
@@ -1851,12 +1865,7 @@ class _Builder:
         toks = self._opaque_container_tokens.get(
             binding_id, frozenset()
         )
-        return {
-            member_id
-            for member_id, member_toks
-            in self._opaque_container_tokens.items()
-            if member_toks & toks
-        } | {binding_id}
+        return self._opaque_container_holders(toks) | {binding_id}
 
     def _opaque_container_deps(
         self, binding_id: str, locals_: dict[str, frozenset[int]]
@@ -9728,13 +9737,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             func_elem_targets: set[int] = set()
             # `s[i] = v` — an element store into a bound opaque
             # container (`s := lib.G(a)`) unions the stored value's
-            # deps into every name sharing the backing. The sharer
-            # set resolves at LHS-eval like the destination operand
+            # deps into every name sharing the backing. The BACKING
+            # resolves at LHS-eval like the destination operand
             # itself — `s, s[0] = t, b` writes the slice `s` named
-            # BEFORE its own store, so the pre-state members are
-            # snapshotted here — and the index's deps join the
-            # stored value like a read's.
-            opaque_elem_targets: dict[int, frozenset[str]] = {}
+            # BEFORE its own store — so the operand's token set is
+            # snapshotted here. The membership expands lazily at
+            # store time: a name joining that same backing in this
+            # very statement (`b, a[0][0] = a[0], x`) receives the
+            # write, while a reseated operand drops out of its old
+            # group — and the index's deps join the stored value
+            # like a read's.
+            opaque_elem_targets: dict[int, frozenset] = {}
             opaque_elem_index_deps: dict[int, frozenset[int]] = {}
             # An element store's holder set resolves like the
             # destination operand itself — against the pre-state —
@@ -10115,8 +10128,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     refs.append(oref)
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(
-                        self._opaque_container_sharers(
-                            oref.binding_id
+                        self._opaque_container_tokens.get(
+                            oref.binding_id, frozenset()
                         )
                     )
                     opaque_elem_index_deps[ri] = frozenset()
@@ -11148,7 +11161,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         value
                         | opaque_elem_index_deps.get(i, frozenset())
                     )
-                    for holder_id in opaque_elem_targets[i]:
+                    for holder_id in self._opaque_container_holders(
+                        opaque_elem_targets[i]
+                    ):
                         self._store(
                             locals_, params, holder_id, elem_value,
                             True,

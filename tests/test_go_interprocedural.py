@@ -18906,6 +18906,18 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn a[0][0]\n}\n",
             frozenset(),
         ),
+        # `b, a[0][0] = a[0], x` — the element store lands on
+        # the backing `b` just joined in the same statement, so
+        # `b` still observes `x` after `a` reseats away.
+        (
+            "func F(x int64) int64 {\n"
+            "\ta := [][]int64{{0}}\n"
+            "\tvar b []int64\n"
+            "\tb, a[0][0] = a[0], x\n"
+            "\ta = nil\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
