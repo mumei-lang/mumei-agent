@@ -15816,9 +15816,534 @@ def test_received_channel_operation_target_expected_dependencies(
         assert result.effects == "unknown"
 
 
+def test_external_chan_chan_queue_aliases_match_direct(
+    go_types_helper,
+):
+    source_specs = {
+        "parameter": ("p chan chan int64, x int64", "", "p", "p"),
+        "package": ("x int64", "", "GCC", "GCC"),
+        "imported_global": (
+            "x int64",
+            "",
+            "lib.GCC",
+            "lib.GCC",
+        ),
+        "local_result": (
+            "x int64",
+            "cc := G()",
+            "cc",
+            "cc",
+        ),
+        "imported_result": (
+            "x int64",
+            "cc := lib.G()",
+            "cc",
+            "cc",
+        ),
+    }
+    alias_forms = {
+        "short": lambda operand: f"q := {operand}",
+        "var_inferred": lambda operand: f"var q = {operand}",
+        "var_typed": lambda operand: (
+            f"var q chan chan int64 = {operand}"
+        ),
+        "assignment": lambda operand: (
+            f"var q chan chan int64\nq = {operand}"
+        ),
+        "short_reassignment": lambda operand: (
+            f"q := {operand}\nq = {operand}"
+        ),
+    }
+    operations = {
+        "chain": "d := <-{Q}\nd <- x\nreturn <-d",
+        "nested_receive": "return <-(<-{Q})",
+        "send_target": "(<-{Q}) <- x\nreturn x",
+        "close_received": "close(<-{Q})\nreturn x",
+        "length": "_ = len({Q})\nreturn x",
+        "capacity": "_ = cap({Q})\nreturn x",
+        "range": "for d := range {Q} {{\n\treturn <-d\n}}\nreturn x",
+        "select_receive": (
+            "select {{\n\tcase d := <-{Q}:\n\t\treturn <-d\n"
+            "\tdefault:\n\t\treturn x\n}}"
+        ),
+        "select_send": (
+            "c := make(chan int64, 1)\n"
+            "select {{\n\tcase {Q} <- c:\n\t\treturn x\n"
+            "\tdefault:\n\t\treturn x\n}}"
+        ),
+        "direct_local_call": "return G2({Q}, x)",
+    }
+
+    def add_function(name, parameters, setup, body):
+        lines = [line for line in setup.splitlines() if line]
+        lines.extend(body.splitlines())
+        return (
+            f"func {name}({parameters}) int64 {{\n"
+            + "\n".join(f"\t{line}" for line in lines)
+            + "\n}\n"
+        )
+
+    def transfer_shape(summary):
+        return sorted(
+            (
+                transfer.imported,
+                tuple(
+                    tuple(sorted(argument))
+                    for argument in transfer.arguments
+                ),
+                tuple(sorted(transfer.result)),
+            )
+            for transfer in summary.calls
+        )
+
+    for source, (parameters, setup, direct, alias_operand) in (
+        source_specs.items()
+    ):
+        declarations = [
+            "var GCC chan chan int64",
+            "func G() chan chan int64 { return GCC }",
+            "func G2(cc chan chan int64, x int64) int64 {\n"
+            "\td := <-cc\n\td <- x\n\treturn <-d\n}",
+        ]
+        body = operations["chain"].format(Q=direct)
+        for alias_name, alias_builder in alias_forms.items():
+            if alias_name == "short_reassignment" and source != "parameter":
+                continue
+            declarations.append(
+                add_function(
+                    f"F_{source}_{alias_name}_direct",
+                    parameters,
+                    setup,
+                    body,
+                )
+            )
+            declarations.append(
+                add_function(
+                    f"F_{source}_{alias_name}_alias",
+                    parameters,
+                    setup + "\n" + alias_builder(alias_operand),
+                    operations["chain"].format(Q="q"),
+                )
+            )
+        for operation, template in operations.items():
+            if operation == "chain":
+                continue
+            declarations.append(
+                add_function(
+                    f"F_{source}_{operation}_direct",
+                    parameters,
+                    setup,
+                    template.format(Q=direct),
+                )
+            )
+            declarations.append(
+                add_function(
+                    f"F_{source}_{operation}_alias",
+                    parameters,
+                    setup + "\n" + f"q := {alias_operand}",
+                    template.format(Q="q"),
+                )
+            )
+        package_import = (
+            'import "lib"\n'
+            if source in ("imported_global", "imported_result")
+            else ""
+        )
+        files = {
+            "a.go": "package p\n" + package_import
+            + "\n".join(declarations),
+        }
+        imports = {
+            "lib": {
+                "channels.go": (
+                    "package lib\n"
+                    "var GCC chan chan int64\n"
+                    "func G() chan chan int64 { return GCC }\n"
+                )
+            }
+        }
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+        for alias_name in alias_forms:
+            if alias_name == "short_reassignment" and source != "parameter":
+                continue
+            direct_summary = named_package(
+                files,
+                snapshot,
+                summaries,
+                f"F_{source}_{alias_name}_direct",
+            )
+            alias_summary = named_package(
+                files,
+                snapshot,
+                summaries,
+                f"F_{source}_{alias_name}_alias",
+            )
+            assert direct_summary.available
+            assert alias_summary.available, (source, alias_name, alias_summary.gaps)
+            assert (
+                alias_summary.return_dependencies
+                == direct_summary.return_dependencies
+            ), (source, alias_name)
+            assert alias_summary.effects == direct_summary.effects, (
+                source,
+                alias_name,
+            )
+            assert transfer_shape(alias_summary) == transfer_shape(
+                direct_summary
+            ), (source, alias_name)
+            for operation in operations:
+                if operation == "chain":
+                    continue
+                direct_summary = named_package(
+                    files,
+                    snapshot,
+                    summaries,
+                    f"F_{source}_{operation}_direct",
+                )
+                alias_summary = named_package(
+                    files,
+                    snapshot,
+                    summaries,
+                    f"F_{source}_{operation}_alias",
+                )
+                assert direct_summary.available, (
+                    source,
+                    operation,
+                    direct_summary.gaps,
+                )
+                assert alias_summary.available, (
+                    source,
+                    operation,
+                    alias_summary.gaps,
+                )
+                assert (
+                    alias_summary.return_dependencies
+                    == direct_summary.return_dependencies
+                ), (source, operation)
+                assert alias_summary.effects == direct_summary.effects, (
+                    source,
+                    operation,
+                )
+                assert transfer_shape(alias_summary) == transfer_shape(
+                    direct_summary
+                ), (source, operation)
+
+
+def test_external_chan_chan_alias_reassignment_preserves_origins(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(p chan chan int64) int64 {\n"
+        "\tq := p\n\treturn <-(<-q)\n}\n"
+        "func Direct(p chan chan int64) int64 {\n"
+        "\treturn <-(<-p)\n}\n"
+        "func Conditional(p1, p2 chan chan int64, b bool) int64 {\n"
+        "\tq := p1\n\tif b { q = p2 }\n\treturn <-(<-q)\n}\n"
+        "func Strong(p1, p2 chan chan int64) int64 {\n"
+        "\tq := p1\n\tq = p2\n\treturn <-(<-q)\n}\n"
+        "func StrongDirect(p1, p2 chan chan int64) int64 {\n"
+        "\treturn <-(<-p2)\n"
+        "}\n",
+    )
+    alias = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "Direct")
+    conditional = named(source, snapshot, summaries, "Conditional")
+    strong = named(source, snapshot, summaries, "Strong")
+    strong_direct = named(source, snapshot, summaries, "StrongDirect")
+    assert alias.available and direct.available
+    assert alias.return_dependencies == direct.return_dependencies == {0}
+    assert conditional.available
+    assert conditional.return_dependencies >= {0, 1}
+    assert strong.available and strong_direct.available
+    assert strong.return_dependencies == strong_direct.return_dependencies == {
+        1
+    }
+
+
+def test_local_chan_chan_reseat_to_external_queue_promotes_members(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "var GCC chan chan int64\n"
+        "func G() chan chan int64 { return GCC }\n"
+        "func FromParam(p chan chan int64, x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n\tcc = p\n\td := <-cc\nd <- x\nreturn <-c\n}\n"
+        "func Conditional(p chan chan int64, x int64, b bool) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n\tif b { cc = p }\n"
+        "\td := <-cc\nd <- x\nreturn <-c\n}\n"
+        "func FromCall(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n\tcc = G()\nd := <-cc\nd <- x\nreturn <-c\n}\n"
+        "func FromImport(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n\tcc = lib.G()\nd := <-cc\nd <- x\nreturn <-c\n}\n"
+        "func ConditionalCall(x int64, b bool) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n\tif b { cc = G() }\n"
+        "\td := <-cc\nd <- x\nreturn <-c\n}\n"
+        "func LocalOnly(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\nd := <-cc\nd <- x\nreturn <-c\n}\n",
+    }
+    imports = {
+        "lib": {
+            "channels.go": (
+                "package lib\n"
+                "var GCC chan chan int64\n"
+                "func G() chan chan int64 { return GCC }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    for name in (
+        "FromParam",
+        "Conditional",
+        "FromCall",
+        "FromImport",
+        "ConditionalCall",
+    ):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available, (name, result.gaps)
+        assert result.effects == "unknown", name
+        assert result.return_dependencies >= (
+            {0, 1} if name in {"FromParam", "Conditional"} else {0}
+        ), name
+    local = named_package(files, snapshot, summaries, "LocalOnly")
+    assert local.available
+    assert local.return_dependencies == {0}
+    assert local.effects == "none_in_supported_fragment"
+
+
+def test_direct_chan_chan_call_result_operands_match_temporary(
+    go_types_helper,
+):
+    operations = {
+        "nested_receive": (
+            "return <-(<-{G})",
+            "return <-(<-cc)",
+        ),
+        "send_target": (
+            "(<-{G}) <- x\nreturn x",
+            "(<-cc) <- x\nreturn x",
+        ),
+        "close": (
+            "close(<-{G})\nreturn x",
+            "close(<-cc)\nreturn x",
+        ),
+        "length": (
+            "_ = len({G})\nreturn x",
+            "_ = len(cc)\nreturn x",
+        ),
+        "capacity": (
+            "_ = cap({G})\nreturn x",
+            "_ = cap(cc)\nreturn x",
+        ),
+        "received_length": (
+            "_ = len(<-{G})\nreturn x",
+            "_ = len(<-cc)\nreturn x",
+        ),
+        "received_capacity": (
+            "_ = cap(<-{G})\nreturn x",
+            "_ = cap(<-cc)\nreturn x",
+        ),
+        "range": (
+            "for d := range <-{G} {{\n\treturn d\n}}\nreturn x",
+            "for d := range <-cc {{\n\treturn d\n}}\nreturn x",
+        ),
+        "select_send": (
+            "select {{\n\tcase (<-{G}) <- x:\n"
+            "\t\treturn x\n\tdefault:\n\t\treturn x\n}}",
+            "select {{\n\tcase (<-cc) <- x:\n"
+            "\t\treturn x\n\tdefault:\n\t\treturn x\n}}",
+        ),
+        "select_receive": (
+            "select {{\n\tcase v := <-(<-{G}):\n"
+            "\t\treturn v\n\tdefault:\n\t\treturn x\n}}",
+            "select {{\n\tcase v := <-(<-cc):\n"
+            "\t\treturn v\n\tdefault:\n\t\treturn x\n}}",
+        ),
+        "select_receive_ok": (
+            "select {{\n\tcase v, ok := <-(<-{G}):\n"
+            "\t\tif ok {{ return v }}\n\t\treturn x\n"
+            "\tdefault:\n\t\treturn x\n}}",
+            "select {{\n\tcase v, ok := <-(<-cc):\n"
+            "\t\tif ok {{ return v }}\n\t\treturn x\n"
+            "\tdefault:\n\t\treturn x\n}}",
+        ),
+        "select_receive_bare": (
+            "select {{\n\tcase <-(<-{G}):\n"
+            "\t\treturn x\n\tdefault:\n\t\treturn x\n}}",
+            "select {{\n\tcase <-(<-cc):\n"
+            "\t\treturn x\n\tdefault:\n\t\treturn x\n}}",
+        ),
+    }
+    declarations = [
+        "var GCC chan chan int64",
+        "func G() chan chan int64 { return GCC }",
+    ]
+    for source in ("local", "imported"):
+        call = "G()" if source == "local" else "lib.G()"
+        for operation, (direct_body, temporary_body) in operations.items():
+            declarations.append(
+                f"func F_{source}_{operation}_direct(x int64) int64 {{\n"
+                + "\n".join(
+                    f"\t{line}"
+                    for line in direct_body.format(G=call).splitlines()
+                )
+                + "\n}\n"
+            )
+            declarations.append(
+                f"func F_{source}_{operation}_temporary(x int64) int64 {{\n"
+                f"\tcc := {call}\n"
+                + "\n".join(
+                    f"\t{line}"
+                    for line in temporary_body.format().splitlines()
+                )
+                + "\n}\n"
+            )
+    files = {
+        "a.go": "package p\nimport \"lib\"\n" + "\n".join(declarations),
+    }
+    imports = {
+        "lib": {
+            "channels.go": (
+                "package lib\n"
+                "var GCC chan chan int64\n"
+                "func G() chan chan int64 { return GCC }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+
+    def transfer_shape(summary):
+        return sorted(
+            (
+                transfer.imported,
+                tuple(
+                    tuple(sorted(argument))
+                    for argument in transfer.arguments
+                ),
+                tuple(sorted(transfer.result)),
+            )
+            for transfer in summary.calls
+        )
+
+    for source in ("local", "imported"):
+        for operation in operations:
+            direct = named_package(
+                files,
+                snapshot,
+                summaries,
+                f"F_{source}_{operation}_direct",
+            )
+            temporary = named_package(
+                files,
+                snapshot,
+                summaries,
+                f"F_{source}_{operation}_temporary",
+            )
+            assert direct.available, (source, operation, direct.gaps)
+            assert temporary.available, (
+                source,
+                operation,
+                temporary.gaps,
+            )
+            assert direct.return_dependencies == temporary.return_dependencies
+            assert direct.effects == temporary.effects
+            assert transfer_shape(direct) == transfer_shape(temporary)
+
+
+def test_received_external_channel_value_joins_local_queue(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func External(p chan chan int64, x int64) int64 {\n"
+        "\tdst := make(chan chan int64, 1)\n"
+        "\tdst <- <-p\nd := <-dst\nd <- x\nreturn <-d\n}\n"
+        "func ExternalTemporary(p chan chan int64, x int64) int64 {\n"
+        "\tdst := make(chan chan int64, 1)\n"
+        "\tt := <-p\ndst <- t\nd := <-dst\nd <- x\nreturn <-d\n}\n"
+        "func Local(x int64) int64 {\n"
+        "\tsrc := make(chan chan int64, 1)\n"
+        "\tdst := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tsrc <- c\ndst <- <-src\nd := <-dst\nd <- x\nreturn <-c\n}\n"
+        "func LocalTemporary(x int64) int64 {\n"
+        "\tsrc := make(chan chan int64, 1)\n"
+        "\tdst := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tsrc <- c\nt := <-src\ndst <- t\nd := <-dst\nd <- x\n"
+        "\treturn <-c\n}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    for direct_name, temporary_name in (
+        ("External", "ExternalTemporary"),
+        ("Local", "LocalTemporary"),
+    ):
+        direct = named_package(files, snapshot, summaries, direct_name)
+        temporary = named_package(
+            files, snapshot, summaries, temporary_name
+        )
+        assert direct.available, (direct_name, direct.gaps)
+        assert temporary.available, (temporary_name, temporary.gaps)
+        assert direct.return_dependencies == temporary.return_dependencies
+        assert direct.effects == temporary.effects
+        assert sorted(
+            (
+                transfer.imported,
+                tuple(
+                    tuple(sorted(argument))
+                    for argument in transfer.arguments
+                ),
+                tuple(sorted(transfer.result)),
+            )
+            for transfer in direct.calls
+        ) == sorted(
+            (
+                transfer.imported,
+                tuple(
+                    tuple(sorted(argument))
+                    for argument in transfer.arguments
+                ),
+                tuple(sorted(transfer.result)),
+            )
+            for transfer in temporary.calls
+        )
+    external = named_package(files, snapshot, summaries, "External")
+    assert external.return_dependencies == {0, 1}
+    local = named_package(files, snapshot, summaries, "Local")
+    assert local.effects == "none_in_supported_fragment"
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
     # Local queues cannot escape the share-group model or become
-    # caller-visible through deeper channel nesting.
+    # caller-visible through unsupported channel shapes.
     for src in (
         "func F(ccc chan chan chan int64) int64 {\n"
         "\treturn 0\n}\n",
@@ -15897,17 +16422,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\th := func() chan chan int64 { return cc }\n"
         "\t_ = h\n"
         "\treturn 0\n}\n",
-        "func G() chan chan int64 { return nil }\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tcc = G()\n"
-        "\t_ = cc\n"
-        "\treturn 0\n}\n",
-        "func F(p chan chan int64) int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tcc = p\n"
-        "\t_ = cc\n"
-        "\treturn 0\n}\n",
         "func F(ccc chan chan chan int64) int64 {\n"
         "\treturn <-(<-(<-ccc))\n}\n",
         "func F(cc chan chan []int64) int64 {\n"
@@ -15915,9 +16429,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "func F(cc chan chan int64) int64 {\n"
         "\ts := []chan chan int64{cc}\n"
         "\treturn <-(<-s[0])\n}\n",
-        "func Q() chan chan int64 { return make(chan chan int64) }\n"
-        "func F() int64 {\n"
-        "\treturn <-(<-Q())\n}\n",
         "func F() int64 {\n"
         "\tccc := make(chan chan chan int64)\n"
         "\t_ = ccc\n"
@@ -15927,10 +16438,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\ts := []chan chan int64{cc}\n"
         "\t_ = s\n"
         "\treturn 0\n}\n",
-        "func F(cc chan chan int64) int64 {\n"
-        "\tlocal := make(chan chan int64, 1)\n"
-        "\tlocal <- <-cc\n"
-        "\treturn 0\n}\n",
         "var GCC chan chan int64\n"
         "func G(p *chan chan int64) { *p = GCC }\n"
         "func F(x int64) int64 {\n"
@@ -15939,6 +16446,12 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\td := <-cc\n"
         "\td <- x\n"
         "\treturn 0\n}\n",
+        "func F(p chan chan chan int64) int64 {\n"
+        "\tq := p\n\t_ = q\n\treturn 0\n}\n",
+        "func F(p []chan chan int64) int64 {\n"
+        "\tq := p\n\t_ = q\n\treturn 0\n}\n",
+        "func F(p chan chan []int64) int64 {\n"
+        "\tq := p\n\t_ = q\n\treturn 0\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available, src

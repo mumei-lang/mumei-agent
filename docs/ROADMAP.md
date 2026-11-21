@@ -2946,28 +2946,37 @@ Passing a local queue to a direct local function call,
 `go`, or `defer` is supported only when its parameter
 has the same scalar-element `chan chan T` shape. Its
 whole share group becomes external at the call or
-defer-registration boundary;
-later members joined by sends, receives, aliases, or
-group merges inherit that externality, so indirect
-writes reach subsequent group reads. Imported,
-indirect, method, variadic, and type-mismatched calls
-remain closed. Returns, stores, func-literal captures,
-and reseats from a call result or parameter remain
-closed too.
-Deeper nesting (`chan chan chan T`), `[]chan chan T`,
-call-result queue operands, and non-scalar channel
-elements remain closed. For an admitted scalar-element
-queue, a channel received directly from the queue may
-be used as an operation target without a named binding:
+defer-registration boundary; later members joined by
+sends, receives, aliases, or group merges inherit that
+externality. Imported, indirect, method, variadic, and
+type-mismatched calls remain closed.
+
+External scalar-element queue sources may be aliased
+through short declarations, `var` initializers, or
+assignment: chan-chan parameters, package/imported
+queue variables, and already-admitted external queue
+locals are supported. A local queue reseated onto one of
+these sources or an admitted direct local/imported
+call-result queue is promoted conservatively; its prior
+share-group members become caller-visible. An admitted
+direct local/imported call result may also be used
+directly as a queue operand.
+
+For an admitted queue, a received channel may be used
+directly as an operation target without a named binding:
 `(<-src) <- x`, `<-(<-src)`, `close(<-src)`,
-`len(<-src)`, `cap(<-src)`, and channel operands in
-`range` and `select`. These carry the same share-group,
-externality, and origin facts as a same-point temporary
-receive. Passing a received channel as a value to another
-local queue (`dst <- <-src`) remains supported and joins
-their share groups. The direct operation-target support
-does not admit deeper nested receives or unsupported
-queue expressions. `select` continues to admit each communication
+`len(<-src)`, `cap(<-src)`, `range <-src`, and channel
+operands in `select`. These carry the same share-group,
+externality, selector, and origin facts as a same-point
+temporary receive. Passing a received external channel
+as a value to another local queue (`dst <- <-src`) joins
+their share groups.
+
+Returning, storing, capturing, or taking the address of
+a local queue remains closed, as do `[]chan chan T`,
+`chan chan chan T` and deeper nesting, non-scalar inner
+elements, and unsupported converted/interface/method/
+variadic call forms. `select` continues to admit each communication
 case's receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
 a bare `<-ch`) or send (`ch <- v`); operands run in a fresh
 alternative scope and every alternative joins back by union —
