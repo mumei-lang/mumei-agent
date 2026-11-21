@@ -56,14 +56,14 @@ outcome and the discharged-check partition on a reproduced run. A
 pinned object/executable bytes reproduce under the recorded toolchain
 from the pinned source's semantics — and ``claim_truth`` — the fresh
 source postcondition was re-established within the declared profile —
-both at representation level. The exit-status match itself is an
-OS-level *observation* bound by the record pin: it discharges no new
-check category, since no runtime/ABI/process-semantics claim exists
-in the vocabulary for it to discharge. The other four checks stay in
-``checks_not_performed`` (producer authenticity, freshness, file
-identity and semantic correspondence remain outside the profile; the
+both at representation level. The exit-status match itself is the named
+``os_exit_status_observation`` check, bound by the record pin. The other
+runtime-observation checks stay in ``checks_not_performed``; the
+``runtime_observation_semantics`` conjunction awaits a Core descriptor.
+The remaining C02 checks (producer authenticity, freshness, file
+identity and semantic correspondence) remain outside the profile; the
 raw link argument-vector is recorded-but-not-reproduced inside Core
-and adds no claim here either).
+and adds no claim here either.
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ import os
 import sys
 from pathlib import Path
 
+from agent.core_evidence import RUNTIME_CHECK_VOCABULARY
 from agent.native_bundle import (
     FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
     MAX_RECORD_BYTES,
@@ -396,6 +397,7 @@ def run_exit_status_recheck(args: argparse.Namespace) -> dict:
         "schema_version": NATIVE_EXIT_STATUS_RECHECK_REPORT_PROFILE,
         "sequence": published.to_dict(),
         "normalized": dispatch.run.normalized().to_dict(),
+        "checks_not_performed": sorted(CHECK_VOCABULARY | RUNTIME_CHECK_VOCABULARY),
     }
     if inputs_changed:
         # The run consumed bytes that no longer match the declared
@@ -405,9 +407,12 @@ def run_exit_status_recheck(args: argparse.Namespace) -> dict:
     elif exit_code in EXIT_STATUS_RECHECK_OUTCOMES:
         report["exit_status_recheck"] = EXIT_STATUS_RECHECK_OUTCOMES[exit_code]
         if report["exit_status_recheck"] == "reproduced":
-            report["discharged_checks"] = sorted(DischargedChecks.REPRODUCED)
+            report["discharged_checks"] = sorted(
+                DischargedChecks.REPRODUCED | {"os_exit_status_observation"}
+            )
             report["checks_not_performed"] = sorted(
-                CHECK_VOCABULARY - DischargedChecks.REPRODUCED
+                (CHECK_VOCABULARY - DischargedChecks.REPRODUCED)
+                | (RUNTIME_CHECK_VOCABULARY - {"os_exit_status_observation"})
             )
     return report
 

@@ -8,6 +8,8 @@ import pytest
 
 from agent.core_evidence import (
     _CHECK_PERFORMERS,
+    RUNTIME_CHECK_VOCABULARY,
+    RUNTIME_OBSERVATION_SCHEMA,
     UNPERFORMED_CHECK_RECOVERY_SCHEMA,
     evaluate_unperformed_check_recovery,
 )
@@ -381,6 +383,83 @@ def test_native_accept_report_recovers_historical_execution():
         record, [_native_accept_report("b" * 64)], record_digest=digest,
     )
     assert evaluation["checks"]["historical_execution"] == "evidence_failed"
+
+
+def test_native_accept_reports_recover_only_bound_channel_observations():
+    digest = "a" * 64
+    performers = {
+        "os_exit_status_observation": (
+            "mumei.native-exit-status-accept-report/v1",
+        ),
+        "os_stdout_observation": ("mumei.native-stdout-accept-report/v1",),
+        "os_stderr_observation": ("mumei.native-stderr-accept-report/v1",),
+    }
+    assert RUNTIME_OBSERVATION_SCHEMA == "mumei.runtime-observation/v1"
+    assert set(performers) | {"runtime_observation_semantics"} == set(
+        RUNTIME_CHECK_VOCABULARY
+    )
+
+    for check, (schema,) in performers.items():
+        record = _record(check)
+        report = _native_accept_report(digest, schema=schema)
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [report], record_digest=digest,
+        )
+        assert evaluation["checks"] == {check: "recovered"}
+        assert evaluation["recovered"] == [check]
+
+        mismatched = _native_accept_report("b" * 64, schema=schema)
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [mismatched], record_digest=digest,
+        )
+        assert evaluation["checks"] == {check: "evidence_failed"}
+        assert evaluation["recovered"] == []
+
+    record = _record(
+        "os_exit_status_observation",
+        "os_stdout_observation",
+        "os_stderr_observation",
+        "runtime_observation_semantics",
+    )
+    reports = [
+        _native_accept_report(digest, schema=schema)
+        for schema in (
+            "mumei.native-exit-status-accept-report/v1",
+            "mumei.native-stdout-accept-report/v1",
+            "mumei.native-stderr-accept-report/v1",
+        )
+    ]
+    evaluation = evaluate_unperformed_check_recovery(
+        record, reports, record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "os_exit_status_observation": "recovered",
+        "os_stdout_observation": "recovered",
+        "os_stderr_observation": "recovered",
+        "runtime_observation_semantics": "no_evidence",
+    }
+
+    recheck = _doc(
+        "mumei.native-exit-status-recheck-report/v1",
+        exit_status_recheck="reproduced",
+        normalized={"stdout": {"sha256": digest}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("os_exit_status_observation"), [recheck],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["os_exit_status_observation"] == "no_evidence"
+
+    foreign = _doc(
+        "mumei.foreign-runtime-observation/v1",
+        os_exit_status_observation=True,
+        normalized={"stdout": {"sha256": digest}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("os_exit_status_observation"), [foreign],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["os_exit_status_observation"] == "no_evidence"
 
 
 def test_anchor_authenticity_recovers_through_shared_digest():
