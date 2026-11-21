@@ -7,9 +7,6 @@ are provably unaffected, on top of the ``_scan_std_imports`` graph.
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 from agent.dependency_invalidation import (
     CHECKS_NOT_PERFORMED,
