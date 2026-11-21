@@ -17617,17 +17617,939 @@ def test_deep_chan_chan_return_and_package_store(go_types_helper):
     assert stored.effects == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("kind", "container_type", "literal", "element"),
+    [
+        ("slice", "[]chan chan int64", "[]chan chan int64{q}", "s[0]"),
+        ("array", "[1]chan chan int64", "[1]chan chan int64{q}", "s[0]"),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "s[0]",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "escape", ["return", "caller", "package-store", "call", "go", "defer"]
+)
+def test_chan_chan_container_escape_matrix_matches_queue(
+    go_types_helper, kind, container_type, literal, element, escape
+):
+    global_decl = (
+        f"var GS {container_type}\n"
+        "var GCC chan chan int64\n"
+    )
+    if escape == "return":
+        source = (
+            f"func F_container(x int64) {container_type} {{\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            f"s := {literal}\n"
+            "return s\n"
+            "}\n"
+            "func F_queue(x int64) chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "return q\n"
+            "}\n"
+        )
+        container_name, queue_name = "F_container", "F_queue"
+    elif escape == "caller":
+        source = (
+            f"func G_container(x int64) {container_type} {{\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            f"s := {literal}\n"
+            "return s\n"
+            "}\n"
+            "func G_queue(x int64) chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "return q\n"
+            "}\n"
+            "func F_container(x int64) int64 {\n"
+            "s := G_container(x)\n"
+            f"return <-(<-{element})\n"
+            "}\n"
+            "func F_queue(x int64) int64 {\n"
+            "q := G_queue(x)\n"
+            "return <-(<-q)\n"
+            "}\n"
+        )
+        container_name, queue_name = "F_container", "F_queue"
+    elif escape == "package-store":
+        source = (
+            global_decl
+            + "func F_container(x int64) int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            f"s := {literal}\n"
+            "GS = s\n"
+            "c <- x\n"
+            f"return <-(<-GS[{0 if kind != 'map' else 0}])\n"
+            "}\n"
+            "func F_queue(x int64) int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "GCC = q\n"
+            "c <- x\n"
+            "return <-(<-GCC)\n"
+            "}\n"
+        )
+        container_name, queue_name = "F_container", "F_queue"
+    else:
+        invocation = (
+            "G_container(s, c)\n"
+            if escape == "call"
+            else f"{escape} G_container(s, c)\n"
+        )
+        queue_invocation = (
+            "G_queue(q, c)\n"
+            if escape == "call"
+            else f"{escape} G_queue(q, c)\n"
+        )
+        source = (
+            f"func G_container(s {container_type}, c chan int64) {{\n"
+            f"s[{0 if kind != 'map' else 0}] <- c\n"
+            "}\n"
+            "func G_queue(q chan chan int64, c chan int64) {\n"
+            "q <- c\n"
+            "}\n"
+            "func F_container(x int64) int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            f"s := {literal}\n"
+            + invocation
+            + "c <- x\n"
+            + f"return <-(<-{element})\n"
+            + "}\n"
+            + "func F_queue(x int64) int64 {\n"
+            + "q := make(chan chan int64, 1)\n"
+            + "c := make(chan int64, 1)\n"
+            + queue_invocation
+            + "c <- x\n"
+            + "return <-(<-q)\n"
+            + "}\n"
+        )
+        container_name, queue_name = "F_container", "F_queue"
+    data = unit(go_types_helper, source)
+    container_result = named(*data, container_name)
+    queue_result = named(*data, queue_name)
+    assert container_result.available, (kind, escape, container_result.gaps)
+    assert queue_result.available, (kind, escape, queue_result.gaps)
+    assert container_result.return_dependencies == queue_result.return_dependencies
+    assert container_result.effects == queue_result.effects
+
+
+@pytest.mark.parametrize(
+    ("kind", "container_type", "literal", "index"),
+    [
+        ("slice", "[]chan chan int64", "[]chan chan int64{q}", "0"),
+        ("array", "[1]chan chan int64", "[1]chan chan int64{q}", "0"),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "0",
+        ),
+    ],
+)
+@pytest.mark.parametrize("imported", [False, True])
+def test_chan_chan_container_package_store_matches_queue(
+    go_types_helper, kind, container_type, literal, index, imported
+):
+    qualifier = "lib." if imported else ""
+    files = {
+        "a.go": (
+            "package p\n"
+            + ('import "lib"\n' if imported else "")
+            + f"func F_container(x int64) int64 {{\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            f"s := {literal}\n"
+            f"{qualifier}GS = s\n"
+            "c <- x\n"
+            f"return <-(<-{qualifier}GS[{index}])\n"
+            "}\n"
+            "func F_queue(x int64) int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            f"{qualifier}GCC = q\n"
+            "c <- x\n"
+            f"return <-(<-{qualifier}GCC)\n"
+            "}\n"
+        )
+    }
+    if imported:
+        imports = {
+            "lib": {
+                "lib.go": (
+                    "package lib\n"
+                    f"var GS {container_type}\n"
+                    "var GCC chan chan int64\n"
+                )
+            }
+        }
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+    else:
+        files["a.go"] = (
+            "package p\n"
+            f"var GS {container_type}\n"
+            "var GCC chan chan int64\n"
+            + files["a.go"].removeprefix("package p\n")
+        )
+        _, snapshot, summaries = package_unit(go_types_helper, files)
+    container_result = named_package(files, snapshot, summaries, "F_container")
+    queue_result = named_package(files, snapshot, summaries, "F_queue")
+    assert container_result.available, (kind, imported, container_result.gaps)
+    assert queue_result.available, (kind, imported, queue_result.gaps)
+    assert container_result.return_dependencies == queue_result.return_dependencies
+    assert container_result.effects == queue_result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("kind", "container_type", "literal", "empty", "index"),
+    [
+        (
+            "slice",
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "[]chan chan int64{}",
+            "0",
+        ),
+        (
+            "array",
+            "[1]chan chan int64",
+            "[1]chan chan int64{q}",
+            "[1]chan chan int64{}",
+            "0",
+        ),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "map[int]chan chan int64{}",
+            "0",
+        ),
+    ],
+)
+def test_chan_chan_container_result_binding_and_index_dependencies(
+    go_types_helper, kind, container_type, literal, empty, index
+):
+    source = (
+        f"func G(x int64) {container_type} {{\n"
+        "q := make(chan chan int64, 1)\n"
+        "c := make(chan int64, 1)\n"
+        "q <- c\n"
+        "c <- x\n"
+        f"s := {literal}\n"
+        "return s\n"
+        "}\n"
+        "func G_queue(x int64) chan chan int64 {\n"
+        "q := make(chan chan int64, 1)\n"
+        "c := make(chan int64, 1)\n"
+        "q <- c\n"
+        "c <- x\n"
+        "return q\n"
+        "}\n"
+        "func F_short(x int64, i int) int64 {\n"
+        "s := G(x)\n"
+        "return <-(<-s[i])\n"
+        "}\n"
+        "func F_assign(x int64, i int) int64 {\n"
+        f"s := {empty}\n"
+        "s = G(x)\n"
+        "return <-(<-s[i])\n"
+        "}\n"
+        "func F_direct_send(x int64) int64 {\n"
+        "c := make(chan int64, 1)\n"
+        f"G(x)[{index}] <- c\n"
+        "c <- x\n"
+        "return <-c\n"
+        "}\n"
+        "func F_direct_receive(x int64) int64 {\n"
+        f"return <-(<-G(x)[{index}])\n"
+        "}\n"
+        "func F_queue_receive(x int64) int64 {\n"
+        "return <-(<-G_queue(x))\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    short = named(*data, "F_short")
+    assigned = named(*data, "F_assign")
+    direct_send = named(*data, "F_direct_send")
+    direct_receive = named(*data, "F_direct_receive")
+    queue_receive = named(*data, "F_queue_receive")
+    for result in (
+        short,
+        assigned,
+        direct_send,
+        direct_receive,
+        queue_receive,
+    ):
+        assert result.available, result.gaps
+    assert short.return_dependencies == assigned.return_dependencies
+    assert {0, 1} <= short.return_dependencies
+    assert direct_send.effects == "unknown"
+    assert direct_receive.effects == "unknown"
+    assert direct_receive.return_dependencies == (
+        queue_receive.return_dependencies
+    )
+    assert direct_receive.effects == queue_receive.effects
+
+
+def test_chan_chan_container_result_promotes_caller_queue_member(
+    go_types_helper,
+):
+    source = (
+        "func G(c chan int64) []chan chan int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tq <- c\n"
+        "\ts := []chan chan int64{q}\n"
+        "\treturn s\n"
+        "}\n"
+        "func G2(c chan int64) chan chan int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tq <- c\n"
+        "\treturn q\n"
+        "}\n"
+        "func F_container(x, y int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- y\n"
+        "\ts := G(c)\n"
+        "\t(<-s[0]) <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_queue(x, y int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- y\n"
+        "\tq := G2(c)\n"
+        "\t(<-q) <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_local(x, y int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- y\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    container_result = named(*data, "F_container")
+    queue_result = named(*data, "F_queue")
+    local_result = named(*data, "F_local")
+    assert container_result.available, container_result.gaps
+    assert queue_result.available, queue_result.gaps
+    assert local_result.available, local_result.gaps
+    assert container_result.return_dependencies == queue_result.return_dependencies
+    assert container_result.effects == queue_result.effects == "unknown"
+    assert container_result.return_dependencies == local_result.return_dependencies
+
+
+def test_chan_chan_call_result_container_operations_evaluate_call_once(
+    go_types_helper,
+):
+    source = (
+        "var GC chan int64\n"
+        "func G(x int64) []chan chan int64 {\n"
+        "\tclose(GC)\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tq <- c\n"
+        "\ts := []chan chan int64{q}\n"
+        "\treturn s\n"
+        "}\n"
+        "func F_bound_close(x int64) {\n"
+        "\ts := G(x)\n"
+        "\tclose(s[0])\n"
+        "}\n"
+        "func F_close(x int64) { close(G(x)[0]) }\n"
+        "func F_len(x int64) int { return len(G(x)[0]) }\n"
+        "func F_cap(x int64) int { return cap(G(x)[0]) }\n"
+        "func F_range(x int64) int64 {\n"
+        "\tfor range G(x)[0] {}\n"
+        "\treturn x\n"
+        "}\n"
+        "func F_receive(x int64) int64 {\n"
+        "\tc := <-(G(x)[0])\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_send(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\t(G(x)[0]) <- c\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    g_id = named(*data, "G").binding_id
+    bound = named(*data, "F_bound_close")
+    assert bound.available, bound.gaps
+    expected = [
+        transfer
+        for transfer in bound.calls
+        if transfer.target == g_id
+    ]
+    assert len(expected) == 1
+    mismatches = []
+    for name in (
+        "F_close",
+        "F_len",
+        "F_cap",
+        "F_range",
+        "F_receive",
+        "F_send",
+    ):
+        result = named(*data, name)
+        assert result.available, (name, result.gaps)
+        actual = [
+            transfer
+            for transfer in result.calls
+            if transfer.target == g_id
+        ]
+        if len(actual) != len(expected):
+            mismatches.append((name, len(actual), len(expected)))
+    assert not mismatches, mismatches
+
+
+def test_chan_chan_container_call_recomputes_dependencies_in_loop(
+    go_types_helper,
+):
+    shapes = (
+        (
+            "slice",
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "chan chan int64",
+            False,
+        ),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "chan chan int64",
+            False,
+        ),
+        (
+            "depth3",
+            "[]chan chan chan int64",
+            "[]chan chan chan int64{q}",
+            "chan chan chan int64",
+            True,
+        ),
+    )
+    operations = ("receive", "send", "close", "len", "range")
+    declarations = ["var GC chan int64"]
+    comparisons = []
+    for shape, container_type, literal, queue_type, depth3 in shapes:
+        g_name = f"G_{shape}"
+        if depth3:
+            g_body = (
+                "q := make(chan chan chan int64, 1); "
+                "cc := make(chan chan int64, 1); "
+                "c := make(chan int64, 1); c <- x; "
+                "cc <- c; q <- cc; "
+            )
+        else:
+            g_body = (
+                "q := make(chan chan int64, 1); "
+                "c := make(chan int64, 1); c <- x; q <- c; "
+            )
+        declarations.append(
+            f"func {g_name}(x int64) {container_type} {{ "
+            f"{g_body}s := {literal}; return s }}"
+        )
+        for operation in operations:
+            direct_name = f"F_{shape}_{operation}"
+            bound_name = f"FB_{shape}_{operation}"
+            for name, target in (
+                (direct_name, f"{g_name}(r)[0]"),
+                (bound_name, "s[0]"),
+            ):
+                body = []
+                if name == bound_name:
+                    body.append(f"s := {g_name}(r)")
+                if operation == "receive":
+                    if depth3:
+                        body.extend(
+                            [
+                                f"cc := <-{target}",
+                                "c := <-cc",
+                                "ret = <-c",
+                            ]
+                        )
+                    else:
+                        body.extend(
+                            [f"c := <-{target}", "ret = <-c"]
+                        )
+                elif operation == "send":
+                    if depth3:
+                        body.extend(
+                            [
+                                "cc := make(chan chan int64, 1)",
+                                "c := make(chan int64, 1)",
+                                "c <- 0",
+                                "cc <- c",
+                                f"{target} <- cc",
+                                "ret = <-c",
+                            ]
+                        )
+                    else:
+                        body.extend(
+                            [
+                                "c := make(chan int64, 1)",
+                                "c <- 0",
+                                f"{target} <- c",
+                                "ret = <-c",
+                            ]
+                        )
+                elif operation == "close":
+                    body.extend([f"close({target})", "ret = <-GC"])
+                elif operation == "len":
+                    body.append(f"ret = int64(len({target}))")
+                elif depth3:
+                    body.extend(
+                        [
+                            f"for cc := range {target} {{",
+                            "\t c := <-cc",
+                            "\t ret = <-c",
+                            "}",
+                        ]
+                    )
+                else:
+                    body.extend(
+                        [
+                            f"for c := range {target} {{",
+                            "\t ret = <-c",
+                            "}",
+                        ]
+                    )
+                loop_body = "\n".join(f"\t\t{line}" for line in body)
+                declarations.append(
+                    f"func {name}(x int64) int64 {{\n"
+                    "\tr := int64(0)\n"
+                    "\tret := int64(0)\n"
+                    "\tfor i := 0; i < 2; i++ {\n"
+                    f"\t{loop_body}\n"
+                    "\t\tr = x\n"
+                    "\t}\n"
+                    "\treturn ret\n"
+                    "}"
+                )
+            comparisons.append((direct_name, bound_name, g_name))
+
+    source, snapshot, summaries = unit(
+        go_types_helper, "\n".join(declarations)
+    )
+    for direct_name, bound_name, g_name in comparisons:
+        direct = named(source, snapshot, summaries, direct_name)
+        bound = named(source, snapshot, summaries, bound_name)
+        g_id = named(source, snapshot, summaries, g_name).binding_id
+        direct_calls = [
+            transfer
+            for transfer in direct.calls
+            if transfer.target == g_id
+        ]
+        bound_calls = [
+            transfer
+            for transfer in bound.calls
+            if transfer.target == g_id
+        ]
+        assert direct.available, (direct_name, direct.gaps)
+        assert bound.available, (bound_name, bound.gaps)
+        assert direct_calls and bound_calls
+        direct_call_deps = {
+            (transfer.arguments, transfer.result)
+            for transfer in direct_calls
+        }
+        bound_call_deps = {
+            (transfer.arguments, transfer.result)
+            for transfer in bound_calls
+        }
+        assert direct_call_deps == bound_call_deps, (
+            direct_name,
+            bound_name,
+            direct_call_deps,
+            bound_call_deps,
+        )
+        assert any(
+            0 in transfer.arguments[0]
+            for transfer in direct_calls
+        ), (
+            direct_name,
+            [transfer.arguments for transfer in direct_calls],
+        )
+        assert any(
+            0 in transfer.result for transfer in direct_calls
+        ), (
+            direct_name,
+            [transfer.result for transfer in direct_calls],
+        )
+        assert direct.effects == bound.effects
+        assert direct.return_dependencies == bound.return_dependencies, (
+            direct_name,
+            bound_name,
+            direct.return_dependencies,
+            bound.return_dependencies,
+        )
+
+
+def test_chan_chan_call_result_container_rejects_unsupported_call(
+    go_types_helper,
+):
+    source = (
+        "type I interface { M() []chan chan int64 }\n"
+        "func G(i I) []chan chan int64 { return i.M() }\n"
+        "func F(i I) { close(G(i)[0]) }\n"
+    )
+    data = unit(go_types_helper, source)
+    assert not named(*data, "G").available
+    result = named(*data)
+    assert not result.available
+    assert result.gaps
+
+
+def test_chan_chan_multi_result_container_bindings_match_queue_results(
+    go_types_helper,
+):
+    shapes = (
+        (
+            "slice",
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "s[0]",
+            "chan chan int64",
+        ),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "s[0]",
+            "chan chan int64",
+        ),
+        (
+            "array",
+            "[1]chan chan int64",
+            "[1]chan chan int64{q}",
+            "s[0]",
+            "chan chan int64",
+        ),
+        (
+            "depth3",
+            "[]chan chan chan int64",
+            "[]chan chan chan int64{q}",
+            "s[0]",
+            "chan chan chan int64",
+        ),
+    )
+    forms = ("short_blank", "short_named", "var_blank", "assign_blank")
+    declarations = []
+    comparisons = []
+    for shape, container_type, literal, element, queue_type in shapes:
+        container_call = f"G_{shape}"
+        queue_call = f"GQ_{shape}"
+        declarations.extend(
+            [
+                f"func {container_call}() ({container_type}, bool) {{ "
+                f"q := make({queue_type}, 1); s := {literal}; "
+                f"return s, true }}",
+                f"func {queue_call}() ({queue_type}, bool) {{ "
+                f"q := make({queue_type}, 1); return q, true }}",
+            ]
+        )
+        for form in forms:
+            container_name = f"F_{shape}_{form}"
+            queue_name = f"FQ_{shape}_{form}"
+            queue_parameters = "()"
+            if form == "short_blank":
+                container_body = (
+                    f"s, _ := {container_call}(); close({element})"
+                )
+                queue_body = f"q, _ := {queue_call}(); close(q)"
+            elif form == "short_named":
+                container_body = (
+                    f"s, err := {container_call}(); "
+                    f"close({element}); _ = err"
+                )
+                queue_body = (
+                    f"q, err := {queue_call}(); close(q); _ = err"
+                )
+            elif form == "var_blank":
+                container_body = (
+                    f"var s, _ = {container_call}(); close({element})"
+                )
+                queue_body = (
+                    f"var q, _ = {queue_call}(); close(q)"
+                )
+            else:
+                container_body = (
+                    f"var s {container_type}; s, _ = {container_call}(); "
+                    f"close({element})"
+                )
+                queue_parameters = f"(q {queue_type})"
+                queue_body = (
+                    f"q, _ = {queue_call}(); close(q)"
+                )
+            declarations.extend(
+                [
+                    f"func {container_name}() {{ {container_body} }}",
+                    f"func {queue_name}{queue_parameters} "
+                    f"{{ {queue_body} }}",
+                ]
+            )
+            comparisons.append((container_name, queue_name))
+
+    source, snapshot, summaries = unit(
+        go_types_helper, "\n".join(declarations)
+    )
+    for container_name, queue_name in comparisons:
+        container_result = named(
+            source, snapshot, summaries, container_name
+        )
+        queue_result = named(source, snapshot, summaries, queue_name)
+        assert container_result.available, (
+            container_name,
+            container_result.gaps,
+        )
+        assert queue_result.available, (
+            queue_name,
+            queue_result.gaps,
+        )
+        assert container_result.effects == queue_result.effects, (
+            container_name,
+            queue_name,
+            container_result.effects,
+            queue_result.effects,
+        )
+        assert queue_result.effects == "unknown", (
+            queue_name,
+            queue_result.effects,
+        )
+
+
+def test_chan_chan_container_escape_external_members_and_depth3(
+    go_types_helper,
+):
+    source = (
+        "var GS []chan chan int64\n"
+        "func F_param(p chan chan int64, x int64) []chan chan int64 {\n"
+        "s := []chan chan int64{p}\n"
+        "c := make(chan int64, 1)\n"
+        "s[0] <- c\n"
+        "c <- x\n"
+        "return s\n"
+        "}\n"
+        "func F_element(i int, x int64) []chan chan int64 {\n"
+        "s := []chan chan int64{GS[i]}\n"
+        "c := make(chan int64, 1)\n"
+        "s[0] <- c\n"
+        "c <- x\n"
+        "return s\n"
+        "}\n"
+        "func F_depth3(x int64) []chan chan chan int64 {\n"
+        "q := make(chan chan chan int64, 1)\n"
+        "cc := make(chan chan int64, 1)\n"
+        "c := make(chan int64, 1)\n"
+        "q <- cc\n"
+        "cc <- c\n"
+        "c <- x\n"
+        "s := []chan chan chan int64{q}\n"
+        "return s\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    param = named(*data, "F_param")
+    element = named(*data, "F_element")
+    depth3 = named(*data, "F_depth3")
+    for result in (param, element, depth3):
+        assert result.available, result.gaps
+    assert param.effects == element.effects == "unknown"
+    assert {0, 1} <= param.return_dependencies
+    assert {0, 1} <= element.return_dependencies
+    assert depth3.return_dependencies == frozenset({0})
+    assert depth3.effects == "none_in_supported_fragment"
+
+
+def test_chan_chan_container_conditional_return_and_store_match_queue(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "var GS []chan chan int64\n"
+            "var GCC chan chan int64\n"
+            "func F_return_container(b bool, x int64) []chan chan int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq <- c\n"
+            "\tc <- x\n"
+            "\ts := []chan chan int64{q}\n"
+            "\tif b {\n\t\treturn s\n\t}\n"
+            "\treturn s\n"
+            "}\n"
+            "func F_return_queue(b bool, x int64) chan chan int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq <- c\n"
+            "\tc <- x\n"
+            "\tif b {\n\t\treturn q\n\t}\n"
+            "\treturn q\n"
+            "}\n"
+            "func F_store_container(b bool, x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq <- c\n"
+            "\ts := []chan chan int64{q}\n"
+            "\tif b {\n\t\tGS = s\n\t}\n"
+            "\tc <- x\n"
+            "\treturn <-(<-GS[0])\n"
+            "}\n"
+            "func F_store_queue(b bool, x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq <- c\n"
+            "\tif b {\n\t\tGCC = q\n\t}\n"
+            "\tc <- x\n"
+            "\treturn <-(<-GCC)\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    container_return = named_package(
+        files, snapshot, summaries, "F_return_container"
+    )
+    queue_return = named_package(
+        files, snapshot, summaries, "F_return_queue"
+    )
+    container_store = named_package(
+        files, snapshot, summaries, "F_store_container"
+    )
+    queue_store = named_package(files, snapshot, summaries, "F_store_queue")
+    for result in (
+        container_return,
+        queue_return,
+        container_store,
+        queue_store,
+    ):
+        assert result.available, result.gaps
+    assert (
+        container_return.return_dependencies
+        == queue_return.return_dependencies
+    )
+    assert container_return.effects == queue_return.effects
+    assert (
+        container_store.return_dependencies
+        == queue_store.return_dependencies
+    )
+    assert container_store.effects == queue_store.effects == "unknown"
+
+
+def test_chan_chan_container_store_broadcasts_later_group_joins(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "var GS []chan chan int64\n"
+            "func F(x, y int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq <- c\n"
+            "\tc <- x\n"
+            "\ts := make([]chan chan int64, 2)\n"
+            "\ts[0] = q\n"
+            "\tGS = s\n"
+            "\tq2 := make(chan chan int64, 1)\n"
+            "\tc2 := make(chan int64, 1)\n"
+            "\tq2 <- c2\n"
+            "\ts[1] = q2\n"
+            "\tc2 <- y\n"
+            "\treturn <-(<-GS[1])\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert {0, 1} <= result.return_dependencies
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_container_depth3_escapes_match_queue(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "var GSS []chan chan chan int64\n"
+            "func G(s []chan chan chan int64) { close(s[0]) }\n"
+            "func D(x int64) []chan chan chan int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tccc := make(chan chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tccc <- cc\n"
+            "\tc <- x\n"
+            "\ts := []chan chan chan int64{ccc}\n"
+            "\treturn s\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\ts := D(x)\n"
+            "\tG(s)\n"
+            "\tGSS = s\n"
+            "\treturn <-(<-(<-s[0]))\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_container_local_return_has_no_external_effect(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F() int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "s := []chan chan int64{q}\n"
+            "c <- 1\n"
+            "return <-(<-s[0])\n"
+            "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "none_in_supported_fragment"
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
-    # Unsupported queue escapes, non-scalar leaves, and nested
+    # Unsupported container shapes, non-scalar leaves, and nested
     # containers stay closed.
     for src in (
-        "func G(ccs []chan chan int64) {}\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tccs := []chan chan int64{cc}\n"
-        "\tG(ccs)\n"
-        "\treturn 0\n"
-        "}\n",
         "func G(v any) {}\n"
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
@@ -17714,19 +18636,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "func F() Queue {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\treturn Queue(cc)\n}\n",
-        "func F() []chan chan int64 {\n"
-        "\ts := make([]chan chan int64, 1)\n"
-        "\treturn s\n}\n",
-        "var Global []chan chan int64\n"
-        "func F() {\n"
-        "\ts := make([]chan chan int64, 1)\n"
-        "\tGlobal = s\n"
-        "}\n",
-        "func G(s []chan chan int64) {}\n"
-        "func F() {\n"
-        "\ts := make([]chan chan int64, 1)\n"
-        "\tG(s)\n"
-        "}\n",
         "func F() {\n"
         "\ts := make([]chan chan int64, 1)\n"
         "\th := func() { _ = s }\n"
@@ -17749,20 +18658,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\ts := make([]chan chan int64, 1)\n"
         "\tst := St{}\n"
         "\tst.S = s\n"
-        "}\n",
-        "func F() []chan chan chan int64 {\n"
-        "\ts := make([]chan chan chan int64, 1)\n"
-        "\treturn s\n"
-        "}\n",
-        "var Global []chan chan chan int64\n"
-        "func F() {\n"
-        "\ts := make([]chan chan chan int64, 1)\n"
-        "\tGlobal = s\n"
-        "}\n",
-        "func G(s []chan chan chan int64) {}\n"
-        "func F() {\n"
-        "\ts := make([]chan chan chan int64, 1)\n"
-        "\tG(s)\n"
         "}\n",
     ):
         result = named(*unit(go_types_helper, src))
@@ -19341,6 +20236,39 @@ def test_local_chan_chan_imported_call_arg_stays_closed(go_types_helper):
         "lib": {
             "g.go": "package lib\n"
             "func G(cc chan chan int64) {}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
+
+
+def test_local_chan_chan_container_imported_call_arg_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\ts := []chan chan int64{cc}\n"
+        "\tlib.G(s)\n"
+        "\treturn 0\n"
+        "}\n"
+    }
+    imports = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(s []chan chan int64) {}\n"
         }
     }
     snapshot = load_go_package_snapshot(
