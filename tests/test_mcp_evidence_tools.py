@@ -1370,6 +1370,19 @@ class TestFreshnessEvalTool:
             if index == 2:
                 assert cli["freshness_claimed"] is False
 
+    def test_huge_max_age_returns_json_ok(self, tmp_path) -> None:
+        record = _fold_write_json(
+            tmp_path / "record.json",
+            {"produced_at": "2026-01-01T00:00:00Z"},
+        )
+        payload = _fold_payload(
+            mcp_server.freshness_eval(
+                str(record), "2026-01-01T00:00:01Z", 10**18
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["evaluation"]["within_window"] is True
+
     @pytest.mark.parametrize("path", ["", "line\nbreak", None, 7])
     def test_invalid_record_paths_are_rejected(self, path) -> None:
         payload = _fold_assert_error(
@@ -1903,6 +1916,23 @@ class TestSignatureEvalTool:
         )
         assert payload["evaluation"] == cli
         assert payload["evaluation"]["envelope_fresh"] is expected
+
+    def test_huge_max_age_returns_json_ok(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(
+                produced_at="2026-01-01T00:00:00Z"
+            ),
+        )
+        payload = _fold_payload(
+            mcp_server.signature_eval(
+                str(envelope),
+                reference_time="2026-01-01T00:00:01Z",
+                max_age_seconds=10**18,
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["evaluation"]["envelope_fresh"] is True
 
     def test_requires_argument_errors_match_cli(self, tmp_path, capsys):
         envelope = _fold_write_json(
