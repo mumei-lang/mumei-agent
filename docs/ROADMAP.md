@@ -6898,7 +6898,8 @@ over bounded declared inputs. They preserve `checks_not_performed` and
 redact declared paths in errors; recovery requests accept at most 64
 evidence paths. They make no Core command or subprocess call and add no
 authority, Evidence acceptance, verdict, or grade promotion. C11 stays
-partial; Core meaning and acceptance, C12's demand gate and grade promotion are unchanged.
+partial; Core meaning and acceptance, C12's demand gate and grade
+promotion are unchanged.
 
 ### C10 runtime/ABI assurance — design memo
 
