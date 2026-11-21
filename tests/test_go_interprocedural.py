@@ -16885,18 +16885,430 @@ def test_local_chan_chan_inside_literal_call_argument_is_not_escape(
     assert result.available, result.gaps
 
 
+def test_deep_chan_chan_local_receive_and_send_match_named_levels(
+    go_types_helper,
+):
+    source = (
+        "func F_direct_recv(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-q3))\n"
+        "}\n"
+        "func F_named_recv(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\tnext := <-q3\n"
+        "\tvalue := <-next\n"
+        "\treturn <-value\n"
+        "}\n"
+        "func F_direct_send(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\t(<-(<-q3)) <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_named_send(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tnext := <-q3\n"
+        "\tvalue := <-next\n"
+        "\tvalue <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    for direct_name, named_name in [
+        ("F_direct_recv", "F_named_recv"),
+        ("F_direct_send", "F_named_send"),
+    ]:
+        direct = named(*data, direct_name)
+        named_levels = named(*data, named_name)
+        assert direct.available, direct.gaps
+        assert named_levels.available, named_levels.gaps
+        assert direct.return_dependencies == named_levels.return_dependencies
+        assert direct.effects == named_levels.effects
+        assert direct.return_dependencies == frozenset({0})
+        assert direct.effects == "none_in_supported_fragment"
+
+
+def test_deep_chan_chan_external_receive_and_send_match_named_levels(
+    go_types_helper,
+):
+    source = (
+        "func F_direct(p chan chan chan int64, x int64) int64 {\n"
+        "\t(<-(<-p)) <- x\n"
+        "\treturn <-(<-(<-p))\n"
+        "}\n"
+        "func F_named(p chan chan chan int64, x int64) int64 {\n"
+        "\tnext := <-p\n"
+        "\tvalue := <-next\n"
+        "\tvalue <- x\n"
+        "\treturn <-value\n"
+        "}\n"
+        "func F_alias(p chan chan chan int64, x int64) int64 {\n"
+        "\tq := p\n"
+        "\t(<-(<-q)) <- x\n"
+        "\treturn <-(<-(<-q))\n"
+        "}\n"
+        "func F_range(p chan chan chan int64, x int64) int64 {\n"
+        "\tfor q2 := range p {\n"
+        "\t\tc := <-q2\n"
+        "\t\tc <- x\n"
+        "\t\treturn <-c\n"
+        "\t}\n"
+        "\treturn x\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    direct = named(*data, "F_direct")
+    named_levels = named(*data, "F_named")
+    alias = named(*data, "F_alias")
+    ranged = named(*data, "F_range")
+    for result in (direct, named_levels, alias, ranged):
+        assert result.available, result.gaps
+        assert result.return_dependencies == named_levels.return_dependencies
+        assert result.effects == "unknown"
+    assert named_levels.return_dependencies == frozenset({0, 1})
+
+
+def test_deep_chan_chan_package_and_imported_sources(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\nimport \"lib\"\n"
+            "var GCCC chan chan chan int64\n"
+            "var GCS []chan chan chan int64\n"
+            "func F_package(x int64) int64 {\n"
+            "\t(<-<-GCCC) <- x\n"
+            "\treturn <-(<-(<-GCCC))\n"
+            "}\n"
+            "func F_imported(x int64) int64 {\n"
+            "\t(<-<-lib.GCCC) <- x\n"
+            "\treturn <-(<-(<-lib.GCCC))\n"
+            "}\n"
+            "func F_package_container(i int, x int64) int64 {\n"
+            "\t(<-<-GCS[i]) <- x\n"
+            "\treturn <-(<-(<-GCS[i]))\n"
+            "}\n"
+            "func F_imported_container(i int, x int64) int64 {\n"
+            "\t(<-<-lib.GCS[i]) <- x\n"
+            "\treturn <-(<-(<-lib.GCS[i]))\n"
+            "}\n"
+        )
+    }
+    imports = {
+        "lib": {
+            "g.go": (
+                "package lib\n"
+                "var GCCC chan chan chan int64\n"
+                "var GCS []chan chan chan int64\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    for name in ("F_package", "F_imported"):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available, (name, result.gaps)
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "unknown"
+    for name in ("F_package_container", "F_imported_container"):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available, (name, result.gaps)
+        assert result.return_dependencies == frozenset({0, 1})
+        assert result.effects == "unknown"
+
+
+def test_deep_chan_chan_depth_four_smoke(go_types_helper):
+    source = (
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq4 := make(chan chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tq4 <- q3\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-(<-q4)))\n"
+        "}\n"
+        "func B(x bool) bool {\n"
+        "\tc := make(chan bool, 1)\n"
+        "\tq2 := make(chan chan bool, 1)\n"
+        "\tq3 := make(chan chan chan bool, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-q3))\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    result = named(*data, "F")
+    bool_result = named(*data, "B")
+    for summary in (result, bool_result):
+        assert summary.available, summary.gaps
+        assert summary.return_dependencies == frozenset({0})
+        assert summary.effects == "none_in_supported_fragment"
+
+
+def test_deep_chan_chan_operations_at_each_level(go_types_helper):
+    source = (
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\t_ = len(q3) + cap(q3)\n"
+        "\t_ = len(<-q3) + cap(<-q3)\n"
+        "\t_ = len(<-(<-q3)) + cap(<-(<-q3))\n"
+        "\tclose(q3)\n"
+        "\tclose(<-q3)\n"
+        "\tclose(<-(<-q3))\n"
+        "\tfor range q3 {}\n"
+        "\tfor range <-q3 {}\n"
+        "\tfor range (<-(<-q3)) {}\n"
+        "\tfor q2range := range q3 {\n"
+        "\t\tcRange := <-q2range\n"
+        "\t\tcRange <- x\n"
+        "\t}\n"
+        "\tq2a, ok := <-q3\n"
+        "\t_ = ok\n"
+        "\tc2, ok := <-q2a\n"
+        "\t_ = ok\n"
+        "\tc2 <- x\n"
+        "\tselect {\n"
+        "\tcase q2b := <-q3:\n"
+        "\t\tc3 := <-q2b\n"
+        "\t\tc3 <- x\n"
+        "\tdefault:\n"
+        "\t}\n"
+        "\treturn <-(<-(<-q3))\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_deep_chan_chan_container_matches_named_queue(go_types_helper):
+    source = (
+        "func F_container(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\ts := []chan chan chan int64{q3}\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-s[0]))\n"
+        "}\n"
+        "func F_named(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-q3))\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    container = named(*data, "F_container")
+    named_queue = named(*data, "F_named")
+    assert container.available, container.gaps
+    assert named_queue.available, named_queue.gaps
+    assert container.return_dependencies == named_queue.return_dependencies
+    assert container.effects == named_queue.effects
+    assert container.return_dependencies == frozenset({0})
+    assert container.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    ("kind", "container_type", "literal", "queue"),
+    [
+        ("slice", "[]chan chan chan int64", "q3", "s[0]"),
+        ("array", "[1]chan chan chan int64", "q3", "a[0]"),
+        (
+            "map",
+            "map[int]chan chan chan int64",
+            "0: q3",
+            "m[0]",
+        ),
+    ],
+)
+def test_deep_chan_chan_container_kinds_match_named_levels(
+    go_types_helper, kind, container_type, literal, queue
+):
+    container = "m" if kind == "map" else "s" if kind == "slice" else "a"
+    local_source = (
+        "func F_container(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        f"\t{container} := {container_type}{{{literal}}}\n"
+        "\tc <- x\n"
+        f"\treturn <-(<-(<-{queue}))\n"
+        "}\n"
+        "func F_named(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-q3))\n"
+        "}\n"
+    )
+    external_type = container_type
+    external_source = (
+        f"func F_external(p {external_type}, i int, x int64) int64 {{\n"
+        "\t(<-(<-p[i])) <- x\n"
+        "\treturn <-(<-(<-p[i]))\n"
+        "}\n"
+        f"func F_external_named(p {external_type}, i int, x int64) int64 {{\n"
+        "\tq3 := p[i]\n"
+        "\tq2 := <-q3\n"
+        "\tc := <-q2\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    source = local_source + external_source
+    data = unit(go_types_helper, source)
+    local_container = named(*data, "F_container")
+    local_named = named(*data, "F_named")
+    external = named(*data, "F_external")
+    external_named = named(*data, "F_external_named")
+    for result in (local_container, local_named, external, external_named):
+        assert result.available, (kind, result.gaps)
+    assert local_container.return_dependencies == local_named.return_dependencies
+    assert local_container.effects == local_named.effects
+    assert local_container.return_dependencies == frozenset({0})
+    assert local_container.effects == "none_in_supported_fragment"
+    assert external.return_dependencies == external_named.return_dependencies
+    assert external.effects == external_named.effects == "unknown"
+    assert external.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_deep_chan_chan_external_container_keeps_index_dependencies(
+    go_types_helper,
+):
+    source = (
+        "func F_direct(p []chan chan chan int64, i int, x int64) int64 {\n"
+        "\t(<-(<-p[i])) <- x\n"
+        "\treturn <-(<-(<-p[i]))\n"
+        "}\n"
+        "func F_named(p []chan chan chan int64, i int, x int64) int64 {\n"
+        "\tq3 := p[i]\n"
+        "\tq2 := <-q3\n"
+        "\tc := <-q2\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    direct = named(*data, "F_direct")
+    named_levels = named(*data, "F_named")
+    assert direct.available, direct.gaps
+    assert named_levels.available, named_levels.gaps
+    assert direct.return_dependencies == named_levels.return_dependencies
+    assert direct.effects == named_levels.effects == "unknown"
+    assert direct.return_dependencies == frozenset({0, 1, 2})
+
+
+@pytest.mark.parametrize("invocation", ["G(q3)", "go G(q3)", "defer G(q3)"])
+def test_deep_chan_chan_call_forms_promote_local_group(
+    go_types_helper, invocation
+):
+    source = (
+        "func G(q chan chan chan int64) { return }\n"
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        f"\t{invocation}\n"
+        "\treturn <-(<-(<-q3))\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, source), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_deep_chan_chan_return_and_package_store(go_types_helper):
+    source = (
+        "var GCCC chan chan chan int64\n"
+        "func G(x int64) chan chan chan int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tc <- x\n"
+        "\treturn q3\n"
+        "}\n"
+        "func F_return(x int64) int64 {\n"
+        "\treturn <-(<-(<-G(x)))\n"
+        "}\n"
+        "func F_named(x int64) int64 {\n"
+        "\tq3 := G(x)\n"
+        "\tq2 := <-q3\n"
+        "\tc := <-q2\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_store(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq2 := make(chan chan int64, 1)\n"
+        "\tq3 := make(chan chan chan int64, 1)\n"
+        "\tq2 <- c\n"
+        "\tq3 <- q2\n"
+        "\tGCCC = q3\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-GCCC))\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    direct = named(*data, "F_return")
+    named_levels = named(*data, "F_named")
+    stored = named(*data, "F_store")
+    for result in (direct, named_levels, stored):
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+    assert direct.return_dependencies == named_levels.return_dependencies
+    assert direct.effects == named_levels.effects == "unknown"
+    assert stored.effects == "unknown"
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
-    # Unsupported shapes cannot expose a local queue outside the
-    # admitted return and package-variable paths.
+    # Unsupported queue escapes, non-scalar leaves, and nested
+    # containers stay closed.
     for src in (
-        "func F(ccc chan chan chan int64) int64 {\n"
-        "\treturn 0\n}\n",
-        "func G(ccc chan chan chan int64) {}\n"
-        "func F() int64 {\n"
-        "\tccc := make(chan chan chan int64, 1)\n"
-        "\tG(ccc)\n"
-        "\treturn 0\n"
-        "}\n",
         "func G(ccs []chan chan int64) {}\n"
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
@@ -16953,13 +17365,12 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\th := func() chan chan int64 { return cc }\n"
         "\t_ = h\n"
         "\treturn 0\n}\n",
-        "func F(ccc chan chan chan int64) int64 {\n"
-        "\treturn <-(<-(<-ccc))\n}\n",
         "func F(cc chan chan []int64) int64 {\n"
         "\treturn int64(len(<-cc))\n}\n",
-        "func F() int64 {\n"
-        "\tccc := make(chan chan chan int64)\n"
-        "\t_ = ccc\n"
+        "func F(ccc chan chan chan []int64) int64 {\n"
+        "\treturn 0\n}\n",
+        "type Leaf struct{ V int64 }\n"
+        "func F(ccc chan chan chan Leaf) int64 {\n"
         "\treturn 0\n}\n",
         "var GCC chan chan int64\n"
         "func G(p *chan chan int64) { *p = GCC }\n"
@@ -16969,8 +17380,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\td := <-cc\n"
         "\td <- x\n"
         "\treturn 0\n}\n",
-        "func F(p chan chan chan int64) int64 {\n"
-        "\tq := p\n\t_ = q\n\treturn 0\n}\n",
         "func F(p chan chan []int64) int64 {\n"
         "\tq := p\n\t_ = q\n\treturn 0\n}\n",
         "func F() []chan chan int64 {\n"
@@ -16986,9 +17395,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "func F() any {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\treturn cc\n}\n",
-        "func F() chan chan chan int64 {\n"
-        "\tccc := make(chan chan chan int64)\n"
-        "\treturn ccc\n}\n",
         "func F() chan chan []int64 {\n"
         "\tcc := make(chan chan []int64)\n"
         "\treturn cc\n}\n",
@@ -17019,10 +17425,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\t_ = &s\n"
         "}\n",
         "func F() {\n"
-        "\ts := make([]chan chan chan int64, 1)\n"
-        "\t_ = s\n"
-        "}\n",
-        "func F() {\n"
         "\ts := make([][]chan chan int64, 1)\n"
         "\t_ = s\n"
         "}\n",
@@ -17035,6 +17437,20 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\ts := make([]chan chan int64, 1)\n"
         "\tst := St{}\n"
         "\tst.S = s\n"
+        "}\n",
+        "func F() []chan chan chan int64 {\n"
+        "\ts := make([]chan chan chan int64, 1)\n"
+        "\treturn s\n"
+        "}\n",
+        "var Global []chan chan chan int64\n"
+        "func F() {\n"
+        "\ts := make([]chan chan chan int64, 1)\n"
+        "\tGlobal = s\n"
+        "}\n",
+        "func G(s []chan chan chan int64) {}\n"
+        "func F() {\n"
+        "\ts := make([]chan chan chan int64, 1)\n"
+        "\tG(s)\n"
         "}\n",
     ):
         result = named(*unit(go_types_helper, src))
@@ -21387,9 +21803,7 @@ def test_multi_result_chan_other_slots_close(go_types_helper):
 
 
 def test_chan_result_boundaries_stay_closed(go_types_helper):
-    # A non-scalar element, a non-scalar element inside a
-    # multi-result tuple, and a `chan` element nested deeper than
-    # one level (`chan chan chan`) all stay closed.
+    # Non-scalar leaves stay closed at every channel nesting depth.
     for decl, body in [
         (
             "func g() (chan string, int64) {\n"
@@ -21401,10 +21815,8 @@ def test_chan_result_boundaries_stay_closed(go_types_helper):
             "ch := g()\n\t_ = ch",
         ),
         (
-            # `chan chan chan int64` — deeper than the one level of
-            # channel-of-channels the external model covers.
-            "func g() chan chan chan int64 {\n"
-            "\tvar ch chan chan chan int64\n\treturn ch\n}\n",
+            "func g() chan chan chan []int64 {\n"
+            "\tvar ch chan chan chan []int64\n\treturn ch\n}\n",
             "ch := g()\n\t_ = ch",
         ),
     ]:
