@@ -820,6 +820,30 @@ fn local_is_not_a_const_argument() {
     assert raw[unknown.span.start : unknown.span.end] == b"Unknown"
 
 
+def test_mutability_does_not_spread_into_nested_rust_patterns():
+    source = """
+struct S { f: Option<u8>, field: u8 }
+fn patterns(value: S) {
+    match value {
+        mut capture @ Some(inner) => {},
+        S { f: Some(mut x) } => {},
+        S { mut field } => {},
+        S { ref mut field } => {},
+        S { f: Some(plain) } => {},
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _bindings(report, "capture", "local")[0].mutable
+    assert not _bindings(report, "inner", "local")[0].mutable
+    assert _bindings(report, "x", "local")[0].mutable
+    assert [binding.mutable for binding in _bindings(report, "field", "local")] == [
+        True,
+        True,
+    ]
+    assert not _bindings(report, "plain", "local")[0].mutable
+
+
 def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
     source = """
 type T = u8;

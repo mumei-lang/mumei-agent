@@ -1038,11 +1038,33 @@ class _RustBindings:
             )
             return []
         if pattern.type == "mut_pattern":
-            mutable_bindings = []
-            for child in self._children(pattern):
-                if child.type != "mutable_specifier":
-                    mutable_bindings.extend(self._pattern_names(child, scope, True))
-            return mutable_bindings
+            inner = next(
+                (
+                    child
+                    for child in self._children(pattern)
+                    if child.type != "mutable_specifier"
+                ),
+                None,
+            )
+            if inner is None:
+                return []
+            names = self._pattern_names(inner, scope)
+            if inner.type in {"identifier", "self"}:
+                return [(name, True) for name, _mutable in names]
+            if inner.type == "captured_pattern":
+                capture = next(
+                    (
+                        child
+                        for child in self._children(inner)
+                        if child.type in {"identifier", "self"}
+                    ),
+                    None,
+                )
+                return [
+                    (name, name == capture or name_mutable)
+                    for name, name_mutable in names
+                ]
+            return names
         if pattern.type == "tuple_struct_pattern":
             tuple_struct_bindings: list[tuple[Any, bool]] = []
             constructor = pattern.child_by_field_name("type")
@@ -1057,11 +1079,11 @@ class _RustBindings:
             return tuple_struct_bindings
         if pattern.type == "field_pattern":
             value = pattern.child_by_field_name("pattern")
-            field_mutable = mutable or any(
+            field_mutable = any(
                 child.type == "mutable_specifier" for child in self._children(pattern)
-            ) or _has_keyword(self.text(pattern), "mut")
+            )
             if value is not None:
-                return self._pattern_names(value, scope, field_mutable)
+                return self._pattern_names(value, scope)
             field = next(
                 (
                     node
