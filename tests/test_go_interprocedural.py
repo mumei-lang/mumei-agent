@@ -20718,6 +20718,62 @@ def test_chan_elem_array(go_types_helper, declarations, expected):
             "\treturn <-s[0]\n}\n",
             frozenset({0}),
         ),
+        # The mirrored direction observes too: `GS[0] <- x` lands in
+        # `indirect_writes`, which a `<-s[0]` read through a group
+        # holding the externalized `c` unions.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tGS[0] = c\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `GS[0] = c` inside a callee promotes the CALLER's argument —
+        # the callee's recorded element-container op promotes the
+        # chan arg roots like a `cc <- q` store does, so `<-c`
+        # observes the later external send.
+        (
+            "var GS []chan int64\n"
+            "func Put(c chan int64) {\n"
+            "\tGS[0] = c\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tPut(c)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # `GS = s` reseats the external container onto a bound
+        # collection — every member queue `s` carried promotes, so a
+        # member send reaches `<-GS[0]`'s indirect_writes read.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tGS = s\n"
+            "\tc <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `c, GS[0] = d, c` — the RHS channel resolves against the
+        # pre-state like `chan_alias_targets` snapshots it: `c`
+        # reseated `e` earlier, but the stored queue is still `c`.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\td := make(chan int64, 1)\n"
+            "\te := c\n"
+            "\tc, GS[0] = d, c\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_chan_elem_external(go_types_helper, declarations, expected):
