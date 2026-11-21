@@ -60,6 +60,7 @@ BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_direct_call_site_tv",
     "machine_code_leaf_function_tv",
     "machine_code_forward_branch_function_tv",
+    "machine_code_acyclic_branch_function_tv",
     "object_translation_correspondence",
 }
 EXPECTED_DISCHARGED = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
@@ -184,6 +185,7 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
         "machine_code_leaf_function_tv",
         "machine_code_direct_call_site_tv",
         "machine_code_forward_branch_function_tv",
+        "machine_code_acyclic_branch_function_tv",
     ]
     core = _write_core(tmp_path, stdout=descriptor)
     bundle = _write_bundle(tmp_path)
@@ -196,6 +198,7 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
     assert "machine_code_leaf_function_tv" not in report["discharged_checks"]
     assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert "machine_code_forward_branch_function_tv" not in report["discharged_checks"]
+    assert "machine_code_acyclic_branch_function_tv" not in report["discharged_checks"]
     _assert_check_partition(report, expected_discharged=expected)
 
 
