@@ -15383,7 +15383,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 }
                 if member_external:
                     self.indirect_writes |= value_deps
-                    for token in member_external:
+                    # Sorted so the recorded transfer order is
+                    # deterministic across runs — a set's iteration
+                    # order would differ between identical inputs.
+                    for token in sorted(member_external):
                         transfers.append(
                             CallTransfer(
                                 FileSpan(
