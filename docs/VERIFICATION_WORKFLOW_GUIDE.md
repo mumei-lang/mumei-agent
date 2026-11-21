@@ -646,7 +646,7 @@ uv run mumei-agent heal src/main.mm
 uv run mumei-agent heal src/main.mm --budget-policy budget_policy.json
 
 # 自己修正プロトコル（収束まで繰り返す）
-uv run mumei-agent self-correct src/main.mm --max-repairs 10 --required-successes 3
+uv run mumei-agent self-correct src/main.mm --max-iterations 10
 ```
 
 ### 5-6. 仕様の健全性チェック（vacuity）
