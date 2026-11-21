@@ -15030,19 +15030,432 @@ def test_chan_chan_parameter_close_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("src", "expected", "effects"),
+    [
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tc <- x\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 2)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\te := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar r int64\n"
+            "\tfor d := range cc {\n"
+            "\t\td <- x\n"
+            "\t\tr = <-c\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tselect {\n"
+            "\tcase cc <- c:\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tselect {\n"
+            "\tcase d := <-cc:\n"
+            "\t\td <- x\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td, ok := <-cc\n"
+            "\tif ok {\n"
+            "\t\td <- x\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\td, _ = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\tif b {\n"
+            "\t\td = <-cc\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64 = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar cc chan chan int64\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar cc chan chan int64 = make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar cc = make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc2 := cc\n"
+            "\tcc2 <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 2)\n"
+            "\tclose(cc)\n"
+            "\t_ = len(cc)\n"
+            "\t_ = cap(cc)\n"
+            "\treturn x\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tcc = make(chan chan int64, 1)\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\tfor d = range cc {\n"
+            "\t\td <- x\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\t\td <- x\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- s[0]\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tother := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\tother <- x\n"
+            "\td <- 0\n"
+            "\treturn <-c\n}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tother := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- make(chan int64, 1)\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\tother <- 0\n"
+            "\treturn <-c\n}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func G(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n"
+            "func F(x int64) int64 { return G(x) }\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- GC\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- GS[0]\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- s[0]\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+    ],
+)
+def test_local_chan_chan_share_group(
+    go_types_helper, src, expected, effects
+):
+    result = named(*unit(go_types_helper, src))
+    assert result.available, src
+    assert result.return_dependencies == expected, src
+    assert result.effects == effects, src
+    if effects == "unknown":
+        assert any(call.imported for call in result.calls), src
+
+
+def test_local_chan_chan_group_keeps_imported_member_external(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc <- lib.GC\n"
+        "\td := <-cc\n"
+        "\td <- x\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GC chan int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(call.imported for call in result.calls)
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
-    # Deeper nesting, a local `make(chan chan)` queue, and a `chan
-    # chan` local var stay closed — a channel value flowing between
-    # two LOCAL queues has no dep-set model.
+    # Local queues cannot escape the share-group model or become
+    # caller-visible through deeper channel nesting.
     for src in (
         "func F(ccc chan chan chan int64) int64 {\n"
         "\treturn 0\n}\n",
+        "func G(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tG(cc)\n"
+        "\treturn 0\n}\n",
+        "func G(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tgo G(cc)\n"
+        "\treturn 0\n}\n",
+        "func F() chan chan int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn cc\n}\n",
+        "var Global chan chan int64\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tGlobal = cc\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\ts := []chan chan int64{cc}\n"
+        "\t_ = s\n"
+        "\treturn 0\n}\n",
+        "type St struct{ C chan chan int64 }\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tst := St{}\n"
+        "\tst.C = cc\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\th := func() chan chan int64 { return cc }\n"
+        "\t_ = h\n"
+        "\treturn 0\n}\n",
+        "func G() chan chan int64 { return nil }\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc = G()\n"
+        "\t_ = cc\n"
+        "\treturn 0\n}\n",
+        "func F(p chan chan int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc = p\n"
+        "\t_ = cc\n"
+        "\treturn 0\n}\n",
         "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn <-(<-cc)\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\t(<-cc) <- x\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
+        "\tccc := make(chan chan chan int64)\n"
+        "\t_ = ccc\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
         "\tcc := make(chan chan int64)\n"
-        "\t_ = cc\n\treturn x\n}\n",
-        "func F(x int64) int64 {\n"
-        "\tvar cc chan chan int64\n"
-        "\t_ = cc\n\treturn x\n}\n",
+        "\ts := []chan chan int64{cc}\n"
+        "\t_ = s\n"
+        "\treturn 0\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available, src
@@ -15540,7 +15953,8 @@ def test_chan_parameter_records_effects_and_staleness(go_types_helper):
 
 
 def test_chan_parameter_boundaries_stay_closed(go_types_helper):
-    # Non-scalar elements and a receive-valued binding stay closed.
+    # Non-scalar elements stay closed. A local chan-chan queue now
+    # binds a receive-valued name through its share group.
     # A scalar `chan` result (`Res`) admits — ops on the bound name
     # follow the external queue model — and a select over a `chan`
     # parameter admits: each comm case binds the queue's deps and
@@ -15571,7 +15985,8 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     }
     assert not results["Ptr"].available
     assert results["Res"].available
-    assert not results["Alias"].available
+    assert results["Alias"].available
+    assert results["Alias"].effects == "none_in_supported_fragment"
     assert results["Sel"].available
     assert results["Sel"].return_dependencies == frozenset({0, 1})
 
