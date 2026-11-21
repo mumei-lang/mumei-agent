@@ -16834,6 +16834,32 @@ def test_package_chan_chan_store_observes_later_member_sends(
     assert read.available and read.effects == "unknown"
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    ["cc, GCC = other, cc", "GCC, cc = cc, other"],
+)
+def test_package_chan_chan_parallel_store_uses_rhs_queue_snapshot(
+    go_types_helper, assignment
+):
+    source = (
+        "var GCC chan chan int64\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tother := make(chan chan int64, 1)\n"
+        "\to := make(chan int64, 1)\n"
+        "\tother <- o\n"
+        f"\t{assignment}\n"
+        "\tc <- x\n"
+        "\treturn <-(<-GCC)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
     # Unsupported shapes cannot expose a local queue outside the
     # admitted return and package-variable paths.

@@ -2090,9 +2090,24 @@ class _Builder:
             deps |= self.indirect_writes
         return deps
 
-    def _promote_local_chan_chan_group(self, binding_id: str) -> None:
-        root = self._chan_root(binding_id)
-        for token in set(self._chan_group_members(root)) | {root}:
+    def _promote_local_chan_chan_group(
+        self,
+        binding_id: str,
+        *,
+        members: frozenset[str] | None = None,
+        resolve_alias: bool = True,
+    ) -> None:
+        root = (
+            self._chan_root(binding_id)
+            if resolve_alias
+            else binding_id
+        )
+        group_members = (
+            self._chan_group_members(root)
+            if members is None
+            else members
+        )
+        for token in set(group_members) | {root}:
             self._mark_external_chan_group_member(token)
 
     def _chan_group_join(
@@ -12989,6 +13004,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 i: local_chan_chan_targets[i]
                 for i in external_chan_chan_write_targets
             }
+            external_chan_chan_group_members = {
+                i: frozenset(self._chan_group_members(root_id))
+                for i, root_id in external_chan_chan_roots.items()
+                if root_id is not None
+            }
             # `s, d = t, s[0]` — a `d = s[i]` element reseat joins
             # the group `s` named at eval time, not the group an
             # earlier slot's store reseated `s` onto: snapshot each
@@ -13172,7 +13192,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             group_deps = self._chan_group_read_deps(
                                 root_id, locals_
                             )
-                            self._promote_local_chan_chan_group(root_id)
+                            self._promote_local_chan_chan_group(
+                                root_id,
+                                members=external_chan_chan_group_members.get(
+                                    i, frozenset()
+                                ),
+                                resolve_alias=False,
+                            )
                             self.indirect_writes |= group_deps
                     elif i in chan_write_targets:
                         # `GC = ch` — the RHS read evaluated to the
