@@ -5886,6 +5886,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     locals_, params, binding.id, recv_deps, conditional
                 )
                 self._chan_group_join(binding.id, chan_group)
+                self._set_chan_chan_param_origins(
+                    binding.id,
+                    self._chan_chan_param_origin(recv, params),
+                    conditional or preserve_chan_alias or self._may_skip > 0,
+                    locals_,
+                )
             else:
                 _, binding = entry
                 # `:=` binds fresh names (and a reused one keeps the
@@ -6362,6 +6368,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     ref.binding_id, frozenset()
                 )
         return frozenset()
+
+    def _set_chan_chan_param_origins(
+        self,
+        binding_id: str,
+        origins: frozenset[int],
+        conditional: bool,
+        locals_: dict[str, frozenset[int]] | None = None,
+    ) -> None:
+        previous = self._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        if conditional:
+            origins |= previous
+        elif locals_ is not None:
+            stale = previous - origins
+            if stale:
+                current = locals_.get(binding_id)
+                if current is not None:
+                    locals_[binding_id] = current - stale
+        if origins:
+            self._chan_chan_param_origins[binding_id] = origins
+        else:
+            self._chan_chan_param_origins.pop(binding_id, None)
 
     def _local_chan_chan_id(self, node: Any) -> str | None:
         """The root identity of a local `chan chan T` queue operand."""
@@ -10007,17 +10036,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else rights[0]
                 )
                 if self._scalar_chan_binding(binding.id):
-                    origins = self._chan_chan_param_origin(
-                        chan_rhs, params
+                    self._set_chan_chan_param_origins(
+                        binding.id,
+                        self._chan_chan_param_origin(chan_rhs, params),
+                        conditional or self._may_skip > 0,
+                        locals_,
                     )
-                    if origins:
-                        self._chan_chan_param_origins[binding.id] = (
-                            origins
-                        )
-                    else:
-                        self._chan_chan_param_origins.pop(
-                            binding.id, None
-                        )
                 if binding.type.kind == "chan" and not self._is_make_chan_call(
                     chan_rhs
                 ):
@@ -12503,6 +12527,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_prestate_members |= {
                         tok for tok in pre_set if isinstance(tok, str)
                     }
+            if not compound:
+                chan_origin_updates: dict[str, frozenset[int]] = {}
+                for i, ref in enumerate(refs):
+                    binding_id = getattr(ref, "binding_id", None)
+                    if (
+                        binding_id is None
+                        or not self._scalar_chan_binding(binding_id)
+                    ):
+                        continue
+                    rhs_node = (
+                        rights[i]
+                        if len(lefts) == len(rights)
+                        else rights[0]
+                    )
+                    chan_origin_updates[binding_id] = (
+                        self._chan_chan_param_origin(rhs_node, params)
+                    )
+                for binding_id, origins in chan_origin_updates.items():
+                    self._set_chan_chan_param_origins(
+                        binding_id,
+                        origins,
+                        conditional or self._may_skip > 0,
+                        locals_,
+                    )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -15477,17 +15525,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self.external_chan_locals.add(
                                         binding.id
                                     )
-                                origins = self._chan_chan_param_origin(
-                                    right, params
+                                self._set_chan_chan_param_origins(
+                                    binding.id,
+                                    self._chan_chan_param_origin(
+                                        right, params
+                                    ),
+                                    False,
+                                    scope,
                                 )
-                                if origins:
-                                    self._chan_chan_param_origins[
-                                        binding.id
-                                    ] = origins
-                                else:
-                                    self._chan_chan_param_origins.pop(
-                                        binding.id, None
-                                    )
                             if chan is not None:
                                 # `for v := range ch` — the element
                                 # name re-joins the queue's widened
@@ -15567,17 +15612,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self.external_chan_locals.add(
                                         ref.binding_id
                                     )
-                                origins = self._chan_chan_param_origin(
-                                    right, params
+                                self._set_chan_chan_param_origins(
+                                    ref.binding_id,
+                                    self._chan_chan_param_origin(
+                                        right, params
+                                    ),
+                                    True,
+                                    scope,
                                 )
-                                if origins:
-                                    self._chan_chan_param_origins[
-                                        ref.binding_id
-                                    ] = origins
-                                else:
-                                    self._chan_chan_param_origins.pop(
-                                        ref.binding_id, None
-                                    )
                             if chan is not None:
                                 range_elem = (
                                     ref.binding_id,
@@ -16572,6 +16614,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ptr_entry = dict(self._ptr_deps)
                 chan_alias_entry = dict(self.chan_aliases)
                 chan_external_entry = set(self.external_chan_locals)
+                chan_origin_entry = dict(
+                    self._chan_chan_param_origins
+                )
                 clause_aliases: list[dict] = []
                 clause_externals: list[set] = []
                 for clause, receive in zip(clauses, receives):
@@ -16644,6 +16689,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             v for v in alias_values if v is not None
                         }
                 self._join(locals_, joined, params)
+                if (
+                    len(clauses) == 1
+                    and clauses[0].type != "default_case"
+                    and not conditional
+                    and self._may_skip == 0
+                ):
+                    for bid in (
+                        set(chan_origin_entry)
+                        | set(self._chan_chan_param_origins)
+                    ):
+                        if (
+                            chan_origin_entry.get(bid, frozenset())
+                            != self._chan_chan_param_origins.get(
+                                bid, frozenset()
+                            )
+                            and bid in joined
+                        ):
+                            locals_[bid] = joined[bid]
                 # A maybe-detached name's slot also unions every
                 # queue it could still mean — a case that kept the
                 # old alias sees that queue's contents on a later

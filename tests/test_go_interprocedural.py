@@ -16536,6 +16536,95 @@ def test_chan_chan_param_origins_flow_through_receive_values(
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("callee", "expected"),
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\td = make(chan int64, 1)\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc chan chan int64, b bool) int64 {\n"
+            "\td := <-cc\n\tif b { d = make(chan int64, 1) }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := make(chan int64, 1)\n\td = e\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\td = <-cc2\n\td <- 1\n\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "func Fresh() chan int64 { return make(chan int64, 1) }\n"
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\td = Fresh()\n\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := <-cc2\n"
+            "\tother := make(chan int64, 1)\n"
+            "\td, other = e, make(chan int64, 1)\n"
+            "\tother <- 2\n\td <- 1\n\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\td, _ = <-cc2\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n"
+            "\tlocal := make(chan chan int64, 1)\n"
+            "\tlocal <- make(chan int64, 1)\n\tclose(local)\n"
+            "\tselect { case d = <-local: }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n"
+            "\tlocal := make(chan chan int64, 1)\n"
+            "\tlocal <- make(chan int64, 1)\n"
+            "\tselect { case d = <-local: default: }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func G(cc chan chan int64, q chan int64) int64 {\n"
+            "\td := <-cc\n"
+            "\tselect { case <-q: d = make(chan int64, 1); default: }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\tfor d = range cc2 { break }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_chan_param_origins_follow_scalar_channel_reassignments(
+    go_types_helper, callee, expected
+):
+    files = {"a.go": "package p\n" + callee}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "G")
+    assert result.available
+    assert result.return_dependencies == expected
+
+
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
     # `cc <- q` inside `Publish` hands `q`'s queue to the outer
     # queue's domain — the caller's `chan` argument roots promote
