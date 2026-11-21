@@ -5225,8 +5225,26 @@ procedural attributes or non-standard derives create `macro_invocation`
 gaps. The fail-closed reader rejects stale, malformed, or internally
 inconsistent reports. It is metadata only, not a proof or verdict. It
 adds no default route and changes no audit, Seal Grade, or Lean
-behavior. C06 remains partially delivered; Solidity and TypeScript
-lexical reports are follow-on work.
+behavior. C06 remains partially delivered; the TypeScript lexical report
+is the remaining language follow-on.
+
+### C06 Solidity lexical binding report (`sol-bindings`)
+
+`python -m agent sol-bindings <file>` emits
+`mumei.sol-lexical-bindings/v1`, a bounded, single-file tree-sitter report
+of Solidity declarations, lexical scopes, references and writes, explicit
+type facts, functions, conservative calls, unresolved names, and analysis
+gaps. It models file and contract declarations, overload ambiguity, and
+same-file inheritance while keeping imported and otherwise-unresolved
+behavior explicit. Address and fixed-byte widths are language-fixed.
+
+This report is lexical metadata, not a type check, proof, or verdict; it
+does not claim to resolve imported or dynamic behavior. Unsupported
+constructs and inline assembly remain explicitly gapped. The fail-closed
+reader rejects stale, malformed, or internally inconsistent reports.
+It adds no default route and changes no audit, Seal Grade, or Lean
+behavior. C06 remains partially delivered; TypeScript is the remaining
+language follow-on.
 
 ### rust-summaries `--summary-aware-calls`
 
