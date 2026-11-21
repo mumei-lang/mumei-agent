@@ -1225,7 +1225,7 @@ class _RustBindings:
                 self._reference(name_node, "read", "type")
             fields = node.child_by_field_name("body")
             if fields is not None:
-        for initializer in self._children(fields):
+                for initializer in self._children(fields):
                     if initializer.type == "shorthand_field_initializer":
                         identifier = next(
                             (
