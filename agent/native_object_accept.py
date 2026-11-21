@@ -18,8 +18,16 @@ This is bounded object-stage machine-code acceptance under an assumed, not
 validated, register convention and the stated input domain. Here
 `object_translation_correspondence` means only Core's profile-bounded
 source-to-object machine-code correspondence, not universal object TV. The C
-`main` wrapper, CRT, loader/libc, ABI/runtime semantics, optimizer semantics,
-producer authenticity, and historical execution remain outside the claim.
+`machine_code_entry_wrapper_tv` check is consumed only when the validated
+descriptor lists it in `checks_performed`. It applies only when the object
+defines both `main` and `__mumei_user_main` and the latter has a supported
+source signature; it checks one unconditional call from `main` to
+`__mumei_user_main`, returning the low 32 bits of its result. This makes no
+CRT, loader, OS exit-status, ABI, or runtime claim;
+`os_exit_status_observation` remains a separate runtime-observation check and
+is not discharged here. Broader C entry-wrapper behavior, CRT, loader/libc,
+ABI/runtime semantics, optimizer semantics, producer authenticity, and
+historical execution remain outside the claim.
 """
 
 from __future__ import annotations
@@ -230,13 +238,22 @@ def build_object_accept_parser(
     parser.description = (
         "Run Core's bounded object-stage machine-code acceptance under an "
         "assumed, not validated, register convention and stated input domain. "
+        "Core's machine_code_entry_wrapper_tv is consumed only when the valid "
+        "descriptor lists it in checks_performed; when applicable, it checks "
+        "one unconditional main call to __mumei_user_main returning the low "
+        "32 bits of its result. Applicability requires both object symbols "
+        "and a supported __mumei_user_main source signature. This makes no "
+        "CRT, loader, OS exit-status, ABI or runtime claim; "
+        "os_exit_status_observation remains a separate runtime-observation "
+        "check and is not discharged. "
         "This emits no evidence candidate, is not reusable Evidence or a "
         "certificate, is not a recovery performer, and does not promote a "
-        "grade; the C main wrapper, CRT, loader/libc, ABI/runtime, optimizer "
-        "semantics, producer authenticity and historical execution remain "
-        "outside the profile. object_translation_correspondence here is only "
-        "profile-bounded source-to-object machine-code correspondence, not "
-        "universal object TV."
+        "grade; broader C entry-wrapper behavior, CRT, loader/libc, "
+        "ABI/runtime, optimizer semantics, producer authenticity and "
+        "historical execution remain outside the profile. "
+        "object_translation_correspondence here is only profile-bounded "
+        "source-to-object machine-code correspondence, not universal object "
+        "TV."
     )
     parser.add_argument(
         "--core",

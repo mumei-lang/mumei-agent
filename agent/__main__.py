@@ -1159,15 +1159,24 @@ def main() -> None:
             prog="python -m agent native-object-accept",
             description=(
                 "Run bounded object-stage machine-code acceptance under an "
-                "assumed, not validated, register convention and stated "
-                "input domain. It emits no evidence candidate, is not reusable "
+                "assumed, not validated, register convention and stated input "
+                "domain. Core's machine_code_entry_wrapper_tv is consumed "
+                "only when the valid descriptor lists it in checks_performed; "
+                "when applicable, it checks one unconditional main call to "
+                "__mumei_user_main returning the low 32 bits of its result. "
+                "Applicability requires both object symbols and a supported "
+                "__mumei_user_main source signature. This makes no CRT, "
+                "loader, OS exit-status, ABI or runtime claim; "
+                "os_exit_status_observation remains a separate runtime-"
+                "observation check and is not discharged. It emits no "
+                "evidence candidate, is not reusable "
                 "Evidence or a certificate, is not a recovery performer, and "
-                "does not promote a grade; the C main wrapper, CRT, loader/"
-                "libc, ABI/runtime, optimizer semantics, producer authenticity "
-                "and historical execution are outside the profile. "
-                "object_translation_correspondence here is only profile-"
-                "bounded source-to-object machine-code correspondence, not "
-                "universal object TV."
+                "does not promote a grade; broader C entry-wrapper behavior, "
+                "CRT, loader/libc, ABI/runtime, optimizer semantics, producer "
+                "authenticity and historical execution are outside the "
+                "profile. object_translation_correspondence here is only "
+                "profile-bounded source-to-object machine-code correspondence, "
+                "not universal object TV."
             ),
         )
         native_obj_accept_build_parser(parser)
@@ -1377,8 +1386,17 @@ def main() -> None:
                 "callees and the cancellation poll are assumed to preserve "
                 "callee-saved registers, while external callees remain an "
                 "assumption. The argument/result register convention is "
-                "assumed, not validated; this is not an ABI-correctness, "
-                "runtime or full object-TV claim."
+                "assumed, not validated. Core's machine_code_entry_wrapper_tv "
+                "is consumed only when listed in checks_performed; when "
+                "applicable it checks one unconditional main call to "
+                "__mumei_user_main returning the low 32 bits of its result. "
+                "Applicability requires both object symbols and a supported "
+                "__mumei_user_main source signature. This makes no CRT, "
+                "loader, OS exit-status, ABI or runtime claim; "
+                "os_exit_status_observation remains a separate runtime-"
+                "observation check and is not discharged. This is not an "
+                "ABI-correctness, runtime or full "
+                "object-TV claim."
             ),
         )
         machine_tv_build_parser(parser)

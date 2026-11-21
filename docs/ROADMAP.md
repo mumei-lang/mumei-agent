@@ -7215,6 +7215,23 @@ remains not performed. The argument/result register convention is assumed,
 not validated. This does not establish ABI correctness, runtime behavior,
 or full object TV.
 
+#### Core #1230 entry-wrapper machine-code TV
+
+`machine_code_entry_wrapper_tv` checks only Core's modeled C entry wrapper:
+when both object symbols exist and `__mumei_user_main` has a supported source
+signature, `main` makes one unconditional call to `__mumei_user_main` and
+returns the low 32 bits of its result. The agent consumes the check only when
+a valid matching descriptor lists it in `checks_performed`; the
+native-object-recheck route always leaves it unperformed. Existing
+function-outcome and callee-saved-preservation counts include the wrapper
+entry when Core reports it, without exposing function names.
+
+This does not establish CRT, loader, OS exit-status, ABI, or runtime
+semantics. `os_exit_status_observation` remains a separate
+runtime-observation check and is not discharged by entry-wrapper TV. Core's
+`object_entry_wrapper_semantics` not-performed marker is Core-only and is not
+added to the agent vocabulary.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

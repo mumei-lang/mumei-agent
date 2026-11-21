@@ -23,6 +23,7 @@ from agent.native_object_accept import (
 
 BUILD_ID = "a" * 64
 ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
+ENTRY_WRAPPER_CHECK = "machine_code_entry_wrapper_tv"
 BASE_DISCHARGED = frozenset(
     {
         "artifact_semantics",
@@ -48,6 +49,7 @@ DESCRIPTOR = {
     "checks_not_performed": [
         "producer_authenticity",
         "historical_execution",
+        "object_entry_wrapper_semantics",
     ],
     "build_id": BUILD_ID,
     "llvm_sha256": "1" * 64,
@@ -223,7 +225,10 @@ def test_accepted_descriptor_maps_core_checks_and_reports_bounds(
         "outside_profile": 1,
     }
     assert "__mumei_user_main" not in out
+    assert '"main"' not in out
     assert "not_a_source_atom" not in out
+    assert "object_entry_wrapper_semantics" not in OBJECT_CHECK_VOCABULARY
+    assert "object_entry_wrapper_semantics" not in report["checks_not_performed"]
     assert "functions" not in report
     assert "object_translation_correspondence" not in descriptor["checks_performed"]
     assert report["sequence"]["selected_result"] is not None
@@ -232,6 +237,64 @@ def test_accepted_descriptor_maps_core_checks_and_reports_bounds(
     else:
         assert "object_link_correspondence" not in report["discharged_checks"]
     _assert_partition(report, expected_discharged)
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_discharged"),
+    [("performed", True), ("not_performed", False), ("absent", False)],
+)
+def test_entry_wrapper_check_requires_performed_descriptor_list(
+    tmp_path, capsys, placement, expected_discharged
+):
+    performed = list(DESCRIPTOR["checks_performed"])
+    not_performed = list(DESCRIPTOR["checks_not_performed"])
+    if placement == "performed":
+        performed.append(ENTRY_WRAPPER_CHECK)
+    elif placement == "not_performed":
+        not_performed.append(ENTRY_WRAPPER_CHECK)
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": performed,
+        "checks_not_performed": not_performed,
+        "functions": {
+            "main": {
+                "role": "entry_wrapper",
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved",
+            },
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved",
+            },
+        },
+    }
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"] == "accepted"
+    assert (ENTRY_WRAPPER_CHECK in report["discharged_checks"]) is (
+        expected_discharged
+    )
+    assert (ENTRY_WRAPPER_CHECK in report["checks_not_performed"]) is (
+        not expected_discharged
+    )
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 2,
+        "outside_profile": 0,
+    }
+    assert '"main"' not in out
+    assert "__mumei_user_main" not in out
+    assert "object_entry_wrapper_semantics" not in report["checks_not_performed"]
+    assert "os_exit_status_observation" not in report["discharged_checks"]
+    assert "os_exit_status_observation" not in OBJECT_CHECK_VOCABULARY
+    expected = BASE_DISCHARGED | (
+        set(performed)
+        & (OBJECT_CHECK_VOCABULARY - {"object_translation_correspondence"})
+    )
+    _assert_partition(report, expected)
 
 
 @pytest.mark.parametrize(
@@ -599,6 +662,43 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
         for line in built.stdout.splitlines()
         if line.startswith("Build ID:")
     )
+    core_acceptance = subprocess.run(
+        [
+            real_core,
+            "native-bundle",
+            "accept-object",
+            "--expected-build-id",
+            build_id,
+            "--json",
+            str(bundle),
+            str(source),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert core_acceptance.returncode == 0, core_acceptance.stderr
+    descriptor = json.loads(core_acceptance.stdout)
+    assert descriptor["acceptance"] == "evaluated"
+    assert descriptor["accepted"] is True
+    assert ENTRY_WRAPPER_CHECK in descriptor["checks_performed"]
+    assert ENTRY_WRAPPER_CHECK not in descriptor["checks_not_performed"]
+    assert "os_exit_status_observation" in descriptor["checks_not_performed"]
+    wrapper_entry = next(
+        function
+        for function in descriptor["functions"].values()
+        if isinstance(function, dict) and function.get("role") == "entry_wrapper"
+    )
+    assert wrapper_entry["outcome"] == "equivalent_within_profile"
+    expected_function_outcomes = {
+        outcome: sum(
+            isinstance(function, dict) and function.get("outcome") == outcome
+            for function in descriptor["functions"].values()
+        )
+        for outcome in ("equivalent_within_profile", "outside_profile")
+    }
+
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
     code, out, err = _run(capsys, argv)
@@ -608,6 +708,9 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
     assert report["acceptance_schema"] == NATIVE_EVIDENCE_ACCEPTANCE_SCHEMA
     assert report["sequence"]["selected_result"] is not None
     assert "object_translation_correspondence" in report["discharged_checks"]
+    assert ENTRY_WRAPPER_CHECK in report["discharged_checks"]
+    assert report["function_outcomes"] == expected_function_outcomes
+    assert "os_exit_status_observation" not in report["discharged_checks"]
     assert report["checks_not_performed"] == sorted(
         ALL_CHECKS - set(report["discharged_checks"])
     )
@@ -618,4 +721,5 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
         assert (
             "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
         )
+    assert '"main"' not in out
     assert "functions" not in report

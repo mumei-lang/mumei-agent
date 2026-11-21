@@ -77,8 +77,11 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "machine_code_bounded_loop_function_tv",
             "machine_code_callee_saved_register_preservation",
             "machine_code_callee_saved_preservation_assumed_for_external_callees",
+            "machine_code_entry_wrapper_tv",
         }
     )
+    assert "os_exit_status_observation" in RUNTIME_CHECK_VOCABULARY
+    assert "os_exit_status_observation" not in OBJECT_CHECK_VOCABULARY
     assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)
     assert CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
     assert RUNTIME_CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
@@ -91,16 +94,26 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
         "mumei.native-object-accept-report/v1",
     ],
 )
-def test_object_translation_correspondence_has_no_recovery_performer(schema):
-    check = "object_translation_correspondence"
+def test_object_accept_reports_have_no_recovery_performer(schema):
+    checks = [
+        "object_translation_correspondence",
+        "machine_code_entry_wrapper_tv",
+    ]
     record = {
         "schema_version": schema,
-        "checks_not_performed": [check],
+        "checks_not_performed": checks,
     }
-    evaluation = evaluate_unperformed_check_recovery(record, [])
-    assert evaluation["checks"] == {check: "no_evidence"}
+    evidence = _doc(
+        schema,
+        acceptance="accepted",
+        discharged_checks=checks,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [evidence], record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {check: "no_evidence" for check in checks}
     assert evaluation["recovered"] == []
-    assert evaluation["unrecovered"] == [check]
+    assert evaluation["unrecovered"] == checks
 
 
 def test_accepted_object_accept_report_cannot_recover_sibling_object_translation():
@@ -716,6 +729,7 @@ def test_native_object_recheck_report_is_not_a_recovery_performer():
         discharged_checks=[
             "artifact_semantics",
             "claim_truth",
+            "machine_code_entry_wrapper_tv",
             "object_symbol_correspondence",
             "object_call_edge_correspondence",
             "object_link_correspondence",

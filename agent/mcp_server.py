@@ -4133,9 +4133,17 @@ def native_object_accept(
     promote a grade, and is not a recovery performer. Here
     `object_translation_correspondence`
     means only profile-bounded source-to-object machine-code correspondence,
-    not universal object TV. The C `main` wrapper, CRT, loader/libc,
-    ABI/runtime semantics, optimizer semantics, producer authenticity and
-    historical execution remain outside the claim.
+    not universal object TV. Core's `machine_code_entry_wrapper_tv` is
+    consumed only when the validated descriptor lists it in
+    `checks_performed`. When applicable, it checks one unconditional call
+    from `main` to `__mumei_user_main`, returning the low 32 bits of its
+    result; applicability requires both object symbols and a supported
+    `__mumei_user_main` source signature. This makes no CRT, loader, OS
+    exit-status, ABI, or runtime claim; `os_exit_status_observation` remains
+    a separate runtime-observation check and is not discharged. Broader C
+    entry-wrapper behavior, CRT, loader/libc, ABI/runtime semantics, optimizer
+    semantics, producer authenticity and historical execution remain outside
+    the claim.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -4742,13 +4750,20 @@ def native_machine_tv_recheck(
     callee-saved registers; external callees remain an assumption, and Core's
     `machine_code_callee_saved_preservation_assumed_for_external_callees`
     marker remains not performed. The
-    argument/result register convention is assumed, not validated.
+    argument/result register convention is assumed, not validated. Core's
+    `machine_code_entry_wrapper_tv` is consumed only when listed in
+    `checks_performed`; when applicable, it checks one unconditional call
+    from `main` to `__mumei_user_main`, returning the low 32 bits of its
+    result. Applicability requires both object symbols and a supported
+    `__mumei_user_main` source signature. This makes no CRT, loader, OS
+    exit-status, ABI, or runtime claim; `os_exit_status_observation` remains
+    a separate runtime-observation check and is not discharged.
     Executions beyond the bound, cancellation/runtime semantics and other
     cyclic control flow stay outside the profile. The report counts function
     outcomes and callee-saved preservation without exposing function names,
     and echoes convention and input-domain fields only when they are strings
-    of at most 256 characters. The C `main` wrapper, CRT, loader and libc are
-    outside the profile; this is not an ABI-correctness, runtime or full
+    of at most 256 characters. No broader C entry-wrapper, CRT, loader or
+    libc behavior is covered; this is not an ABI-correctness, runtime or full
     object-TV claim, and `object_translation_correspondence` stays
     unperformed. The report is not a recovery performer.
     `machine_tv_recheck` is claimed only for uniquely-mapped exit codes
