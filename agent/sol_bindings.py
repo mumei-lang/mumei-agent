@@ -624,7 +624,7 @@ class _SolBindings:
                     continue
                 if index > 0:
                     private_match = private_match or any(
-                        record.binding.kind == "function"
+                        record.binding.kind in {"function", "state_variable"}
                         and record.visibility == "private"
                         for record in records
                     )

@@ -593,6 +593,26 @@ contract External is Remote { function g() public { absent(); } }
     assert any(gap.reason == "unresolved_base" for gap in report.gaps)
 
 
+def test_private_inherited_state_is_distinguished_from_unknown_names():
+    source = """
+contract Base { uint private hidden; uint visible; }
+contract Derived is Base {
+    function f() public view returns (uint) {
+        return hidden + visible + missing;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    visible = _bindings(report, "visible", "state_variable")[0]
+    assert _unresolved(report, "hidden", "private_base_member")
+    assert not _unresolved(report, "hidden", "unknown_name")
+    assert any(
+        reference.binding_id == visible.id and reference.kind == "read"
+        for reference in report.references
+    )
+    assert _unresolved(report, "missing", "unknown_name")
+
+
 def test_inherited_overloads_collect_bases_and_remove_overridden_functions():
     source = """
 contract Base {
