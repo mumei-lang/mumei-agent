@@ -20613,6 +20613,121 @@ def test_chan_elem_array(go_types_helper, declarations, expected):
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
+        # `GS[i] <- x` then `<-GS[i]` — the element queues of a
+        # package-level chan-element container record on the
+        # container's own identity like a `lib.VA[i] = v` member
+        # write; the send broadcasts into `indirect_writes` so the
+        # receive returns it.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A variable index's own deps join the read like any other
+        # element read's.
+        (
+            "var GM map[int64]chan int64\n"
+            "func F(k int64) int64 {\n"
+            "\treturn <-GM[k]\n}\n",
+            frozenset({0}),
+        ),
+        # `[N]chan` package arrays admit the same element ops.
+        (
+            "var GA [4]chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGA[1] <- x\n"
+            "\treturn <-GA[1]\n}\n",
+            frozenset({0}),
+        ),
+        # `for v := range GS[i]` — elements re-join
+        # `indirect_writes` through the fixed-point pass like a
+        # package channel's; a variable index's deps join.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64, x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\tvar r int64\n"
+            "\tfor v := range GS[i] {\n"
+            "\t\tr = v\n"
+            "\t\tbreak\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Select arms funnel through the send and receive paths —
+        # `case v := <-GS[i]` and `case GS[j] <- x` both resolve.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tselect {\n"
+            "\tcase v := <-GS[0]:\n"
+            "\t\treturn v\n"
+            "\tcase GS[1] <- x:\n"
+            "\t\treturn x\n"
+            "\t}\n"
+            "\treturn 0\n}\n",
+            frozenset({0}),
+        ),
+        # `GS[i] = c` stores already admitted through the imported
+        # member-write path; the send broadcast reaches both params.
+        (
+            "var GS []chan int64\n"
+            "func F(c chan int64, x int64) int64 {\n"
+            "\tGS[0] = c\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_elem_external(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert any(t.imported for t in result.calls)
+
+
+def test_chan_elem_external_close(go_types_helper):
+    # `close(GS[i])` records a caller-visible effect on the
+    # container's identity; the index itself evaluates for its
+    # deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GS []chan int64\n"
+            "func F(i int64) {\n"
+            "\tclose(GS[i])\n}\n",
+        )
+    )
+    assert result.available
+    assert any(t.imported for t in result.calls)
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `[][]chan` nests stay closed — the operand of the inner
+        # index is itself an index expression.
+        "var GS [][]chan int64\nfunc F(x int64) {\n\tGS[0][0] <- x\n}\n",
+        # `[]chan chan` non-scalar elements stay closed.
+        "var GS []chan chan int64\nfunc F(c chan int64) {\n\tGS[0] <- c\n}\n",
+        # `d := GS[i]` extraction stays closed — the element queue
+        # has no declared identity of its own.
+        "var GS []chan int64\nfunc F() int64 {\n\td := GS[0]\n\treturn <-d\n}\n",
+    ],
+)
+def test_chan_elem_external_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
         # `s.V = <-ch` — a field store on a local composite folds the
         # receive into the base binding like the plain assignment.
         (
