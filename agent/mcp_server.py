@@ -4646,21 +4646,22 @@ def native_machine_tv_recheck(
     expected_build_id: str,
     attempt_timeout_ms: int = 60000,
 ) -> str:
-    """Check bounded straight-line machine-code TV, including direct calls.
+    """Check bounded leaf, direct-call, and forward-branch machine-code TV.
 
     Runs `native-bundle recheck-machine-tv --json` as one declared attempt —
     the same wiring as the `native-machine-tv-recheck` CLI route. Core runs
     the object reproduction and correspondence pipeline, then checks
-    straight-line functions against pure-i64 source models under an assumed
-    register convention; direct calls are compared as uninterpreted sites.
-    Only object checks listed in a matching
+    leaf straight-line and forward-branch functions against pure-i64 source
+    models under an assumed register convention; direct calls are compared
+    as uninterpreted sites. Backward branches and loops stay outside the
+    profile. Only object checks listed in a matching
     `mumei.machine-code-tv/v1` descriptor are discharged. The report counts
     function outcomes without exposing function names, and echoes convention
     and input-domain fields only when they are strings of at most 256
-    characters. Branching functions, the C `main` wrapper, CRT, loader and
-    libc are outside the profile; this is not an ABI, runtime or full object
-    translation claim, and `object_translation_correspondence` stays
-    unperformed. The report is not a recovery performer.
+    characters. The C `main` wrapper, CRT, loader and libc are outside the
+    profile; this is not an ABI, runtime or full object translation claim,
+    and `object_translation_correspondence` stays unperformed. The report
+    is not a recovery performer.
     `machine_tv_recheck` is claimed only for uniquely-mapped exit codes
     (0 `checked`, 3 `inconclusive`); mid-run drift reports `inputs_changed`
     with no claimed outcome. Every outcome echoes `expected_build_id`.

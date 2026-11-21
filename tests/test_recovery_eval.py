@@ -71,6 +71,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "object_translation_correspondence",
             "machine_code_leaf_function_tv",
             "machine_code_direct_call_site_tv",
+            "machine_code_forward_branch_function_tv",
         }
     )
     assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)

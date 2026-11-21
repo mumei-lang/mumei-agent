@@ -8,12 +8,13 @@ channel build ID; dispatch records one fresh attempt and publishes reconciled
 lineage compare-and-set.
 
 Core runs the object reproduction and correspondence pipeline, then compares
-straight-line functions with pure-i64 source models under an assumed register
-convention. Direct calls are compared as uninterpreted call sites. This is not
-an ABI, full object translation, runtime or historical-execution claim.
-Branching functions, the C `main` wrapper, CRT, loader and libc are outside
-the profile; `object_translation_correspondence` stays unperformed. This
-recheck report is never a recovery performer.
+leaf straight-line and forward-branch functions with pure-i64 source models
+under an assumed register convention. Direct calls are compared as
+uninterpreted call sites. Backward branches and loops remain outside the
+profile. This is not an ABI, full object translation, runtime or
+historical-execution claim. The C `main` wrapper, CRT, loader and libc are
+outside the profile; `object_translation_correspondence` stays unperformed.
+This recheck report is never a recovery performer.
 """
 
 from __future__ import annotations
@@ -167,8 +168,9 @@ def build_machine_tv_recheck_parser(
     if parser is None:
         parser = argparse.ArgumentParser(prog="native-machine-tv-recheck")
     parser.description = (
-        "Run Core's bounded straight-line machine-code TV recheck, with "
-        "direct calls compared as uninterpreted sites, and emit one attempt."
+        "Run Core's bounded leaf straight-line and forward-branch machine-code "
+        "TV recheck; direct calls are uninterpreted sites; backward branches, "
+        "loops, ABI/runtime semantics and full object TV stay outside."
     )
     parser.add_argument(
         "--core",

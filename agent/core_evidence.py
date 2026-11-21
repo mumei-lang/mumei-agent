@@ -1548,11 +1548,13 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
 )
 
 # Core's object-symbol, direct-call-edge and object-to-executable checks are
-# bounded correspondences. The leaf and direct-call-site machine-code checks
-# are bounded straight-line TV under an assumed register convention; calls
-# are compared as uninterpreted sites. Neither check establishes ABI behavior
-# or full object TV. object_translation_correspondence is the full object-TV
-# check; none has a performer or makes a linker, loader, ABI, or runtime claim.
+# bounded correspondences. Leaf and direct-call-site machine-code checks
+# cover straight-line TV under an assumed register convention; calls are
+# compared as uninterpreted sites. Forward-branch function TV is also bounded;
+# backward branches and loops remain outside the profile. These checks do not
+# establish ABI behavior or full object TV. object_translation_correspondence
+# is the full object-TV check; none has a performer or makes a linker, loader,
+# ABI, or runtime claim.
 OBJECT_CHECK_VOCABULARY = frozenset(
     {
         "object_call_edge_correspondence",
@@ -1561,6 +1563,7 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "object_translation_correspondence",
         "machine_code_leaf_function_tv",
         "machine_code_direct_call_site_tv",
+        "machine_code_forward_branch_function_tv",
     }
 )
 
