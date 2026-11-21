@@ -5956,6 +5956,358 @@ def test_local_interface_method_value_and_expression_calls_are_admitted(
 
 
 @pytest.mark.parametrize(
+    "binding",
+    [
+        "f := i.M",
+        "var f = i.M",
+        "var f func(int64) int64 = i.M",
+        "var f func(int64) int64; f = i.M",
+    ],
+)
+def test_interface_method_value_bindings_match_direct_dispatch(
+    go_types_helper, binding
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            f"{binding}; return f(x) }}",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { return i.M(x) }",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_method_expression_value_matches_direct_dispatch(
+    go_types_helper,
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { f := I.M; return f(i, x) }",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { return I.M(i, x) }",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_method_value_freezes_receiver_dependencies(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i, j I, x int64) int64 { "
+            "f := i.M; i = j; return f(x) }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 2})
+
+
+def test_interface_method_value_pointer_argument_matches_direct_dispatch(
+    go_types_helper,
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(*int64) }\n"
+            "func F(i I, x int64) int64 { "
+            "y := x; f := i.M; f(&y); return y }",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(*int64) }\n"
+            "func F(i I, x int64) int64 { "
+            "y := x; i.M(&y); return y }",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0})
+    assert value.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_method_value_channel_argument_matches_direct_dispatch(
+    go_types_helper,
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(chan int64) }\n"
+            "func F(i I) int64 { c := make(chan int64, 1); "
+            "f := i.M; f(c); return <-c }",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(chan int64) }\n"
+            "func F(i I) int64 { c := make(chan int64, 1); "
+            "i.M(c); return <-c }",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+
+
+def test_interface_method_value_plain_copy_is_admitted(go_types_helper):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; g := f; return g(x) }",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { return i.M(x) }",
+        )
+    )
+    assert value.available, value.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_method_value_rebind_resolves_new_value(
+    go_types_helper,
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\n"
+            "func (T) N(x int64) int64 { return x }\n"
+            "func F(i I, t T, x int64) int64 { "
+            "f := i.M; f = t.N; return f(x) }",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\n"
+            "func (T) N(x int64) int64 { return x }\n"
+            "func F(i I, t T, x int64) int64 { return t.N(x) }",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({2})
+
+    literal = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; f = func(y int64) int64 { return y }; "
+            "return f(x) }",
+        )
+    )
+    assert literal.available, literal.gaps
+    assert literal.return_dependencies == frozenset({1})
+
+
+def test_interface_method_value_conditional_rebind_is_sound(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(b bool, i, j I, x int64) int64 { "
+            "f := i.M; if b { f = j.M }; return f(x) }",
+        )
+    )
+    if result.available:
+        assert {1, 2} <= result.return_dependencies
+
+
+def test_interface_method_value_caller_propagation_matches_direct(
+    go_types_helper,
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\n"
+            "func (T) M(x int64) int64 { return x }\n"
+            "func F(i I, x int64) int64 { f := i.M; return f(x) }\n"
+            "func G(x int64) int64 { return F(T{}, x) }",
+        ),
+        name="G",
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\n"
+            "func (T) M(x int64) int64 { return x }\n"
+            "func F(i I, x int64) int64 { return i.M(x) }\n"
+            "func G(x int64) int64 { return F(T{}, x) }",
+        ),
+        name="G",
+    )
+    assert value.available, value.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0})
+
+
+def test_interface_method_value_binding_pins_stale_dependents(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(i I, x int64) int64 { f := i.M; return f(x) }\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    interface_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "I" and binding.kind == "type"
+    )
+    assert interface_id in result.pinned
+
+    changed = {
+        "a.go": files["a.go"],
+        "i.go": "package p\n",
+        "i2.go": (
+            "package p\n"
+            "type I interface{ M(int64) int64; N() }\n"
+        ),
+    }
+    snapshot2 = _snapshot_for(go_types_helper, changed)
+    known = {binding.id for binding in snapshot2.bindings}
+    function_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert interface_id not in known
+    assert summaries.stale_dependents(known) == frozenset(
+        {function_id}
+    )
+
+
+@pytest.mark.parametrize(
+    "declarations,reason",
+    [
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func H(f func(int64) int64) int64 { return f(0) }\n"
+            "func F(i I) int64 { return H(i.M) }",
+            "non_parameter_reference",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I) func(int64) int64 { return i.M }",
+            "non_parameter_reference",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(mk func() I, x int64) int64 { "
+            "f := mk().M; return f(x) }",
+            "non_parameter_reference",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ i I }\n"
+            "func F(s S, x int64) int64 { "
+            "f := s.i.M; return f(x) }",
+            "non_parameter_reference",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; go f(x); return x }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; defer f(x); return x }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; g := func() int64 { return f(x) }; return g() }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func H(f func(int64) int64) int64 { return f(0) }\n"
+            "func F(i I, x int64) int64 { f := i.M; return H(f) }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I) func(int64) int64 { f := i.M; return f }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { f := i.M; "
+            "fs := []func(int64) int64{f}; _ = fs; return x }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { f := i.M; "
+            "if f == nil { return x }; return x }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F[T I](t T, x int64) int64 { f := t.M; return f(x) }",
+            "unsupported_signature",
+        ),
+    ],
+)
+def test_interface_method_value_non_call_uses_stay_closed(
+    go_types_helper, declarations, reason
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(gap.reason == reason for gap in result.gaps), result.gaps
+
+
+@pytest.mark.parametrize(
     "setup,receiver",
     [
         ("", "i"),
