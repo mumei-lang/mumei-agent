@@ -5956,6 +5956,322 @@ def test_local_interface_method_value_and_expression_calls_are_admitted(
 
 
 @pytest.mark.parametrize(
+    ("root_type", "receiver"),
+    [
+        ("W", "w.i"),
+        ("W", "(w.i)"),
+        ("WW", "w.w.i"),
+    ],
+)
+def test_interface_dispatch_value_struct_parameter_field_receivers(
+    go_types_helper, root_type, receiver
+):
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type W struct{ i I }\n"
+        "type WW struct{ w W }\n"
+        "func G(i I, x int64) int64 { return i.M(x) }\n"
+        f"func F(w {root_type}, x int64) int64 {{ "
+        f"return {receiver}.M(x) }}\n"
+        f"func H(w {root_type}, x int64) int64 {{ "
+        f"return G({receiver}, x) }}\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    direct = named(source, snapshot, summaries, "F")
+    extracted = named(source, snapshot, summaries, "H")
+    assert direct.available, direct.gaps
+    assert extracted.available, extracted.gaps
+    assert direct.return_dependencies == extracted.return_dependencies
+    assert direct.return_dependencies == frozenset({0, 1})
+    assert direct.effects == extracted.effects == "unknown"
+    (transfer,) = direct.calls
+    root_binding = next(
+        binding
+        for binding in snapshot.bindings
+        if binding.name == "w" and binding.scope is not None
+    )
+    assert transfer.target == root_binding.id
+    assert transfer.arguments == (frozenset({0}), frozenset({1}))
+    assert transfer.imported
+
+
+def test_interface_dispatch_field_receiver_keeps_indirect_writes(
+    go_types_helper,
+):
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type P struct{ V int64 }\n"
+        "func (p *P) M(x int64) int64 { p.V = x; return 0 }\n"
+        "type W struct{ i I }\n"
+        "func F(w W, p *P, x int64) int64 {\n"
+        "\tw.i.M(x)\n"
+        "\treturn p.V\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert 2 in result.return_dependencies
+    assert result.effects == "unknown"
+
+
+def test_interface_dispatch_field_receiver_pins_method_set(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(w W, x int64) int64 { return w.i.M(x) }\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+        "w.go": "package p\ntype W struct{ i I }\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    interface_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "I" and binding.kind == "type"
+    )
+    assert interface_id in result.pinned
+    function_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+
+    changed = {
+        "a.go": files["a.go"],
+        "w.go": files["w.go"],
+        "i2.go": (
+            "package p\n"
+            "type I interface{ M(int64) int64; N() }\n"
+        ),
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report_imports(go_types_helper, changed, {}),
+        changed,
+        target_arch="amd64",
+    )
+    known = {binding.id for binding in snapshot2.bindings}
+    function_id2 = next(
+        function.binding_id
+        for function in snapshot2.functions
+        if snapshot2.binding(function.binding_id).name == "F"
+    )
+    assert function_id2 == function_id
+    assert interface_id not in known
+    assert summaries.stale_dependents(known) == frozenset({function_id})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "reason"),
+    [
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\n"
+            "func (T) M(x int64) int64 { return x }\n"
+            "type W struct{ i I }\n"
+            "func F(x int64) int64 { "
+            "w := W{i: T{}}; return w.i.M(0) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type P struct{ i I }\n"
+            "type W struct{ p *P }\n"
+            "func F(w W, x int64) int64 { return w.p.i.M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w *W, x int64) int64 { return w.i.M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w *W, x int64) int64 { return (*w).i.M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type B struct{ i I }\n"
+            "type WD B\n"
+            "func F(w WD, x int64) int64 { return w.i.M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "var global I\n"
+            "func F(x int64) int64 { return global.M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(is []I, x int64) int64 { return is[0].M(x) }",
+            "unsupported_signature",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(m map[int]I, x int64) int64 { return m[0].M(x) }",
+            "unsupported_signature",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(v interface{}, x int64) int64 { return v.(I).M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+    ],
+)
+def test_interface_dispatch_computed_receiver_shapes_stay_closed(
+    go_types_helper, declarations, reason
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(gap.reason == reason for gap in result.gaps)
+
+
+def test_interface_dispatch_imported_struct_root_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "import \"lib\"\n"
+            "func F(w lib.W, x int64) int64 { return w.I.M(x) }\n"
+        )
+    }
+    imports = {
+        "lib": {
+            "w.go": (
+                "package lib\n"
+                "type I interface{ M(int64) int64 }\n"
+                "type W struct{ I I }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
+
+
+def test_interface_dispatch_local_interface_call_result_stays_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type T struct{}\n"
+        "func (T) M(x int64) int64 { return x }\n"
+        "func mk() I { return T{} }\n"
+        "func F(x int64) int64 { return mk().M(x) }\n"
+    )
+    data = unit(go_types_helper, declarations)
+    result = named(*data, name="F")
+    callee = named(*data, name="mk")
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
+    assert not callee.available
+    assert any(
+        gap.reason == "unsupported_signature" for gap in callee.gaps
+    )
+
+
+def test_interface_dispatch_local_struct_pointer_value_stays_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type P struct{ V int64 }\n"
+        "func (p *P) M(x int64) int64 { p.V = x; return 0 }\n"
+        "type W struct{ i I }\n"
+        "func F(x int64) int64 {\n"
+        "\tq := &P{}\n"
+        "\tw := W{i: q}\n"
+        "\tw.i.M(x)\n"
+        "\treturn q.V\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
+
+
+def test_interface_dispatch_field_method_value_stays_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type W struct{ i I }\n"
+        "func F(w W, x int64) int64 { f := w.i.M; return f(x) }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(
+        gap.reason == "non_parameter_reference" for gap in result.gaps
+    )
+
+
+def test_imported_interface_call_result_stays_closed_when_unrepresentable(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "import \"lib\"\n"
+            "func E(x int64) int64 { _ = lib.Mk(); return x }\n"
+            "func F(x int64) int64 { return lib.Mk().M(x) }\n"
+        )
+    }
+    lib = {
+        "lib": {
+            "m.go": (
+                "package lib\n"
+                "type I interface{ M(int64) int64 }\n"
+                "type T struct{}\n"
+                "func (T) M(x int64) int64 { return x }\n"
+                "func Mk() I { return T{} }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    expression = named_package(files, snapshot, summaries, "E")
+    dispatch = named_package(files, snapshot, summaries, "F")
+    assert any(
+        call.kind == "external_or_bodyless" for call in snapshot.calls
+    )
+    for result in (expression, dispatch):
+        assert not result.available
+        assert any(
+            gap.reason == "unresolved_or_opaque_call"
+            for gap in result.gaps
+        )
+
+
+@pytest.mark.parametrize(
     "binding",
     [
         "f := i.M",
@@ -6633,6 +6949,52 @@ def test_interface_parameter_signature_pin_flags_stale_dependents(
     )
     assert f_id in known
     assert interface_id not in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_interface_field_receiver_signature_pin_flags_stale_dependents(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(w W, x int64) int64 { w.i.M(x); return x }\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(x int64) R }\n",
+        "w.go": "package p\ntype W struct{ i I }\n",
+        "r.go": "package p\ntype R *int64\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    r_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "R" and binding.kind == "type"
+    )
+    assert r_id in result.pinned
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+
+    changed = {
+        **files,
+        "r.go": "package p\ntype R struct{ v int64 }\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report_imports(go_types_helper, changed, {}),
+        changed,
+        target_arch="amd64",
+    )
+    known = {binding.id for binding in snapshot2.bindings}
+    assert f_id in known
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
