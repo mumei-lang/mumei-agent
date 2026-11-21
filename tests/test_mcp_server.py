@@ -162,6 +162,7 @@ class TestGetAgentStatus:
         assert "get_spec_guide_summary" in registered
         assert "get_spec_guidelines" in registered
         assert "evidence_check_schedule" in registered
+        assert "evidence_check_attempt_acceptance" in registered
         assert "evidence_check_adapter" in registered
         assert "evidence_accept_list" in registered
         assert "native_observations_accept" in registered
