@@ -338,6 +338,21 @@ func TestImportedGenericStructFieldDoesNotImportLocalTypeArgument(t *testing.T) 
 	}
 }
 
+func TestGenericNamedTypeFactMarksInstantiationArguments(t *testing.T) {
+	out := checked(t, `package p
+type S3 struct{ B int64 }
+type Box[T any] struct{ A T }
+func F(t *Box[S3]) int64 { return t.A.B }`, "amd64")
+	if len(out.Functions) != 1 || len(out.Functions[0].Parameters) != 1 {
+		t.Fatal("the generic pointer parameter is missing")
+	}
+	paramType := out.Functions[0].Parameters[0].Type
+	if paramType.Kind != "pointer" || paramType.Elem == nil ||
+		!paramType.Elem.HasTypeArgs {
+		t.Fatalf("the instantiated pointee was not marked: %+v", paramType)
+	}
+}
+
 func TestImportedMethodChanResultAdmits(t *testing.T) {
 	// `ch, n := st.M()` — an imported method whose signature
 	// declares a scalar-element `chan` among its results records

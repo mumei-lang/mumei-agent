@@ -11051,6 +11051,89 @@ def test_imported_generic_struct_field_with_local_type_argument_loads(
     assert result.available or result.gaps
 
 
+def test_generic_struct_intermediates_stay_closed_across_instantiations(
+    go_types_helper,
+):
+    lib = {
+        "lib": {
+            "box.go": "package lib\ntype Box[T any] struct{ A T }\n",
+            "s3.go": "package lib\ntype S3 struct{ B int64 }\n",
+            "s4.go": "package lib\ntype S4 struct{ B int64 }\n",
+        }
+    }
+    s3 = (
+        "package p\nimport \"lib\"\n"
+        "func F3Read(t *lib.Box[lib.S3]) int64 { return t.A.B }\n"
+        "func F3Store(t *lib.Box[lib.S3], x int64) int64 { "
+        "t.A.B = x; return t.A.B }\n"
+    )
+    s4 = (
+        "package p\nimport \"lib\"\n"
+        "func F4Read(t *lib.Box[lib.S4]) int64 { return t.A.B }\n"
+        "func F4Store(t *lib.Box[lib.S4], x int64) int64 { "
+        "t.A.B = x; return t.A.B }\n"
+    )
+    int64 = (
+        "package p\nimport \"lib\"\n"
+        "func FIRead(t *lib.Box[int64]) int64 { return t.A }\n"
+        "func FIStore(t *lib.Box[int64], x int64) int64 { "
+        "t.A = x; return t.A }\n"
+    )
+
+    def results(files, expected_names):
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, lib),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+        functions = {
+            snapshot.binding(fn.binding_id).name: fn
+            for fn in snapshot.functions
+        }
+        assert set(expected_names) <= set(functions)
+        for name in ("F3Read", "F3Store", "F4Read", "F4Store"):
+            if name not in functions:
+                continue
+            param_type = functions[name].parameters[0].type
+            assert (
+                param_type.kind == "pointer"
+                and param_type.elem is not None
+                and param_type.elem.has_type_args
+            )
+            result = named_package(files, snapshot, summaries, name)
+            assert not result.available
+            assert result.gaps
+        for name, expected in (
+            ("FIRead", frozenset({0})),
+            ("FIStore", frozenset({0, 1})),
+        ):
+            if name not in functions:
+                continue
+            result = named_package(files, snapshot, summaries, name)
+            if result.available:
+                assert result.return_dependencies == expected
+            else:
+                assert result.gaps
+
+    results(
+        {"a.go": s3, "b.go": int64},
+        ("F3Read", "F3Store", "FIRead", "FIStore"),
+    )
+    results(
+        {"a.go": int64, "b.go": s3},
+        ("F3Read", "F3Store", "FIRead", "FIStore"),
+    )
+    results(
+        {"a.go": s3, "b.go": s4},
+        ("F3Read", "F3Store", "F4Read", "F4Store"),
+    )
+    results(
+        {"a.go": s4, "b.go": s3},
+        ("F3Read", "F3Store", "F4Read", "F4Store"),
+    )
+
+
 def test_bound_base_field_read_pins_nested_imported_type_staleness(
     go_types_helper,
 ):

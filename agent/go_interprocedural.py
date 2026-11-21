@@ -367,6 +367,8 @@ def _type_dict(t: GoType) -> dict:
         result["elem"] = _type_dict(t.elem)
     if t.key is not None:
         result["key"] = _type_dict(t.key)
+    if t.has_type_args:
+        result["has_type_args"] = True
     return result
 
 
@@ -376,11 +378,13 @@ def _type_from_dict(value: Any, depth: int = 0) -> GoType:
     v = _manifest_record(
         value,
         ("kind", "basic_name", "bit_width", "signed", "type_id"),
-        ("elem", "key"),
+        ("elem", "key", "has_type_args"),
     )
     signed = v["signed"]
+    has_type_args = v.get("has_type_args", False)
     _require_restore(type(signed) is bool or signed is None)
     _require_restore(type(v["bit_width"]) is int and v["bit_width"] >= 0)
+    _require_restore(type(has_type_args) is bool)
     return GoType(
         _string(v["kind"]),
         _string(v["basic_name"]),
@@ -389,6 +393,7 @@ def _type_from_dict(value: Any, depth: int = 0) -> GoType:
         _string(v["type_id"]),
         _type_from_dict(value["elem"], depth + 1) if "elem" in value else None,
         _type_from_dict(value["key"], depth + 1) if "key" in value else None,
+        has_type_args,
     )
 
 
@@ -4119,7 +4124,8 @@ class _Builder:
         reference to its `scope`-less `variable` binding. Only when
         `intermediate=True` may a named struct-valued field also be
         returned, so recursive selection can pin its type identity;
-        anonymous struct fields stay closed. A promoted method's
+        anonymous struct fields and intermediates under generic
+        instantiations stay closed. A promoted method's
         `func` member, a non-scalar leaf, a computed base, or any
         unresolvable name returns None.
         """
@@ -4435,6 +4441,23 @@ class _Builder:
             ref,
         )
 
+    def _type_fact_has_type_args(self, fact: GoType | None) -> bool:
+        while fact is not None:
+            if fact.has_type_args:
+                return True
+            fact = fact.elem
+        return False
+
+    def _bound_chain_has_type_args(
+        self, root_ref: Any, members: tuple[Any, ...]
+    ) -> bool:
+        root = self.bindings.get(root_ref.binding_id)
+        if root is not None and self._type_fact_has_type_args(root.type):
+            return True
+        return any(
+            self._type_fact_has_type_args(member.type) for member in members
+        )
+
     def _bound_selector_pointees(
         self,
         operand: Any,
@@ -4453,9 +4476,10 @@ class _Builder:
         member — pinned so redeclaring `W` flags the summary —
         followed by the field's pointee `type` member when the field
         is pointer-typed, or when it is a named struct-valued field.
-        Anonymous struct intermediates remain closed. The tuple's
-        last element is always the deepest pointee. Anything else —
-        a computed base, a double deref, or an unresolvable field —
+        Anonymous struct intermediates and struct-valued intermediates
+        under a generic instantiation remain closed. The tuple's last
+        element is always the deepest pointee. Anything else — a
+        computed base, a double deref, or an unresolvable field —
         returns None.
         """
         while operand.type == "parenthesized_expression":
@@ -4505,6 +4529,10 @@ class _Builder:
                     if pointee is None:
                         return None
             elif inner_field.type.kind == "struct":
+                if self._bound_chain_has_type_args(
+                    root_ref, (*inner_pointees, inner_field)
+                ):
+                    return None
                 if not inner_field.type.type_id:
                     return None
                 pointee = self._pointee_type(inner_field.type.type_id)

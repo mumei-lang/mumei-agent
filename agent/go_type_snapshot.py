@@ -83,6 +83,10 @@ class GoType:
     # The key fact on map kinds — `map[K]V` — so a named key's
     # identity pins like the value's does.
     key: "GoType | None" = None
+    # A named/alias type fact marks an instantiated generic shape.
+    # The analyzer closes struct-valued selector intermediates through
+    # such a pointee until the field identity can vary per instance.
+    has_type_args: bool = False
 
 
 @dataclass(frozen=True)
@@ -454,11 +458,22 @@ def _go_type(value: Any, arch: str) -> GoType:
         isinstance(value, dict)
         and {"kind", "basic_name", "bit_width", "signed", "type_id"}
         <= set(value)
-        <= {"kind", "basic_name", "bit_width", "signed", "type_id", "elem", "key"}
+        <= {
+            "kind",
+            "basic_name",
+            "bit_width",
+            "signed",
+            "type_id",
+            "elem",
+            "key",
+            "has_type_args",
+        }
     )
     v = value
     kind, name, width = v["kind"], v["basic_name"], v["bit_width"]
     signed, type_id = v["signed"], _string(v["type_id"])
+    has_type_args = v.get("has_type_args", False)
+    _require(type(has_type_args) is bool)
     elem_raw = v["elem"] if "elem" in v else None
     key_raw = v["key"] if "key" in v else None
     _require(isinstance(kind, str) and isinstance(name, str) and type(width) is int)
@@ -552,7 +567,7 @@ def _go_type(value: Any, arch: str) -> GoType:
     else:
         _require(elem_raw is None and key_raw is None)
         elem = key = None
-    return GoType(kind, name, width, signed, type_id, elem, key)
+    return GoType(kind, name, width, signed, type_id, elem, key, has_type_args)
 
 
 def _type_ids(t: GoType) -> Iterator[str]:

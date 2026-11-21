@@ -62,11 +62,12 @@ func fileSpan(file, start, end int) span {
 }
 
 type typeFact struct {
-	Kind      string `json:"kind"`
-	BasicName string `json:"basic_name"`
-	BitWidth  int    `json:"bit_width"`
-	Signed    *bool  `json:"signed"`
-	TypeID    string `json:"type_id"`
+	Kind        string `json:"kind"`
+	BasicName   string `json:"basic_name"`
+	BitWidth    int    `json:"bit_width"`
+	Signed      *bool  `json:"signed"`
+	TypeID      string `json:"type_id"`
+	HasTypeArgs bool   `json:"has_type_args,omitempty"`
 	// Elem carries the element type fact on slice/array kinds — `[]T`,
 	// `[N]T` and named/alias types whose underlying is one — so a
 	// container index read can classify the element it returns. On map
@@ -1135,8 +1136,10 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	switch typ := t.(type) {
 	case *types.Named:
 		f.TypeID = ix.typeID(typ.Obj())
+		f.HasTypeArgs = typ.TypeArgs().Len() > 0
 	case *types.Alias:
 		f.TypeID = ix.typeID(typ.Obj())
+		f.HasTypeArgs = typ.TypeArgs().Len() > 0
 	case *types.TypeParam:
 		f.TypeID = ix.typeID(typ.Obj())
 	case *types.Pointer:
