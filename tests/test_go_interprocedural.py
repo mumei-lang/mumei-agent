@@ -32105,12 +32105,33 @@ def test_struct_field_scalar_element_callee_write_reaches_source(
                 "type S2 struct { A []E[int64] }\n"
                 "func F(o S2, i int64) int64 { return o.A[i].V }\n"
             ),
+        (
+            "type I struct { V int64 }\n"
+            "type E struct { R [2]I; V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(o S2, x int64) int64 {\n"
+            "\to.A[0].R[0].V = x\n"
+            "\treturn o.A[0].R[0].V\n"
+            "}\n"
+        ),
+        (
+            "type I struct { V int64 }\n"
+            "type E struct { R [2]I; V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(o S2, x int64) int64 {\n"
+            "\ta := o.A\n"
+            "\to.A[0].R[0].V = x\n"
+            "\treturn a[0].R[0].V\n"
+            "}\n"
+        ),
         ],
         ids=[
             "pointer-root",
             "pointer-field",
             "anonymous-element",
             "generic-element",
+            "element-array-field-index-write",
+            "element-array-field-index-alias",
         ],
     )
 def test_struct_field_root_scalar_element_unsupported_shapes_stay_closed(

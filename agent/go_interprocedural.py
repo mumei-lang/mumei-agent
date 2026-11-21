@@ -2840,6 +2840,38 @@ class _Builder:
             container_fact.kind == "array"
             and not self._type_embeds_collection(container_fact)
         ):
+            # A pure-array field keeps value-copy semantics in its own
+            # slot — but only when the container sits directly on the
+            # root (`o.R[0].V`). When the container is reached through
+            # an index (`o.A[0].R[0].V`), the field lives inside a
+            # shared-backing element, so an isolated slot would drop
+            # writes an alias (`a := o.A`) must observe. Stay closed.
+            probe = current
+            while probe is not None:
+                while probe.type == "parenthesized_expression":
+                    probe = next(
+                        (
+                            child
+                            for child in probe.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                    if probe is None:
+                        break
+                if probe is None:
+                    break
+                if probe.type == "index_expression":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(current)
+                    )
+                if probe.type in {
+                    "selector_expression",
+                    "field_expression",
+                }:
+                    probe = probe.child_by_field_name("operand")
+                    continue
+                break
             tokens = self._opaque_container_tokens.get(field_key)
             if not tokens:
                 tokens = frozenset({field_key})
