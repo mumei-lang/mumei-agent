@@ -4113,6 +4113,26 @@ exactly like `st.F[j]` (the field slot is reachable only
 through extraction), and a pure array field still copies on
 extract.
 
+A *scalar-payload channel element* admits the same conflated way
+— `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind
+under `_chan_elem_collection` (slice/map only; an `[N]chan` array
+stays closed because its copy detaches the names while the queues
+inside still share). The stored queues keep their own identity —
+`c`'s token seeds into the container's group on bind, on `s[i] =
+c`, and on a `s = []chan{c2}` reseat — so a send through either
+side lands in the shared set: `s[i] <- x` deposits
+`value|index` into every sharer like an element store (and into
+`indirect_writes`, since the backing may alias escaped memory),
+and `c <- x` shows up in `<-s[j]`; `<-s[i]` reads the group's
+conflated union, FIFO order unmodelled like `<-ch`. `b := s`
+shares the group like any bound container copy. The honest
+closures stay: `d := s[i]` extracts no channel name (the same
+closure `b := a[i]` keeps for scalar elements — a bare index
+sharer yields no binding), `[]chan chan T` stays closed (a
+channel value travelling the group would alias under a second
+dep set), and `close(s[i])`, `for range`, `select` and
+param/result shapes stay opaque.
+
 ### C07 scalar-element *nested* local containers
 
 Exactly one level of nesting over a scalar-element collection
