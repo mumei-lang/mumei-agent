@@ -619,6 +619,43 @@ def test_const_generic_type_facts_follow_forward_aliases():
     assert _bindings(cyclic, "N", "generic_parameter")[0].type.kind == "unknown"
 
 
+def test_extern_functions_declare_generic_parameters_and_signature_references():
+    source = """
+extern "C" {
+    fn foreign<'a, T, const N: usize>(value: &'a T, values: [u8; N]) -> &'a T;
+    fn plain(value: Missing);
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    foreign = _bindings(report, "foreign", "function")[0]
+    foreign_function = next(
+        function for function in report.functions if function.binding_id == foreign.id
+    )
+    assert foreign_function.generic
+    assert foreign_function.body is None
+    for name in ("'a", "T", "N"):
+        generic = _bindings(report, name, "generic_parameter")
+        assert len(generic) == 1
+        references = [
+            reference
+            for reference in _refs(report, source, name)
+            if reference.binding_id == generic[0].id
+        ]
+        assert references
+    assert (
+        _bindings(report, "N", "generic_parameter")[0].type.bit_width,
+        _bindings(report, "N", "generic_parameter")[0].type.signed,
+    ) == (64, False)
+
+    plain = _bindings(report, "plain", "function")[0]
+    plain_function = next(
+        function for function in report.functions if function.binding_id == plain.id
+    )
+    assert not plain_function.generic
+    assert not _bindings(report, "Missing", "generic_parameter")
+    assert not _refs(report, source, "Missing")
+
+
 @pytest.mark.parametrize(
     "source",
     [

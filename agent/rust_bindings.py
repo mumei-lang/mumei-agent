@@ -368,7 +368,7 @@ class _RustBindings:
                             scope.module_depth,
                             item=True,
                             body_node=function_node.child_by_field_name("body"),
-                            generic=function_node.child_by_field_name("type_parameters") is not None,
+                            generic=self._is_generic_function(function_node),
                             variadic=any(
                                 child.type == "variadic_parameter"
                                 for child in self._descendants(
@@ -379,6 +379,11 @@ class _RustBindings:
                         )
                         self._add_to_scope(scope, fn_record)
                         self._function_records[fn_record.binding.id] = fn_record
+                        self._add_generic_parameters(
+                            function_node,
+                            scope,
+                            owner_function=fn_record.binding.id,
+                        )
             elif node.type == "use_declaration":
                 self._predeclare_use(node, scope)
             elif node.type == "macro_definition":
