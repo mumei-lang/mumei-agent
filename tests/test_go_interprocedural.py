@@ -20393,6 +20393,31 @@ def test_chan_elem_container_extract(
     assert result.return_dependencies == expected
 
 
+def test_chan_elem_detach_surrogate_never_stale(go_types_helper):
+    # Reseating an external channel parks its queue under a
+    # `/chan_queue/` surrogate so the old alias's sends still land —
+    # the synthetic id must not leak into `call_targets`, or
+    # `stale_dependents` would flag the summary against its own
+    # snapshot forever.
+    source = (
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\te := ch\n"
+        "\tch = make(chan int64, 1)\n"
+        "\te <- x\n"
+        "\treturn <-ch\n}\n"
+    )
+    source_, snapshot, summaries = unit(go_types_helper, source)
+    result = named(source_, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert any(t.imported for t in result.calls)
+    assert not any("/chan_queue/" in t for t in result.call_targets)
+    own = {f.binding_id for f in snapshot.functions} | {
+        b.id for b in snapshot.bindings
+    }
+    assert summaries.stale_dependents(own) == frozenset()
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
