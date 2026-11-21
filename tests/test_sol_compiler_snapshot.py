@@ -346,12 +346,14 @@ def test_rejects_captured_compiler_error_output():
 
 @pytest.mark.parametrize(
     "change",
-    ["missing_source", "nonzero_source_id", "wrong_ast_root"],
+    ["missing_source", "extra_output_source", "nonzero_source_id", "wrong_ast_root"],
 )
 def test_rejects_missing_or_invalid_output_source(change):
     envelope = _envelope("state_write")
     if change == "missing_source":
         del envelope["output"]["sources"]["state_write.sol"]
+    elif change == "extra_output_source":
+        envelope["output"]["sources"]["other.sol"] = {"id": 1, "ast": {}}
     elif change == "nonzero_source_id":
         envelope["output"]["sources"]["state_write.sol"]["id"] = 1
     else:

@@ -191,7 +191,7 @@ def load_sol_compiler_snapshot(
         _compiler_metadata_version(output_data, compiler_version)
 
         output_sources = output_data.get("sources")
-        _require(type(output_sources) is dict and source_name in output_sources)
+        _require(type(output_sources) is dict and set(output_sources) == {source_name})
         output_source = output_sources[source_name]
         _require(type(output_source) is dict and type(output_source.get("id")) is int)
         _require(output_source["id"] == 0)
