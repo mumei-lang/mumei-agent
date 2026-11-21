@@ -20467,22 +20467,26 @@ def test_chan_elem_close(
 
 
 def test_chan_elem_close_index_evaluates(go_types_helper):
-    # `close(s[idx(0)])` — the index operand still evaluates; a
-    # helper call inside it records its transfer.
-    result = named(
-        *unit(
-            go_types_helper,
-            "func idx(x int64) int64 { return x }\n"
-            "func F(x int64) int64 {\n"
-            "\tc := make(chan int64, 4)\n"
-            "\ts := []chan int64{c}\n"
-            "\tc <- x\n"
-            "\tclose(s[idx(0)])\n"
-            "\treturn <-s[0]\n}\n",
-        )
+    # `close(s[i])` — the index operand still evaluates, recorded
+    # as a statement read on the close itself. Skipping it would
+    # leave the close's read empty and the test still passing.
+    source = (
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 4)\n"
+        "\ts := []chan int64{c}\n"
+        "\tc <- x\n"
+        "\ti := x\n"
+        "\tclose(s[i])\n"
+        "\treturn <-s[0]\n}\n"
     )
+    result = named(*unit(go_types_helper, source))
     assert result.available
     assert result.return_dependencies == frozenset({0})
+    close_start = source.index("close(s[i])") + len("package p;\n")
+    assert any(
+        read.span.start == close_start and read.deps == frozenset({0})
+        for read in result.statement_reads
+    )
 
 
 @pytest.mark.parametrize(
