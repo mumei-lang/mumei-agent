@@ -5846,6 +5846,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
             elif entry[0] == "local_chan_group":
                 _, binding, chan_group = entry
+                self.chan_aliases.pop(binding.id, None)
+                self.external_chan_locals.discard(binding.id)
                 self._store(
                     locals_, params, binding.id, recv_deps, conditional
                 )

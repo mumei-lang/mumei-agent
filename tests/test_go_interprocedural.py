@@ -15433,6 +15433,23 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             frozenset({0}),
             "none_in_supported_fragment",
         ),
+        (
+            "select receive detaches the previous channel alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ta := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := a\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\t\td <- x\n"
+            "\t}\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
     ],
 )
 def test_local_chan_chan_review_regressions(
