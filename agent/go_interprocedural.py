@@ -19928,15 +19928,15 @@ class _Builder:
                         transfers=transfers,
                         count=count,
                     )
-                        if (
-                            (
-                                bound is not None
-                                or computed is not None
-                                or opaque_range is not None
-                                or opaque_range_field is not None
-                            )
-                            and fact is not None
-                            and len(lefts) >= 1
+                    if (
+                        (
+                            bound is not None
+                            or computed is not None
+                            or opaque_range is not None
+                            or opaque_range_field is not None
+                        )
+                        and fact is not None
+                        and len(lefts) >= 1
                         and len(lefts) <= 2
                     ):
                         # A map's key is stored data — keys added
