@@ -37,6 +37,7 @@ _SUBCOMMANDS = {
     "summaries-plan",
     "rust-summaries",
     "rust-bindings",
+    "ts-bindings",
     "rust-summaries-accept",
     "rust-summaries-check",
     "rust-summaries-reuse",
@@ -1331,6 +1332,23 @@ def main() -> None:
         sol_bindings_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(sol_bindings_main(args))
+    elif command == "ts-bindings":
+        import argparse
+        from agent.ts_bindings import (
+            build_parser as ts_bindings_build_parser,
+            main as ts_bindings_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent ts-bindings",
+            description=(
+                "Emit a conservative TypeScript lexical binding report as JSON; "
+                "this is lexical metadata, not a type check, proof, or verdict."
+            ),
+        )
+        ts_bindings_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(ts_bindings_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
