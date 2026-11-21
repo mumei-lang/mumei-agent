@@ -231,6 +231,30 @@ def test_reader_rejects_reference_and_unresolved_at_the_same_span():
         _load_producer_document(doc, source)
 
 
+def test_reader_rejects_exact_duplicate_references_but_allows_distinct_kinds():
+    source = "fn f(mut x:i32){ x += 1; }"
+    doc = _producer_document(source)
+    reference = next(
+        item
+        for item in doc["references"]
+        if source.encode()[item["span"]["start"] : item["span"]["end"]] == b"x"
+        and item["kind"] == "read"
+    )
+    doc["references"].append(copy.deepcopy(reference))
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+    report = build_rust_bindings(source, pointer_width=64)
+    x_references = [
+        item
+        for item in report.references
+        if source.encode()[item.span.start : item.span.end] == b"x"
+    ]
+    assert [item.kind for item in x_references] == ["read", "write"]
+    restored = _load_producer_document(json.loads(report.to_json()), source)
+    assert restored.to_json() == report.to_json()
+
+
 @pytest.mark.parametrize("tamper", ["duplicate", "function_kind", "parameter_kind"])
 def test_reader_validates_function_records_and_parameter_kinds(tamper):
     source = "fn f(x:i32){ x; }"

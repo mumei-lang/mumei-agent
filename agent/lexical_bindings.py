@@ -466,12 +466,16 @@ def load_lexical_report(
         binding_kinds = {binding.id: binding.kind for binding in bindings}
 
         references: list[Reference] = []
+        reference_keys: set[tuple[ByteSpan, str, str]] = set()
         for item in _array(top["references"]):
             record = _object(item, {"span", "binding_id", "kind"})
             span = _span(record["span"], boundaries, len(source_bytes))
             identifier = _string(record["binding_id"])
             kind = _string(record["kind"])
             _fail(identifier in ids and kind in REFERENCE_KINDS)
+            reference_key = (span, identifier, kind)
+            _fail(reference_key not in reference_keys)
+            reference_keys.add(reference_key)
             _fail(
                 kind != "write"
                 or binding_kinds[identifier] not in NON_ASSIGNABLE_WRITE_KINDS

@@ -4,7 +4,19 @@ import sys
 import pytest
 
 from agent.lexical_bindings import LexicalReportError, load_lexical_report
-from agent.rust_bindings import PROFILE, build_rust_bindings
+from agent.rust_bindings import PROFILE, build_rust_bindings as _build_rust_bindings
+
+
+def build_rust_bindings(source, *, pointer_width):
+    report = _build_rust_bindings(source, pointer_width=pointer_width)
+    reference_keys = [
+        (reference.span, reference.binding_id, reference.kind)
+        for reference in report.references
+    ]
+    assert len(reference_keys) == len(set(reference_keys)), source
+    call_spans = [call.span for call in report.calls]
+    assert len(call_spans) == len(set(call_spans)), source
+    return report
 
 
 def _bindings(report, name, kind=None):
@@ -568,6 +580,32 @@ fn outside(x: T) {}
     )
     alias = _bindings(report, "T", "type_alias")[0]
     assert outside.type.type_id == alias.id
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "fn g<const N: usize>(a: usize) -> usize { a + N }",
+        (
+            "fn f<T, const N: usize>(x: T) { "
+            "match 1 { n if n > N => {}, _ => {} } }"
+        ),
+    ],
+)
+def test_generic_const_references_are_emitted_once(source):
+    report = build_rust_bindings(source, pointer_width=64)
+    const_parameter = next(
+        binding
+        for binding in report.bindings
+        if binding.kind == "generic_parameter" and binding.name == "N"
+    )
+    n_references = [
+        reference
+        for reference in report.references
+        if reference.binding_id == const_parameter.id
+    ]
+    assert len(n_references) == 1
+    assert n_references[0].kind == "read"
 
 
 def test_generic_type_parameters_do_not_leak_outside_their_item_scope():

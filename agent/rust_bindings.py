@@ -763,7 +763,12 @@ class _RustBindings:
                             item=False,
                         ),
                     )
-        self._generic_references(node, skip_nested_items=True)
+        self._generic_references(node.child_by_field_name("type_parameters"))
+        if parameters is not None:
+            for parameter in self._children(parameters):
+                self._generic_references(parameter.child_by_field_name("type"))
+        self._generic_references(node.child_by_field_name("return_type"))
+        self._generic_references(node.child_by_field_name("where_clause"))
         if body is not None:
             parameter_scope = self.span(body)
             if parameters is not None:
