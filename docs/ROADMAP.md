@@ -4160,8 +4160,7 @@ admits through the bound root: the element operand registers
 the root binding as the range's channel, so the per-pass
 rejoin unions the whole group's deps, and `select`
 alternatives on `s[i]` / `s[i] <- x` resolve through the same
-operand path. `[N]chan` arrays and `[][]chan` extraction stay
-opaque.
+operand path. `[][]chan` extraction stays opaque.
 
 A chan-element collection PARAMETER or RESULT admits like the
 scalar-element form — `func F(s []chan int64)`, `func G()
