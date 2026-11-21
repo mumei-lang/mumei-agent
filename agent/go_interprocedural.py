@@ -25478,7 +25478,67 @@ member, or one explicit dereference of one (`(*t).F` — the same
             locals_,
             params,
         )
+        self._escape_interface_dispatch_containers(
+            [receiver_node, *value_arguments], params, locals_
+        )
         return deps
+
+    def _escape_interface_dispatch_containers(
+        self,
+        arguments: list[Any],
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> None:
+        binding_ids = set()
+        for argument in arguments:
+            while (
+                argument is not None
+                and argument.type == "parenthesized_expression"
+            ):
+                argument = next(
+                    (
+                        child
+                        for child in argument.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if argument is None:
+                continue
+            if argument.type == "identifier":
+                ref = self.references.get(self.node_key(argument))
+                if ref is not None and ref.binding_id:
+                    binding_ids.add(ref.binding_id)
+            elif argument.type == "index_expression":
+                sharers = self._opaque_container_index_sharer_toks(
+                    argument
+                )
+                binding_ids.update(
+                    self._opaque_container_holders(sharers)
+                )
+        for binding_id in binding_ids:
+            if binding_id not in locals_ and binding_id not in params:
+                continue
+            binding = self.bindings.get(binding_id)
+            fact = binding.type if binding is not None else None
+            if (
+                fact is None
+                or not (
+                    fact.kind in {"slice", "map"}
+                    or (
+                        fact.kind == "array"
+                        and self._array_arg_shares_memory(fact)
+                    )
+                    or self._func_elem_collection(fact)
+                    or self._func_elem_nested_collection(fact)
+                    or (
+                        binding_id in self._opaque_container_tokens
+                        and fact.kind != "array"
+                    )
+                )
+            ):
+                continue
+            self.escaped.add(binding_id)
 
     def _bound_method_call(
         self,

@@ -5407,6 +5407,70 @@ def test_interface_dispatch_writes_back_pointer_argument(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+@pytest.mark.parametrize(
+    ("interfaces", "calls", "expected"),
+    [
+        pytest.param(
+            "type I interface{ Set([]int64); Update(int64) }\n",
+            "i.Set(s)\n\ti.Update(x)",
+            frozenset({0, 1}),
+            id="same-interface",
+        ),
+        pytest.param(
+            "type I interface{ Set([]int64) }\n"
+            "type J interface{ Update(int64) }\n",
+            "i.Set(s)\n\tj.Update(x)",
+            frozenset({0, 1, 2}),
+            id="different-interface",
+        ),
+    ],
+)
+def test_interface_dispatch_retained_container_reaches_later_call(
+    go_types_helper, interfaces, calls, expected
+):
+    params = "i I, x int64"
+    if "type J" in interfaces:
+        params = "i I, j J, x int64"
+    declarations = (
+        interfaces
+        + f"func F({params}) int64 {{\n"
+        "\ts := []int64{0}\n"
+        f"\t{calls}\n"
+        "\treturn s[0]\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+def test_interface_dispatch_retained_container_control_and_escape_scope(
+    go_types_helper,
+):
+    no_retention = (
+        "type I interface{ Set([]int64) }\n"
+        "func F(i I) int64 { s := []int64{0}; i.Set(s); return s[0] }\n"
+    )
+    result = named(*unit(go_types_helper, no_retention))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+    unrelated = (
+        "type I interface{ Set([]int64) }\n"
+        "func F(i I) int64 {\n"
+        "\ts := []int64{0}\n"
+        "\tt := []int64{0}\n"
+        "\ti.Set(s)\n"
+        "\tt[0] = 1\n"
+        "\treturn t[0]\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, unrelated))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset()
+
+
 def test_interface_dispatch_promotes_chan_argument(go_types_helper):
     # `lib.IC.Send(t, q)` — the dynamic implementation may send on or
     # hand back the channel argument, so `q` joins the external model
