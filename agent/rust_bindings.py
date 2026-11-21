@@ -518,6 +518,13 @@ class _RustBindings:
         if node.type == "higher_ranked_trait_bound":
             parameters = node.child_by_field_name("type_parameters")
             binder_scope = self.span(node)
+            parent = node.parent
+            if (
+                parent is not None
+                and parent.type == "where_predicate"
+                and parent.child_by_field_name("left") == node
+            ):
+                binder_scope = self.span(parent)
         elif node.type == "function_type":
             parameters = next(
                 (

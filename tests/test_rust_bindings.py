@@ -736,6 +736,41 @@ where
     )
 
 
+def test_higher_ranked_lifetimes_cover_their_complete_predicate_or_type():
+    source = """
+trait Tr<'a> {}
+fn f<'a, T, U, V, W>(
+    pointer: for<'d> fn(&'d T),
+    outside_pointer: &'d T,
+)
+where
+    for<'b> T: Tr<'b>,
+    U: Tr<'b>,
+    V: for<'c> Tr<'c>,
+    W: Tr<'c>,
+{
+    let _: &'a T;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for lifetime in ("'a", "'b", "'c", "'d"):
+        assert _bindings(report, lifetime, "generic_parameter")
+    assert len(_refs(report, source, "'b")) == 1
+    assert len(_refs(report, source, "'c")) == 1
+    assert len(_refs(report, source, "'d")) == 1
+    assert len(_refs(report, source, "'a")) == 1
+    for name, outside_marker in (
+        ("'b", "U: Tr<'b>"),
+        ("'c", "W: Tr<'c>"),
+        ("'d", "outside_pointer"),
+    ):
+        outside_position = source.index(outside_marker)
+        assert not any(
+            reference.span.start > outside_position
+            for reference in _refs(report, source, name)
+        )
+
+
 def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     source = "type T=u8; fn generic<T>(x:T){} fn outside(x:T){}"
     report = build_rust_bindings(source, pointer_width=64)
