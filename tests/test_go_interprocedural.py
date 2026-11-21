@@ -16659,6 +16659,43 @@ def test_chan_chan_param_origins_survive_reseating_an_alias(
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "if b { d = <-cc2 } else { return <-d }\n"
+        ),
+        (
+            "switch b {\n"
+            "case true: d = <-cc2\n"
+            "case false: return <-d\n"
+            "}\n"
+        ),
+        (
+            "a := make(chan int64, 1)\n"
+            "select {\n"
+            "case x := <-a: d = <-cc2; _ = x\n"
+            "case v := <-d: _ = v; return <-d\n"
+            "}\n"
+        ),
+    ],
+)
+def test_chan_chan_param_origins_do_not_leak_between_branches(
+    go_types_helper, body
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc, cc2 chan chan int64, b bool) int64 {\n"
+        "\td := <-cc\n"
+        + body
+        + "return 0\n}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "G")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
     # `cc <- q` inside `Publish` hands `q`'s queue to the outer
     # queue's domain — the caller's `chan` argument roots promote

@@ -6475,6 +6475,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
         else:
             self._chan_chan_param_origins.pop(binding_id, None)
 
+    def _merge_chan_chan_param_origin_states(
+        self, *states: dict[str, frozenset[int]]
+    ) -> dict[str, frozenset[int]]:
+        merged: dict[str, frozenset[int]] = {}
+        for state in states:
+            for binding_id, origins in state.items():
+                merged[binding_id] = (
+                    merged.get(binding_id, frozenset()) | origins
+                )
+        return {
+            binding_id: origins
+            for binding_id, origins in merged.items()
+            if origins
+        }
+
     def _local_chan_chan_id(self, node: Any) -> str | None:
         """The root identity of a local `chan chan T` queue operand."""
         inner = node
@@ -11515,21 +11530,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.expression(
                 condition, fn, params, scope, transfers, count, 0
             )
+            chan_origin_entry = dict(
+                self._chan_chan_param_origins
+            )
+            scope_entry = dict(scope)
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
             # Reassignments of existing names join back by union: the
             # branch may not execute.
-            branch = dict(scope)
+            branch = dict(scope_entry)
             ptr_branch = dict(self._ptr_deps)
             self._branch_sequence(
                 _children(consequence), fn, params, branch, transfers,
                 count, deps, saw_return, conditional,
             )
+            consequence_origins = dict(
+                self._chan_chan_param_origins
+            )
             self._join(scope, branch, params)
             self._join_ptr(ptr_branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
-                branch = dict(scope)
+                self._chan_chan_param_origins = dict(chan_origin_entry)
+                branch = dict(scope_entry)
                 ptr_branch = dict(self._ptr_deps)
                 if alternative.type == "if_statement":
                     self._branch_statement(
@@ -11541,8 +11564,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         _children(alternative), fn, params, branch,
                         transfers, count, deps, saw_return, conditional,
                     )
+                alternative_origins = dict(
+                    self._chan_chan_param_origins
+                )
                 self._join(scope, branch, params)
                 self._join_ptr(ptr_branch, params)
+            else:
+                alternative_origins = chan_origin_entry
+            self._chan_chan_param_origins = (
+                self._merge_chan_chan_param_origin_states(
+                    consequence_origins, alternative_origins
+                )
+            )
             if initializer is not None:
                 self._join(locals_, scope, params)
                 self._join_ptr(ptr_scope, params)
@@ -16148,6 +16181,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self.expression(
                     value, fn, params, scope, transfers, count, 0
                 )
+            switch_scope_entry = dict(scope)
             frame = {
                 "kind": "switch",
                 "exited": False,
@@ -16162,6 +16196,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if c.type in {"expression_case", "default_case"}
                 ]
                 branch: dict[str, frozenset[int]] | None = None
+                chan_origin_entry = dict(
+                    self._chan_chan_param_origins
+                )
+                chan_origin_exits: list[dict[str, frozenset[int]]] = []
+                branch_origins: dict[str, frozenset[int]] | None = None
                 for index, clause in enumerate(clauses):
                     body = next(
                         (
@@ -16189,6 +16228,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 "unsupported_fallthrough", _span(clause)
                             )
                         statements = statements[:-1]
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     for sub in clause.named_children:
                         if sub.type == "expression_list":
                             # Case guards are evaluated like the tag.
@@ -16201,17 +16243,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # Direct match, or the head of a new chain — the
                         # same fresh alternative doubles as the chain's
                         # first step when the clause falls through.
+                        self._chan_chan_param_origins = dict(
+                            chan_origin_entry
+                        )
                         frame["exited"] = False
-                        branch = dict(scope)
+                        branch = dict(switch_scope_entry)
                         ptr_branch = dict(self._ptr_deps)
                         self._branch_sequence(
                             statements, fn, params, branch, transfers,
                             count, deps, saw_return, conditional,
                         )
+                        direct_origins = dict(
+                            self._chan_chan_param_origins
+                        )
                         if not falls:
+                            chan_origin_exits.append(direct_origins)
                             self._join(scope, branch, params)
                             self._join_ptr(ptr_branch, params)
                             branch = None
+                            branch_origins = None
+                        else:
+                            branch_origins = direct_origins
                         continue
                     # Fall-through target — the body runs twice: once in
                     # the carried chain scope (the fallthrough path, with
@@ -16219,9 +16271,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # fresh alternative (the direct-match path, which
                     # skips the preceding clause's writes).
                     clause_seen_labels = set(self._seen_labels)
+                    self._chan_chan_param_origins = dict(
+                        branch_origins or chan_origin_entry
+                    )
                     self._branch_sequence(
                         statements, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
+                    )
+                    chain_origins = dict(
+                        self._chan_chan_param_origins
                     )
                     chain_exited = frame["exited"]
                     frame["exited"] = False
@@ -16229,22 +16287,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # one recorded — a forward goto inside the clause is
                     # still forward.
                     self._seen_labels = clause_seen_labels
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     fresh = dict(scope)
                     ptr_fresh = dict(self._ptr_deps)
                     self._branch_sequence(
                         statements, fn, params, fresh, transfers,
                         count, deps, saw_return, conditional,
                     )
+                    fresh_origins = dict(
+                        self._chan_chan_param_origins
+                    )
                     self._join(scope, fresh, params)
                     self._join_ptr(ptr_fresh, params)
                     if falls:
                         frame["exited"] = chain_exited
+                        branch_origins = (
+                            self._merge_chan_chan_param_origin_states(
+                                chain_origins, fresh_origins
+                            )
+                        )
                     else:
+                        chan_origin_exits.extend(
+                            [chain_origins, fresh_origins]
+                        )
                         self._join(scope, branch, params)
                         self._join_ptr(ptr_branch, params)
                         branch = None
+                        branch_origins = None
             finally:
                 self.frames.pop()
+            if not any(
+                clause.type == "default_case" for clause in clauses
+            ):
+                chan_origin_exits.append(chan_origin_entry)
+            self._chan_chan_param_origins = (
+                self._merge_chan_chan_param_origin_states(
+                    *chan_origin_exits
+                )
+                if chan_origin_exits
+                else chan_origin_entry
+            )
             if initializer is not None:
                 self._join(locals_, scope, params)
                 self._join_ptr(ptr_scope, params)
@@ -16697,6 +16781,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ]
             if not clauses:
                 raise _Unsupported("unsupported_statement", _span(node))
+            chan_origin_entry = dict(
+                self._chan_chan_param_origins
+            )
             frame = {
                 "kind": "switch",
                 "exited": False,
@@ -16719,6 +16806,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     tuple[list, Any, frozenset[int]] | None
                 ] = []
                 for clause in clauses:
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     receive = next(
                         (
                             s
@@ -16753,11 +16843,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ptr_entry = dict(self._ptr_deps)
                 chan_alias_entry = dict(self.chan_aliases)
                 chan_external_entry = set(self.external_chan_locals)
-                chan_origin_entry = dict(
-                    self._chan_chan_param_origins
-                )
                 clause_aliases: list[dict] = []
                 clause_externals: list[set] = []
+                clause_origins: list[dict[str, frozenset[int]]] = []
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
                     # `_branch_sequence` rewrites the shared
@@ -16770,6 +16858,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._ptr_deps = dict(ptr_entry)
                     self.chan_aliases = dict(chan_alias_entry)
                     self.external_chan_locals = set(chan_external_entry)
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     if receive is not None:
                         lefts, recv, recv_deps = receive
                         self._select_receive_store(
@@ -16805,6 +16896,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     clause_externals.append(
                         set(self.external_chan_locals)
                     )
+                    clause_origins.append(
+                        dict(self._chan_chan_param_origins)
+                    )
+                self._chan_chan_param_origins = (
+                    self._merge_chan_chan_param_origin_states(
+                        *clause_origins
+                    )
+                    if clause_origins
+                    else chan_origin_entry
+                )
                 # Post-join a channel name keeps its alias only where
                 # every clause's map agrees; a disagreement means it
                 # may hold either queue — the same "either queue"
