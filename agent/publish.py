@@ -259,11 +259,33 @@ def publish(
     # ``artifact_paths`` the consumer validates below). The verify --json
     # report itself never carries those keys.
     certificate_path = generated_path.with_suffix(".proof.json")
-    verify_result = client.verify(
-        str(generated_path),
-        spec_code_mapping=spec_code_mapping,
-        extra_args=["--proof-cert", "--output", str(certificate_path)],
-    )
+    cert_args = ["--proof-cert", "--output", str(certificate_path)]
+    # ``--proof-cert`` is a CLI-only flag — the MCP ``validate_logic``
+    # tool cannot emit a certificate file — so on an MCP-routed client
+    # the publish verdict still comes from the MCP path and a second,
+    # CLI-only pass produces the certificate (passing extra_args would
+    # silently downgrade the verdict to the local CLI).  On the plain
+    # CLI client the same call emits both.
+    try:
+        from agent.mcp_client import MumeiMCPClient as _MCPClient
+    except Exception:
+        _MCPClient = None
+    if (
+        _MCPClient is not None
+        and isinstance(client, _MCPClient)
+        and client.mode != "unavailable"
+    ):
+        verify_result = client.verify(
+            str(generated_path),
+            spec_code_mapping=spec_code_mapping,
+        )
+        client.verify(str(generated_path), extra_args=cert_args)
+    else:
+        verify_result = client.verify(
+            str(generated_path),
+            spec_code_mapping=spec_code_mapping,
+            extra_args=cert_args,
+        )
     if not verify_result["success"]:
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
         result["verify_error"] = verify_result
@@ -306,7 +328,11 @@ def publish(
     # never carries them.
     if certificate_path.is_file():
         cert_doc = proofcert.ProofCertificate.from_path(certificate_path)
-        result["proof_certificate_file"] = str(certificate_path)
+        # Repo-relative so the JSON result stays portable across
+        # environments (the absolute runner path means nothing off-box).
+        result["proof_certificate_file"] = str(
+            certificate_path.relative_to(cwd)
+        )
         declared_paths = proofcert.artifact_paths_of(cert_doc)
         if declared_paths:
             result["artifact_paths_status"] = (

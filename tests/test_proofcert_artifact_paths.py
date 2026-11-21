@@ -7,7 +7,9 @@ collection, and existence validation — without new artifact keys or aliases.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from agent.proofcert import (
     ProofCertificate,
@@ -175,3 +177,78 @@ class TestPublishResultSummaryWiring:
         summary = out["publish_result"]["proof_certificate_summary"]
         assert "artifact_paths" not in summary
         assert "harness_contract" not in summary
+
+
+class TestPublishCertificateWiring:
+    """publish() consumes the ``--proof-cert`` certificate file the CLI
+    writes — not the ``verify --json`` report — and reports each declared
+    artifact path as present or missing."""
+
+    _CODE = "atom test_mod(x: i64) requires: x >= 0; body: x;"
+
+    def _client_writing_cert(self, cert: dict) -> MagicMock:
+        def _verify(path, report_dir=None, extra_args=None,
+                    spec_code_mapping=None,
+                    collect_decidable_metrics=False):
+            if extra_args and "--output" in extra_args:
+                out = Path(extra_args[extra_args.index("--output") + 1])
+                out.write_text(json.dumps(cert), encoding="utf-8")
+            return {
+                "success": True, "report": {"status": "ok"},
+                "stdout": "", "stderr": "",
+            }
+
+        client = MagicMock()
+        client.verify.side_effect = _verify
+        client.build_with_emit.return_value = {
+            "success": True, "stdout": "ok", "stderr": "",
+        }
+        return client
+
+    def _run_publish(self, tmp_path, client):
+        from agent.publish import publish
+
+        spec = {"name": "test_mod",
+                "params": [{"name": "x", "type": "i64"}]}
+        (tmp_path / "spec.json").write_text(json.dumps(spec))
+        cfg = MagicMock()
+        cfg.mumei_bin = "mumei"
+        cfg.model = "m"
+        cfg.max_retries = 1
+        cfg.create_client.return_value = MagicMock()
+        with patch("agent.publish.AgentConfig", return_value=cfg), \
+             patch("agent.publish.create_mumei_client",
+                   return_value=client):
+            return publish(
+                spec_path=str(tmp_path / "spec.json"),
+                repo_dir=str(tmp_path),
+                dry_run=True,
+                pre_generated_code=self._CODE,
+            )
+
+    def test_cert_file_drives_artifact_paths_status(self, tmp_path):
+        (tmp_path / "present.json").write_text("{}", encoding="utf-8")
+        cert = _cert(artifact_paths=["present.json", "missing.json"])
+        result = self._run_publish(
+            tmp_path, self._client_writing_cert(cert),
+        )
+        assert result["success"] is True
+        assert result["proof_certificate_file"] == "test_mod.proof.json"
+        statuses = {
+            entry["path"]: entry["exists"]
+            for entry in result["artifact_paths_status"]
+        }
+        assert statuses == {"present.json": True, "missing.json": False}
+
+    def test_no_cert_file_leaves_keys_absent(self, tmp_path):
+        client = MagicMock()
+        client.verify.return_value = {
+            "success": True, "report": {}, "stdout": "", "stderr": "",
+        }
+        client.build_with_emit.return_value = {
+            "success": True, "stdout": "ok", "stderr": "",
+        }
+        result = self._run_publish(tmp_path, client)
+        assert result["success"] is True
+        assert "proof_certificate_file" not in result
+        assert "artifact_paths_status" not in result

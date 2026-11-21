@@ -1143,6 +1143,8 @@ def _publish_dependency_group(
         dependent_publish_result = dict(pub_result)
         dependent_publish_result.pop("proof_certificate", None)
         dependent_publish_result.pop("certificate", None)
+        dependent_publish_result.pop("proof_certificate_file", None)
+        dependent_publish_result.pop("artifact_paths_status", None)
         report = extra_reports.get(str(specs[index].get("target_file", "")))
         if isinstance(report, dict):
             dependent_publish_result["proof_certificate"] = report
