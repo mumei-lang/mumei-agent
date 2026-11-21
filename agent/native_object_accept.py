@@ -34,8 +34,10 @@ argument/result registers assumed, not validated. MXCSR RNE, masked
 exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain unestablished
 and not performed; the agent never discharges the external-callee, MXCSR, or
 NaN-payload assumption markers even if a descriptor lists them as performed.
-Direct calls with f64 arguments fail closed in Core. This is not an IEEE-754
-conformance, ABI, runtime, or full object-TV claim.
+Direct-call f64 arguments are admitted only under Core's exact-bits obligation
+(NaN-aware match, then an exact-bit proof against the XMM argument); computed
+f64 arguments without provably identical bits and f64 tail calls fail closed.
+This is not an IEEE-754 conformance, ABI, runtime, or full object-TV claim.
 """
 
 from __future__ import annotations
@@ -275,10 +277,12 @@ def build_object_accept_parser(
         "RNE, masked exceptions, FTZ/DAZ-off assumptions and NaN payload bits "
         "remain unestablished and not performed; the agent never discharges "
         "the external-callee, MXCSR or NaN-payload assumption markers even "
-        "if a descriptor lists them as performed. Direct calls with f64 "
-        "arguments fail closed in Core. "
-        "This makes no IEEE-754 conformance, "
-        "ABI, runtime or full object-TV claim."
+        "if a descriptor lists them as performed. Direct-call f64 arguments "
+        "are admitted only under Core's exact-bits obligation (NaN-aware "
+        "match, then an exact-bit proof against the XMM argument); computed "
+        "f64 arguments without provably identical bits and f64 tail calls "
+        "fail closed. This makes no IEEE-754 conformance, ABI, runtime or "
+        "full object-TV claim."
     )
     parser.add_argument(
         "--core",
