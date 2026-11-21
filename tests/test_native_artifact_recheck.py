@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from agent.core_evidence import OBJECT_CHECK_VOCABULARY
 from agent.native_artifact_recheck import (
+    CHECK_VOCABULARY,
+    DischargedChecks,
     FILE_MEMBERS,
     RECORD_FILE,
     build_artifact_recheck_parser,
@@ -96,6 +99,16 @@ def _args(core: Path, bundle: Path, source: Path, extra=()):
     ]
 
 
+def _assert_check_partition(report, discharged=frozenset()):
+    assert report["checks_not_performed"] == sorted(
+        (CHECK_VOCABULARY - discharged) | OBJECT_CHECK_VOCABULARY
+    )
+    assert not (
+        set(report.get("discharged_checks", []))
+        & OBJECT_CHECK_VOCABULARY
+    )
+
+
 def test_reproduced_run_selects_output(tmp_path, capsys):
     core = _write_core(tmp_path)
     bundle = _write_bundle(tmp_path)
@@ -116,9 +129,11 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
     assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
+        "object_translation_correspondence",
         "producer_authenticity",
         "semantic_correspondence",
     ]
+    _assert_check_partition(report, DischargedChecks.REPRODUCED)
     # The stdout line is not an evidence record — no handoff.
     assert "candidate" not in report
     assert "recheck" not in report
@@ -139,6 +154,7 @@ def test_exit_one_publishes_lineage_without_claimed_outcome(
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
     assert report["normalized"]["exit_code"] == 1
+    _assert_check_partition(report)
 
 
 def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
@@ -152,6 +168,7 @@ def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
     assert "discharged_checks" not in report
     assert report["sequence"].get("selected_result") is None
     assert report["normalized"]["exit_code"] == 3
+    _assert_check_partition(report)
 
 
 def test_unknown_exit_code_omits_recheck_outcome(tmp_path, capsys):
@@ -163,6 +180,7 @@ def test_unknown_exit_code_omits_recheck_outcome(tmp_path, capsys):
     report = json.loads(out)
     assert "artifact_recheck" not in report
     assert report["normalized"]["exit_code"] == 2
+    _assert_check_partition(report)
 
 
 def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
@@ -187,6 +205,7 @@ def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
     assert "discharged_checks" not in report
     assert "artifact_recheck" not in report
     assert report["sequence"].get("selected_result") is None
+    _assert_check_partition(report)
 
 
 def test_multifile_members_enumerated_and_fingerprinted(tmp_path, capsys):
@@ -209,6 +228,7 @@ def test_multifile_members_enumerated_and_fingerprinted(tmp_path, capsys):
     report = json.loads(out)
     assert report["inputs_changed"] is True
     assert "artifact_recheck" not in report
+    _assert_check_partition(report)
 
 
 def test_mid_run_record_swap_declaring_new_member_is_drift(
@@ -402,4 +422,3 @@ def test_real_core_end_to_end(tmp_path, capsys):
         "artifact_semantics",
         "claim_truth",
     ]
-
