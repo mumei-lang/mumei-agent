@@ -3586,7 +3586,9 @@ class _Builder:
         name. A promoted field's binding lives inside its own
         declaring type's span, so it never appears in this window —
         which is what lets callers spot a write or read that must
-        cross an embedded pointer."""
+        cross an embedded pointer. Type parameters have a scope
+        starting at their type declaration, and must not cut a
+        generic struct's field window short."""
         type_file = span.file if isinstance(span, FileSpan) else 0
         boundary: int | None = None
         direct: list[Any] = []
@@ -3598,10 +3600,15 @@ class _Builder:
             if bfile != type_file or bspan.start <= span.end:
                 continue
             is_field = b.kind == "variable" and b.scope is None
+            is_type_parameter = (
+                b.kind == "type"
+                and b.scope is not None
+                and b.scope.start == span.start
+            )
             if is_field:
                 if boundary is None or bspan.start < boundary:
                     direct.append(b)
-            elif b.scope is not None and (
+            elif b.scope is not None and not is_type_parameter and (
                 boundary is None or bspan.start < boundary
             ):
                 boundary = bspan.start
@@ -4561,7 +4568,7 @@ class _Builder:
                         embedded_type is None
                         or getattr(embedded_type, "span", None) is None
                     ):
-                        if edge_generic:
+                        if generic or edge_generic:
                             return True
                         if embedded_id:
                             next_unenumerable_ids.add(embedded_id)

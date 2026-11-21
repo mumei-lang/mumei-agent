@@ -11307,6 +11307,57 @@ def test_generic_embed_gate_obeys_shallowest_selector_depth(
         assert members["S3"] in result.pinned
 
 
+@pytest.mark.parametrize(
+    ("generic", "pointer_embed"),
+    [(True, False), (True, True), (False, False), (False, True)],
+)
+def test_generic_parent_closes_unenumerable_embedded_struct_fields(
+    go_types_helper, generic, pointer_embed
+):
+    embedded = ("*" if pointer_embed else "") + "lib.Q"
+    if generic:
+        declaration = (
+            f"type G[T any] struct{{ {embedded}; X T }}\n"
+            "type W struct{ G[int64] }\n"
+        )
+    else:
+        declaration = (
+            f"type G struct{{ {embedded}; X int64 }}\n"
+            "type W struct{ G }\n"
+        )
+    files = {
+        "a.go": (
+            'package p\nimport "lib"\n'
+            + declaration
+            + "func F(t *W) int64 { return t.A.B }\n"
+        )
+    }
+    lib = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "type S3 struct{ B int64 }\n"
+                "type Q struct{ A S3 }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    if generic:
+        assert not result.available, result.gaps
+        assert result.gaps
+    else:
+        members = {member.name: member.id for member in snapshot.imported_members}
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+        assert members["S3"] in result.pinned
+
+
 def test_generic_embed_walk_visits_shared_diamonds_once(
     go_types_helper, monkeypatch
 ):
