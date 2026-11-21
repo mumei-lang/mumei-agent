@@ -1432,7 +1432,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 def main(args: argparse.Namespace) -> int:
     try:
-        source = args.file.read_text(encoding="utf-8")
+        source = args.file.read_bytes().decode("utf-8", errors="strict")
         report = build_rust_bindings(source, pointer_width=args.pointer_width)
         sys.stdout.write(report.to_json())
         return 0

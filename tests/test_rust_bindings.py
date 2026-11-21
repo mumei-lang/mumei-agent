@@ -707,3 +707,33 @@ def test_cli_emits_loadable_json_requires_width_and_fails_closed(tmp_path):
     assert failed.returncode == 2
     assert failed.stdout == ""
     assert failed.stderr
+
+
+def test_cli_preserves_crlf_bytes_for_report_hash_and_spans(tmp_path):
+    source = "fn first() {}\r\nfn second() { first(); }\r\n"
+    source_file = tmp_path / "crlf.rs"
+    source_file.write_bytes(source.encode("utf-8"))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent",
+            "rust-bindings",
+            str(source_file),
+            "--pointer-width",
+            "64",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    restored = load_lexical_report(
+        result.stdout,
+        source,
+        profile=PROFILE,
+        target={"pointer_width": 64},
+    )
+    assert restored.source_sha256 == build_rust_bindings(
+        source, pointer_width=64
+    ).source_sha256
