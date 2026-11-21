@@ -42,6 +42,7 @@ BINDING_KINDS = frozenset(
         "local",
         "parameter",
         "self_parameter",
+        "generic_parameter",
         "associated_function",
         "associated_const",
     }
@@ -59,6 +60,7 @@ NON_ASSIGNABLE_WRITE_KINDS = frozenset(
         "import",
         "associated_function",
         "associated_const",
+        "generic_parameter",
     }
 )
 UNRESOLVED_REASONS = frozenset(

@@ -504,6 +504,86 @@ fn f(a:B, s:S, e:E) { let x: B = 1; let r: &u8 = &x; let t: (u8,u8)=(1,2); let z
     assert _bindings(cycle, "x", "parameter")[0].type.kind == "unknown"
 
 
+def test_type_lifetime_and_const_generics_resolve_in_item_scopes():
+    source = """
+type T = u8;
+struct S<'a, T, const N: usize> where T: Copy { r: &'a T, values: [T; N] }
+enum E<T> { Value(T) }
+trait Tr<'a, T> { fn borrow(x: &'a T); }
+impl<U> S<'static, U, 4> {
+    fn method<V, const M: usize>(x: V, values: [u8; M]) -> U
+    where V: Copy { let result: U = x; result }
+}
+fn generic<T, const N: usize>(x: T, values: [u8; N]) -> T
+where T: Copy { x }
+fn outside(x: T) {}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    generic_types = _bindings(report, "T", "generic_parameter")
+    assert len(generic_types) == 4
+    assert all(binding.type.kind == "unknown" for binding in generic_types)
+    generic_ids = {binding.id for binding in generic_types}
+    assert _refs(report, source, "T")
+    assert {ref.binding_id for ref in _refs(report, source, "T")} <= generic_ids
+
+    lifetimes = _bindings(report, "'a", "generic_parameter")
+    assert len(lifetimes) == 2
+    assert all(
+        ref.binding_id in {binding.id for binding in lifetimes}
+        for ref in _refs(report, source, "'a")
+    )
+    consts = [
+        binding
+        for binding in report.bindings
+        if binding.kind == "generic_parameter" and binding.name in {"N", "M"}
+    ]
+    assert len(consts) == 3
+    assert all(
+        (binding.type.kind, binding.type.bit_width, binding.type.signed)
+        == ("int", 64, False)
+        for binding in consts
+    )
+    method = next(
+        binding for binding in _bindings(report, "method", "associated_function")
+    )
+    generic_function = next(
+        fn for fn in report.functions if fn.binding_id == method.id
+    )
+    assert generic_function.generic
+
+    generic_start = source.index("fn generic")
+    generic_end = source.index("fn outside")
+    generic_parameter = next(
+        binding
+        for binding in report.bindings
+        if binding.kind == "parameter"
+        and binding.name == "x"
+        and generic_start < binding.span.start < generic_end
+    )
+    assert generic_parameter.type.kind == "unknown"
+    outside = next(
+        binding
+        for binding in _bindings(report, "x", "parameter")
+        if binding.span.start > generic_end
+    )
+    alias = _bindings(report, "T", "type_alias")[0]
+    assert outside.type.type_id == alias.id
+
+
+def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
+    source = "type T=u8; fn generic<T>(x:T){} fn outside(x:T){}"
+    report = build_rust_bindings(source, pointer_width=64)
+    generic = _bindings(report, "T", "generic_parameter")[0]
+    outside = [
+        binding
+        for binding in _bindings(report, "x", "parameter")
+        if binding.span.start > source.index("outside")
+    ][0]
+    alias = _bindings(report, "T", "type_alias")[0]
+    assert generic.scope is not None
+    assert outside.type.type_id == alias.id
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)

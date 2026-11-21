@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,7 @@ class _Record:
     variadic: bool = False
     extern: bool = False
     struct_constructor: bool = False
+    generic_kind: str = ""
 
 
 class _RustBindings:
@@ -233,6 +234,7 @@ class _RustBindings:
         extern: bool = False,
         struct_constructor: bool = False,
         name_override: str | None = None,
+        generic_kind: str = "",
     ) -> _Record:
         name = self.text(name_node) if name_override is None else name_override
         declaration = self.span(name_node)
@@ -262,6 +264,7 @@ class _RustBindings:
             variadic,
             extern,
             struct_constructor,
+            generic_kind,
         )
         self.bindings.append(binding)
         self.records[identifier] = record
@@ -322,6 +325,15 @@ class _RustBindings:
                     self._function_records[record.binding.id] = record
                 if kind == "type_alias":
                     record.alias_node = node.child_by_field_name("type")
+                self._add_generic_parameters(
+                    node,
+                    scope,
+                    owner_function=(
+                        record.binding.id if kind == "function" else scope.function_id
+                    ),
+                )
+            elif node.type == "impl_item":
+                self._add_generic_parameters(node, scope)
             elif node.type in {"extern_block", "foreign_mod_item"}:
                 body = node.child_by_field_name("body")
                 if body is None:
@@ -385,6 +397,88 @@ class _RustBindings:
                 name_override=bound_name,
             )
             self._add_to_scope(scope, record)
+
+    def _add_generic_parameters(
+        self,
+        node: Any,
+        scope: _Scope,
+        *,
+        owner_function: str | None = None,
+    ) -> None:
+        parameters = node.child_by_field_name("type_parameters")
+        if parameters is None:
+            return
+        item_scope = self.span(node)
+        for parameter in parameters.named_children:
+            if parameter.type not in {
+                "type_parameter",
+                "lifetime_parameter",
+                "const_parameter",
+            }:
+                continue
+            generic_kind = {
+                "type_parameter": "type",
+                "lifetime_parameter": "lifetime",
+                "const_parameter": "const",
+            }[parameter.type]
+            name_node = parameter.child_by_field_name("name")
+            if name_node is None:
+                continue
+            annotation = (
+                parameter.child_by_field_name("type")
+                if generic_kind == "const"
+                else None
+            )
+            type_fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
+            record = self._make_record(
+                name_node,
+                "generic_parameter",
+                item_scope,
+                scope.function_id if owner_function is None else owner_function,
+                scope.module_depth,
+                item=False,
+                type_fact=type_fact,
+                generic_kind=generic_kind,
+            )
+            self._add_to_scope(scope, record)
+
+    def _generic_references(
+        self, node: Any | None, *, skip_nested_items: bool = False
+    ) -> None:
+        if node is None:
+            return
+        candidates = []
+        stack = [node]
+        while stack:
+            candidate = stack.pop()
+            if (
+                skip_nested_items
+                and candidate is not node
+                and candidate.type
+                in {"function_item", "function_signature_item"}
+            ):
+                continue
+            candidates.append(candidate)
+            stack.extend(reversed(candidate.named_children))
+        for candidate in candidates:
+            if candidate.type in {"type_identifier", "lifetime"}:
+                namespace = "type"
+            elif candidate.type == "identifier":
+                namespace = "value"
+            else:
+                continue
+            record, _boundary = self._lookup_with_boundary(
+                self.text(candidate), candidate.start_byte, namespace
+            )
+            if (
+                record is None
+                or record.binding.kind != "generic_parameter"
+                or record.binding.span == self.span(candidate)
+            ):
+                continue
+            reference = Reference(self.span(candidate), record.binding.id, "read")
+            if reference not in self.references:
+                self.references.append(reference)
 
     def _use_names(self, node: Any) -> list[tuple[Any, bool, str | None]]:
         out: list[tuple[Any, bool, str | None]] = []
@@ -480,6 +574,10 @@ class _RustBindings:
             return
         if node.type in {"impl_item", "trait_item"}:
             body = node.child_by_field_name("body")
+            self._generic_references(node.child_by_field_name("type_parameters"))
+            self._generic_references(node.child_by_field_name("where_clause"))
+            if node.type == "impl_item":
+                self._generic_references(node.child_by_field_name("type"))
             if body is not None:
                 old_extern = self.in_extern
                 self.in_extern = old_extern
@@ -495,8 +593,12 @@ class _RustBindings:
             return
         if node.type == "type_item":
             self._assign_item_type(node, scope)
+            self._generic_references(node)
             return
-        if node.type in {"struct_item", "enum_item", "union_item", "trait_item"}:
+        if node.type in {"struct_item", "enum_item", "union_item"}:
+            self._generic_references(node)
+            return
+        if node.type == "trait_item":
             return
 
     def _find_item_record(self, scope: _Scope, node: Any) -> _Record | None:
@@ -532,6 +634,9 @@ class _RustBindings:
                     extern=self.in_extern or body_node is None,
                 )
                 self._function_records[record.binding.id] = record
+                self._add_generic_parameters(
+                    node, parent_scope, owner_function=record.binding.id
+                )
                 self._function(node, record)
             elif node.type == "const_item":
                 name_node = self._item_name(node)
@@ -593,10 +698,39 @@ class _RustBindings:
         body_span = None if body is None else self.span(body)
         parameter_ids: list[str] = []
         parameters = node.child_by_field_name("parameters")
+        fn_scope = _Scope(
+            body if body is not None else node,
+            self.module_depth,
+            record.binding.id,
+        )
+        self.scopes.append(fn_scope)
+        inherited_generics: set[str] = set()
+        for outer_scope in self.scopes[:-1]:
+            for records in outer_scope.bindings.values():
+                for generic in records:
+                    if (
+                        generic.binding.kind != "generic_parameter"
+                        or generic.binding.id in inherited_generics
+                        or generic.binding.scope is None
+                        or not (
+                            generic.binding.scope.start
+                            <= node.start_byte
+                            < generic.binding.scope.end
+                        )
+                    ):
+                        continue
+                    inherited_generics.add(generic.binding.id)
+                    self._add_to_scope(
+                        fn_scope,
+                        replace(
+                            generic,
+                            owner_function=record.binding.id,
+                            item=False,
+                        ),
+                    )
+        self._generic_references(node, skip_nested_items=True)
         if body is not None:
             parameter_scope = self.span(body)
-            fn_scope = _Scope(body, self.module_depth, record.binding.id)
-            self.scopes.append(fn_scope)
             if parameters is not None:
                 for parameter in parameters.named_children:
                     parameter_ids.extend(
@@ -607,7 +741,6 @@ class _RustBindings:
                 self._scan_container(body, fn_scope)
             else:
                 self._expr(body)
-            self.scopes.pop()
         result_node = node.child_by_field_name("return_type")
         result = _UNKNOWN if result_node is None else self._type_fact(result_node)
         is_method = bool(parameter_ids and any(
@@ -624,6 +757,7 @@ class _RustBindings:
             record.variadic,
         )
         self.functions.append(function)
+        self.scopes.pop()
         self.current_function, self.call_owner = old_function, old_call_owner
 
     def _parameter(self, node: Any, scope: _Scope, body_span: ByteSpan) -> list[str]:
@@ -871,6 +1005,31 @@ class _RustBindings:
                     blocked = "module_boundary"
                 continue
             records = scope.bindings.get(name, ())
+            generic_records = []
+            for record in records:
+                if (
+                    record.binding.kind != "generic_parameter"
+                    or not self._in_namespace(record, namespace)
+                ):
+                    continue
+                binding_scope = record.binding.scope
+                if binding_scope is None or not (
+                    binding_scope.start <= position < binding_scope.end
+                ):
+                    continue
+                if record.owner_function != self.current_function:
+                    blocked = "item_boundary"
+                    continue
+                generic_records.append(record)
+            if generic_records:
+                return min(
+                    generic_records,
+                    key=lambda record: (
+                        record.binding.scope.end - record.binding.scope.start
+                        if record.binding.scope is not None
+                        else 0
+                    ),
+                ), None
             for record in reversed(records):
                 if record.binding.scope is not None and record.binding.scope != ByteSpan(0, 0) and not (
                     record.binding.scope.start <= position < record.binding.scope.end
@@ -895,6 +1054,10 @@ class _RustBindings:
     @staticmethod
     def _in_namespace(record: _Record, namespace: str) -> bool:
         kind = record.binding.kind
+        if kind == "generic_parameter":
+            if record.generic_kind == "const":
+                return namespace != "type"
+            return namespace == "type"
         if namespace == "type":
             return kind in {"struct", "enum", "type_alias", "trait", "union", "import"}
         if kind == "struct":
