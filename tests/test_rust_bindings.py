@@ -725,6 +725,47 @@ fn outer<T, const N: usize>() {
     assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
 
 
+def test_nested_impl_and_trait_methods_use_their_own_generics():
+    source = """
+fn outer<T>() {
+    struct Local;
+    impl<U> Bound<U> for Local {
+        fn method(&self, value: U) -> U {
+            fn nested() { let _: U; }
+            let _: T;
+            value
+        }
+    }
+    trait Tr<V> {
+        fn bodyless(&self, value: V);
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_generic = _bindings(report, "U", "generic_parameter")[0]
+    trait_generic = _bindings(report, "V", "generic_parameter")[0]
+    raw = source.encode()
+    impl_references = [
+        reference
+        for reference in report.references
+        if raw[reference.span.start : reference.span.end] == b"U"
+    ]
+    trait_references = [
+        reference
+        for reference in report.references
+        if raw[reference.span.start : reference.span.end] == b"V"
+    ]
+    assert impl_references
+    assert all(reference.binding_id == impl_generic.id for reference in impl_references)
+    assert trait_references
+    assert all(reference.binding_id == trait_generic.id for reference in trait_references)
+    assert {
+        (item.name, item.reason)
+        for item in report.unresolved
+        if item.reason == "item_boundary"
+    } == {("T", "item_boundary"), ("U", "item_boundary")}
+
+
 def test_where_clauses_record_generic_parameters_without_binding_other_names():
     source = """
 type Outside = u8;

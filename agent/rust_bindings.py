@@ -119,7 +119,7 @@ class _Scope:
 @dataclass
 class _Record:
     binding: Binding
-    owner_function: str
+    owner_function: str | None
     module_depth: int
     item: bool
     alias_node: Any = None
@@ -228,7 +228,7 @@ class _RustBindings:
         name_node: Any,
         kind: str,
         scope: ByteSpan | None,
-        owner: str,
+        owner: str | None,
         module_depth: int,
         *,
         item: bool,
@@ -341,11 +341,18 @@ class _RustBindings:
                     node,
                     scope,
                     owner_function=(
-                        record.binding.id if kind == "function" else scope.function_id
+                        record.binding.id
+                        if kind == "function"
+                        else None
+                        if node.type == "trait_item"
+                        else scope.function_id
                     ),
+                    inherit_scope_function=node.type != "trait_item",
                 )
             elif node.type == "impl_item":
-                self._add_generic_parameters(node, scope)
+                self._add_generic_parameters(
+                    node, scope, inherit_scope_function=False
+                )
             elif node.type in {"extern_block", "foreign_mod_item"}:
                 body = node.child_by_field_name("body")
                 if body is None:
@@ -455,6 +462,7 @@ class _RustBindings:
         scope: _Scope,
         *,
         owner_function: str | None = None,
+        inherit_scope_function: bool = True,
     ) -> None:
         parameters = node.child_by_field_name("type_parameters")
         if parameters is None:
@@ -484,7 +492,11 @@ class _RustBindings:
                 name_node,
                 "generic_parameter",
                 item_scope,
-                scope.function_id if owner_function is None else owner_function,
+                (
+                    scope.function_id
+                    if owner_function is None and inherit_scope_function
+                    else owner_function
+                ),
                 scope.module_depth,
                 item=False,
                 generic_kind=generic_kind,
@@ -683,15 +695,21 @@ class _RustBindings:
             return
         if node.type in {"impl_item", "trait_item"}:
             body = node.child_by_field_name("body")
-            self._generic_references(node.child_by_field_name("type_parameters"))
-            self._generic_references(self._where_clause(node))
-            if node.type == "impl_item":
-                self._generic_references(node.child_by_field_name("type"))
-            if body is not None:
-                old_extern = self.in_extern
+            old_function, old_owner = self.current_function, self.call_owner
+            old_extern = self.in_extern
+            self.current_function = None
+            self.call_owner = ""
+            try:
+                self._generic_references(node.child_by_field_name("type_parameters"))
+                self._generic_references(self._where_clause(node))
+                if node.type == "impl_item":
+                    self._generic_references(node.child_by_field_name("type"))
+                if body is not None:
+                    self._scan_associated_container(body, scope, self.span(node))
+            finally:
                 self.in_extern = old_extern
-                self._scan_associated_container(body, scope)
-                self.in_extern = old_extern
+                self.current_function = old_function
+                self.call_owner = old_owner
             return
         if node.type in {"extern_block", "foreign_mod_item"}:
             body = node.child_by_field_name("body")
@@ -726,7 +744,9 @@ class _RustBindings:
             None,
         )
 
-    def _scan_associated_container(self, body: Any, parent_scope: _Scope) -> None:
+    def _scan_associated_container(
+        self, body: Any, parent_scope: _Scope, generic_scope: ByteSpan
+    ) -> None:
         for node in self._children(body):
             if node.type in {"function_item", "function_signature_item"}:
                 name_node = self._item_name(node)
@@ -752,7 +772,9 @@ class _RustBindings:
                 self._add_generic_parameters(
                     node, parent_scope, owner_function=record.binding.id
                 )
-                self._function(node, record)
+                self._function(
+                    node, record, inherited_generic_scopes=(generic_scope,)
+                )
             elif node.type == "const_item":
                 name_node = self._item_name(node)
                 if name_node is not None:
@@ -805,7 +827,13 @@ class _RustBindings:
             self.bindings[self.bindings.index(record.binding)] = replacement
             record.binding = replacement
 
-    def _function(self, node: Any, record: _Record) -> None:
+    def _function(
+        self,
+        node: Any,
+        record: _Record,
+        *,
+        inherited_generic_scopes: tuple[ByteSpan, ...] = (),
+    ) -> None:
         old_function, old_call_owner = self.current_function, self.call_owner
         self.current_function = record.binding.id
         self.call_owner = record.binding.id
@@ -826,8 +854,8 @@ class _RustBindings:
                     if (
                         generic.binding.kind != "generic_parameter"
                         or (
-                            generic.owner_function
-                            and generic.owner_function != record.binding.id
+                            generic.owner_function != record.binding.id
+                            and generic.binding.scope not in inherited_generic_scopes
                         )
                         or generic.binding.id in inherited_generics
                         or generic.binding.scope is None
