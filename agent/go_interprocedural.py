@@ -12451,6 +12451,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 elem_join[0],
                                 chan_elem_root_sets.get(elem_join[0]),
                             )
+                    reseat_bound = self.bindings.get(ref.binding_id)
+                    if (
+                        reseat_bound is not None
+                        and reseat_bound.type is not None
+                        and self._chan_elem_collection(reseat_bound.type)
+                        and not conditional
+                        and self._may_skip == 0
+                    ):
+                        # `t, s = u, append(s, t[0])` — a chan-
+                        # element container named in this
+                        # statement's pre-state sets (or already
+                        # sharing, like `b := s` then `s = u`)
+                        # parks its member identity under a
+                        # surrogate like a reseated `chan` does:
+                        # `t`'s token in `s`'s pre-state capture
+                        # must keep meaning `t`'s OLD group, not
+                        # the `u` members `t` lands on. Running
+                        # before `_store` keeps the parked queue
+                        # on the OLD dep set — after the store it
+                        # would pick up the reseated value's deps.
+                        self._chan_queue_detach(
+                            ref.binding_id, locals_, params
+                        )
                     self._store(
                         locals_, params, ref.binding_id, value,
                         conditional,
@@ -12494,23 +12517,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     if c.type != "comment"
                                 ),
                                 None,
-                            )
-                        if (
-                            self._chan_elem_collection(bound.type)
-                            and not conditional
-                            and self._may_skip == 0
-                        ):
-                            # `t, s = u, append(s, t[0])` — a chan-
-                            # element container named in this
-                            # statement's pre-state sets (or already
-                            # sharing) parks its member identity
-                            # under a surrogate like a reseated
-                            # `chan` does: `t`'s token in `s`'s
-                            # pre-state capture must keep meaning
-                            # `t`'s OLD group, not the `u` members
-                            # `t` lands on.
-                            self._chan_queue_detach(
-                                ref.binding_id, locals_, params
                             )
                         if conditional or self._may_skip > 0:
                             # `if c { s = t }` — the untaken path

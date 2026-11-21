@@ -21049,6 +21049,28 @@ def test_chan_elem_external_unsupported_stays_closed(
             "\treturn <-c3\n}\n",
             frozenset(),
         ),
+        # `b := s` then `s = u` — the surrogate that parks `s`'s
+        # old group for `b` keeps the OLD dep set; the reseated
+        # value's deps must not leak into `<-b[0]`.
+        (
+            "func F(u []chan int64, x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tb := s\n"
+            "\ts = u\n"
+            "\treturn <-b[0]\n}\n",
+            frozenset(),
+        ),
+        (
+            "func F(u []chan int64, x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tb := s\n"
+            "\ts = u\n"
+            "\tc1 <- x\n"
+            "\treturn <-b[0]\n}\n",
+            frozenset({1}),
+        ),
     ],
 )
 def test_chan_elem_append(go_types_helper, declarations, expected):
