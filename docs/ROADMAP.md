@@ -8643,10 +8643,12 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
 2. **MCP sampling** — `USE_MCP_SAMPLING` の capability detection、sampling
    fallback、tool-enabled sampling、`maxTokens` 上限、および text-only request
    の回帰は `tests/test_mcp_server.py` と
-   `tests/test_llm_provider_sampling_tools.py` で検査する。ただし、sampling
-   provider と OpenAI-compatible provider の間で戻り値キーおよび
-   `budget_policy_fingerprint` が同一になることを直接検査するテストはまだなく、
-   provider-independent contract としては未実装である。
+   `tests/test_llm_provider_sampling_tools.py` で検査する。sampling
+   provider と OpenAI-compatible provider が同一の戻り値 surface
+   （`response.choices[0].message.content` と token accounting）を出すことは
+   `tests/test_llm_provider_contract.py` が provider-independent contract
+   として固定する。`budget_policy_fingerprint` は LLM 応答ではなく
+   certificate artifact 由来のため、ここでは対象外とする。
 3. **Proof artifact** — mumei が配布する per-module certificate と bundle は
    canonical な `artifact_paths` で参照し、`MUMEI_PROOF_CERTS` /
    `MUMEI_PROOF_BUNDLE` と `mumei verify-cert --strict` による distribution-only
@@ -8659,7 +8661,7 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    常時実行する。metrics の `proven` / proof density は source-count heuristic
    であり、certificate-derived count との density 比較は意図的に行わない。
 
-**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py -q`
+**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py tests/test_llm_provider_contract.py -q`
 
 ## 大規模ケースでの合成性報告（agent 側 local checkpoint）— ✅ Implemented
 
