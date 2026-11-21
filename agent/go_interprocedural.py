@@ -4479,48 +4479,101 @@ class _Builder:
         direct_fields = self._struct_fields(container)
         if field_member.id in {field.id for field in direct_fields}:
             return False
-        pending = [
-            (field, frozenset())
-            for field in direct_fields
-            if getattr(field, "embedded", None) is not False
-            and (
+        def is_embedded(field: Any) -> bool:
+            return getattr(field, "embedded", None) is not False and (
                 getattr(field, "embedded", None) is True
                 or self._embed_name_compatible(field)
             )
-        ]
-        while pending:
-            field, seen = pending.pop()
+
+        level: dict[str, bool] = {}
+        visited = {container.id}
+        unenumerable_ids: set[str] = set()
+        for field in direct_fields:
+            if not is_embedded(field):
+                continue
             field_type = getattr(field, "type", None)
             if field_type is None:
                 continue
-            if self._type_fact_has_type_args(field_type) and (
-                self._promotion_path((field,), field_member, frozenset())
-                is not None
-            ):
-                return True
             pointee = (
                 field_type.elem
                 if field_type.kind == "pointer"
                 else field_type
             )
             type_id = getattr(pointee, "type_id", "")
+            if type_id in visited:
+                continue
             embedded_type = self._pointee_type(type_id) if type_id else None
+            generic = self._type_fact_has_type_args(field_type)
             if (
                 embedded_type is None
                 or getattr(embedded_type, "span", None) is None
-                or embedded_type.id in seen
             ):
+                if generic:
+                    return True
+                if type_id:
+                    unenumerable_ids.add(type_id)
                 continue
-            next_seen = seen | {embedded_type.id}
-            pending.extend(
-                (nested, next_seen)
-                for nested in self._struct_fields(embedded_type)
-                if getattr(nested, "embedded", None) is not False
-                and (
-                    getattr(nested, "embedded", None) is True
-                    or self._embed_name_compatible(nested)
-                )
-            )
+            level[type_id] = level.get(type_id, False) or generic
+        visited.update(level)
+        visited.update(unenumerable_ids)
+
+        while level:
+            fields_by_type: dict[str, tuple[Any, ...]] = {}
+            found = False
+            generic_found = False
+            for type_id, generic in level.items():
+                embedded_type = self._pointee_type(type_id)
+                if (
+                    embedded_type is None
+                    or getattr(embedded_type, "span", None) is None
+                ):
+                    continue
+                fields = self._struct_fields(embedded_type)
+                fields_by_type[type_id] = fields
+                if field_member.id in {field.id for field in fields}:
+                    found = True
+                    generic_found = generic_found or generic
+            if found:
+                return generic_found
+
+            next_level: dict[str, bool] = {}
+            next_unenumerable_ids: set[str] = set()
+            for type_id, generic in level.items():
+                for field in fields_by_type.get(type_id, ()):
+                    if not is_embedded(field):
+                        continue
+                    field_type = getattr(field, "type", None)
+                    if field_type is None:
+                        continue
+                    pointee = (
+                        field_type.elem
+                        if field_type.kind == "pointer"
+                        else field_type
+                    )
+                    embedded_id = getattr(pointee, "type_id", "")
+                    if embedded_id and embedded_id in visited:
+                        continue
+                    embedded_type = (
+                        self._pointee_type(embedded_id) if embedded_id else None
+                    )
+                    edge_generic = self._type_fact_has_type_args(field_type)
+                    if (
+                        embedded_type is None
+                        or getattr(embedded_type, "span", None) is None
+                    ):
+                        if edge_generic:
+                            return True
+                        if embedded_id:
+                            next_unenumerable_ids.add(embedded_id)
+                        continue
+                    next_level[embedded_id] = (
+                        next_level.get(embedded_id, False)
+                        or generic
+                        or edge_generic
+                    )
+            visited.update(next_level)
+            visited.update(next_unenumerable_ids)
+            level = next_level
         return False
 
     def _bound_selector_pointees(
