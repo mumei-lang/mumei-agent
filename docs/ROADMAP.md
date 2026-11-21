@@ -2879,7 +2879,12 @@ Local queues stay closed when they escape through
 calls, returns, stores, or func-literal captures, and
 when reseated from a call result or parameter.
 Deeper nesting (`chan chan chan T`), `[]chan chan T`,
-and direct nested channel operations stay closed.
+and direct nested channel operations stay closed:
+passing a channel received from one local queue as a
+value to another (`dst <- <-src`) is supported and
+joins their share groups, but using that receive as
+the operation target (`(<-src) <- x`) or nesting a
+receive (`<-(<-src)`) remains closed.
 Still
 closed: non-scalar elements — while `select` now
 admits: each communication case's

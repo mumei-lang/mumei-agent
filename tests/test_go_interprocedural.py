@@ -15580,6 +15580,8 @@ def test_local_chan_chan_group_keeps_imported_member_external(
         ),
         (
             "scalar channel receive can be sent to another queue",
+            # Sending a received channel value is supported; using that
+            # receive as an operation target remains closed.
             "func F(x int64) int64 {\n"
             "\tin := make(chan int64, 1)\n"
             "\tout := make(chan int64, 1)\n"
