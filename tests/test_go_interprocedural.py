@@ -15430,6 +15430,69 @@ def test_bound_closure_local_channel_send_iife_folds_dependencies(
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func F(x int64) int64 { y := int64(0); "
+            "c := make(chan int64, 1); "
+            "g := func(_ int64) { c <- y }; "
+            "g(set(&y, x)); return <-c }",
+            id="bound-channel-send",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func F(x int64) int64 { y := int64(0); r := int64(0); "
+            "g := func(_ int64) { r = y }; "
+            "g(set(&y, x)); return r }",
+            id="bound-plain-write",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func F(x int64) int64 { y := int64(0); "
+            "c := make(chan int64, 1); "
+            "func(_ int64) { c <- y }(set(&y, x)); return <-c }",
+            id="immediate-channel-send",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func F(x int64) int64 { y := int64(0); r := int64(0); "
+            "func(_ int64) { r = y }(set(&y, x)); return r }",
+            id="immediate-plain-write",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func F(x int64) int64 { y := int64(0); r := int64(0); "
+            "fs := []func(int64){func(_ int64) { r = y }}; "
+            "fs[0](set(&y, x)); return r }",
+            id="function-element-call",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func Run(f func(), _ int64) { f() }\n"
+            "func F(x int64) int64 { y := int64(0); r := int64(0); "
+            "g := func() { r = y }; "
+            "Run(g, set(&y, x)); return r }",
+            id="callback-bound-name",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func Run(f func(), _ int64) { f() }\n"
+            "func F(x int64) int64 { y := int64(0); r := int64(0); "
+            "Run(func() { r = y }, set(&y, x)); return r }",
+            id="callback-literal-argument",
+        ),
+    ],
+)
+def test_closure_calls_resolve_captures_after_argument_writes(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
     go_types_helper,
 ):

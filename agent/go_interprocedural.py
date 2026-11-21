@@ -20468,6 +20468,7 @@ class _Builder:
                 if binding_id in self.functions
                 else None
             )
+            external = False
             if binding_id in self.functions:
                 unbounded = (
                     callee is None
@@ -20532,6 +20533,11 @@ class _Builder:
                         or not has_literal
                         or effectful
                     )
+                    external = (
+                        binding_id in params
+                        or binding_id in self.opaque_callees
+                        or not has_literal
+                    )
                     external_chan = unbounded
             transfers.append(
                 CallTransfer(
@@ -20546,8 +20552,22 @@ class _Builder:
                     imported=unbounded,
                 )
             )
+            invocation_deps = arg_deps
+            captured = self.closure_captures.get(binding_id)
+            if captured is not None:
+                invocation_deps |= self._captured_current_deps(
+                    captured, params, locals_
+                )
+            if external or binding_id in self.pointee_closures:
+                for escaped_id in self.escaped:
+                    if escaped_id in locals_:
+                        invocation_deps |= locals_[escaped_id]
+                    elif escaped_id in params:
+                        invocation_deps |= frozenset(
+                            {params[escaped_id]}
+                        )
             if unbounded or external_chan:
-                self.indirect_writes |= arg_deps
+                self.indirect_writes |= invocation_deps
             # A passed LOCAL func value keeps its literal records —
             # `Pass(h, x)` where `h` may still be the literal that
             # writes `a = v`. If the callee invokes it, those named
@@ -20558,7 +20578,9 @@ class _Builder:
             for target in self.closure_writes.get(
                 binding_id, frozenset()
             ):
-                self._store(locals_, params, target, arg_deps, True)
+                self._store(
+                    locals_, params, target, invocation_deps, True
+                )
                 self.func_aliases.pop(target, None)
                 self.opaque_callees.add(target)
             if (
@@ -20566,10 +20588,11 @@ class _Builder:
                 or binding_id in self.closure_star_writes
                 or binding_id in self.closure_inner_calls
             ):
-                self.indirect_writes |= arg_deps
+                self.indirect_writes |= invocation_deps
                 for escaped_id in self.escaped:
                     self._store(
-                        locals_, params, escaped_id, arg_deps, True
+                        locals_, params, escaped_id,
+                        invocation_deps, True
                     )
 
     def _record_read(self, deps: frozenset[int]) -> None:
@@ -25842,6 +25865,16 @@ class _Builder:
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
         deps |= arg_deps
+        if captured is not None:
+            deps |= self._captured_current_deps(
+                captured, params, locals_
+            )
+        if ref.binding_id in self.pointee_closures or external:
+            for escaped_id in self.escaped:
+                if escaped_id in locals_:
+                    deps |= locals_[escaped_id]
+                elif escaped_id in params:
+                    deps |= frozenset({params[escaped_id]})
         if writes or star_write or inner_calls:
             # The literal's body sequences AT this call: its stores
             # land on the captured targets' dep sets (the written
@@ -26291,6 +26324,15 @@ class _Builder:
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
         deps |= arg_deps
+        if captured is not None:
+            deps |= self._captured_current_deps(
+                captured, params, locals_
+            )
+        for escaped_id in self.escaped:
+            if escaped_id in locals_:
+                deps |= locals_[escaped_id]
+            elif escaped_id in params:
+                deps |= frozenset({params[escaped_id]})
         # The callee may write `*p = y` or send `y` through an
         # argument — the same escaped/indirect fold every opaque
         # call does.
