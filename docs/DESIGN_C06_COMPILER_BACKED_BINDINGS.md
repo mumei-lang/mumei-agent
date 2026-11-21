@@ -81,7 +81,8 @@
 
 ## 4. 後続（このメモでは実装しない）
 
-- TypeScript: `typescript` パッケージを固定バージョンで同梱する operator helper（Node）＋純粋リーダー。
-  標準ライブラリ宣言を helper に同梱し、ユーザーの `tsconfig` や `node_modules` は読まない。
+- TypeScript: 初回の compiler-backed slice は TypeScript 5.9.3 の operator helper と純粋リーダーで実装済み。
+  境界は [`ROADMAP.md`](ROADMAP.md) の「C06 first compiler-backed TypeScript binding slice」を参照。
+  TypeScript 7.0.2 には JavaScript compiler API がない。追加の型・project/import 解決は後続設計が必要。
 - Rust: 単一ファイルで閉じないため、プロジェクト単位の解決（C06 の「project/import resolution」）を
   先に設計する必要がある。それまでは lexical report のまま。

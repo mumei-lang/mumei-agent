@@ -1,0 +1,49 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [
+    {
+      "category": "error",
+      "code": 2792,
+      "message": "Cannot find module './dependency'. Did you mean to set the 'moduleResolution' option to 'nodenext', or to add aliases to the 'paths' option?"
+    }
+  ],
+  "file_name": "input.ts",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [
+        {
+          "end": 22,
+          "start": 9
+        }
+      ],
+      "library": false,
+      "name": "externalValue",
+      "span": {
+        "end": 59,
+        "start": 46
+      }
+    }
+  ],
+  "source": "import { externalValue } from \"./dependency\";\nexternalValue;\n",
+  "typescript_version": "5.9.3",
+  "unsupported": [
+    {
+      "kind": "ImportDeclaration",
+      "span": {
+        "end": 45,
+        "start": 0
+      }
+    }
+  ]
+}

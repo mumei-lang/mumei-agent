@@ -1,0 +1,35 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [],
+  "file_name": "input.tsx",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [
+        {
+          "end": 60,
+          "start": 55
+        }
+      ],
+      "library": false,
+      "name": "value",
+      "span": {
+        "end": 87,
+        "start": 82
+      }
+    }
+  ],
+  "source": "declare namespace JSX {\n  interface Element {}\n}\nconst value = 1;\nconst view = <>{value}</>;\n",
+  "typescript_version": "5.9.3",
+  "unsupported": []
+}

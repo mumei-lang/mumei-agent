@@ -15,3 +15,4 @@ visualizer/.report_history.lock
 .agents/
 examples/challenges/results/*/
 tools/go-types/go-types
+/tools/ts-bindings/node_modules/
