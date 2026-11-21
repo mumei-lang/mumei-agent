@@ -1502,7 +1502,7 @@ class _Builder:
         group would alias under a second dep set."""
         collection = (
             fact is not None
-            and fact.kind in {"slice", "map"}
+            and fact.kind in {"slice", "map", "array"}
             and getattr(fact, "elem", None) is not None
             and fact.elem.kind == "chan"
             and getattr(fact.elem, "elem", None) is not None
@@ -2438,6 +2438,21 @@ class _Builder:
                 # in the opaque model — `b := s` shares the group.
                 return None
             if binding.type.kind == "array":
+                if self._chan_elem_collection(binding.type):
+                    # `b := a` on a `[N]chan` copies the array
+                    # descriptor — but the channel values it copied
+                    # still name the SAME queues, so `b` joins `a`'s
+                    # share group like a slice copy does.
+                    toks = self._opaque_container_tokens.get(
+                        ref.binding_id
+                    )
+                    if toks:
+                        return toks
+                    fresh = frozenset({self.node_key(rhs)})
+                    self._opaque_container_tokens[ref.binding_id] = (
+                        fresh
+                    )
+                    return fresh
                 # `s = a` copies the array — the reseat never
                 # aliases `a`'s backing, so the destination mints
                 # its own token. A copy whose type still embeds a

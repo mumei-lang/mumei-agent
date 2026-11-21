@@ -4148,8 +4148,11 @@ mints the new membership, and `d = make(chan)` parks the old
 queue under a surrogate so `<-s[0]` keeps reading what `c`
 serves. The honest closures stay: `d := s[0][0]` on a
 `[][]chan` extracts nothing (the nested-element gate already
-declines it), `[]chan chan T` stays closed (a channel value
-travelling the group would alias under a second dep set).
+declines it), `[N]chan T` arrays admit the same way — the copy
+`b := a` still names the same queues, so it joins `a`'s share
+group like a slice copy. `[]chan chan T` stays closed (a
+channel value travelling the group would alias under a second
+dep set), and so do `[][]chan`/`[N][M]chan` nests.
 `close(s[i])` admits — an untracked synchronization fact on a
 local group, and a caller-visible effect recorded on each
 param/external member like `s[i] <- x`. `for v := range s[i]`
