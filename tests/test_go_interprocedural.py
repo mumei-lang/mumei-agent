@@ -27727,8 +27727,8 @@ def test_struct_parameter_argument_carries_deps(go_types_helper):
 
 
 def test_struct_parameter_boundaries_stay_closed(go_types_helper):
-    # Pointer-intermediate field traversal, embedded-pointer
-    # promotion, and map/slice field mutation stay closed.
+    # Pointer-intermediate traversal and embedded-pointer promotion
+    # stay closed.
     for decls in (
         "type Q struct{ W int64 }\ntype P struct{ A *Q }\n"
         "func F(s P, x int64) int64 {\n"
@@ -27737,14 +27737,6 @@ def test_struct_parameter_boundaries_stay_closed(go_types_helper):
         "type Q struct{ W int64 }\ntype P struct{ *Q }\n"
         "func F(s P, x int64) int64 {\n"
         "\treturn s.W\n}\n",
-        "type P struct{ M map[string]int64 }\n"
-        "func F(s P, x int64) int64 {\n"
-        "\ts.M[\"k\"] = x\n"
-        "\treturn s.M[\"k\"]\n}\n",
-        "type P struct{ A []int64 }\n"
-        "func F(s P, x int64) int64 {\n"
-        "\ts.A[0] = x\n"
-        "\treturn s.A[0]\n}\n",
     ):
         result = named(*unit(go_types_helper, decls))
         assert not result.available
@@ -30009,13 +30001,6 @@ def test_container_builtin_dep_free_param_write_marks_effects(
         "\tb = s[0]\n"
         "\tb.A = x\n"
         "\treturn s[0].A\n}\n",
-        # `s[i].F[j]` — a direct index on the element's field stays
-        # closed exactly like `st.F[j]` on a composite (the field
-        # slot is reachable only through extraction).
-        "type St struct { F []int64 }\n"
-        "func F(s []St, i int, j int, x int64) int64 {\n"
-        "\ts[i].F[0] = x\n"
-        "\treturn s[i].F[j]\n}\n",
     ],
 )
 def test_scalar_container_unsupported_stays_closed(
@@ -30648,6 +30633,765 @@ def test_struct_field_index_call_is_recorded_once_and_index_deps_remain(
     )
     assert indexed.available, indexed.gaps
     assert 1 in indexed.return_dependencies
+
+
+@pytest.mark.parametrize(
+    ("direct", "extracted", "expected"),
+    [
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\ta := s.A\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\ts.A[0] = x\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\ta := s.A\n"
+            "\ta[0] = x\n"
+            "\treturn a[0]\n}\n",
+            None,
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{1}}\n"
+            "\ts.A[0] += x\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{1}}\n"
+            "\ta := s.A\n"
+            "\ta[0] += x\n"
+            "\treturn a[0]\n}\n",
+            None,
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\ts.A[0]++\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\ta := s.A\n"
+            "\ta[0]++\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { M map[string]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{M: map[string]int64{}}\n"
+            "\ts.M[\"k\"] = x\n"
+            "\treturn s.M[\"k\"]\n}\n",
+            "type S struct { M map[string]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{M: map[string]int64{}}\n"
+            "\tm := s.M\n"
+            "\tm[\"k\"] = x\n"
+            "\treturn m[\"k\"]\n}\n",
+            None,
+        ),
+        (
+            "type W struct { A []int64 }\n"
+            "type S struct { W W }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{W: W{A: []int64{x}}}\n"
+            "\treturn s.W.A[0]\n}\n",
+            "type W struct { A []int64 }\n"
+            "type S struct { W W }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{W: W{A: []int64{x}}}\n"
+            "\tw := s.W\n"
+            "\ta := w.A\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A [][]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: [][]int64{{x}}}\n"
+            "\treturn s.A[0][0]\n}\n",
+            "type S struct { A [][]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: [][]int64{{x}}}\n"
+            "\ta := s.A\n"
+            "\tb := a[0]\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type E struct { F []int64 }\n"
+            "func F(i, j int, x int64) int64 {\n"
+            "\tss := []E{{F: []int64{x}}}\n"
+            "\treturn ss[i].F[j]\n}\n",
+            "type E struct { F []int64 }\n"
+            "func F(i, j int, x int64) int64 {\n"
+            "\tss := []E{{F: []int64{x}}}\n"
+            "\tb := ss[i].F\n"
+            "\treturn b[j]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\treturn int64(len(s.A))\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\ta := s.A\n"
+            "\treturn int64(len(a))\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\treturn int64(cap(s.A))\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\ta := s.A\n"
+            "\treturn int64(cap(a))\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\tr := int64(0)\n"
+            "\tfor _, v := range s.A { r += v }\n"
+            "\treturn r\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\ta := s.A\n"
+            "\tr := int64(0)\n"
+            "\tfor _, v := range a { r += v }\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\tb := append(s.A, x)\n"
+            "\treturn b[1]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\ta := s.A\n"
+            "\tb := append(a, x)\n"
+            "\treturn b[1]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\ts.A = append(s.A, x)\n"
+            "\treturn s.A[1]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\ta := s.A\n"
+            "\ta = append(a, x)\n"
+            "\ts.A = a\n"
+            "\treturn a[1]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func G(s S, x int64) { s.A[0] = x }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\tG(s, x)\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\tG(s, x)\n"
+            "\ta := s.A\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\tt := s\n"
+            "\tt.A[0] = x\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\tt := s\n"
+            "\ta := t.A\n"
+            "\ta[0] = x\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\ta := s.A\n"
+            "\ts.A = []int64{0}\n"
+            "\ts.A[0] = x\n"
+            "\treturn a[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\ta := s.A\n"
+            "\ts.A = []int64{0}\n"
+            "\tb := s.A\n"
+            "\tb[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset(),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(s S, c bool, x int64) int64 {\n"
+            "\tif c { s.A[0] = x }\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(s S, c bool, x int64) int64 {\n"
+            "\tif c { a := s.A; a[0] = x }\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 2}),
+        ),
+        (
+            "type S struct { M map[string]int64 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\ts.M[\"k\"] = x\n"
+            "\treturn s.M[\"k\"]\n}\n",
+            "type S struct { M map[string]int64 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\tm := s.M\n"
+            "\tm[\"k\"] = x\n"
+            "\treturn m[\"k\"]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\ts.A[0] = x\n"
+            "\treturn s.A[0]\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\ta := s.A\n"
+            "\ta[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_struct_field_direct_ops_match_extraction(
+    go_types_helper, direct, extracted, expected
+):
+    direct_result = named(*unit(go_types_helper, direct))
+    extracted_result = named(*unit(go_types_helper, extracted))
+    assert direct_result.available == extracted_result.available
+    assert direct_result.available, direct_result.gaps
+    assert direct_result.return_dependencies == (
+        extracted_result.return_dependencies
+    )
+    assert direct_result.effects == extracted_result.effects
+    if expected is not None:
+        assert direct_result.return_dependencies == expected
+
+
+def test_struct_field_element_direct_index_is_supported(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type E struct { F []int64 }\n"
+            "func F(i, j int, x int64) int64 {\n"
+            "\tss := []E{{F: []int64{x}}}\n"
+            "\tss[i].F[0] = x\n"
+            "\treturn ss[i].F[j]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+@pytest.mark.parametrize(
+    ("direct", "extracted"),
+    [
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 2)}\n"
+            "\tr := int64(0)\n"
+            "\tfor i, v := range s.A {\n"
+            "\t\tr = v\n"
+            "\t\tif i == 0 { s.A[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 2)}\n"
+            "\ta := s.A\n"
+            "\tr := int64(0)\n"
+            "\tfor i, v := range a {\n"
+            "\t\tr = v\n"
+            "\t\tif i == 0 { a[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        ),
+        (
+            "type S struct { M map[int]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{M: map[int]int64{0: 0, 1: 0}}\n"
+            "\tr := int64(0)\n"
+            "\tfor k, v := range s.M {\n"
+            "\t\tr = v\n"
+            "\t\tif k == 0 { s.M[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            "type S struct { M map[int]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{M: map[int]int64{0: 0, 1: 0}}\n"
+            "\tm := s.M\n"
+            "\tr := int64(0)\n"
+            "\tfor k, v := range m {\n"
+            "\t\tr = v\n"
+            "\t\tif k == 0 { m[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        ),
+    ],
+)
+def test_struct_field_range_rejoins_body_writes(
+    go_types_helper, direct, extracted
+):
+    direct_result = named(*unit(go_types_helper, direct))
+    extracted_result = named(*unit(go_types_helper, extracted))
+    assert direct_result.available, direct_result.gaps
+    assert extracted_result.available, extracted_result.gaps
+    assert direct_result.return_dependencies == (
+        extracted_result.return_dependencies
+    ) == frozenset({0})
+    assert direct_result.effects == extracted_result.effects
+
+
+def test_struct_field_range_summary_stays_fresh(go_types_helper):
+    direct_declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\tr := int64(0)\n"
+        "\tfor _, v := range s.A { r += v }\n"
+        "\treturn r + x\n}\n"
+    )
+    extracted_declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\ta := s.A\n"
+        "\tr := int64(0)\n"
+        "\tfor _, v := range a { r += v }\n"
+        "\treturn r + x\n}\n"
+    )
+    source = "package p;\n" + direct_declarations
+    report = compiler_report(go_types_helper, source)
+    snapshot = load_go_snapshot(report, source, target_arch="amd64")
+    summaries = ip.summarize_go(source, snapshot)
+    direct_result = named(source, snapshot, summaries)
+    extracted_result = named(
+        *unit(go_types_helper, extracted_declarations)
+    )
+    assert direct_result.available, direct_result.gaps
+    assert direct_result.return_dependencies == (
+        extracted_result.return_dependencies
+    ) == frozenset({0})
+    assert direct_result.effects == extracted_result.effects
+    assert len(direct_result.calls) == len(extracted_result.calls) == 1
+    assert [
+        (call.imported, call.arguments, call.result)
+        for call in direct_result.calls
+    ] == [
+        (call.imported, call.arguments, call.result)
+        for call in extracted_result.calls
+    ]
+    assert len(direct_result.pinned) == len(extracted_result.pinned) > 0
+
+    manifest = summaries.to_dict()
+
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from strings(key)
+                yield from strings(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from strings(item)
+
+    assert all("\x00" not in value for value in strings(manifest))
+    from agent import go_summaries
+
+    restored = ip.GoSummarySet.from_dict(manifest)
+    reusable, stale, missing = go_summaries._reuse_partition(
+        restored, summaries, report
+    )
+    assert direct_result.binding_id in reusable
+    assert direct_result.binding_id not in stale
+    assert direct_result.binding_id not in missing
+
+    range_function = (
+        "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tvar s S\n"
+        "\tr := int64(0)\n"
+        "\tfor _, v := range s.A { r += int64(v) }\n"
+        "\treturn r + x\n"
+        "}\n"
+    )
+    old_files = {
+        "types.go": "package p\ntype S struct { A []int64 }\n",
+        "function.go": range_function,
+    }
+    old_report = package_report(go_types_helper, old_files)
+    old_snapshot = load_go_package_snapshot(
+        old_report, old_files, target_arch="amd64"
+    )
+    old_summaries = ip.summarize_go_package(old_files, old_snapshot)
+    old_result = named_package(
+        old_files, old_snapshot, old_summaries, "F"
+    )
+    assert old_result.available, old_result.gaps
+    old_type_id = next(
+        binding.id
+        for binding in old_snapshot.bindings
+        if binding.name == "S" and binding.kind == "type"
+    )
+    assert old_type_id in old_result.pinned
+
+    changed_files = {
+        "types.go": "package p\ntype S struct { A []int32 }\n",
+        "function.go": range_function,
+    }
+    changed_report = package_report(go_types_helper, changed_files)
+    changed_snapshot = load_go_package_snapshot(
+        changed_report, changed_files, target_arch="amd64"
+    )
+    changed_summaries = ip.summarize_go_package(
+        changed_files, changed_snapshot
+    )
+    changed_result = named_package(
+        changed_files, changed_snapshot, changed_summaries, "F"
+    )
+    assert changed_result.available, changed_result.gaps
+    assert changed_result.binding_id == old_result.binding_id
+    restored_package = ip.GoSummarySet.from_dict(
+        old_summaries.to_dict()
+    )
+    changed_reusable, changed_stale, changed_missing = (
+        go_summaries._reuse_partition(
+            restored_package, changed_summaries, changed_report
+        )
+    )
+    assert old_result.binding_id not in changed_reusable
+    assert old_result.binding_id in changed_stale
+    assert old_result.binding_id not in changed_missing
+
+
+def test_struct_array_slice_field_store_keeps_backing_dependencies(
+    go_types_helper,
+):
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A [2][]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tn := []int64{0}\n"
+            "\ts := S{}\n"
+            "\ts.A[0] = n\n"
+            "\tn[0] = x\n"
+            "\treturn s.A[0][0]\n}\n",
+        )
+    )
+    extracted = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A [2][]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tn := []int64{0}\n"
+            "\ts := S{}\n"
+            "\ta := s.A\n"
+            "\ta[0] = n\n"
+            "\tn[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+        )
+    )
+    assert direct.available, direct.gaps
+    assert extracted.available, extracted.gaps
+    assert direct.return_dependencies == (
+        extracted.return_dependencies
+    ) == frozenset({0})
+    assert direct.effects == extracted.effects
+
+
+def test_struct_field_comma_ok_map_read_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { M map[int]int64 }\n"
+            "func F(s S, k int) int64 {\n"
+            "\tv, ok := s.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+def test_struct_field_select_receive_target_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(s S, ch chan int64, i int) int64 {\n"
+            "\tselect { case s.A[i] = <-ch: }\n"
+            "\treturn s.A[i]\n}\n",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{1}}\n"
+        "\told := s.A\n"
+        "\tt := []int64{2}\n"
+        "\tvar b []int64\n"
+        "\ts.A, b = t, append(s.A, 0)\n"
+        "\tb[0] = x\n"
+        "\treturn old[0]\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(s S, t []int64) int64 {\n"
+        "\tvar b int64\n"
+        "\ts.A, b = t, s.A[0]\n"
+        "\treturn b\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(s, t S) int64 {\n"
+        "\tvar b []int64\n"
+        "\ts, b = t, s.A\n"
+        "\treturn b[0]\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(s, t S) int64 {\n"
+        "\tvar b int64\n"
+        "\ts, b = t, s.A[0]\n"
+        "\treturn b\n}\n",
+    ],
+)
+def test_struct_field_parallel_assignment_overlap_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_expression"
+
+
+def test_struct_field_parallel_assignment_nonoverlap_is_available(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{1}}\n"
+            "\tt := []int64{2}\n"
+            "\tu := []int64{3}\n"
+            "\tvar b []int64\n"
+            "\ts.A, b = t, append(u, 0)\n"
+            "\tb[0] = x\n"
+            "\treturn s.A[0]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{x}}\n"
+        "\tt := []int64{0}\n"
+        "\tvar b []int64\n"
+        "\ts.A, b = t, s.A\n"
+        "\treturn b[0]\n}\n",
+        "type S struct { A []int64; B []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{0}, B: []int64{0}}\n"
+        "\ta := s.A\n"
+        "\ts.A, s.B = s.B, s.A\n"
+        "\ts.B[0] = x\n"
+        "\treturn a[0]\n}\n",
+        "type S struct { A []int64; B []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{x}, B: []int64{0}}\n"
+        "\ts.A, s.B = s.B, s.A\n"
+        "\tb := s.B\n"
+        "\treturn b[0]\n}\n",
+        "type S struct { A []int64; B []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{x}, B: []int64{0}}\n"
+        "\ts.A, s.B = (s.B), (s.A)\n"
+        "\tb := s.B\n"
+        "\treturn b[0]\n}\n",
+        "type S struct { A []int64; B []int64; C []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{x}, B: []int64{0}, C: []int64{1}}\n"
+        "\ts.A, s.B, s.C = s.B, s.C, s.A\n"
+        "\tb := s.C\n"
+        "\treturn b[0]\n}\n",
+    ],
+)
+def test_struct_field_parallel_assignment_swaps_use_snapshots(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct { A []int64 }\n"
+        "func F(x int64, t []int64) int64 {\n"
+        "\ts := S{A: []int64{0}}\n"
+        "\ta := s.A\n"
+        "\tvar b []int64\n"
+        "\ts.A, b = t, s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(x int64, t []int64) int64 {\n"
+        "\tu := S{A: []int64{0}}\n"
+        "\ta := u.A\n"
+        "\tvar b []int64\n"
+        "\tu.A, b = t, u.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+    ],
+)
+def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert 0 in result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{x}}\n"
+        "\tp := &s\n"
+        "\treturn p.A[0]\n}\n",
+        "type P struct { A []int64 }\n"
+        "type Q struct { P *P }\n"
+        "func F(q Q) int64 { return q.P.A[0] }\n",
+        "type S struct { A []int64 }\n"
+        "func F(p *S) int64 { return (*p).A[0] }\n",
+        "type S struct { A [2]int64 }\n"
+        "func F(s S, x int64) int64 { s.A[0] = x; return s.A[0] }\n",
+        "type S struct { A []int64 }\n"
+        "var GS S\n"
+        "func F() int64 { return GS.A[0] }\n",
+        "func F(s struct { A []int64 }) int64 { return s.A[0] }\n",
+        "type S[T any] struct { A []int64 }\n"
+        "func F(s S[int64]) int64 { return s.A[0] }\n",
+        "type E struct { F []int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(s S) int64 { return s.A[0].F[0] }\n",
+        "type E struct { F []int64 }\n"
+        "func F(ss []E, i int) int64 { return ss[i].F[0] }\n",
+        ],
+)
+def test_struct_field_direct_ops_keep_unsupported_shapes_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+def test_struct_field_index_calls_are_evaluated_once(go_types_helper):
+    cases = (
+        "type S struct { A []int64 }\n"
+        "func I() int64 { return 0 }\n"
+        "func F(s S, x int64) int64 {\n"
+        "\ts.A[I()] = x\n"
+        "\ta := s.A\n"
+        "\treturn a[0]\n}\n",
+        "type S struct { A []int64 }\n"
+        "func I() int64 { return 0 }\n"
+        "func F(s S) int64 { return s.A[I()] }\n",
+    )
+    for source in cases:
+        data = unit(go_types_helper, source)
+        result = named(*data)
+        assert result.available, result.gaps
+        index_call_id = named(*data, "I").binding_id
+        assert sum(
+            transfer.target == index_call_id
+            for transfer in result.calls
+        ) == 1
+
+
+def test_imported_struct_field_index_stays_closed(go_types_helper):
+    files = {
+        "main.go": (
+            'package p\nimport "lib"\n'
+            "func F() int64 { return lib.GS.A[0] }\n"
+        )
+    }
+    imports = {
+        "lib": {
+            "g.go": (
+                "package lib\n"
+                "type S struct { A []int64 }\n"
+                "var GS S\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot)
+    )
+    assert not result.available
 
 
 @pytest.mark.parametrize(

@@ -2372,6 +2372,213 @@ class _Builder:
         )
         return field_key.rsplit("\x00", 1)[0], member
 
+    def _scalar_container_field_pointer_crossing(
+        self, sel: Any
+    ) -> bool:
+        current = sel
+        while current is not None:
+            while current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if current is None:
+                    return False
+            if current.type in {"selector_expression", "field_expression"}:
+                field = current.child_by_field_name("field")
+                field_ref = (
+                    self.references.get(self.node_key(field))
+                    if field is not None
+                    else None
+                )
+                member = self._field_identity(field_ref)
+                if (
+                    member is not None
+                    and member.type is not None
+                    and member.type.kind == "pointer"
+                ):
+                    return True
+                current = current.child_by_field_name("operand")
+                continue
+            if current.type == "index_expression":
+                current = current.child_by_field_name("operand")
+                continue
+            if current.type in {"dereference_expression", "unary_expression"}:
+                operator = current.child_by_field_name("operator")
+                if (
+                    current.type == "dereference_expression"
+                    or operator is not None
+                    and operator.text == b"*"
+                ):
+                    return True
+                current = current.child_by_field_name("operand")
+                continue
+            if current.type == "identifier":
+                ref = self.references.get(self.node_key(current))
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None and ref.binding_id is not None
+                    else None
+                )
+                return (
+                    binding is not None
+                    and binding.type is not None
+                    and binding.type.kind == "pointer"
+                )
+            return False
+        return False
+
+    def _opaque_container_field_target(
+        self, sel: Any, params: dict | None = None
+    ) -> tuple[str, str, Any, frozenset, Any] | None:
+        root_id, member = self._scalar_container_field(sel)
+        if root_id is None or member is None:
+            return None
+        if self._scalar_container_field_pointer_crossing(sel):
+            raise _Unsupported(
+                "non_parameter_reference", _span(sel)
+            )
+        root = sel
+        while root is not None:
+            while root.type == "parenthesized_expression":
+                root = next(
+                    (
+                        child
+                        for child in root.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if root is None:
+                    return None
+            if root.type in {
+                "selector_expression",
+                "field_expression",
+                "index_expression",
+            }:
+                root = root.child_by_field_name("operand")
+                continue
+            break
+        root_ref = (
+            self.references.get(self.node_key(root))
+            if root is not None and root.type == "identifier"
+            else None
+        )
+        if root_ref is None or root_ref.binding_id is None:
+            return None
+        root_binding = self.bindings.get(root_ref.binding_id)
+        fact = member.type
+        operand = sel.child_by_field_name("operand")
+        indexed_struct_root = False
+        while operand is not None:
+            while operand.type == "parenthesized_expression":
+                operand = next(
+                    (
+                        child
+                        for child in operand.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if operand is None:
+                    break
+            if operand is None:
+                break
+            if operand.type == "index_expression":
+                indexed_struct_root = True
+                operand = operand.child_by_field_name("operand")
+            elif operand.type in {
+                "selector_expression",
+                "field_expression",
+            }:
+                operand = operand.child_by_field_name("operand")
+            else:
+                break
+        scalar_collection = (
+            fact is not None
+            and fact.kind in {"slice", "array", "map"}
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind in {"integer", "boolean", "pointer"}
+        )
+        nested_scalar_collection = (
+            fact is not None
+            and self._scalar_elem_nested_collection(fact)
+        )
+        if (
+            root_ref.kind == "import"
+            or root_binding is None
+            or self._package_level(root_binding)
+            or (
+                root_binding.type is not None
+                and root_binding.type.kind == "struct"
+                and not root_binding.type.type_id
+            )
+            or (
+                indexed_struct_root
+                and root_binding.type is not None
+                and root_binding.type.kind == "struct"
+            )
+            or (
+                root_ref.binding_id in (params or {})
+                and root_binding.type is not None
+                and root_binding.type.kind
+                in {"slice", "array", "map"}
+                and getattr(root_binding.type, "elem", None) is not None
+                and root_binding.type.elem.kind == "struct"
+            )
+            or not (scalar_collection or nested_scalar_collection)
+            or (
+                fact.kind == "array"
+                and not self._type_embeds_collection(fact)
+            )
+        ):
+            return None
+        tokens = self._opaque_container_bind(sel, params)
+        if not tokens:
+            return None
+        field_key = self._opaque_container_field_key(
+            root_id, member.id
+        )
+        return field_key, root_id, member, tokens, root_ref
+
+    def _opaque_container_field_index_target(
+        self, node: Any, params: dict | None = None
+    ) -> tuple[Any, Any, list[Any], str, Any, frozenset, Any] | None:
+        indexes: list[Any] = []
+        current = node
+        while True:
+            while current is not None and current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if current is None or current.type != "index_expression":
+                break
+            indexes.append(current.child_by_field_name("index"))
+            current = current.child_by_field_name("operand")
+        if (
+            current is None
+            or current.type not in {"selector_expression", "field_expression"}
+            or not indexes
+        ):
+            return None
+        target = self._opaque_container_field_target(current, params)
+        if target is None:
+            return None
+        field_key, _root_id, member, tokens, root_ref = target
+        return (
+            root_ref, indexes[0], indexes[1:], field_key, member,
+            tokens, current,
+        )
+
     def _opaque_container_field_key(
         self, root_id: str, member_id: str
     ) -> str:
@@ -3068,6 +3275,12 @@ class _Builder:
                         arg_ref.binding_id,
                         frozenset({arg_ref.binding_id}),
                     )
+            elif arg0 is not None and arg0.type == "selector_expression":
+                field_target = self._opaque_container_field_target(
+                    arg0, params
+                )
+                if field_target is not None:
+                    toks |= field_target[3]
             # `b := append(a[i][j], sub)` — an appended
             # collection element shares its backing with the
             # result's element slot, so its group unions in
@@ -6583,8 +6796,13 @@ class _Builder:
         call_fact = None
         call_member = None
         opaque_composite = None
+        opaque_field = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)
+            if member is None:
+                opaque_field = self._opaque_container_field_target(
+                    inner, params
+                )
         elif inner is not None and inner.type in (
             "call_expression",
             "type_conversion_expression",
@@ -6696,7 +6914,11 @@ class _Builder:
                             else (
                                 self.bindings[opaque_composite].type
                                 if opaque_composite is not None
-                                else None
+                                else (
+                                    opaque_field[2].type
+                                    if opaque_field is not None
+                                    else None
+                                )
                             )
                         )
                     )
@@ -6731,6 +6953,7 @@ class _Builder:
                 and package_pointee is None
                 and call_operand is None
                 and opaque_composite is None
+                and opaque_field is None
             )
             or (member is not None and member.kind != "var")
             or fact is None
@@ -6739,7 +6962,10 @@ class _Builder:
             or (
                 elem.kind not in {"integer", "boolean", "pointer"}
                 and not (
-                    opaque_composite is not None
+                    (
+                        opaque_composite is not None
+                        or opaque_field is not None
+                    )
                     and (
                         self._scalar_elem_collection(elem)
                         or self._scalar_elem_nested_collection(
@@ -6769,6 +6995,8 @@ class _Builder:
             self._pin_fact_identities(
                 self.bindings[opaque_composite].type
             )
+        elif opaque_field is not None:
+            self._pin_fact_identities(opaque_field[2].type)
         else:
             # `(*GP)[i]` — same pins on the pointee container fact;
             # the var's own identity is the transfer target below.
@@ -6783,7 +7011,11 @@ class _Builder:
         key = fact.key
         if key is not None and key.type_id:
             self.pinned.add(key.type_id)
-        if call_operand is None and opaque_composite is None:
+        if (
+            call_operand is None
+            and opaque_composite is None
+            and opaque_field is None
+        ):
             transfers.append(
                 CallTransfer(
                     FileSpan(self.current_file, node.start_byte, node.end_byte),
@@ -6894,6 +7126,12 @@ class _Builder:
             deps |= self._opaque_container_deps(
                 opaque_composite, locals_
             )
+        if opaque_field is not None:
+            field_key = opaque_field[0]
+            deps |= self.expression(
+                inner, fn, params, locals_, transfers, count, depth + 1
+            )
+            deps |= self._opaque_container_deps(field_key, locals_)
         for idx in reversed(indexes):
             if idx is None:
                 raise _Unsupported(
@@ -15536,6 +15774,7 @@ class _Builder:
             # like a read's.
             opaque_elem_targets: dict[int, frozenset] = {}
             opaque_elem_index_deps: dict[int, frozenset[int]] = {}
+            opaque_elem_slot_ids: dict[int, str] = {}
             # `a, a[0] = arr, x` — assigning an ARRAY copies the
             # value into the variable's own storage, which keeps
             # naming the element the LHS pointer was computed
@@ -16007,6 +16246,49 @@ class _Builder:
                 # resolves every element through the one slot. A
                 # param container's elements live in caller memory —
                 # that external mutation stays closed here.
+                field_elem_lhs = (
+                    self._opaque_container_field_index_target(
+                        lhs, params
+                    )
+                )
+                if field_elem_lhs is not None:
+                    (
+                        oref, oindex, inner_indexes, field_key,
+                        _field_member, field_tokens, field_selector,
+                    ) = field_elem_lhs
+                    refs.append(oref)
+                    ri = len(refs) - 1
+                    opaque_elem_targets[ri] = frozenset(field_tokens)
+                    opaque_elem_slot_ids[ri] = field_key
+                    opaque_elem_index_deps[ri] = self.expression(
+                        field_selector, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                    self._record_read(opaque_elem_index_deps[ri])
+                    for inner_index in reversed(inner_indexes or ()):
+                        if (
+                            inner_index is not None
+                            and inner_index.type not in _INDEX_LITERALS
+                        ):
+                            opaque_elem_index_deps[ri] |= self.expression(
+                                inner_index, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                            self._record_read(
+                                opaque_elem_index_deps[ri]
+                            )
+                    if (
+                        oindex is not None
+                        and oindex.type not in _INDEX_LITERALS
+                    ):
+                        opaque_elem_index_deps[ri] |= self.expression(
+                            oindex, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                        self._record_read(
+                            opaque_elem_index_deps[ri]
+                        )
+                    continue
                 opaque_elem_lhs = self._opaque_container_index_target(
                     lhs
                 )
@@ -16113,6 +16395,83 @@ class _Builder:
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
+            field_rhs_snapshots: dict[
+                int, tuple[frozenset, frozenset[int]]
+            ] = {}
+            if len(lefts) == len(rights) and len(lefts) > 1:
+                assigned_root_ids: set[str] = set()
+                for lhs in lefts:
+                    if lhs.type != "identifier":
+                        continue
+                    lhs_ref = self.references.get(
+                        self.node_key(lhs)
+                    )
+                    if lhs_ref is not None:
+                        assigned_root_ids.add(lhs_ref.binding_id)
+                assigned_field_keys = {
+                    self._opaque_container_field_key(
+                        root_id, member_id
+                    )
+                    for root_id, member_id
+                    in field_container_reseats.values()
+                }
+                for rhs_index, rhs in enumerate(rights):
+                    bare_rhs = rhs
+                    while (
+                        bare_rhs is not None
+                        and bare_rhs.type == "parenthesized_expression"
+                    ):
+                        bare_rhs = next(
+                            (
+                                child
+                                for child in bare_rhs.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    bare_field = (
+                        self._opaque_container_field_target(
+                            bare_rhs, params
+                        )
+                        if bare_rhs is not None
+                        and bare_rhs.type
+                        in {"selector_expression", "field_expression"}
+                        else None
+                    )
+                    if (
+                        bare_field is not None
+                        and bare_field[1] not in assigned_root_ids
+                        and bare_field[0] in assigned_field_keys
+                    ):
+                        field_rhs_snapshots[rhs_index] = (
+                            frozenset(bare_field[3]),
+                            self._opaque_container_deps(
+                                bare_field[0], locals_
+                            ),
+                        )
+                        continue
+                    pending = [rhs]
+                    while pending:
+                        current = pending.pop()
+                        if current.type in {
+                            "selector_expression",
+                            "field_expression",
+                        }:
+                            field_target = (
+                                self._opaque_container_field_target(
+                                    current, params
+                                )
+                            )
+                            if field_target is not None and (
+                                field_target[1] in assigned_root_ids
+                                or field_target[0]
+                                in assigned_field_keys
+                            ):
+                                raise _Unsupported(
+                                    "unsupported_expression",
+                                    _span(node),
+                                )
+                        pending.extend(_children(current))
             # `s.F = v` reseats the field's share group onto the
             # RHS's own backing: a `a := s.F` bound before the store
             # keeps the OLD tokens (it still aliases the previous
@@ -16332,6 +16691,9 @@ class _Builder:
                     for rhs in rights
                 ]
             )
+            for rhs_index, (_, rhs_deps) in field_rhs_snapshots.items():
+                if rhs_index < len(values):
+                    values[rhs_index] |= rhs_deps
             # The stored map keys' deps join the external-write set
             # only now — the store lands after every RHS read.
             self.indirect_writes |= pending_map_key_deps
@@ -16456,6 +16818,14 @@ class _Builder:
             self._chan_detached.clear()
             self._chan_prestate_members = set()
             pre_container_toks: dict[int, Any] = {}
+            for rhs_index, (tokens, _) in field_rhs_snapshots.items():
+                current_tokens = self._opaque_container_bind(
+                    rights[rhs_index], params
+                )
+                pre_container_toks[rhs_index] = (
+                    frozenset(tokens)
+                    | frozenset(current_tokens or ())
+                )
             if len(lefts) == len(rights):
                 for pre_i in range(len(refs)):
                     pre_rhs = rights[pre_i]
@@ -17962,11 +18332,14 @@ class _Builder:
                         else frozenset()
                     )
                     if inner_toks:
+                        slot_id = opaque_elem_slot_ids.get(
+                            i, ref.binding_id
+                        )
                         self._opaque_container_tokens[
-                            ref.binding_id
+                            slot_id
                         ] = (
                             self._opaque_container_tokens.get(
-                                ref.binding_id, frozenset()
+                                slot_id, frozenset()
                             )
                             | inner_toks
                         )
@@ -18862,6 +19235,20 @@ class _Builder:
                 # this distinction.
                 computed_pointer_result = False
                 opaque_range = None
+                opaque_range_field = None
+                if (
+                    right is not None
+                    and member is None
+                    and container_var is None
+                    and right.type in {
+                        "selector_expression", "field_expression"
+                    }
+                ):
+                    opaque_range_field = (
+                        self._opaque_container_field_target(
+                            right, params
+                        )
+                    )
                 if (
                     right is not None
                     and member is None
@@ -19083,6 +19470,7 @@ class _Builder:
                     or package_pointee is not None
                     or computed is not None
                     or opaque_range is not None
+                    or opaque_range_field is not None
                 ):
                     # Ranging a container in external state — an
                     # imported member (`lib.VA`, `lib.VM`), the
@@ -19109,6 +19497,7 @@ class _Builder:
                         or package_pointee is not None
                         or computed is not None
                         or opaque_range is not None
+                        or opaque_range_field is not None
                     ):
                         fact = (
                             bound[2]
@@ -19119,9 +19508,13 @@ class _Builder:
                                 else (
                                     computed[1]
                                     if computed is not None
-                                    else self.bindings[
-                                        opaque_range
-                                    ].type
+                                    else (
+                                        self.bindings[
+                                            opaque_range
+                                        ].type
+                                        if opaque_range is not None
+                                        else opaque_range_field[2].type
+                                    )
                                 )
                             )
                         )
@@ -19134,7 +19527,11 @@ class _Builder:
                                 else (
                                     computed[2]
                                     if computed is not None
-                                    else opaque_range
+                                    else (
+                                        opaque_range
+                                        if opaque_range is not None
+                                        else opaque_range_field[1]
+                                    )
                                 )
                             )
                         )
@@ -19443,7 +19840,14 @@ class _Builder:
                                 )
                             )
                     value_deps = frozenset()
-                    if opaque_range is not None:
+                    if opaque_range_field is not None:
+                        value_deps = self.expression(
+                            right, fn, params, scope, transfers,
+                            count, 0,
+                        ) | self._opaque_container_deps(
+                            opaque_range_field[0], scope
+                        )
+                    elif opaque_range is not None:
                         # `for range s` — each element (and a map's
                         # key, when only one name binds) carries the
                         # bound container's conflated set across
@@ -19577,6 +19981,7 @@ class _Builder:
                             bound is not None
                             or computed is not None
                             or opaque_range is not None
+                            or opaque_range_field is not None
                         )
                         and fact is not None
                         and len(lefts) >= 1
@@ -20439,6 +20844,13 @@ class _Builder:
                                 else self.indirect_writes
                             )
                         )
+                        if (
+                            opaque_range_field is not None
+                            and not elem_static
+                        ):
+                            extra |= self._opaque_container_deps(
+                                opaque_range_field[0], inner
+                            )
                         if elem_escaped:
                             # A func iterator's callee reads escaped
                             # caller memory each iteration — re-join
@@ -21113,6 +21525,37 @@ class _Builder:
                             imported=True,
                         )
                     )
+                return
+            field_elem = self._opaque_container_field_index_target(
+                operand, params
+            )
+            if field_elem is not None:
+                (
+                    ref, index_node, inner_indexes, field_key,
+                    _member, field_tokens, field_selector,
+                ) = field_elem
+                elem_value = self.expression(
+                    field_selector, fn, params, locals_,
+                    transfers, count, 0,
+                ) | self._opaque_container_deps(
+                    field_key, locals_
+                )
+                for idx in tuple(reversed(inner_indexes or ())) + (
+                    index_node,
+                ):
+                    if idx is not None and idx.type not in _INDEX_LITERALS:
+                        elem_value |= self.expression(
+                            idx, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                for holder_id in self._opaque_container_holders(
+                    field_tokens
+                ):
+                    self._store(
+                        locals_, params, holder_id, elem_value, True
+                    )
+                self.indirect_writes |= elem_value
+                self._record_read(elem_value)
                 return
             opaque_elem = self._opaque_container_index_target(operand)
             if opaque_elem is not None:
@@ -24996,6 +25439,18 @@ class _Builder:
                         )
                         scalar_cont = append_cont is not None
                     if append_cont is None:
+                        field_target = self._opaque_container_field_target(
+                            arguments[0], params
+                        )
+                        if (
+                            field_target is not None
+                            and self._scalar_elem_collection(
+                                field_target[2].type
+                            )
+                        ):
+                            append_cont = field_target[0]
+                            scalar_cont = True
+                    if append_cont is None:
                         # `append(s, c)` on a bound chan-element
                         # container — the same element-dep fold as
                         # the scalar arm; the appended queue joins
@@ -25025,8 +25480,14 @@ class _Builder:
                     for extra in arguments[1:]:
                         if (
                             append_cont is not None
+                            and (
+                                (append_binding := self.bindings.get(
+                                    append_cont
+                                ))
+                                is not None
+                            )
                             and self._chan_chan_elem_collection(
-                                self.bindings[append_cont].type
+                                append_binding.type
                             )
                         ):
                             element = extra
@@ -25572,6 +26033,23 @@ class _Builder:
                                     return self._opaque_container_deps(
                                         len_ref.binding_id, locals_
                                     )
+                        field_target = self._opaque_container_field_target(
+                            arguments[0], params
+                        )
+                        if field_target is not None:
+                            field_key = field_target[0]
+                            self._pin_fact_identities(
+                                field_target[2].type
+                            )
+                            return (
+                                self.expression(
+                                    arguments[0], fn, params, locals_,
+                                    transfers, count, depth + 1,
+                                )
+                                | self._opaque_container_deps(
+                                    field_key, locals_
+                                )
+                            )
                         if (
                             operand is not None
                             and operand.type == "call_expression"
