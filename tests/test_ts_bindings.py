@@ -818,6 +818,37 @@ def test_direct_const_reassignment_still_reports_a_gap():
     assert any(gap.reason == "const_reassignment" for gap in report.gaps)
 
 
+def test_typeof_type_queries_read_value_roots_conservatively():
+    source = """
+declare const value: number;
+declare const object: {x: number};
+type ValueType = typeof value;
+type MemberType = typeof object.x;
+type ImportedType = typeof import("module");
+type MissingType = typeof notDeclared;
+"""
+    report = build_ts_bindings(source)
+    value = _bindings(report, "value", "ambient")[0]
+    object_binding = _bindings(report, "object", "ambient")[0]
+    assert _refs(report, source, "value")[0].binding_id == value.id
+    assert _refs(report, source, "object")[0].binding_id == object_binding.id
+    assert any(
+        item.name == "notDeclared" and item.reason == "unknown_name"
+        for item in _unresolved(report)
+    )
+    assert any(
+        "import" in item.name and item.reason == "qualified_path"
+        for item in _unresolved(report)
+    )
+    aliases = {
+        binding.name: binding
+        for binding in report.bindings
+        if binding.name in {"ValueType", "MemberType", "ImportedType", "MissingType"}
+    }
+    assert len(aliases) == 4
+    assert all(binding.type.kind == "unknown" for binding in aliases.values())
+
+
 def test_multibyte_spans_hash_and_output_are_deterministic():
     source = 'const greeting = "💡"; function f() { return greeting; }'
     report = build_ts_bindings(source)

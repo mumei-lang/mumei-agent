@@ -899,6 +899,19 @@ class _TypeScriptBindings:
                 self._scan_type(child)
             return
         if node.type == "type_query":
+            expression = next(iter(self.children(node)), None)
+            if expression is not None and expression.type in {
+                "member_expression", "subscript_expression",
+            }:
+                root = expression
+                while root.type in {"member_expression", "subscript_expression"}:
+                    root = root.child_by_field_name("object")
+                if root is not None and root.type == "identifier":
+                    self._resolve(root, "value", "read")
+                    return
+            elif expression is not None and expression.type == "identifier":
+                self._resolve(expression, "value", "read")
+                return
             self.add_unresolved(node, self.text(node).strip(), "qualified_path")
             return
         if node.type in {"member_expression", "nested_type_identifier"}:
