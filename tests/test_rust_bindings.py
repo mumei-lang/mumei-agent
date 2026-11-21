@@ -660,6 +660,33 @@ fn caller() { plain(target::<u8>()); impl_trait(1); }
     assert calls[plain.id].kind == "direct_local"
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "struct S { field: make_type!() }",
+        "fn f() { let value: make_type!() = 0; }",
+        "fn f() -> make_type!() { loop {} }",
+        "type Alias = make_type!();",
+    ],
+)
+def test_type_position_macros_create_macro_gaps(source):
+    report = build_rust_bindings(source, pointer_width=64)
+    macro_start = source.encode().index(b"make_type!")
+    assert any(
+        gap.reason == "macro_invocation" and gap.span.start == macro_start
+        for gap in report.gaps
+    )
+    assert not report.complete
+
+
+def test_explicit_non_macro_types_do_not_create_macro_gaps():
+    report = build_rust_bindings(
+        "struct S { field: u8 } type Alias = u16; fn f(x: u8) -> u16 { x as u16 }",
+        pointer_width=64,
+    )
+    assert not any(gap.reason == "macro_invocation" for gap in report.gaps)
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)

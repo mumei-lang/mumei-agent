@@ -498,6 +498,14 @@ class _RustBindings:
             if reference not in self.references:
                 self.references.append(reference)
 
+    def _record_macro_invocations(self, node: Any | None) -> None:
+        for candidate in self._descendants(node):
+            if candidate.type != "macro_invocation":
+                continue
+            gap = Gap("macro_invocation", self.span(candidate))
+            if gap not in self.gaps:
+                self.gaps.append(gap)
+
     def _use_names(self, node: Any) -> list[tuple[Any, bool, str | None]]:
         out: list[tuple[Any, bool, str | None]] = []
 
@@ -561,6 +569,7 @@ class _RustBindings:
                 self._expr(node)
 
     def _scan_item(self, node: Any, scope: _Scope) -> None:
+        self._record_macro_invocations(node)
         if node.type == "macro_definition":
             return
         if node.type == "use_declaration":
@@ -820,6 +829,7 @@ class _RustBindings:
         return identifiers
 
     def _type_fact(self, node: Any, aliases: frozenset[str] = frozenset()) -> TypeFact:
+        self._record_macro_invocations(node)
         text = self.text(node).strip()
         if not text:
             return _UNKNOWN
@@ -1144,8 +1154,11 @@ class _RustBindings:
         if node is None:
             return
         kind = node.type
-        if kind in {"macro_invocation", "macro_definition"}:
-            self.gaps.append(Gap("macro_invocation" if kind == "macro_invocation" else "macro_definition", self.span(node)))
+        if kind == "macro_invocation":
+            self._record_macro_invocations(node)
+            return
+        if kind == "macro_definition":
+            self.gaps.append(Gap("macro_definition", self.span(node)))
             return
         if kind in {"identifier", "self"}:
             self._reference(node)
