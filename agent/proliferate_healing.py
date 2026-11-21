@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from agent.dependency_invalidation import dependency_invalidation_map
 from agent.mumei_client import MumeiClient
 from agent.thought_log import (
     ThoughtProcess,
@@ -54,14 +55,38 @@ def check_blast_radius(
         new_file_path.write_text(code, encoding="utf-8")
         wrote_new = True
 
+        # Dependency-aware invalidation map (detection only): which
+        # existing files transitively import the candidate. Computed
+        # while the candidate is on disk so its node exists in the
+        # scanned graph.
+        rederive: set[str] = set()
+        try:
+            rel_changed = str(
+                new_file_path.resolve().relative_to(mumei_repo_dir.resolve())
+            ).replace("\\", "/")
+            inv_map = dependency_invalidation_map(std_dir, rel_changed)
+            rederive = set(inv_map["re_derive"])
+            result["dependency_invalidation"] = inv_map
+        except (OSError, ValueError):
+            pass
+
         # Verify every existing .mm file (excluding the new one)
         for mm_file in sorted(std_dir.rglob("*.mm")):
             if mm_file.resolve() == new_file_path.resolve():
                 continue
             verify = mumei_client.verify(str(mm_file))
             if not verify["success"]:
+                rel_broken = str(
+                    mm_file.resolve().relative_to(mumei_repo_dir.resolve())
+                ).replace("\\", "/")
                 result["broken_files"].append(
-                    {"file": str(mm_file), "error": verify.get("stderr", "")}
+                    {
+                        "file": str(mm_file),
+                        "error": verify.get("stderr", ""),
+                        # True when the broken file transitively imports
+                        # the candidate; False marks independent breakage.
+                        "dependency_driven": rel_broken in rederive,
+                    }
                 )
         result["all_passed"] = len(result["broken_files"]) == 0
     finally:
