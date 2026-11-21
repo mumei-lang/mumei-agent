@@ -1557,7 +1557,11 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
 # that bound, cancellation/runtime semantics and other cyclic control flow
 # remain outside; the loop input domain carries
 # `_and_loops_exiting_within_bound_4`. These checks do not establish ABI
-# behavior or full object TV. object_translation_correspondence is the full
+# behavior or full object TV. Core's callee-saved preservation check applies
+# only to Equivalent functions within this profile; direct callees and the
+# cancellation poll are assumed to preserve those registers, while external
+# callees remain an assumption. The argument/result register convention is
+# assumed, not validated. object_translation_correspondence is the full
 # object-TV check; none is a recovery performer or makes a linker, loader,
 # ABI, or runtime claim.
 OBJECT_CHECK_VOCABULARY = frozenset(
@@ -1572,6 +1576,8 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_forward_branch_function_tv",
         "machine_code_acyclic_branch_function_tv",
         "machine_code_conditional_call_function_tv",
+        "machine_code_callee_saved_register_preservation",
+        "machine_code_callee_saved_preservation_assumed_for_external_callees",
     }
 )
 

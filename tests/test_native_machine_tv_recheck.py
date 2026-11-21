@@ -14,6 +14,7 @@ from agent.core_evidence import OBJECT_CHECK_VOCABULARY
 from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
 from agent.native_machine_tv_recheck import (
     CHECK_VOCABULARY,
+    MACHINE_TV_OBJECT_CHECKS,
     MACHINE_TV_SCHEMA,
     build_machine_tv_recheck_parser,
     main_machine_tv_recheck,
@@ -43,6 +44,7 @@ DESCRIPTOR = {
         "object_call_edge_correspondence",
         "object_link_correspondence",
         "machine_code_leaf_function_tv",
+        "machine_code_callee_saved_register_preservation",
     ],
     "checks_not_performed": [
         "machine_code_direct_call_site_tv",
@@ -50,6 +52,7 @@ DESCRIPTOR = {
         "machine_code_acyclic_branch_function_tv",
         "machine_code_conditional_call_function_tv",
         "machine_code_bounded_loop_function_tv",
+        "machine_code_callee_saved_preservation_assumed_for_external_callees",
         "machine_code_tv_cyclic_control_flow_functions",
         "object_translation_correspondence",
     ],
@@ -60,7 +63,8 @@ RECORD = {
 }
 BASE_DISCHARGED = frozenset({"artifact_semantics", "claim_truth"})
 OBJECT_MACHINE_CHECKS = OBJECT_CHECK_VOCABULARY - {
-    "object_translation_correspondence"
+    "object_translation_correspondence",
+    "machine_code_callee_saved_preservation_assumed_for_external_callees",
 }
 ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
 EXPECTED_CHECKED = BASE_DISCHARGED | OBJECT_MACHINE_CHECKS
@@ -203,6 +207,7 @@ def test_descriptor_without_equivalent_function_leaves_leaf_tv_unperformed(
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
             "machine_code_bounded_loop_function_tv",
+            "machine_code_callee_saved_register_preservation",
         }
     )
     assert report["machine_tv_recheck"] == "checked"
@@ -257,7 +262,11 @@ def test_direct_call_and_leaf_checks_stay_unperformed_when_not_listed(
 ):
     descriptor = {
         **DESCRIPTOR,
-        "checks_performed": DESCRIPTOR["checks_performed"][:-1],
+        "checks_performed": [
+            name
+            for name in DESCRIPTOR["checks_performed"]
+            if name != "machine_code_leaf_function_tv"
+        ],
         "checks_not_performed": [
             "machine_code_direct_call_site_tv",
             "machine_code_leaf_function_tv",
@@ -499,6 +508,63 @@ def test_bounded_loop_check_stays_unperformed_when_not_listed(
 
 
 @pytest.mark.parametrize(
+    "check",
+    [
+        "machine_code_callee_saved_register_preservation",
+        "machine_code_callee_saved_preservation_assumed_for_external_callees",
+    ],
+)
+def test_callee_saved_check_is_discharged_only_when_listed(
+    tmp_path, capsys, check
+):
+    assert check in MACHINE_TV_OBJECT_CHECKS
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [
+            *(name for name in DESCRIPTOR["checks_performed"] if name != check),
+            check,
+        ],
+        "checks_not_performed": [
+            name for name in DESCRIPTOR["checks_not_performed"] if name != check
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert check in report["discharged_checks"]
+    assert check not in report["checks_not_performed"]
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        "machine_code_callee_saved_register_preservation",
+        "machine_code_callee_saved_preservation_assumed_for_external_callees",
+    ],
+)
+def test_callee_saved_check_stays_unperformed_when_absent(
+    tmp_path, capsys, check
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [
+            name for name in DESCRIPTOR["checks_performed"] if name != check
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert check in report["checks_not_performed"]
+    assert check not in report["discharged_checks"]
+
+
+@pytest.mark.parametrize(
     "out_of_profile_check",
     [
         "machine_code_tv_branching_functions",
@@ -576,17 +642,24 @@ def test_non_list_checks_performed_discharge_no_object_checks(
             "checks_performed": [
                 "machine_code_leaf_function_tv",
                 "machine_code_bounded_loop_function_tv",
+                "machine_code_callee_saved_register_preservation",
             ],
         },
         {
             "schema_version": "mumei.other/v1",
             "build_id": BUILD_ID,
-            "checks_performed": ["machine_code_bounded_loop_function_tv"],
+            "checks_performed": [
+                "machine_code_bounded_loop_function_tv",
+                "machine_code_callee_saved_register_preservation",
+            ],
         },
         {
             "schema_version": MACHINE_TV_SCHEMA,
             "build_id": "b" * 64,
-            "checks_performed": ["machine_code_bounded_loop_function_tv"],
+            "checks_performed": [
+                "machine_code_bounded_loop_function_tv",
+                "machine_code_callee_saved_register_preservation",
+            ],
         },
         "not-json",
         ["not", "an", "object"],
@@ -606,8 +679,13 @@ def test_descriptor_schema_and_build_id_gate_machine_tv_fields(
     assert "register_convention_assumed" not in report
     assert "input_domain" not in report
     assert "function_outcomes" not in report
+    assert "callee_saved_preservation" not in report
     assert report["discharged_checks"] == sorted(BASE_DISCHARGED)
     assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
+    assert (
+        "machine_code_callee_saved_register_preservation"
+        not in report["discharged_checks"]
+    )
     _assert_partition(report, BASE_DISCHARGED)
 
 
@@ -659,6 +737,93 @@ def test_function_outcomes_ignore_malformed_entries(tmp_path, capsys):
     assert '"eq":' not in out and '"outside":' not in out
 
 
+def test_callee_saved_preservation_counts_valid_values_without_function_names(
+    tmp_path, capsys
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "functions": {
+            "preserved_function": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved",
+            },
+            "violated_function": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "violated",
+            },
+            "unknown_function": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "unknown",
+            },
+            "function_without_preservation": {
+                "outcome": "outside_profile",
+            },
+        },
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["callee_saved_preservation"] == {
+        "preserved": 1,
+        "violated": 1,
+        "unknown": 1,
+    }
+    for function_name in descriptor["functions"]:
+        assert function_name not in out
+
+
+def test_callee_saved_preservation_omitted_when_no_function_has_field(
+    tmp_path, capsys
+):
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert "callee_saved_preservation" not in report
+
+
+@pytest.mark.parametrize("preservation", ["invalid", 7, None])
+def test_callee_saved_preservation_omitted_for_invalid_value(
+    tmp_path, capsys, preservation
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "functions": {
+            "valid": {"callee_saved_preservation": "preserved"},
+            "invalid": {"callee_saved_preservation": preservation},
+        },
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert "callee_saved_preservation" not in report
+
+
+@pytest.mark.parametrize(
+    "functions",
+    [["not", "a", "map"], {"malformed": []}, {"malformed": None}],
+)
+def test_callee_saved_preservation_omitted_for_malformed_functions(
+    tmp_path, capsys, functions
+):
+    descriptor = {**DESCRIPTOR, "functions": functions}
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert "callee_saved_preservation" not in report
+
+
 def test_non_dict_functions_omits_aggregate_field(tmp_path, capsys):
     descriptor = {**DESCRIPTOR, "functions": ["not", "a", "map"]}
     core = _write_core(tmp_path, stdout=descriptor)
@@ -668,6 +833,7 @@ def test_non_dict_functions_omits_aggregate_field(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert "function_outcomes" not in report
+    assert "callee_saved_preservation" not in report
 
 
 @pytest.mark.parametrize(
@@ -849,13 +1015,35 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
     bundle, source = _build_real_bundle(tmp_path, real_core)
     build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
     descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
+    assert (
+        "machine_code_callee_saved_register_preservation"
+        in descriptor["checks_performed"]
+    )
+    assert (
+        "machine_code_callee_saved_preservation_assumed_for_external_callees"
+        in descriptor["checks_not_performed"]
+    )
+    equivalent_functions = [
+        function
+        for function in descriptor["functions"].values()
+        if isinstance(function, dict)
+        and function.get("outcome") == "equivalent_within_profile"
+    ]
+    assert equivalent_functions
+    assert all(
+        function.get("callee_saved_preservation") == "preserved"
+        for function in equivalent_functions
+    )
     assert "machine_code_leaf_function_tv" in descriptor["checks_performed"]
     assert "machine_code_direct_call_site_tv" in descriptor["checks_not_performed"]
     assert "machine_code_forward_branch_function_tv" in descriptor["checks_not_performed"]
     assert "machine_code_acyclic_branch_function_tv" in descriptor["checks_not_performed"]
     assert "machine_code_conditional_call_function_tv" in descriptor["checks_not_performed"]
     assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
-    assert "machine_code_tv_cyclic_control_flow_functions" in descriptor["checks_not_performed"]
+    assert (
+        "machine_code_tv_cyclic_control_flow_functions"
+        not in descriptor["checks_not_performed"]
+    )
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
     code, out, err = _run(capsys, argv)
@@ -871,7 +1059,20 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
         "equivalent_within_profile": 1,
         "outside_profile": 1,
     }
+    assert report["callee_saved_preservation"] == {
+        "preserved": 1,
+        "violated": 0,
+        "unknown": 0,
+    }
     assert "machine_code_leaf_function_tv" in report["discharged_checks"]
+    assert (
+        "machine_code_callee_saved_register_preservation"
+        in report["discharged_checks"]
+    )
+    assert (
+        "machine_code_callee_saved_preservation_assumed_for_external_callees"
+        in report["checks_not_performed"]
+    )
     assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert "machine_code_conditional_call_function_tv" not in report["discharged_checks"]
     assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
@@ -904,19 +1105,23 @@ CONDITIONAL_CALL_SOURCE = (
 )
 
 BOUNDED_LOOP_SOURCE = (
-    "atom main() -> i64\n"
-    "requires: true;\n"
-    "ensures: result == 4;\n"
+    "atom loop_count(n: i64) -> i64\n"
+    "requires: n >= 0 && n <= 10;\n"
+    "ensures: true;\n"
     "body: {\n"
     "    let i = 0;\n"
-    "    while i < 4\n"
-    "    invariant: i >= 0 && i <= 4\n"
-    "    decreases: 4 - i\n"
+    "    while i < n\n"
+    "    invariant: i >= 0 && i <= n\n"
+    "    decreases: n - i\n"
     "    {\n"
     "        i = i + 1;\n"
     "    };\n"
     "    i\n"
     "};\n"
+    "atom main() -> i64\n"
+    "requires: true;\n"
+    "ensures: true;\n"
+    "body: { loop_count(3) };\n"
 )
 
 FORWARD_BRANCH_SOURCE = (
@@ -996,7 +1201,10 @@ def test_real_core_rechecks_machine_tv_forward_branch_functions(
     build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
     descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
     assert "machine_code_forward_branch_function_tv" in descriptor["checks_performed"]
-    assert "machine_code_tv_cyclic_control_flow_functions" in descriptor["checks_not_performed"]
+    assert (
+        "machine_code_tv_cyclic_control_flow_functions"
+        not in descriptor["checks_not_performed"]
+    )
     assert (
         "machine_code_conditional_call_function_tv"
         in descriptor["checks_not_performed"]
@@ -1036,6 +1244,13 @@ def test_real_core_rechecks_machine_tv_bounded_loop(
         not in descriptor["checks_not_performed"]
     )
     assert "_and_loops_exiting_within_bound_4" in descriptor["input_domain"]
+    assert "machine_code_tv_loop_executions_beyond_bound" in descriptor[
+        "checks_not_performed"
+    ]
+    assert "runtime_cancellation_semantics" in descriptor["checks_not_performed"]
+    assert "machine_code_tv_cyclic_control_flow_functions" not in descriptor[
+        "checks_not_performed"
+    ]
 
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
@@ -1048,10 +1263,14 @@ def test_real_core_rechecks_machine_tv_bounded_loop(
     assert report["machine_tv_recheck"] == "checked"
     assert report["input_domain"] == descriptor["input_domain"]
     assert "_and_loops_exiting_within_bound_4" in report["input_domain"]
-    assert report["function_outcomes"] == {
-        "equivalent_within_profile": 1,
-        "outside_profile": 1,
+    expected_function_outcomes = {
+        outcome: sum(
+            isinstance(function, dict) and function.get("outcome") == outcome
+            for function in descriptor["functions"].values()
+        )
+        for outcome in ("equivalent_within_profile", "outside_profile")
     }
+    assert report["function_outcomes"] == expected_function_outcomes
     assert "machine_code_bounded_loop_function_tv" in report["discharged_checks"]
     assert report["discharged_checks"] == sorted(expected_discharged)
     assert report["checks_not_performed"] == sorted(ALL_CHECKS - expected_discharged)
@@ -1068,7 +1287,10 @@ def test_real_core_rechecks_machine_tv_acyclic_backward_branch_functions(
     build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
     descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
     assert "machine_code_acyclic_branch_function_tv" in descriptor["checks_performed"]
-    assert "machine_code_tv_cyclic_control_flow_functions" in descriptor["checks_not_performed"]
+    assert (
+        "machine_code_tv_cyclic_control_flow_functions"
+        not in descriptor["checks_not_performed"]
+    )
     assert "machine_code_leaf_function_tv" in descriptor["checks_not_performed"]
     assert (
         "machine_code_conditional_call_function_tv"
@@ -1088,6 +1310,7 @@ def test_real_core_rechecks_machine_tv_acyclic_backward_branch_functions(
         "machine_code_direct_call_site_tv",
         "machine_code_forward_branch_function_tv",
         "machine_code_acyclic_branch_function_tv",
+        "machine_code_callee_saved_register_preservation",
     }
     assert report["machine_tv_recheck"] == "checked"
     assert report["function_outcomes"] == {
@@ -1128,7 +1351,7 @@ def test_real_core_rechecks_machine_tv_conditional_calls(
     )
     assert (
         "machine_code_tv_cyclic_control_flow_functions"
-        in descriptor["checks_not_performed"]
+        not in descriptor["checks_not_performed"]
     )
     assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
 

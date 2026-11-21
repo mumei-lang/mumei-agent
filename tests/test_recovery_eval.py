@@ -75,6 +75,8 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
             "machine_code_bounded_loop_function_tv",
+            "machine_code_callee_saved_register_preservation",
+            "machine_code_callee_saved_preservation_assumed_for_external_callees",
         }
     )
     assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)

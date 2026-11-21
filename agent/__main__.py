@@ -1372,8 +1372,13 @@ def main() -> None:
                 "`_and_loops_exiting_within_bound_4` input-domain suffix when "
                 "listed by the descriptor; executions beyond the bound, "
                 "cancellation/runtime semantics and other cyclic control "
-                "flow stay outside. The register convention is assumed, not "
-                "validated; this is not an ABI or full object-TV claim."
+                "flow stay outside. Callee-saved preservation is proved "
+                "only for Equivalent functions within the profile; direct "
+                "callees and the cancellation poll are assumed to preserve "
+                "callee-saved registers, while external callees remain an "
+                "assumption. The argument/result register convention is "
+                "assumed, not validated; this is not an ABI-correctness, "
+                "runtime or full object-TV claim."
             ),
         )
         machine_tv_build_parser(parser)

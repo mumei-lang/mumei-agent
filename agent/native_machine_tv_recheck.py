@@ -16,13 +16,19 @@ functions use per-path guarded call matching. The agent consumes machine-TV
 object checks only when the matching `mumei.machine-code-tv/v1` descriptor
 lists them in `checks_performed`. Bounded loops use Core's `LOOP_BOUND=4`,
 with `_and_loops_exiting_within_bound_4` in the input-domain string.
+Callee-saved preservation is proved only for Equivalent functions within
+this profile. Direct callees and the cancellation poll are assumed to
+preserve callee-saved registers; external callees remain an assumption. The
+argument/result register convention is also assumed, not validated.
+Core's `machine_code_callee_saved_preservation_assumed_for_external_callees`
+marker remains not performed.
 Executions beyond the bound, cancellation/runtime semantics and other cyclic
-control flow remain outside the profile. The register convention is assumed,
-not validated. This is not an ABI, full object translation, runtime or
-historical-execution claim. The C `main` wrapper, CRT, loader and libc are
-outside the profile;
-`object_translation_correspondence` stays unperformed. This recheck report is
-never a recovery performer.
+control flow remain outside the profile. This is not an ABI-correctness,
+runtime or full object-TV claim. The C `main` wrapper, CRT, loader and libc
+are outside the profile; `object_translation_correspondence` stays
+unperformed. Function outcomes and callee-saved preservation are aggregated
+as counts without function names. This recheck report is never a recovery
+performer.
 """
 
 from __future__ import annotations
@@ -182,9 +188,15 @@ def build_machine_tv_recheck_parser(
         "including inside branching functions with per-path guarded call "
         "matching; bounded loops use the "
         "`_and_loops_exiting_within_bound_4` input-domain suffix when listed "
-        "by the descriptor; executions beyond the bound, cancellation/runtime "
-        "semantics and other cyclic control flow stay outside. The register "
-        "convention is assumed, not validated; this is not an ABI or full "
+        "by the descriptor; callee-saved preservation is proved only for "
+        "Equivalent functions within the profile; direct callees and the "
+        "cancellation poll are assumed to preserve callee-saved registers, "
+        "and external callees remain an assumption; Core's external-callee "
+        "`machine_code_callee_saved_preservation_assumed_for_external_callees` "
+        "marker remains not performed. The argument/result "
+        "register convention is assumed, not validated; executions beyond "
+        "the bound, cancellation/runtime semantics and other cyclic control "
+        "flow stay outside; this is not an ABI-correctness, runtime or full "
         "object-TV claim."
     )
     parser.add_argument(
@@ -269,6 +281,25 @@ def _function_outcomes(descriptor: dict) -> dict[str, int] | None:
     return counts
 
 
+def _callee_saved_preservation_counts(descriptor: dict) -> dict[str, int] | None:
+    functions = descriptor.get("functions")
+    if not isinstance(functions, dict):
+        return None
+    counts = {"preserved": 0, "violated": 0, "unknown": 0}
+    found = False
+    for function in functions.values():
+        if not isinstance(function, dict):
+            return None
+        if "callee_saved_preservation" not in function:
+            continue
+        preservation = function["callee_saved_preservation"]
+        if not isinstance(preservation, str) or preservation not in counts:
+            return None
+        counts[preservation] += 1
+        found = True
+    return counts if found else None
+
+
 def run_machine_tv_recheck(args: argparse.Namespace) -> dict:
     """Run declared native machine-TV recheck and return its report."""
     from agent.attempt_runner import dispatch_attempt
@@ -346,6 +377,11 @@ def run_machine_tv_recheck(args: argparse.Namespace) -> dict:
                 outcomes = _function_outcomes(descriptor)
                 if outcomes is not None:
                     report["function_outcomes"] = outcomes
+                preservation_counts = _callee_saved_preservation_counts(
+                    descriptor
+                )
+                if preservation_counts is not None:
+                    report["callee_saved_preservation"] = preservation_counts
                 checks_performed = descriptor.get("checks_performed")
                 if isinstance(checks_performed, list):
                     discharged.update(

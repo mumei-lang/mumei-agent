@@ -42,6 +42,19 @@ Evidence or a certificate. The C `main` wrapper, CRT, loader and libc remain
 outside the profile; ABI/runtime semantics, optimizer semantics, producer
 authenticity and historical execution also remain outside the claim.
 
+Core #1229 adds
+`machine_code_callee_saved_register_preservation`, consumed only when listed
+in `checks_performed`. It is performed only when at least one function is
+Equivalent and all Equivalent functions are proved to preserve callee-saved
+registers; each Equivalent function reports `preserved`, `violated`, or
+`unknown`, and the agent aggregates those counts without function names.
+Direct callees and the cancellation poll are assumed to preserve
+callee-saved registers; external callees remain an assumption, and Core's
+`machine_code_callee_saved_preservation_assumed_for_external_callees` marker
+remains not performed. The argument/result register convention is still
+assumed, not validated. This is not an ABI-correctness, runtime, or full
+object-TV claim.
+
 ## Background
 
 What exists today (verified against mumei `develop` and this repo):

@@ -7163,9 +7163,10 @@ candidate and is not a recovery performer.
 <source>` in the C11 declared-attempt lifecycle. A `checked` result always
 discharges `artifact_semantics` and `claim_truth`; object checks are added
 only from `checks_performed` in a matching `mumei.machine-code-tv/v1`
-descriptor with the declared build ID. The agent exposes only aggregate
-function-outcome counts, plus `register_convention_assumed` and
-`input_domain` when they are bounded strings. Core #1201 adds
+descriptor with the declared build ID. The agent exposes aggregate
+function-outcome and callee-saved-preservation counts without names, plus
+`register_convention_assumed` and `input_domain` when they are bounded
+strings. Core #1201 adds
 `machine_code_direct_call_site_tv`, consumed only when listed in
 `checks_performed`; direct calls are compared as uninterpreted call sites.
 Core #1206 adds `machine_code_forward_branch_function_tv`, consumed only when
@@ -7188,6 +7189,21 @@ wrapper, CRT, loader and libc also remain outside its scope, so
 the full C02 and object-check vocabularies unperformed; mid-run input drift
 claims no outcome. The route remains a non-performer for recovery-eval. It
 makes no ABI, runtime or full object-TV claim.
+
+#### Core #1229 callee-saved register preservation
+
+Core adds `machine_code_callee_saved_register_preservation`, consumed only
+when listed in `checks_performed`. It is performed only when at least one
+function is Equivalent and all Equivalent functions are proved to preserve
+callee-saved registers. Each Equivalent function reports
+`callee_saved_preservation` as `preserved`, `violated`, or `unknown`; the
+agent counts these values without exposing function names. Direct callees
+and the cancellation poll are assumed to preserve callee-saved registers;
+external callees remain an assumption, and Core's
+`machine_code_callee_saved_preservation_assumed_for_external_callees` marker
+remains not performed. The argument/result register convention is assumed,
+not validated. This does not establish ABI correctness, runtime behavior,
+or full object TV.
 
 ## Roadmap authority and vocabulary
 
