@@ -8279,8 +8279,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # admits like the scalar-element form: the
                         # element queues are caller-shared memory,
                         # so `s[i] <- x` reaches `indirect_writes`
-                        # like any element store does.
-                        or self._chan_elem_collection(p.type)
+                        # like any element store does. An `[N]chan`
+                        # parameter stays closed — admitted only
+                        # for local binds.
+                        or (
+                            p.type.kind in {"slice", "map"}
+                            and self._chan_elem_collection(p.type)
+                        )
                     )
                 )
                 for p in fn.parameters
@@ -8337,8 +8342,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         or self._scalar_elem_nested_collection(r.type)
                         # A `[]chan T`/`map[K]chan T` result binds
                         # like the local `s :=` form — the caller
-                        # names the group's backing.
-                        or self._chan_elem_collection(r.type)
+                        # names the group's backing. An `[N]chan`
+                        # result stays closed like the parameter.
+                        or (
+                            r.type.kind in {"slice", "map"}
+                            and self._chan_elem_collection(r.type)
+                        )
                     )
                 )
                 for r in fn.results
