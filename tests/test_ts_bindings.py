@@ -262,6 +262,35 @@ function assign(iterable) {
     assert all(reference.kind == "read" for reference in iterable_refs)
 
 
+@pytest.mark.parametrize(
+    ("loop", "name"),
+    [
+        ("for (let x of x) {}", "x"),
+        ("for (const [a] of [a]) {}", "a"),
+        ("for (let k in k) {}", "k"),
+    ],
+)
+def test_lexical_for_loop_variables_in_iterables_report_tdz(loop, name):
+    source = f"function f() {{ {loop} }}"
+    report = build_ts_bindings(source)
+    binding = _bindings(report, name, "local")[0]
+    reference = _refs(report, source, name)[0]
+    assert reference.binding_id == binding.id
+    assert any(gap.reason == "temporal_dead_zone" for gap in report.gaps)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "let x = [1]; for (const y of x) {}",
+        "function f() { for (var v of v) {} }",
+    ],
+)
+def test_outer_and_var_for_loop_iterables_do_not_report_tdz(source):
+    report = build_ts_bindings(source)
+    assert not any(gap.reason == "temporal_dead_zone" for gap in report.gaps)
+
+
 def test_var_scope_stops_at_namespaces_and_class_static_blocks():
     source = """
 var outer = 1;

@@ -116,6 +116,8 @@ class _TypeScriptBindings:
         self.function_records: dict[int, _Record] = {}
         self._function_node_ids: set[int] = set()
         self._type_alias_cache: dict[str, TypeFact] = {}
+        self._loop_binding_ids: dict[int, frozenset[str]] = {}
+        self._tdz_binding_ids: frozenset[str] = frozenset()
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -447,8 +449,9 @@ class _TypeScriptBindings:
         )
         type_node = self._pattern_type_node(node, pattern)
         names = self._pattern_names(pattern)
+        loop_binding_ids: set[str] = set()
         for name in names:
-            self.add_binding(
+            record = self.add_binding(
                 name,
                 "local",
                 scope,
@@ -458,6 +461,10 @@ class _TypeScriptBindings:
                 tdz=not is_var,
                 declaration_function=declaration_function,
             )
+            if not is_var:
+                loop_binding_ids.add(record.binding.id)
+        if loop_binding_ids:
+            self._loop_binding_ids[node.id] = frozenset(loop_binding_ids)
 
     def _is_readonly_parameter(self, node: Any) -> bool:
         parent = node.parent
@@ -877,8 +884,13 @@ class _TypeScriptBindings:
             if (
                 check_tdz
                 and record.tdz
-                and node.start_byte < record.binding.span.start
-                and record.declaration_function == reference_function_id
+                and (
+                    record.binding.id in self._tdz_binding_ids
+                    or (
+                        node.start_byte < record.binding.span.start
+                        and record.declaration_function == reference_function_id
+                    )
+                )
             ):
                 self.add_gap("temporal_dead_zone", node)
             return record, None
@@ -1522,7 +1534,8 @@ class _TypeScriptBindings:
             return
         if node_type == "for_in_statement":
             left = node.child_by_field_name("left")
-            if node.child_by_field_name("kind") is None:
+            kind = node.child_by_field_name("kind")
+            if kind is None:
                 self._scan_assignment_target(
                     left,
                     owner,
@@ -1536,12 +1549,20 @@ class _TypeScriptBindings:
                 self._scan_pattern_defaults(
                     left, owner, function_context, with_scopes
                 )
-            self._scan(
-                node.child_by_field_name("right"),
-                owner,
-                function_context,
-                with_scopes,
-            )
+            right = node.child_by_field_name("right")
+            if kind is not None and kind.type != "var":
+                previous_tdz_binding_ids = self._tdz_binding_ids
+                self._tdz_binding_ids = previous_tdz_binding_ids | (
+                    self._loop_binding_ids.get(node.id, frozenset())
+                )
+                try:
+                    self._scan(
+                        right, owner, function_context, with_scopes
+                    )
+                finally:
+                    self._tdz_binding_ids = previous_tdz_binding_ids
+            else:
+                self._scan(right, owner, function_context, with_scopes)
             self._scan(
                 node.child_by_field_name("body"),
                 owner,
