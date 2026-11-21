@@ -2896,8 +2896,7 @@ the chan name's position binds an external queue,
 and the call's `chan` arguments join the external
 model since the opaque callee may return one — the
 `var` and plain-assignment forms admit identically,
-while a non-scalar element other than
-`chan chan T` at any position stays closed. An
+while a non-scalar leaf stays closed. An
 imported method declares the same way: `ch := st.M()`
 or `ch, n := st.M()` admits when `M`'s signature
 carries a scalar-element `chan` at the bound slot
@@ -2924,17 +2923,16 @@ result like `g(x)` does, while a call-result callee
 (`mk(x)()`) and a nested index (`fm["k"][0](x)`)
 stay closed, and a multi-result func-value callee
 stays closed since no signature record verifies the
-per-slot `chan` fact. One level of channel-of-channels admits under the
-external queue model: a `chan chan T` parameter or
-result (local or imported), a package-level `var cc
-chan chan T`, or a `cc := G()` / `cc, n := G()`
-bound name joins the external model — `cc <- ch`
-records an imported effect and promotes the sent
-channel's queue external, `c := <-cc` binds the
-received channel as an external name (dep-free like
-any external receive), and `close(cc)` records the
-same imported effect as on a scalar `chan`
-parameter. The follow-on forms admit identically:
+per-slot `chan` fact. Nested channel queues with an integer or
+boolean leaf admit under the external queue model at any depth: a
+`chan chan ... chan T` parameter or result (local or imported), a
+package-level queue variable, or a `cc := G()` / `cc, n := G()`
+bound name joins the external model. Operations on the outer queue
+record imported effects; channels received from it remain external,
+including when they are themselves nested queues, and retain their
+selectors and parameter origins through later operations. `close`
+likewise records the imported effect. The follow-on forms admit
+identically:
 `cc = G()` reseats a `chan chan` name to the
 callee-produced external queue (conditional or not
 — the unioned slot covers either meaning), `var cc
@@ -2945,38 +2943,35 @@ binds each element as an external channel like `c
 := <-cc`, and the comma-ok receives `c, ok :=
 <-cc`, `var c, ok = <-cc` and `c, _ = <-cc` reseat
 or bind the value slot to the received external
-queue. A local `make(chan chan T)` or `var cc chan
-chan T` is admitted as a bound channel-element
-container under the existing conflated share-group
-model: each local channel sent into or received from
-the queue joins its group, as do aliases and members
-of other local channel-element groups. Local queue
-operations (`send`, `receive`, `close`, `len`, and
-`cap`) do not record a transfer on the outer queue
-identity. External members remain externally
-observable through the group: their reads and sends
-contribute indirect writes and imported transfers.
-Passing a local queue to a direct local function call,
-`go`, or `defer` is supported only when its parameter
-has the same scalar-element `chan chan T` shape. Its
-whole share group becomes external at the call or
-defer-registration boundary; later members joined by
-sends, receives, aliases, or group merges inherit that
-externality. Imported, indirect, method, variadic, and
-type-mismatched calls remain closed.
+queue. A local `make(chan chan ... chan T)` or `var cc chan
+chan ... chan T` is admitted as a bound queue under one
+conflated share-group model: every local channel sent into or
+received from the queue at any depth joins its group, as do
+aliases and members of other local channel groups. Local queue
+operations (`send`, `receive`, `close`, `len`, and `cap`) do not
+record a transfer on the outer queue identity. External members
+remain externally observable through the group: their reads and
+sends contribute indirect writes and imported transfers. Passing a
+local queue to a direct local function call, `go`, or `defer` is
+supported only when its parameter has the same scalar-leaf nested
+channel shape. Its whole share group becomes external at the call
+or defer-registration boundary; later members joined by sends,
+receives, aliases, or group merges inherit that externality.
+Imported, indirect, method, variadic, and type-mismatched calls
+remain closed.
 
-External scalar-element queue sources may be aliased
+External scalar-leaf nested-channel queue sources may be aliased
 through short declarations, `var` initializers, or
-assignment: chan-chan parameters, package/imported
-queue variables, and already-admitted external queue
-locals are supported. A local queue reseated onto one of
+assignment: nested-channel parameters, package/imported
+queue variables, and already-admitted external queue locals are
+supported. A local queue reseated onto one of
 these sources or an admitted direct local/imported
 call-result queue is promoted conservatively; its prior
 share-group members become caller-visible. An admitted
 direct local/imported call result may also be used
 directly as a queue operand.
 
-For an admitted queue, a received channel may be used
+For an admitted queue, a received channel at any depth may be used
 directly as an operation target without a named binding:
 `(<-src) <- x`, `<-(<-src)`, `close(<-src)`,
 `len(<-src)`, `cap(<-src)`, `range <-src`, and channel
@@ -2986,19 +2981,20 @@ temporary receive. Passing a received external channel
 as a value to another local queue (`dst <- <-src`) joins
 their share groups.
 
-Returning a local scalar-element queue through a matching
-`chan chan T` result is supported: the result dependencies
-include the readable contents of its share group, and the
+Returning a local scalar-leaf nested-channel queue through a
+matching `chan chan ... chan T` result is supported: the result
+dependencies include the readable contents of its share group, and the
 whole group becomes external at the return point so deferred
 work observes the caller-visible identity. Storing such a
-queue in a package or imported `chan chan T` variable also
+queue in a package or imported matching nested-channel variable also
 promotes its group and broadcasts its dependencies to later
 external reads. The container value itself still cannot be returned,
 stored, passed, captured, or addressed; struct fields, local queue
 escapes other than the admitted return/package-store paths,
-`chan chan chan T` and deeper nesting, non-scalar inner elements,
-and unsupported converted/interface/method/variadic call forms stay
-closed. `select` continues to admit each communication case's
+non-scalar leaves, and unsupported converted/interface/method/
+variadic call forms stay closed. Scalar-leaf channel queues at depth
+three and deeper use the same recursive share-group model.
+`select` continues to admit each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`, a bare `<-ch`)
 or send (`ch <- v`); operands run in a fresh alternative scope and
 every alternative joins back by union —
@@ -4354,16 +4350,18 @@ select, and channel-call arguments) join `indirect_writes` and
 record the corresponding imported transfer; group merges and copies
 preserve that external marker.
 The honest closures mirror the bound case — `[][]chan` nests,
-non-scalar payloads other than the scalar-element chan-chan queue
-form below, comma-ok `d, ok := GM[k]`, and a
+non-scalar payloads outside the scalar-leaf nested-channel queue
+forms below, comma-ok `d, ok := GM[k]`, and a
 `map[string]chan` variable key stay closed or unreachable (a
 `string` value is never producible).
 
-### C07 scalar-element chan-chan containers
+### C07 scalar-leaf nested-channel containers
 
-Local `[]chan chan T`, `[N]chan chan T`, and
-`map[K]chan chan T` containers model one conflated local
-chan-chan queue group, identified by the container binding.
+Local `[]chan chan ... chan T`, `[N]chan chan ... chan T`, and
+`map[K]chan chan ... chan T` containers model one conflated local
+nested-channel queue group, identified by the container binding.
+Every channel reachable at any nesting level joins that group, and
+the leaf `T` is an integer or boolean.
 Elements from literals, `make`, zero-value arrays, `append`, and
 indexed stores join that group; an element that is already an
 external queue promotes the group and carries its selectors and
@@ -4375,19 +4373,19 @@ comma-ok), nested receives, received-channel operation targets,
 resolve through the group. `len`/`cap` of the container itself
 remain pure. Range-bound elements alias the same conflated group.
 
-Chan-chan container parameters and package/imported
-`[]chan chan T`, `[N]chan chan T`, and `map[K]chan chan T`
-sources act like external indexed queue sources. Element reads
-retain the container's parameter origin and index dependencies;
-external stores and operations propagate through the container
-identity. As with named local queues, local-only operations keep
-`none_in_supported_fragment` effects.
+Nested-channel container parameters and package/imported
+`[]chan chan ... chan T`, `[N]chan chan ... chan T`, and
+`map[K]chan chan ... chan T` sources act like external indexed queue
+sources. Element reads retain the container's parameter origin and
+index dependencies; external stores and operations propagate through
+the container identity. As with named local queues, local-only
+operations keep `none_in_supported_fragment` effects.
 
 The container value itself does not escape through this model:
 returning, storing, passing, capturing, or taking the address of
-the container remains closed, as do struct fields, `[][]chan chan
-T`, `[]chan chan chan T` and deeper nesting, and non-scalar
-elements such as `[]chan chan []T`.
+the container remains closed, as do struct fields, nested containers
+such as `[][]chan chan T`, and non-scalar leaves such as
+`[]chan chan ... chan []T`.
 
 ### C07 scalar-element *nested* local containers
 
@@ -6834,6 +6832,23 @@ suppresses selection.
 C11 stays partial; this route adds no Evidence acceptance or grade
 promotion.
 
+### C11 Evidence accept-list consumer route
+
+The `evidence-accept-list` CLI route and `evidence_accept_list` MCP
+tool consume Core's `evidence accept-list` verdict over a declared
+Evidence list and exactly one single or conjunctive requirement. The
+route validates the duplicate-free, input-fingerprinted Core descriptor
+and reports only its aggregate verdict, consistency, counts and check
+lists. Accepted selection requires exit 0, an accepted verdict, a valid
+descriptor and unchanged inputs; rejected and inconclusive verdicts do
+not select. The verdict is Core's declared-requirement normalization
+over representation plus cross-record pin agreement, not claim truth,
+producer authenticity, freshness, tool execution or grade promotion.
+Selection is a declared-success exit, not a grade promotion. A
+descriptor larger than the 64 KiB attempt capture bound is reported as
+`descriptor_truncated` with no verdict and no selection. C11 stays
+partial.
+
 ### C11 Core adapter-manifest representation check
 
 The `evidence-check-adapter` CLI route and `evidence_check_adapter`
@@ -7078,13 +7093,16 @@ discharges `artifact_semantics` and `claim_truth`; object checks are added
 only from `checks_performed` in a matching `mumei.machine-code-tv/v1`
 descriptor with the declared build ID. The agent exposes only aggregate
 function-outcome counts, plus `register_convention_assumed` and
-`input_domain` when they are bounded strings. The profile covers leaf
-straight-line pure-i64 functions under an assumed register convention, not
-ABI or runtime semantics. Non-leaf functions, the C `main` wrapper, CRT,
-loader and libc are outside its scope, so
+`input_domain` when they are bounded strings. Core #1201 adds
+`machine_code_direct_call_site_tv`, consumed only when listed in
+`checks_performed`; direct calls are compared as uninterpreted call sites.
+The profile covers straight-line pure-i64 functions under an assumed register
+convention, not ABI or runtime semantics. Branching functions, the C `main`
+wrapper, CRT, loader and libc are outside its scope, so
 `object_translation_correspondence` stays unperformed. Other outcomes leave
 the full C02 and object-check vocabularies unperformed; mid-run input drift
-claims no outcome. The report is not a `recovery-eval` performer.
+claims no outcome. The route remains a non-performer for recovery-eval. There
+is no ABI claim.
 
 ## Roadmap authority and vocabulary
 

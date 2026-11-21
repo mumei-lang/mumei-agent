@@ -50,6 +50,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `evidence-check-schedule` | 5 | Run a declared Core attempt-schedule representation check as one attempt and emit the reconciled lineage plus the declared schedule outcome. |
 | `evidence-check-adapter` | 5 | Check a declared adapter manifest's static representation and Core/local consistency only; declared argv/stdin stay inert; no adapter execution, command safety, host policy, resource enforcement, producer authenticity, Evidence acceptance or grade promotion. |
 | `evidence-check-list` | 6 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
+| `evidence-accept-list` | 7 | Run Core's declared-requirement normalization over a saved Evidence list and emit one attempt lineage and verdict. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-check-consistency` | 6 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
 | `evidence-acceptance-eval` | 3 | Evaluate a declared Core acceptance descriptor and emit the representation-level acceptance evaluation. |
@@ -80,7 +81,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-observations-accept` | 7 | Run a declared Core native observations acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `native-observations-recheck` | 7 | Run a declared Core native observations recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-object-recheck` | 7 | Run a declared Core native object correspondence recheck as one attempt and emit the reconciled lineage plus declared outcome. |
-| `native-machine-tv-recheck` | 7 | Run a declared Core native machine-code TV recheck as one attempt and emit the reconciled lineage plus declared outcome. |
+| `native-machine-tv-recheck` | 7 | Run Core's bounded straight-line machine-code TV recheck, with direct calls compared as uninterpreted sites, and emit one attempt. |
 | `native-check` | 7 | Run a declared Core native bundle identity check as one attempt and emit the reconciled lineage plus the declared check outcome. |
 | `native-source-recheck` | 7 | Run a declared Core native bundle source recheck as one attempt and emit the reconciled lineage plus the declared source recheck outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
@@ -769,6 +770,25 @@ Run a declared Core Evidence list-envelope representation check as one attempt a
 | `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
 
 
+## `mumei-agent evidence-accept-list`
+
+Run Core's declared-requirement normalization over a saved Evidence list and emit one attempt lineage and verdict.
+
+Exactly one of `--requirement`, `--requirement-list` is required.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path). |
+| `--list` | `<PATH>` | yes | — | Saved mumei.verification-evidence-list/v1 envelope (absolute path, at most 65536 bytes); its bytes are fed to Core on stdin. |
+| `--requirement` | `<PATH>` | no | — | Declared mumei.evidence-requirement/v1 document. |
+| `--requirement-list` | `<PATH>` | no | — | Declared conjunctive mumei.evidence-requirement-list/v1 document. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the report JSON here instead of stdout. |
+
+
 ## `mumei-agent evidence-check-accept`
 
 Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor.
@@ -1265,7 +1285,7 @@ Run a declared Core native object correspondence recheck as one attempt and emit
 
 ## `mumei-agent native-machine-tv-recheck`
 
-Run a declared Core native machine-code TV recheck as one attempt and emit the reconciled lineage plus declared outcome.
+Run Core's bounded straight-line machine-code TV recheck, with direct calls compared as uninterpreted sites, and emit one attempt.
 
 ### Options
 
