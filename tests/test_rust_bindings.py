@@ -584,6 +584,38 @@ def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     assert outside.type.type_id == alias.id
 
 
+def test_local_type_alias_precedes_primitive_type_facts():
+    source = """
+type u8 = u16;
+fn shadowed(x: u8) -> u8 { let y: u8 = x; y }
+fn builtin(x: i8) -> i8 { x }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    alias = _bindings(report, "u8", "type_alias")[0]
+    for name in ("x", "y"):
+        shadowed = next(
+            binding
+            for binding in _bindings(report, name, "parameter" if name == "x" else "local")
+            if binding.span.start < source.index("fn builtin")
+        )
+        assert (
+            shadowed.type.kind,
+            shadowed.type.name,
+            shadowed.type.bit_width,
+            shadowed.type.type_id,
+        ) == ("int", "u16", 16, alias.id)
+    builtin = next(
+        binding
+        for binding in _bindings(report, "x", "parameter")
+        if binding.span.start > source.index("fn builtin")
+    )
+    assert (builtin.type.kind, builtin.type.name, builtin.type.bit_width) == (
+        "int",
+        "i8",
+        8,
+    )
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)

@@ -807,6 +807,23 @@ class _RustBindings:
             return _UNKNOWN
         if text == "()":
             return TypeFact("unit", "()", 0, None, "")
+        if (
+            node.type in {"type_identifier", "identifier", "primitive_type"}
+            and "::" not in text
+        ):
+            resolved = self._lookup(text, node.start_byte, "type")
+            if resolved is not None:
+                record = resolved
+                if record.binding.kind == "type_alias":
+                    if record.binding.id in aliases:
+                        return _UNKNOWN
+                    fact = self._type_fact(record.alias_node, aliases | {record.binding.id})
+                    return TypeFact(
+                        fact.kind, fact.name, fact.bit_width, fact.signed, record.binding.id
+                    )
+                if record.binding.kind in {"struct", "enum"}:
+                    return TypeFact("named", text, 0, None, record.binding.id)
+                return _UNKNOWN
         if node.type == "primitive_type" or text in {
             "i8", "i16", "i32", "i64", "i128", "isize",
             "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
@@ -822,19 +839,6 @@ class _RustBindings:
                 return TypeFact("int", text, int(text[1:]), text[0] == "i", "")
             if text[0] == "f" and text[1:].isdigit():
                 return TypeFact("float", text, int(text[1:]), None, "")
-        if node.type in {"type_identifier", "identifier", "scoped_type_identifier"} and "::" not in text:
-            resolved = self._lookup(text, node.start_byte, "type")
-            if resolved is not None:
-                record = resolved
-                if record.binding.kind == "type_alias":
-                    if record.binding.id in aliases:
-                        return _UNKNOWN
-                    fact = self._type_fact(record.alias_node, aliases | {record.binding.id})
-                    return TypeFact(
-                        fact.kind, fact.name, fact.bit_width, fact.signed, record.binding.id
-                    )
-                if record.binding.kind in {"struct", "enum"}:
-                    return TypeFact("named", text, 0, None, record.binding.id)
         return _UNKNOWN
 
     def _pattern_names(self, pattern: Any | None, scope: _Scope) -> list[tuple[Any, bool]]:
