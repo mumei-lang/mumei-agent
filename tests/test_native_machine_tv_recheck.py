@@ -45,7 +45,8 @@ DESCRIPTOR = {
         "machine_code_leaf_function_tv",
     ],
     "checks_not_performed": [
-        "machine_code_tv_non_leaf_functions",
+        "machine_code_direct_call_site_tv",
+        "machine_code_tv_branching_functions",
         "object_translation_correspondence",
     ],
 }
@@ -59,6 +60,7 @@ OBJECT_MACHINE_CHECKS = OBJECT_CHECK_VOCABULARY - {
 }
 ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
 EXPECTED_CHECKED = BASE_DISCHARGED | OBJECT_MACHINE_CHECKS
+EXPECTED_LEAF_CHECKED = EXPECTED_CHECKED - {"machine_code_direct_call_site_tv"}
 
 
 def _write_core(tmp_path: Path, exit_code: int = 0, stdout=DESCRIPTOR) -> Path:
@@ -156,10 +158,11 @@ def test_checked_descriptor_discharges_listed_checks_and_reports_aggregates(
     }
     assert "__mumei_user_main" not in out
     assert "main" not in report
-    assert report["discharged_checks"] == sorted(EXPECTED_CHECKED)
+    assert report["discharged_checks"] == sorted(EXPECTED_LEAF_CHECKED)
     assert "object_translation_correspondence" not in report["discharged_checks"]
+    assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert report["sequence"]["selected_result"] is not None
-    _assert_partition(report, EXPECTED_CHECKED)
+    _assert_partition(report, EXPECTED_LEAF_CHECKED)
 
 
 def test_descriptor_without_equivalent_function_leaves_leaf_tv_unperformed(
@@ -182,13 +185,73 @@ def test_descriptor_without_equivalent_function_leaves_leaf_tv_unperformed(
     assert code == 0
     report = json.loads(out)
     expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS - {"machine_code_leaf_function_tv"}
+        OBJECT_MACHINE_CHECKS
+        - {
+            "machine_code_leaf_function_tv",
+            "machine_code_direct_call_site_tv",
+        }
     )
     assert report["machine_tv_recheck"] == "checked"
     assert report["function_outcomes"] == {
         "equivalent_within_profile": 0,
         "outside_profile": 1,
     }
+    assert "machine_code_leaf_function_tv" not in report["discharged_checks"]
+    _assert_partition(report, expected)
+
+
+def test_direct_call_site_check_is_discharged_when_listed_as_performed(
+    tmp_path, capsys
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [
+            *DESCRIPTOR["checks_performed"],
+            "machine_code_direct_call_site_tv",
+        ],
+        "checks_not_performed": [
+            "machine_code_tv_branching_functions",
+            "object_translation_correspondence",
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    expected = BASE_DISCHARGED | OBJECT_MACHINE_CHECKS
+    assert "machine_code_direct_call_site_tv" in report["discharged_checks"]
+    _assert_partition(report, expected)
+
+
+def test_direct_call_and_leaf_checks_stay_unperformed_when_not_listed(
+    tmp_path, capsys
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": DESCRIPTOR["checks_performed"][:-1],
+        "checks_not_performed": [
+            "machine_code_direct_call_site_tv",
+            "machine_code_leaf_function_tv",
+            "machine_code_tv_branching_functions",
+            "object_translation_correspondence",
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    expected = BASE_DISCHARGED | (
+        OBJECT_MACHINE_CHECKS
+        - {
+            "machine_code_direct_call_site_tv",
+            "machine_code_leaf_function_tv",
+        }
+    )
+    assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert "machine_code_leaf_function_tv" not in report["discharged_checks"]
     _assert_partition(report, expected)
 
@@ -284,7 +347,7 @@ def test_descriptor_strings_are_echoed_only_when_bounded(
     report = json.loads(out)
     assert field not in report
     assert report["machine_tv_schema"] == MACHINE_TV_SCHEMA
-    _assert_partition(report, EXPECTED_CHECKED)
+    _assert_partition(report, EXPECTED_LEAF_CHECKED)
 
 
 def test_function_outcomes_ignore_malformed_entries(tmp_path, capsys):
@@ -444,8 +507,11 @@ def real_core():
     pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
 
 
-def _build_real_bundle(tmp_path: Path, real_core: str) -> tuple[Path, Path]:
-    source = _write_source(tmp_path)
+def _build_real_bundle(
+    tmp_path: Path, real_core: str, source_text: str = SOURCE
+) -> tuple[Path, Path]:
+    source = tmp_path / "native-source.mm"
+    source.write_text(source_text)
     bundle = tmp_path / "real-bundle"
     built = subprocess.run(
         [real_core, "native-bundle", "build", str(source), "-o", str(bundle)],
@@ -460,10 +526,46 @@ def _build_real_bundle(tmp_path: Path, real_core: str) -> tuple[Path, Path]:
     return bundle, source
 
 
+def _real_machine_tv_descriptor(
+    real_core: str, bundle: Path, source: Path, build_id: str
+) -> dict:
+    checked = subprocess.run(
+        [
+            real_core,
+            "native-bundle",
+            "recheck-machine-tv",
+            "--expected-build-id",
+            build_id,
+            "--json",
+            str(bundle),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert checked.returncode == 0, checked.stderr
+    descriptor = json.loads(checked.stdout)
+    function_outcomes = {
+        value.get("outcome")
+        for value in descriptor["functions"].values()
+        if isinstance(value, dict)
+    }
+    unexpected = function_outcomes - {
+        "equivalent_within_profile",
+        "outside_profile",
+    }
+    assert not unexpected, f"Unexpected Core machine-TV outcomes: {unexpected}"
+    return descriptor
+
+
 @pytest.mark.integration
 def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core):
     bundle, source = _build_real_bundle(tmp_path, real_core)
     build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
+    descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
+    assert "machine_code_leaf_function_tv" in descriptor["checks_performed"]
+    assert "machine_code_direct_call_site_tv" in descriptor["checks_not_performed"]
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
     code, out, err = _run(capsys, argv)
@@ -480,9 +582,44 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
         "outside_profile": 1,
     }
     assert "machine_code_leaf_function_tv" in report["discharged_checks"]
+    assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert "object_translation_correspondence" not in report["discharged_checks"]
-    assert "machine_code_tv_non_leaf_functions" not in report["discharged_checks"]
-    assert report["discharged_checks"] == sorted(EXPECTED_CHECKED)
+    assert "machine_code_tv_branching_functions" not in report["discharged_checks"]
+    assert report["discharged_checks"] == sorted(EXPECTED_LEAF_CHECKED)
     assert report["checks_not_performed"] == sorted(
-        ALL_CHECKS - EXPECTED_CHECKED
+        ALL_CHECKS - EXPECTED_LEAF_CHECKED
     )
+
+
+DIRECT_CALL_SOURCE = (
+    "atom helper(x: i64) -> i64 requires: x > 0; "
+    "ensures: result == x + 1; body: { x + 1 };\n"
+    "atom main() -> i64 requires: true; ensures: result == 6; "
+    "body: { helper(5) };\n"
+)
+
+
+@pytest.mark.integration
+def test_real_core_rechecks_machine_tv_direct_call_sites(
+    tmp_path, capsys, real_core
+):
+    bundle, source = _build_real_bundle(
+        tmp_path, real_core, DIRECT_CALL_SOURCE
+    )
+    build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
+    descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
+    assert "machine_code_direct_call_site_tv" in descriptor["checks_performed"]
+    argv = _args(Path(real_core), bundle, source)
+    argv[argv.index("--expected-build-id") + 1] = build_id
+    code, out, err = _run(capsys, argv)
+    assert code == 0, err
+    report = json.loads(out)
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 2,
+        "outside_profile": 1,
+    }
+    assert "machine_code_direct_call_site_tv" in report["discharged_checks"]
+    assert "machine_code_leaf_function_tv" in report["discharged_checks"]
+    assert "helper" not in out
+    assert "object_translation_correspondence" not in report["discharged_checks"]

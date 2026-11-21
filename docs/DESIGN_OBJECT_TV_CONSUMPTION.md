@@ -25,11 +25,12 @@ provides that deeper acceptance route.
 Core has also landed `native-bundle recheck-machine-tv` and its
 `mumei.machine-code-tv/v1` descriptor. The agent's
 `native-machine-tv-recheck` route consumes only descriptor-listed checks for
-leaf straight-line pure-i64 functions under an assumed register convention;
-it is not an ABI, runtime or full object-TV claim and is not a recovery
-performer. Non-leaf functions, the C `main` wrapper, CRT, loader and libc
-remain outside the profile, so the `object_translation_correspondence`
-performer and `accept-object` route remain deferred.
+straight-line pure-i64 functions under an assumed register convention,
+including direct calls compared as uninterpreted call sites; it is not an
+ABI, runtime or full object-TV claim and is not a recovery performer.
+Branching functions, the C `main` wrapper, CRT, loader and libc remain outside
+the profile, so the `object_translation_correspondence` performer and
+`accept-object` route remain deferred.
 
 ## Background
 

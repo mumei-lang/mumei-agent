@@ -7090,13 +7090,16 @@ discharges `artifact_semantics` and `claim_truth`; object checks are added
 only from `checks_performed` in a matching `mumei.machine-code-tv/v1`
 descriptor with the declared build ID. The agent exposes only aggregate
 function-outcome counts, plus `register_convention_assumed` and
-`input_domain` when they are bounded strings. The profile covers leaf
-straight-line pure-i64 functions under an assumed register convention, not
-ABI or runtime semantics. Non-leaf functions, the C `main` wrapper, CRT,
-loader and libc are outside its scope, so
+`input_domain` when they are bounded strings. Core #1201 adds
+`machine_code_direct_call_site_tv`, consumed only when listed in
+`checks_performed`; direct calls are compared as uninterpreted call sites.
+The profile covers straight-line pure-i64 functions under an assumed register
+convention, not ABI or runtime semantics. Branching functions, the C `main`
+wrapper, CRT, loader and libc are outside its scope, so
 `object_translation_correspondence` stays unperformed. Other outcomes leave
 the full C02 and object-check vocabularies unperformed; mid-run input drift
-claims no outcome. The report is not a `recovery-eval` performer.
+claims no outcome. The route remains a non-performer for recovery-eval. There
+is no ABI claim.
 
 ## Roadmap authority and vocabulary
 

@@ -14,9 +14,10 @@ bytes and resolved PC-relative call targets. Object checks are discharged
 only when a matching descriptor lists them; an older Core may exit 0
 without listing `object_link_correspondence`. This makes no
 instruction-selection, register-allocation, linker-semantics, ABI, runtime
-or historical-execution claim. `machine_code_leaf_function_tv` and
-`object_translation_correspondence` stay unperformed. This recheck report
-is never a recovery performer.
+or historical-execution claim. `machine_code_leaf_function_tv`,
+`machine_code_direct_call_site_tv` and
+`object_translation_correspondence` stay unperformed. This recheck report is
+never a recovery performer.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ NATIVE_OBJECT_RECHECK_REPORT_PROFILE = "mumei.native-object-recheck-report/v1"
 OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA = "mumei.object-symbol-correspondence/v1"
 OBJECT_RECHECK_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_leaf_function_tv",
+    "machine_code_direct_call_site_tv",
     "object_translation_correspondence",
 }
 
