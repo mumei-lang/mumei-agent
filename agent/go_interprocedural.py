@@ -367,6 +367,8 @@ def _type_dict(t: GoType) -> dict:
         result["elem"] = _type_dict(t.elem)
     if t.key is not None:
         result["key"] = _type_dict(t.key)
+    if t.has_type_args:
+        result["has_type_args"] = True
     return result
 
 
@@ -376,11 +378,13 @@ def _type_from_dict(value: Any, depth: int = 0) -> GoType:
     v = _manifest_record(
         value,
         ("kind", "basic_name", "bit_width", "signed", "type_id"),
-        ("elem", "key"),
+        ("elem", "key", "has_type_args"),
     )
     signed = v["signed"]
+    has_type_args = v.get("has_type_args", False)
     _require_restore(type(signed) is bool or signed is None)
     _require_restore(type(v["bit_width"]) is int and v["bit_width"] >= 0)
+    _require_restore(type(has_type_args) is bool)
     return GoType(
         _string(v["kind"]),
         _string(v["basic_name"]),
@@ -389,6 +393,7 @@ def _type_from_dict(value: Any, depth: int = 0) -> GoType:
         _string(v["type_id"]),
         _type_from_dict(value["elem"], depth + 1) if "elem" in value else None,
         _type_from_dict(value["key"], depth + 1) if "key" in value else None,
+        has_type_args,
     )
 
 
@@ -4098,6 +4103,8 @@ class _Builder:
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
+        *,
+        intermediate: bool = False,
     ) -> tuple[tuple[PackageMember, ...], PackageMember, Any] | None:
         """The `(pointee members, field member, root ref)` triple
         `t.F` names.
@@ -4106,7 +4113,7 @@ class _Builder:
         state — external like `lib.VS.F`, so the read is dep-free and
         records against the field's identity. The operand must be a
         bound identifier whose pointer fact names the pointee `type`
-member, or one explicit dereference of one (`(*t).F` — the same
+        member, or one explicit dereference of one (`(*t).F` — the same
         auto-deref spelled out), possibly through intermediate
         pointer-typed selections (`t.W.N` walks field `W`'s `*W2`
         member to `W2`, then resolves `N` there) — every `type`
@@ -4114,9 +4121,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
         through its own `import` reference to a scalar-or-pointer
         `var` member, like the imported-struct-var path — or, for a
         package-local struct type, through the field's `local`
-        reference to its `scope`-less `variable` binding. A promoted
-        method's `func` member, a non-scalar field, a computed base,
-        or any unresolvable name returns None.
+        reference to its `scope`-less `variable` binding. Only when
+        `intermediate=True` may a named struct-valued field also be
+        returned, so recursive selection can pin its type identity;
+        anonymous struct fields and intermediates under generic
+        instantiations stay closed. A promoted method's
+        `func` member, a non-scalar leaf, a computed base, or any
+        unresolvable name returns None.
         """
         operand = node.child_by_field_name("operand")
         field = node.child_by_field_name("field")
@@ -4136,7 +4147,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             field_member is None
             or field_member.name.encode("utf-8") != field.text
             or field_member.kind not in {"var", "variable"}
-            or field_member.type.kind not in {"integer", "boolean", "pointer"}
+            or field_member.type.kind
+            not in (
+                {"integer", "boolean", "pointer", "struct"}
+                if intermediate
+                else {"integer", "boolean", "pointer"}
+            )
+            or field_member.type.kind == "struct"
+            and not field_member.type.type_id
         ):
             return None
         return pointees, field_member, root_ref
@@ -4423,6 +4441,146 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ref,
         )
 
+    def _type_fact_has_type_args(self, fact: GoType | None) -> bool:
+        while fact is not None:
+            if fact.has_type_args:
+                return True
+            fact = fact.elem
+        return False
+
+    def _bound_chain_has_type_args(
+        self, root_ref: Any, members: tuple[Any, ...]
+    ) -> bool:
+        root = self.bindings.get(root_ref.binding_id)
+        if root is not None and self._type_fact_has_type_args(root.type):
+            return True
+        if any(
+            self._type_fact_has_type_args(member.type) for member in members
+        ):
+            return True
+        if len(members) < 2:
+            return False
+        field_member = members[-1]
+        container_member = next(
+            (
+                member
+                for member in reversed(members[:-1])
+                if member.kind == "type"
+            ),
+            None,
+        )
+        container = (
+            self.bindings.get(container_member.id)
+            if container_member is not None
+            else None
+        )
+        if container is None or container.kind != "type":
+            return False
+        direct_fields = self._struct_fields(container)
+        if field_member.id in {field.id for field in direct_fields}:
+            return False
+        def is_embedded(field: Any) -> bool:
+            return getattr(field, "embedded", None) is not False and (
+                getattr(field, "embedded", None) is True
+                or self._embed_name_compatible(field)
+            )
+
+        level: dict[str, bool] = {}
+        visited = {container.id}
+        unenumerable_ids: set[str] = set()
+        for field in direct_fields:
+            if not is_embedded(field):
+                continue
+            field_type = getattr(field, "type", None)
+            if field_type is None:
+                continue
+            pointee = (
+                field_type.elem
+                if field_type.kind == "pointer"
+                else field_type
+            )
+            type_id = getattr(pointee, "type_id", "")
+            if type_id in visited:
+                continue
+            embedded_type = self._pointee_type(type_id) if type_id else None
+            generic = self._type_fact_has_type_args(field_type)
+            if (
+                embedded_type is None
+                or getattr(embedded_type, "span", None) is None
+            ):
+                if generic:
+                    return True
+                if type_id:
+                    unenumerable_ids.add(type_id)
+                continue
+            level[type_id] = level.get(type_id, False) or generic
+        visited.update(level)
+        visited.update(unenumerable_ids)
+
+        while level:
+            fields_by_type: dict[str, tuple[Any, ...]] = {}
+            found = False
+            generic_found = False
+            opaque_generic = False
+            for type_id, generic in level.items():
+                embedded_type = self._pointee_type(type_id)
+                if (
+                    embedded_type is None
+                    or getattr(embedded_type, "span", None) is None
+                ):
+                    continue
+                fields = self._struct_fields(embedded_type)
+                fields_by_type[type_id] = fields
+                if generic and not fields:
+                    opaque_generic = True
+                if field_member.id in {field.id for field in fields}:
+                    found = True
+                    generic_found = generic_found or generic
+            if found:
+                return generic_found
+            if opaque_generic:
+                return True
+
+            next_level: dict[str, bool] = {}
+            next_unenumerable_ids: set[str] = set()
+            for type_id, generic in level.items():
+                for field in fields_by_type.get(type_id, ()):
+                    if not is_embedded(field):
+                        continue
+                    field_type = getattr(field, "type", None)
+                    if field_type is None:
+                        continue
+                    pointee = (
+                        field_type.elem
+                        if field_type.kind == "pointer"
+                        else field_type
+                    )
+                    embedded_id = getattr(pointee, "type_id", "")
+                    if embedded_id and embedded_id in visited:
+                        continue
+                    embedded_type = (
+                        self._pointee_type(embedded_id) if embedded_id else None
+                    )
+                    edge_generic = self._type_fact_has_type_args(field_type)
+                    if (
+                        embedded_type is None
+                        or getattr(embedded_type, "span", None) is None
+                    ):
+                        if generic or edge_generic:
+                            return True
+                        if embedded_id:
+                            next_unenumerable_ids.add(embedded_id)
+                        continue
+                    next_level[embedded_id] = (
+                        next_level.get(embedded_id, False)
+                        or generic
+                        or edge_generic
+                    )
+            visited.update(next_level)
+            visited.update(next_unenumerable_ids)
+            level = next_level
+        return False
+
     def _bound_selector_pointees(
         self,
         operand: Any,
@@ -4436,12 +4594,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         with parentheses either side) contributes its pointee `type`
         member — or the local `type` binding it names — and supplies
         the root reference; a nested selection
-        (`t.W`) recurses through `_bound_field_read` and extends the
-        chain with the field's own member — pinned so redeclaring
-        `W` flags the summary — followed by the field's pointee
-        `type` member when the field is pointer-typed. The tuple's
-        last element is always the deepest pointee. Anything else —
-        a computed base, a double deref, a non-pointer field —
+        (`t.W`) recurses through `_bound_field_read` with
+        `intermediate=True` and extends the chain with the field's own
+        member — pinned so redeclaring `W` flags the summary —
+        followed by the field's pointee `type` member when the field
+        is pointer-typed, or when it is a named struct-valued field.
+        Anonymous struct intermediates and struct-valued intermediates
+        under a generic instantiation remain closed. The tuple's last
+        element is always the deepest pointee. Anything else — a
+        computed base, a double deref, or an unresolvable field —
         returns None.
         """
         while operand.type == "parenthesized_expression":
@@ -4467,29 +4628,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if operand is None:
                 return None
         if operand.type == "selector_expression":
-            inner = self._bound_field_read(operand, locals_, params)
+            inner = self._bound_field_read(
+                operand, locals_, params, intermediate=True
+            )
             if inner is None:
                 return None
             inner_pointees, inner_field, root_ref = inner
-            if (
-                inner_field.type.kind != "pointer"
-                or not inner_field.type.type_id
-            ):
-                return None
-            pointee = self._pointee_type(inner_field.type.type_id)
-            if pointee is None:
-                return None
-            if pointee.type.kind == "pointer":
-                # `t.W` on a `W PP` field (`type PP *S`) — the named
-                # pointer type's member IS the pointer; its whole
-                # fact pins, and the pointee resolves one hop deeper
-                # through its `elem`.
-                self._pin_fact_identities(inner_field.type)
-                pointee = self._pointer_underlying_pointee(
-                    pointee, inner_field.id
-                )
+            if inner_field.type.kind == "pointer":
+                if not inner_field.type.type_id:
+                    return None
+                pointee = self._pointee_type(inner_field.type.type_id)
                 if pointee is None:
                     return None
+                if pointee.type.kind == "pointer":
+                    # `t.W` on a `W PP` field (`type PP *S`) — the named
+                    # pointer type's member IS the pointer; its whole
+                    # fact pins, and the pointee resolves one hop deeper
+                    # through its `elem`.
+                    self._pin_fact_identities(inner_field.type)
+                    pointee = self._pointer_underlying_pointee(
+                        pointee, inner_field.id
+                    )
+                    if pointee is None:
+                        return None
+            elif inner_field.type.kind == "struct":
+                if self._bound_chain_has_type_args(
+                    root_ref, (*inner_pointees, inner_field)
+                ):
+                    return None
+                if not inner_field.type.type_id:
+                    return None
+                pointee = self._pointee_type(inner_field.type.type_id)
+                if (
+                    pointee is None
+                    or pointee.kind != "type"
+                    or pointee.type.kind != "struct"
+                ):
+                    return None
+            else:
+                return None
             return (*inner_pointees, inner_field, pointee), root_ref
         if operand.type != "identifier" or operand.text == b"_":
             return None

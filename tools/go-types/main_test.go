@@ -280,6 +280,102 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 	}
 }
 
+func TestImportedStructFieldDeclaresNamedValueType(t *testing.T) {
+	unit := []namedSource{{
+		"a.go",
+		"package p\nimport \"lib\"\nfunc F(t *lib.S) int64 { return t.A.B }",
+	}}
+	imports := []importedUnit{{"lib", []namedSource{{
+		"types.go",
+		"package lib\ntype S3 struct{ B int64 }\ntype S struct{ A S3 }",
+	}}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	s3, ok := members["S3"]
+	if !ok || s3.Kind != "type" || s3.Type.Kind != "struct" {
+		t.Fatalf("the nested named struct type is missing: %+v", s3)
+	}
+	a, ok := members["A"]
+	if !ok || a.Type.Kind != "struct" || a.Type.TypeID != s3.ID {
+		t.Fatalf("the field's struct type identity was not declared: %+v", a)
+	}
+}
+
+func TestImportedGenericStructFieldDoesNotImportLocalTypeArgument(t *testing.T) {
+	unit := []namedSource{{
+		"a.go",
+		"package p\nimport \"lib\"\ntype S struct{ B int64 }\nfunc F(t *lib.Box[S]) int64 { return t.A.B }",
+	}}
+	imports := []importedUnit{{"lib", []namedSource{{
+		"box.go",
+		"package lib\ntype Box[T any] struct{ A T }",
+	}}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	localS := named(out, "S")[0]
+	for _, m := range out.ImportedMembers {
+		if m.ID == localS.ID {
+			t.Fatalf("local type S was emitted as imported member: %+v", m)
+		}
+	}
+	var fieldA *member
+	for i := range out.ImportedMembers {
+		if out.ImportedMembers[i].Name == "A" {
+			fieldA = &out.ImportedMembers[i]
+			break
+		}
+	}
+	if fieldA == nil || fieldA.Type.Kind != "struct" || fieldA.Type.TypeID != localS.ID {
+		t.Fatalf("the instantiated field did not retain its local type identity: %+v", fieldA)
+	}
+}
+
+func TestGenericNamedTypeFactMarksInstantiationArguments(t *testing.T) {
+	out := checked(t, `package p
+type S3 struct{ B int64 }
+type Box[T any] struct{ A T }
+func F(t *Box[S3]) int64 { return t.A.B }`, "amd64")
+	if len(out.Functions) != 1 || len(out.Functions[0].Parameters) != 1 {
+		t.Fatal("the generic pointer parameter is missing")
+	}
+	paramType := out.Functions[0].Parameters[0].Type
+	if paramType.Kind != "pointer" || paramType.Elem == nil ||
+		!paramType.Elem.HasTypeArgs {
+		t.Fatalf("the instantiated pointee was not marked: %+v", paramType)
+	}
+}
+
+func TestAliasTypeFactMarksUnderlyingInstantiationArguments(t *testing.T) {
+	unit := []namedSource{{"a.go", `package p
+import "lib"
+type P = lib.Box[lib.S3]
+type Q[T any] = lib.Box[T]
+func F(t *P, u *Q[lib.S3]) int64 { return t.A.B + u.A.B }`}}
+	imports := []importedUnit{{"lib", []namedSource{{"lib.go", `package lib
+type S3 struct{ B int64 }
+type Box[T any] struct{ A T }`}}}}
+	out := analyze(request{
+		Sources: unit, Imports: imports, TargetArch: "amd64",
+	})
+	if len(out.Functions) != 1 || len(out.Functions[0].Parameters) != 2 {
+		t.Fatal("the alias pointer parameters are missing")
+	}
+	for _, param := range out.Functions[0].Parameters {
+		if param.Type.Kind != "pointer" || param.Type.Elem == nil ||
+			!param.Type.Elem.HasTypeArgs {
+			t.Fatalf("the instantiated alias pointee was not marked: %+v", param.Type)
+		}
+	}
+}
+
 func TestImportedMethodChanResultAdmits(t *testing.T) {
 	// `ch, n := st.M()` — an imported method whose signature
 	// declares a scalar-element `chan` among its results records

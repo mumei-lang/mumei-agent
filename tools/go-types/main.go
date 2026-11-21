@@ -62,11 +62,12 @@ func fileSpan(file, start, end int) span {
 }
 
 type typeFact struct {
-	Kind      string `json:"kind"`
-	BasicName string `json:"basic_name"`
-	BitWidth  int    `json:"bit_width"`
-	Signed    *bool  `json:"signed"`
-	TypeID    string `json:"type_id"`
+	Kind        string `json:"kind"`
+	BasicName   string `json:"basic_name"`
+	BitWidth    int    `json:"bit_width"`
+	Signed      *bool  `json:"signed"`
+	TypeID      string `json:"type_id"`
+	HasTypeArgs bool   `json:"has_type_args,omitempty"`
 	// Elem carries the element type fact on slice/array kinds — `[]T`,
 	// `[N]T` and named/alias types whose underlying is one — so a
 	// container index read can classify the element it returns. On map
@@ -754,6 +755,9 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 		}
 	}
 	if kind == "var" {
+		if _, ok := obj.Type().Underlying().(*types.Struct); ok {
+			ix.recordPointeeMembers(obj.Type(), map[string]bool{})
+		}
 		// A pointer-typed var's pointee identity must be declared too:
 		// the consumer needs the pointee's own fact to classify a
 		// `*lib.V` dereference read, exactly like a signature's
@@ -827,17 +831,21 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 func (ix *indexer) recordPointeeMembers(t types.Type, seen map[string]bool) {
 	switch tt := t.(type) {
 	case *types.Named:
-		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
-			seen[id] = true
-			ix.recordMember(tt.Obj(), id)
+		if ix.id(tt.Obj()) == "" {
+			if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+				seen[id] = true
+				ix.recordMember(tt.Obj(), id)
+			}
 		}
 		for i := 0; i < tt.TypeArgs().Len(); i++ {
 			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
 		}
 	case *types.Alias:
-		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
-			seen[id] = true
-			ix.recordMember(tt.Obj(), id)
+		if ix.id(tt.Obj()) == "" {
+			if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+				seen[id] = true
+				ix.recordMember(tt.Obj(), id)
+			}
 		}
 		for i := 0; i < tt.TypeArgs().Len(); i++ {
 			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
@@ -1128,8 +1136,15 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	switch typ := t.(type) {
 	case *types.Named:
 		f.TypeID = ix.typeID(typ.Obj())
+		f.HasTypeArgs = typ.TypeArgs().Len() > 0
 	case *types.Alias:
 		f.TypeID = ix.typeID(typ.Obj())
+		f.HasTypeArgs = typ.TypeArgs().Len() > 0
+		if !f.HasTypeArgs {
+			if named, ok := types.Unalias(typ).(*types.Named); ok {
+				f.HasTypeArgs = named.TypeArgs().Len() > 0
+			}
+		}
 	case *types.TypeParam:
 		f.TypeID = ix.typeID(typ.Obj())
 	case *types.Pointer:
