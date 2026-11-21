@@ -2979,6 +2979,184 @@ class _Builder:
                 return None
         return tuple(result)
 
+    def _local_struct_literal_fact(
+        self, literal: Any
+    ) -> tuple[Any, Any] | None:
+        type_node = literal.child_by_field_name("type")
+        if type_node is None or type_node.type != "type_identifier":
+            return None
+        ref = self.references.get(self.node_key(type_node))
+        if (
+            ref is None
+            or ref.kind == "import"
+            or ref.binding_id is None
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if binding is None or binding.kind != "type":
+            return None
+        if self._struct_literal_type_id(type_node) is None:
+            return None
+        fact = self._struct_value_fact(binding.type)
+        return (fact, binding) if fact is not None else None
+
+    def _struct_selector_container(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[str, frozenset] | None:
+        selectors = []
+        current = node
+        while current is not None:
+            while current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if current is None:
+                    return None
+            if current.type not in {
+                "selector_expression",
+                "field_expression",
+            }:
+                break
+            selectors.append(current)
+            current = current.child_by_field_name("operand")
+        if current is None or current.type != "identifier":
+            return None
+        root_ref = self.references.get(self.node_key(current))
+        root_binding = (
+            self.bindings.get(root_ref.binding_id)
+            if root_ref is not None and root_ref.binding_id is not None
+            else None
+        )
+        if (
+            root_ref is None
+            or root_ref.binding_id not in locals_
+            and root_ref.binding_id not in params
+            or root_binding is None
+            or root_binding.type.kind != "struct"
+        ):
+            return None
+        final_members = ()
+        for index, selector in enumerate(reversed(selectors)):
+            field = selector.child_by_field_name("field")
+            field_ref = (
+                self.references.get(self.node_key(field))
+                if field is not None
+                else None
+            )
+            member = self._field_identity(field_ref)
+            member_fact = (
+                self._struct_value_fact(member.type)
+                if member is not None and member.type is not None
+                else None
+            )
+            if member_fact is None:
+                return None
+            if index < len(selectors) - 1:
+                continue
+            final_members = self._struct_collection_members(
+                member_fact, member
+            )
+            if not final_members:
+                return None
+        tokens = frozenset()
+        for member in final_members:
+            field_key = self._opaque_container_field_key(
+                root_ref.binding_id, member.id
+            )
+            tokens |= self._opaque_container_tokens.get(
+                field_key, frozenset()
+            )
+        return root_ref.binding_id, tokens
+
+    def _store_container_holder_writes(
+        self,
+        tokens: frozenset,
+        stored: frozenset[int],
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> None:
+        for holder_id in self._opaque_container_holders(tokens):
+            self._store(locals_, params, holder_id, stored, True)
+
+    def _store_struct_literal_writes(
+        self,
+        literal: Any,
+        fact: Any,
+        anchor: Any,
+        stored: frozenset[int],
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> None:
+        members = self._struct_collection_members(fact, anchor)
+        pairs = self._struct_literal_field_values(
+            literal, fact, anchor
+        )
+        if not members or pairs is None:
+            return
+        collection_ids = {member.id for member in members}
+        for member, value in pairs:
+            if member.id in collection_ids:
+                tokens = self._opaque_container_bind(value, params)
+                if tokens:
+                    self._store_container_holder_writes(
+                        tokens, stored, locals_, params
+                    )
+                continue
+            nested_fact = self._struct_value_fact(member.type)
+            if nested_fact is None or not self._struct_collection_members(
+                nested_fact, member
+            ):
+                continue
+            nested = value
+            while nested.type == "parenthesized_expression":
+                nested = next(
+                    (
+                        child
+                        for child in nested.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if nested is None:
+                    break
+            if nested is None:
+                continue
+            if nested.type in {"composite_literal", "literal_value"}:
+                self._store_struct_literal_writes(
+                    nested,
+                    nested_fact,
+                    member,
+                    stored,
+                    locals_,
+                    params,
+                )
+                continue
+            tokens = self._opaque_container_bind(value, params)
+            if tokens is None and nested.type in {
+                "selector_expression",
+                "field_expression",
+            }:
+                selector_container = self._struct_selector_container(
+                    nested, locals_, params
+                )
+                if selector_container is not None:
+                    root_id, tokens = selector_container
+                    self._store(
+                        locals_, params, root_id, stored, True
+                    )
+            if tokens:
+                self._store_container_holder_writes(
+                    tokens, stored, locals_, params
+                )
+
     def _initialize_struct_field_tokens(
         self,
         root_id: str,
@@ -31451,6 +31629,24 @@ class _Builder:
                             locals_, params, holder_id, stored, True
                         )
                     self.indirect_writes |= stored
+            elif arg_node.type == "composite_literal":
+                literal_fact = self._local_struct_literal_fact(
+                    arg_node
+                )
+                if (
+                    literal_fact is not None
+                    and self._struct_collection_members(*literal_fact)
+                ):
+                    fact, anchor = literal_fact
+                    self._store_struct_literal_writes(
+                        arg_node,
+                        fact,
+                        anchor,
+                        stored,
+                        locals_,
+                        params,
+                    )
+                    self.indirect_writes |= stored
             elif arg_node.type == "index_expression":
                 # `lib.U(a[i], v)` — `a[i]` hands the callee a slice
                 # header sharing the bound root's backing: the
@@ -31516,35 +31712,49 @@ class _Builder:
             elif arg_node.type in {
                 "selector_expression",
                 "field_expression",
-            } and self._scalar_container_field(arg_node)[0] is not None:
-                root_id, member = self._scalar_container_field(arg_node)
-                if (
-                    root_id is not None
-                    and member is not None
-                    and not (
-                        member.type.kind == "array"
-                        and not self._type_embeds_collection(
-                            member.type
-                        )
+            }:
+                struct_container = (
+                    self._struct_selector_container(
+                        arg_node, locals_, params
                     )
-                ):
-                    field_tokens = self._opaque_container_bind(
-                        arg_node, params
+                )
+                if struct_container is not None:
+                    root_id, struct_tokens = struct_container
+                    self._store_container_holder_writes(
+                        struct_tokens, stored, locals_, params
                     )
-                    if field_tokens:
-                        for holder_id in self._opaque_container_holders(
-                            field_tokens
-                        ):
-                            self._store(
-                                locals_,
-                                params,
-                                holder_id,
-                                stored,
-                                True,
-                            )
                     self._store(
                         locals_, params, root_id, stored, True
                     )
+                    self.indirect_writes |= stored
+                else:
+                    root_id, member = self._scalar_container_field(
+                        arg_node
+                    )
+                    if (
+                        root_id is not None
+                        and member is not None
+                        and not (
+                            member.type.kind == "array"
+                            and not self._type_embeds_collection(
+                                member.type
+                            )
+                        )
+                    ):
+                        field_tokens = self._opaque_container_bind(
+                            arg_node, params
+                        )
+                        if field_tokens:
+                            self._store_container_holder_writes(
+                                field_tokens, stored, locals_, params
+                            )
+                        self._store(
+                            locals_, params, root_id, stored, True
+                        )
+                    elif self._external_chan_operand(
+                        arg_node, params
+                    ) is not None:
+                        self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the

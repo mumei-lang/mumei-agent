@@ -269,14 +269,19 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `scan_and_fix` | `code_file: str, language: str, spec: str = '', auto_heal: bool = False, heal_output_dir: str = '', domain_hint: str = '', output_format: str = 'json', ctx: Context \| None = None` | `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors` |
 | `extract_spec_from_code` | `code_file: str, language: str = '', domain_hint: str = '', generate: bool = False, mumei_repo: str = '', ctx: Context \| None = None` | `spec`, `natural_language_spec`, `detected_language`, `warnings`, `code`, `final_spec`, `verified` |
 
-### Composite register aggregate TV scope
+### Composite register aggregate TV scope (Core #1241/#1242/#1243/#1244)
 
 Core's `machine_code_composite_register_aggregate_tv` is consumed only when
-listed in `checks_performed`; it covers one-/two-leaf struct parameters,
-results and direct-call struct values with integer and/or f64 leaves under an
-assumed SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx,
-f64 leaves in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI,
-runtime or full object-TV claim.
+listed in `checks_performed`; it covers one- through four-leaf struct
+parameters, results and direct-call struct values with integer and/or f64
+leaves. One- and two-leaf values use Core's existing assumed SysV eightbyte
+convention; integer arguments use rdi–r9 and f64 arguments xmm0–xmm7, with
+the whole aggregate fitting and never split or stack-passed. Aggregate
+results are limited to three integer leaves in rax/rdx/rcx and two f64 leaves
+in xmm0/xmm1. Aggregates wider than two leaves assume LLVM first-class
+aggregate register lowering, not SysV C-ABI classification, and
+`machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed. This
+makes no ABI, runtime or full object-TV claim.
 
 `check_cross_spec_consistency` delegates to `mumei verify --cross-spec-files` and returns the parsed `cross_spec.json`, including contract consistency, global invariant conflicts, source file names, and dependency cycles. Session-type protocol violations (P22) are surfaced both raw (`session_protocol_violations[]`, `session_analysis_skips[]`) and as `missing_constraints[]` with the declared `contradiction_type` (`spec_vs_code`), following the report's own `agent_artifact_mapping[]`; a violation makes `consistent` false, and so does a non-empty `session_analysis_skips[]` — the compiler's bounded session analysis is fail-open, so a skipped effect leaves consistency unestablished rather than proven. If the report's declared mapping for `session_protocol_violations[]` stops matching the mapping the agent applies, the mismatch is reported in `artifact_mapping_divergences[]` instead of being followed silently.
 

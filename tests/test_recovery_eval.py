@@ -82,6 +82,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "machine_code_composite_register_aggregate_tv",
             "machine_code_tv_mxcsr_control_state",
             "machine_code_tv_nan_payload_bits",
+            "machine_code_tv_sysv_memory_class_aggregate_abi",
         }
     )
     assert "os_exit_status_observation" in RUNTIME_CHECK_VOCABULARY

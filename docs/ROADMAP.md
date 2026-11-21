@@ -4529,7 +4529,9 @@ to the same slots used by field extraction and assignment
 copies of memory-sharing structs retain those slots. Writes
 through effectful call arguments, receivers, and collection
 field arguments flow to the slot holders and later field
-reads. Struct call results (`s := mk(a)`, `lib.Mk(...)`,
+reads. Non-identifier struct arguments and value receivers passed as
+composite literals or value selectors use the same tracked field slots
+as a bound temporary. Struct call results (`s := mk(a)`, `lib.Mk(...)`,
 methods) mint a fresh backing joined with the backings of
 memory-sharing arguments; reseating one alias re-keys its
 field slots to a surviving alias; parallel assignments
@@ -7296,14 +7298,19 @@ remain unestablished and not performed; the agent never discharges
 Direct calls with f64 arguments fail closed in Core. This is not an
 IEEE-754-conformance, ABI, runtime, or full object-TV claim.
 
-#### Core #1241/#1242/#1243 composite aggregate register machine-code TV
+#### Core #1241/#1242/#1243/#1244 composite aggregate register machine-code TV
 
 Core's `machine_code_composite_register_aggregate_tv` is consumed only when
-listed in `checks_performed`; it covers one-/two-leaf struct parameters,
-results and direct-call struct values with integer and/or f64 leaves under an
-assumed SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx,
-f64 leaves in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI,
-runtime or full object-TV claim.
+listed in `checks_performed`; it covers one- through four-leaf struct
+parameters, results and direct-call struct values with integer and/or f64
+leaves. One- and two-leaf values use Core's existing assumed SysV eightbyte
+convention; integer arguments use rdi–r9 and f64 arguments xmm0–xmm7, with
+the whole aggregate fitting and never split or stack-passed. Aggregate
+results are limited to three integer leaves in rax/rdx/rcx and two f64 leaves
+in xmm0/xmm1. Aggregates wider than two leaves assume LLVM first-class
+aggregate register lowering, not SysV C-ABI classification, and
+`machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed. This
+makes no ABI, runtime or full object-TV claim.
 
 ## Roadmap authority and vocabulary
 
