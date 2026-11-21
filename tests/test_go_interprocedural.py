@@ -5332,6 +5332,81 @@ def test_interface_dispatch_method_expression_admitted(go_types_helper):
     )
 
 
+@pytest.mark.parametrize(
+    ("method_expr", "arg_type", "arg_value", "read"),
+    [
+        pytest.param(
+            False,
+            "[]int64",
+            "[]int64{0}",
+            "s[0]",
+            id="method-value-slice",
+        ),
+        pytest.param(
+            True,
+            "[]int64",
+            "[]int64{0}",
+            "s[0]",
+            id="method-expression-slice",
+        ),
+        pytest.param(
+            False,
+            "map[int]int64",
+            "map[int]int64{0: 0}",
+            "s[0]",
+            id="method-value-map",
+        ),
+        pytest.param(
+            True,
+            "map[int]int64",
+            "map[int]int64{0: 0}",
+            "s[0]",
+            id="method-expression-map",
+        ),
+        pytest.param(
+            False,
+            "[1][]int64",
+            "[1][]int64{[]int64{0}}",
+            "s[0][0]",
+            id="method-value-array",
+        ),
+        pytest.param(
+            True,
+            "[1][]int64",
+            "[1][]int64{[]int64{0}}",
+            "s[0][0]",
+            id="method-expression-array",
+        ),
+    ],
+)
+def test_interface_dispatch_writes_back_mutable_arguments(
+    go_types_helper, method_expr, arg_type, arg_value, read
+):
+    call = "I.M(i, s)" if method_expr else "i.M(s)"
+    declarations = (
+        f"type I interface{{ M({arg_type}) }}\n"
+        "func F(i I, x int64) int64 {\n"
+        f"\ts := {arg_value}\n"
+        f"\t{call}\n"
+        f"\treturn {read}\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_interface_dispatch_writes_back_pointer_argument(go_types_helper):
+    declarations = (
+        "type I interface{ M(*int64) }\n"
+        "func F(i I, y int64) int64 { i.M(&y); return y }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_interface_dispatch_promotes_chan_argument(go_types_helper):
     # `lib.IC.Send(t, q)` — the dynamic implementation may send on or
     # hand back the channel argument, so `q` joins the external model
@@ -20797,43 +20872,82 @@ def test_local_chan_chan_call_args_promote_groups(
 
 
 @pytest.mark.parametrize(
-    "src",
+    ("src", "expected_reason"),
     [
-        "func G(v any) {}\n"
-        "func F() int64 { cc := make(chan chan int64, 1); G(cc); return 0 }\n",
-        "func G(cc ...chan chan int64) {}\n"
-        "func F() int64 { cc := make(chan chan int64, 1); G(cc); return 0 }\n",
-        "func G(cc chan chan int64) {}\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tG((chan chan int64)(cc))\n"
-        "\treturn 0\n"
-        "}\n",
-        "type T struct{}\n"
-        "func (T) M(cc chan chan int64) {}\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\t(T{}).M(cc)\n"
-        "\treturn 0\n"
-        "}\n",
-        "type Q chan chan int64\n"
-        "func (Q) M() {}\n"
-        "func F() int64 { var cc Q; Q.M(cc); return 0 }\n",
-        "func F() int64 {\n"
+        (
+            "func G(v any) {}\n"
+            "func F() int64 { cc := make(chan chan int64, 1); G(cc); return 0 }\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "func G(cc ...chan chan int64) {}\n"
+            "func F() int64 { cc := make(chan chan int64, 1); G(cc); return 0 }\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "func G(cc chan chan int64) {}\n"
+            "func F() int64 {\n"
             "\tcc := make(chan chan int64, 1)\n"
-        "\tf := func(q chan chan int64) {}\n"
-        "\tf(cc)\n"
-        "\treturn 0\n"
-        "}\n",
+            "\tG((chan chan int64)(cc))\n"
+            "\treturn 0\n"
+            "}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type T struct{}\n"
+            "func (T) M(cc chan chan int64) {}\n"
+            "func F() int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\t(T{}).M(cc)\n"
+            "\treturn 0\n"
+            "}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type T struct{}\n"
+            "type I interface{ M(chan chan int64) }\n"
+            "func (T) M(chan chan int64) {}\n"
+            "func F() int64 {\n"
+            "\tvar i I = T{}\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\ti.M(cc)\n"
+            "\treturn 0\n"
+            "}\n",
+            "binding_unavailable",
+        ),
+        (
+            "type I interface{ M(chan chan int64) }\n"
+            "func F(i I, x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\ti.M(cc)\n"
+            "\treturn x\n"
+            "}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type Q chan chan int64\n"
+            "func (Q) M() {}\n"
+            "func F() int64 { var cc Q; Q.M(cc); return 0 }\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "func F() int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tf := func(q chan chan int64) {}\n"
+            "\tf(cc)\n"
+            "\treturn 0\n"
+            "}\n",
+            "unresolved_or_opaque_call",
+        ),
     ],
 )
 def test_local_chan_chan_call_arg_boundaries_keep_unresolved_reason(
-    go_types_helper, src
+    go_types_helper, src, expected_reason
 ):
     result = named(*unit(go_types_helper, src))
     assert not result.available
     assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+        gap.reason == expected_reason for gap in result.gaps
     )
 
 

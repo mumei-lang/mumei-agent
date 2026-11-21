@@ -25472,6 +25472,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._store(
                 locals_, params, escaped_id, write_deps, True
             )
+        self._store_call_writes(
+            [receiver_node, *value_arguments],
+            deps,
+            locals_,
+            params,
+        )
         return deps
 
     def _bound_method_call(
