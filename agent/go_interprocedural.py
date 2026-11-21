@@ -5502,18 +5502,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         params,
                         ref.binding_id,
                         deps,
-                        conditional,
+                        True,
                     )
-                    if not conditional:
-                        self.external_chan_selectors.pop(
-                            ref.binding_id, None
-                        )
                     self._set_chan_chan_param_origins(
                         ref.binding_id,
                         external_chan_chan_origins,
-                        conditional,
+                        True,
                         scope,
                     )
+                    continue
+                if (
+                    chan_group is not None
+                    and rb is not None
+                    and self._chan_chan_fact(rb.type)
+                ):
+                    root_id = self._chan_root(ref.binding_id)
+                    self._store(
+                        scope,
+                        params,
+                        ref.binding_id,
+                        deps,
+                        True,
+                    )
+                    self._local_chan_chan_init(root_id)
+                    self._chan_group_join(root_id, chan_group)
                     continue
                 if (
                     chan_group is not None

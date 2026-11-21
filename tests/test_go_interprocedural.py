@@ -17467,6 +17467,138 @@ def test_external_chan_chan_container_extraction_and_range(
     assert ranged.effects == "unknown"
 
 
+def test_chan_chan_range_assignment_preserves_external_queue_state(
+    go_types_helper, monkeypatch,
+):
+    bind_range_names = ip._Builder._bind_range_names
+
+    def trace_range_names(
+        builder,
+        names,
+        scope,
+        params,
+        conditional,
+        value_deps=frozenset(),
+        key_deps=frozenset(),
+        chan_group=None,
+        external_chan_chan_origins=None,
+    ):
+        q = next((name for name in names if name.text == b"q"), None)
+        ref = (
+            builder.references.get(builder.node_key(q))
+            if q is not None
+            else None
+        )
+        binding_id = ref.binding_id if ref is not None else None
+        binding = (
+            builder.bindings.get(binding_id)
+            if binding_id is not None
+            else None
+        )
+        preserve_chan_chan_state = (
+            binding is not None
+            and builder._chan_chan_fact(binding.type)
+        )
+        old_deps = scope.get(binding_id, frozenset())
+        old_selectors = builder.external_chan_selectors.get(
+            binding_id, frozenset()
+        )
+        old_origins = builder._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        result = bind_range_names(
+            builder,
+            names,
+            scope,
+            params,
+            conditional,
+            value_deps,
+            key_deps,
+            chan_group,
+            external_chan_chan_origins,
+        )
+        if preserve_chan_chan_state:
+            assert old_deps <= scope.get(binding_id, frozenset())
+            assert old_selectors <= builder.external_chan_selectors.get(
+                binding_id, frozenset()
+            )
+            assert old_origins <= builder._chan_chan_param_origins.get(
+                binding_id, frozenset()
+            )
+        return result
+
+    monkeypatch.setattr(
+        ip._Builder, "_bind_range_names", trace_range_names
+    )
+    files = {
+        "a.go": (
+            "package p\n"
+            "var QS []chan chan int64\n"
+            "var RT []chan chan int64\n"
+            "func Read(q chan chan int64) int64 {\n"
+            "\tc := <-q\n"
+            "\treturn <-c\n"
+            "}\n"
+            "func F_selector(i int, x int64, c chan int64) int64 {\n"
+            "\tc <- x\n"
+            "\tq := QS[i]\n"
+            "\tq <- c\n"
+            "\treturn Read(q)\n"
+            "}\n"
+            "func F_selector_range(i int, x int64, c chan int64) int64 {\n"
+            "\tc <- x\n"
+            "\tq := QS[i]\n"
+            "\tfor _, q = range RT {}\n"
+            "\tq <- c\n"
+            "\treturn Read(q)\n"
+            "}\n"
+            "func F_param(p, r []chan chan int64, x int64, c chan int64) int64 {\n"
+            "\tc <- x\n"
+            "\tq := p[0]\n"
+            "\tq <- c\n"
+            "\treturn Read(q)\n"
+            "}\n"
+            "func F_param_range(p, r []chan chan int64, x int64, c chan int64) int64 {\n"
+            "\tc <- x\n"
+            "\tq := p[0]\n"
+            "\tfor _, q = range r {}\n"
+            "\tq <- c\n"
+            "\treturn Read(q)\n"
+            "}\n"
+            "func F_local(i int, x int64, c chan int64) int64 {\n"
+            "\tc <- x\n"
+            "\tq := QS[i]\n"
+            "\tlocal := make(chan chan int64, 1)\n"
+            "\tlocal <- make(chan int64, 1)\n"
+            "\ts := []chan chan int64{local}\n"
+            "\tfor _, q = range s {}\n"
+            "\tq <- c\n"
+            "\treturn Read(q)\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    for baseline_name, range_name in [
+        ("F_selector", "F_selector_range"),
+        ("F_param", "F_param_range"),
+        ("F_selector", "F_local"),
+    ]:
+        baseline = named_package(
+            files, snapshot, summaries, baseline_name
+        )
+        ranged = named_package(files, snapshot, summaries, range_name)
+        assert baseline.available, baseline.gaps
+        assert ranged.available, ranged.gaps
+        assert baseline.return_dependencies <= ranged.return_dependencies
+        assert baseline.effects == ranged.effects
+    selector = named_package(files, snapshot, summaries, "F_selector")
+    assert {0, 1} <= selector.return_dependencies
+    param_range = named_package(
+        files, snapshot, summaries, "F_param_range"
+    )
+    assert {0, 2} <= param_range.return_dependencies
+
+
 @pytest.mark.parametrize("copy_kind", ["short_declaration", "assignment"])
 @pytest.mark.parametrize("send_through_copy", [False, True])
 @pytest.mark.parametrize(
