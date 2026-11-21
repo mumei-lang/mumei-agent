@@ -911,9 +911,6 @@ class _Builder:
         # `*t`/`*lib.PV` read unions this set back in (the escaped set
         # alone drops the deps when nothing took `&x`).
         self.indirect_writes: frozenset[int] = frozenset()
-        self._struct_literal_contents: dict[
-            tuple[int, int, int], frozenset[int]
-        ] = {}
         # Bound closures (`h := func()...`) whose literal references an
         # enclosing pointer-typed binding: invoking one reads caller
         # memory like a `*p` read, so `h()` records an imported
@@ -4735,56 +4732,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return identity.type.type_id or identity.id
 
-    def _struct_literal_address_contents(
-        self, node: Any
-    ) -> frozenset[int] | None:
-        current = node
-        while (
-            current is not None
-            and current.type == "parenthesized_expression"
-        ):
-            current = next(
-                (
-                    child
-                    for child in current.named_children
-                    if child.type != "comment"
-                ),
-                None,
-            )
-        if current is None or current.type != "unary_expression":
-            return None
-        operator = current.child_by_field_name("operator")
-        if operator is None or operator.text != b"&":
-            return None
-        literal = current.child_by_field_name("operand")
-        while (
-            literal is not None
-            and literal.type == "parenthesized_expression"
-        ):
-            literal = next(
-                (
-                    child
-                    for child in literal.named_children
-                    if child.type != "comment"
-                ),
-                None,
-            )
-        if literal is None or literal.type != "composite_literal":
-            return None
-        return self._struct_literal_contents.get(self.node_key(literal))
-
-    def _struct_literal_binding_deps(
-        self,
-        binding_id: str,
-        rhs: Any,
-        value: frozenset[int],
-    ) -> frozenset[int]:
-        binding = self.bindings.get(binding_id)
-        if binding is None or binding.type.kind != "pointer":
-            return value
-        contents = self._struct_literal_address_contents(rhs)
-        return value if contents is None else value | contents
-
     def result(
         self,
         fn: Function,
@@ -8194,9 +8141,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         deps = self.expression(
             expr, fn, params, locals_, transfers, count, 0
         )
-        literal_contents = self._struct_literal_address_contents(expr)
-        if literal_contents is not None:
-            deps |= literal_contents
         if local_chan_chan is not None:
             deps |= self._return_local_chan_chan_deps(
                 local_chan_chan, locals_
@@ -10678,7 +10622,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_pinned = self.pinned
         saved_escaped = self.escaped
         saved_indirect = self.indirect_writes
-        saved_struct_literal_contents = self._struct_literal_contents
         saved_read_stack = self._read_stack
         saved_stmt_reads = self._stmt_reads
         saved_ptr_deps = self._ptr_deps
@@ -10714,7 +10657,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self.pinned = set()
         self.escaped = set()
         self.indirect_writes = frozenset()
-        self._struct_literal_contents = {}
         self._read_stack = []
         self._stmt_reads = {}
         self._ptr_deps = {}
@@ -10796,9 +10738,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.pinned = saved_pinned
             self.escaped = saved_escaped
             self.indirect_writes = saved_indirect
-            self._struct_literal_contents = (
-                saved_struct_literal_contents
-            )
             self._read_stack = saved_read_stack
             self._stmt_reads = saved_stmt_reads
             self._ptr_deps = saved_ptr_deps
@@ -11797,20 +11736,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else value
                         )
                     )
-                rhs_node = (
-                    rights[i]
-                    if len(lefts) == len(rights)
-                    else rights[0]
-                )
-                self._store(
-                    locals_,
-                    params,
-                    binding.id,
-                    self._struct_literal_binding_deps(
-                        binding.id, rhs_node, value
-                    ),
-                    conditional,
-                )
+                self._store(locals_, params, binding.id, value, conditional)
                 # `h2 := h` — a copied closure keeps its captured
                 # bindings: propagate the capture record so `h2()`
                 # resolves them at call time like `h()` does. A
@@ -12881,21 +12807,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 else value
                             )
                         )
-                    rhs_node = (
-                        value_nodes[i]
-                        if len(names) == len(value_nodes)
-                        else value_nodes[0]
-                        if value_nodes
-                        else None
-                    )
                     self._store(
-                        locals_,
-                        params,
-                        binding.id,
-                        self._struct_literal_binding_deps(
-                            binding.id, rhs_node, value
-                        ),
-                        conditional,
+                        locals_, params, binding.id, value, conditional
                     )
                     # `var h2 = h` — a copied closure keeps its
                     # captured bindings, like `h2 := h`.
@@ -15565,18 +15478,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._chan_queue_detach(
                             ref.binding_id, locals_, params
                         )
-                    rhs_node = (
-                        rights[i]
-                        if len(lefts) == len(rights)
-                        else rights[0]
-                    )
                     self._store(
                         locals_,
                         params,
                         ref.binding_id,
-                        self._struct_literal_binding_deps(
-                            ref.binding_id, rhs_node, value
-                        ),
+                        value,
                         conditional,
                     )
                     bound = self.bindings.get(ref.binding_id)
@@ -21806,20 +21712,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unsupported_operator", _span(node)
                         )
-                    # The fresh pointer has no binding yet, so fold its
-                    # initializer through the same shared pointee set as
-                    # a bound-pointer field store. The pointer value
-                    # itself remains dep-free like `new(T)`.
+                    # The pointer value carries the initializer deps;
+                    # also fold them into the shared pointee set like a
+                    # store through a fresh pointer.
                     literal_deps = self.expression(
                         root, fn, params, locals_, transfers, count,
                         depth + 1,
-                    )
-                    literal_key = self.node_key(root)
-                    self._struct_literal_contents[literal_key] = (
-                        self._struct_literal_contents.get(
-                            literal_key, frozenset()
-                        )
-                        | literal_deps
                     )
                     body = root.child_by_field_name("body")
                     elements = (
@@ -21851,7 +21749,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                         )
                         self.indirect_writes |= literal_deps
-                    return frozenset()
+                    return literal_deps
                 root_ref = (
                     self.references.get(self.node_key(root))
                     if root is not None and root.type == "identifier"

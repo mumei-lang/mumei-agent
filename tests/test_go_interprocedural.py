@@ -7828,6 +7828,67 @@ def test_struct_literal_address_passed_to_local_callee(
     assert result.effects == "unknown"
 
 
+def test_struct_literal_address_direct_local_argument_read(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        "func G(p *S) int64 { return p.V }\n"
+        "func F(x int64) int64 { return G(&S{V: x}) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_direct_imported_argument_read(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.G(&lib.S{V: x}) }\n"
+    }
+    imports = {
+        "lib": {
+            "s.go": "package lib\n"
+            "type S struct{ V int64 }\n"
+            "func G(p *S) int64 { return p.V }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_argument_to_func_value(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ V int64 }\n"
+        "func F(g func(*S) int64, x int64) int64 {\n"
+        "\treturn g(&S{V: x})\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
 def test_struct_literal_address_pointer_receiver_method(
     go_types_helper,
 ):
@@ -7850,6 +7911,21 @@ def test_struct_literal_address_pointer_receiver_method(
     assert result.effects == "unknown"
 
 
+def test_struct_literal_address_method_result(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ V int64 }\n"
+        "func (s *S) Get() int64 { return s.V }\n"
+        "func F(x int64) int64 { return (&S{V: x}).Get() }",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_struct_literal_address_returned_pointer_read_by_caller(
     go_types_helper,
 ):
@@ -7863,6 +7939,20 @@ def test_struct_literal_address_returned_pointer_read_by_caller(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_pointer_field_dereference_on_parameter(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ P *int64 }\n"
+        "func F(s *S) int64 { return *s.P }",
+    )
+    result = named(*data)
     assert result.available
     assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"
