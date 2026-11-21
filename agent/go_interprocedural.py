@@ -16201,6 +16201,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 chan_origin_exits: list[dict[str, frozenset[int]]] = []
                 branch_origins: dict[str, frozenset[int]] | None = None
+                guard_scope = dict(switch_scope_entry)
+                has_default = any(
+                    clause.type == "default_case" for clause in clauses
+                )
                 for index, clause in enumerate(clauses):
                     body = next(
                         (
@@ -16231,15 +16235,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
-                    case_scope = dict(switch_scope_entry)
                     for sub in clause.named_children:
                         if sub.type == "expression_list":
                             # Case guards are evaluated like the tag.
                             for guard in _children(sub):
                                 self.expression(
-                                    guard, fn, params, case_scope,
+                                    guard, fn, params, guard_scope,
                                     transfers, count, 0,
                                 )
+                    case_scope = dict(guard_scope)
                     if branch is None:
                         # Direct match, or the head of a new chain — the
                         # same fresh alternative doubles as the chain's
@@ -16319,9 +16323,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         branch_origins = None
             finally:
                 self.frames.pop()
-            if not any(
-                clause.type == "default_case" for clause in clauses
-            ):
+            if not has_default:
+                self._join(scope, guard_scope, params)
                 chan_origin_exits.append(chan_origin_entry)
             self._chan_chan_param_origins = (
                 self._merge_chan_chan_param_origin_states(

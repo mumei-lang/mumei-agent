@@ -16716,6 +16716,47 @@ def test_switch_case_expression_writes_are_visible_in_case_body(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_switch_earlier_case_expression_writes_reach_later_case(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) int64 { *p = x; return 0 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tcase Set(&y, x) == 0: return 0\n"
+        "\tcase true: return y\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_switch_case_expression_writes_reach_no_match_path(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) bool { *p = x; return false }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tcase Set(&y, x): return 0\n"
+        "\t}\n"
+        "\treturn y\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
     # `cc <- q` inside `Publish` hands `q`'s queue to the outer
     # queue's domain — the caller's `chan` argument roots promote
