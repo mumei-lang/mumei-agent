@@ -19014,20 +19014,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # Promote the sent channel's queue root so the
                     # receive/sent sides stay connected through
                     # `indirect_writes`.
-                    sent = self._chan_alias_target(
-                        value, locals_, params
+                    sent_local_queue = self._local_chan_chan_id(
+                        value
                     )
-                    if sent is not None:
-                        self.external_chan_locals.add(sent.id)
-                    else:
-                        # `cc <- G(q)` — a non-identifier send value
-                        # may still hand one of its chan arguments'
-                        # queues to the outer queue (`G` returning
-                        # `q`), so the argument roots promote like
-                        # an imported result's args.
-                        self._promote_chan_call_args(
-                            value, "", locals_, params
+                    if sent_local_queue is not None:
+                        value_deps |= self._chan_group_read_deps(
+                            sent_local_queue, locals_
                         )
+                        self._promote_local_chan_chan_group(
+                            sent_local_queue
+                        )
+                    else:
+                        sent = self._chan_alias_target(
+                            value, locals_, params
+                        )
+                        if sent is not None:
+                            self.external_chan_locals.add(sent.id)
+                        else:
+                            # `cc <- G(q)` — a non-identifier send value
+                            # may still hand one of its chan arguments'
+                            # queues to the outer queue (`G` returning
+                            # `q`), so the argument roots promote like
+                            # an imported result's args.
+                            self._promote_chan_call_args(
+                                value, "", locals_, params
+                            )
                 if field_chan is not None:
                     # The send's destination read — like `(*p)[i]` —
                     # observes the pointer's deps and every earlier
@@ -19092,6 +19103,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 for channel_id in (binding.id, chan_root)
                 if channel_id in params
                 or channel_id in self.external_chan_locals
+                or self._chan_elem_external_member(channel_id)
             }
             if external_ids:
                 if self._chan_chan_fact(binding.type):
@@ -19100,15 +19112,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `_external_chan_operand` path above. Sending a
                     # channel through it exposes that queue to the
                     # caller just like `cc <- ch` on an external name.
-                    sent = self._chan_alias_target(
-                        value, locals_, params
-                    )
-                    if sent is not None:
-                        self.external_chan_locals.add(sent.id)
-                    else:
-                        self._promote_chan_call_args(
-                            value, "", locals_, params
+                    sent_local_queue = self._local_chan_chan_id(value)
+                    if sent_local_queue is not None:
+                        value_deps |= self._chan_group_read_deps(
+                            sent_local_queue, locals_
                         )
+                        self._promote_local_chan_chan_group(
+                            sent_local_queue
+                        )
+                    else:
+                        sent = self._chan_alias_target(
+                            value, locals_, params
+                        )
+                        if sent is not None:
+                            self.external_chan_locals.add(sent.id)
+                        else:
+                            self._promote_chan_call_args(
+                                value, "", locals_, params
+                            )
                 # `ch <- x` on a channel parameter or a
                 # callee-produced queue (`ch := g()`) — the queue is
                 # shared beyond this function, so the send is an

@@ -17009,6 +17009,118 @@ def test_deep_chan_chan_received_queue_send_joins_local_group(
         assert direct.effects == "none_in_supported_fragment"
 
 
+def test_deep_chan_chan_sent_nested_queue_promotes_external_group(
+    go_types_helper,
+):
+    source = (
+        "var GCCC chan chan chan int64\n"
+        "var GCS []chan chan chan int64\n"
+        "func F_depth2_direct(p chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tp <- c\n"
+        "\tc <- x\n"
+        "\treturn <-(<-p)\n"
+        "}\n"
+        "func F_depth2_named(p chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tp <- c\n"
+        "\tc <- x\n"
+        "\tq := <-p\n"
+        "\treturn <-q\n"
+        "}\n"
+        "func F_param_direct(p chan chan chan int64, x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tp <- cc\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-p))\n"
+        "}\n"
+        "func F_param_named(p chan chan chan int64, x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tp <- cc\n"
+        "\tc <- x\n"
+        "\tq := <-p\n"
+        "\tr := <-q\n"
+        "\treturn <-r\n"
+        "}\n"
+        "func F_package_direct(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tGCCC <- cc\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-GCCC))\n"
+        "}\n"
+        "func F_package_named(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tGCCC <- cc\n"
+        "\tc <- x\n"
+        "\tq := <-GCCC\n"
+        "\tr := <-q\n"
+        "\treturn <-r\n"
+        "}\n"
+        "func F_container_direct(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tGCS[0] <- cc\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-GCS[0]))\n"
+        "}\n"
+        "func F_container_named(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tGCS[0] <- cc\n"
+        "\tc <- x\n"
+        "\tq := <-GCS[0]\n"
+        "\tr := <-q\n"
+        "\treturn <-r\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    pairs = [
+        ("F_depth2_direct", "F_depth2_named", frozenset({0, 1})),
+        ("F_param_direct", "F_param_named", frozenset({0, 1})),
+        ("F_package_direct", "F_package_named", frozenset({0})),
+        ("F_container_direct", "F_container_named", frozenset({0})),
+    ]
+    mismatches = []
+    for direct_name, named_name, expected_deps in pairs:
+        direct = named(*data, direct_name)
+        named_levels = named(*data, named_name)
+        assert direct.available, direct.gaps
+        assert named_levels.available, named_levels.gaps
+        if direct.return_dependencies != named_levels.return_dependencies:
+            mismatches.append(
+                (
+                    direct_name,
+                    "named-equivalent",
+                    direct.return_dependencies,
+                    named_levels.return_dependencies,
+                )
+            )
+        if direct.return_dependencies != expected_deps:
+            mismatches.append(
+                (
+                    direct_name,
+                    "expected",
+                    direct.return_dependencies,
+                    expected_deps,
+                )
+            )
+        if direct.effects != named_levels.effects or direct.effects != "unknown":
+            mismatches.append(
+                (direct_name, "effects", direct.effects, named_levels.effects)
+            )
+    assert not mismatches, mismatches
+
+
 def test_deep_chan_chan_external_receive_and_send_match_named_levels(
     go_types_helper,
 ):
