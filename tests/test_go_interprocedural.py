@@ -20479,6 +20479,32 @@ def test_chan_elem_close(
     assert sum(t.imported for t in result.calls) >= imported_calls
 
 
+def test_chan_elem_close_transfer_target(go_types_helper):
+    # `close(s[i])` on a param member records a transfer on the
+    # PARAM's own identity — the bare `>= imported_calls` counts in
+    # test_chan_elem_close pass even if the close emits nothing
+    # (the send/receive alone meet the count), so assert the close
+    # statement's span and target directly.
+    declarations = (
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\ts := []chan int64{ch}\n"
+        "\ts[0] <- x\n"
+        "\tclose(s[0])\n"
+        "\treturn <-ch\n}\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    result = named(source, snapshot, summaries)
+    assert result.available
+    ch = next(b for b in snapshot.bindings if b.name == "ch")
+    close_start = source.index("close(s[0])")
+    assert any(
+        t.imported
+        and t.target == ch.id
+        and t.span.start == close_start
+        for t in result.calls
+    )
+
+
 def test_chan_elem_close_index_evaluates(go_types_helper):
     # `close(s[i])` — the index operand still evaluates, recorded
     # as a statement read on the close itself. Skipping it would
