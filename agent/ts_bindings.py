@@ -1022,7 +1022,25 @@ class _TypeScriptBindings:
         for child in self.children(node):
             if child == name or child == body or child == type_parameters:
                 continue
-            if child.type in {"class_heritage", "extends_clause", "implements_clause"}:
+            if child.type == "class_heritage":
+                for clause in self.children(child):
+                    if clause.type == "extends_clause":
+                        self._scan(
+                            clause.child_by_field_name("value"),
+                            owner,
+                            None,
+                            with_scopes,
+                        )
+                    elif clause.type == "implements_clause":
+                        self._scan_type(clause)
+            elif child.type == "extends_clause":
+                self._scan(
+                    child.child_by_field_name("value"),
+                    owner,
+                    None,
+                    with_scopes,
+                )
+            elif child.type == "implements_clause":
                 self._scan_type(child)
             elif child.type == "decorator":
                 self._scan(child, owner, None, with_scopes)

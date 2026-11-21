@@ -687,6 +687,37 @@ const object = { [key()]: 1, plain: 2 };
     assert not _unresolved(report, "plain")
 
 
+def test_class_extends_scans_values_and_implements_scans_types():
+    source = """
+class Base {}
+interface Contract {}
+class Derived extends Base implements Contract {}
+function makeBase() { return Base; }
+class Created extends makeBase() {}
+class Missing extends missingBase {}
+"""
+    report = build_ts_bindings(source)
+    base = _bindings(report, "Base", "class")[0]
+    contract = _bindings(report, "Contract", "interface")[0]
+    make_base = _bindings(report, "makeBase", "function")[0]
+    assert any(
+        reference.binding_id == base.id
+        and reference.kind == "read"
+        and source.index("class Derived") < reference.span.start < source.index("implements")
+        for reference in report.references
+    )
+    assert any(
+        reference.binding_id == contract.id
+        and reference.kind == "read"
+        for reference in _refs(report, source, "Contract")
+    )
+    assert any(call.target == make_base.id for call in report.calls)
+    assert any(
+        item.name == "missingBase" and item.reason == "unknown_name"
+        for item in _unresolved(report)
+    )
+
+
 def test_multibyte_spans_hash_and_output_are_deterministic():
     source = 'const greeting = "💡"; function f() { return greeting; }'
     report = build_ts_bindings(source)
