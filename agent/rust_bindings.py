@@ -793,6 +793,7 @@ class _RustBindings:
                 self._add_generic_parameters(
                     node, parent_scope, owner_function=record.binding.id
                 )
+                self._finalize_generic_type_facts(parent_scope)
                 self._function(
                     node, record, inherited_generic_scopes=(generic_scope,)
                 )

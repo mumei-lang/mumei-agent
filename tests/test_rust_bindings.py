@@ -936,6 +936,30 @@ fn glob_barrier() { use external::*; let _: Generic<Hidden>; }
     assert raw[vec_start : vec_start + len("Vec")] == b"Vec"
 
 
+def test_bodyless_trait_const_generic_facts_finalize_after_item_predeclaration():
+    source = """
+trait Tr {
+    fn good<const N: Width>();
+    fn unknown<const M: Missing>();
+}
+type Width = u8;
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    width = _bindings(report, "Width", "type_alias")[0]
+    good = _bindings(report, "N", "generic_parameter")[0]
+    unknown = _bindings(report, "M", "generic_parameter")[0]
+    assert (good.type.kind, good.type.bit_width, good.type.type_id) == (
+        "int",
+        8,
+        width.id,
+    )
+    assert unknown.type.kind == "unknown"
+    assert any(
+        item.name == "Missing" and item.reason == "unknown_name"
+        for item in report.unresolved
+    )
+
+
 def test_mutability_does_not_spread_into_nested_rust_patterns():
     source = """
 struct S { f: Option<u8>, field: u8 }
