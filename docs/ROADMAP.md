@@ -7607,6 +7607,7 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
     - 提案は difficulty + 未充足依存数でランキングし先頭 3 件に priority を付与
   - `generate_specs_from_gaps(gaps, max_count)` — `propose.build_spec_from_proposal` を再利用して forge 互換 spec を生成
   - `check_blast_radius(mumei_client, repo_dir, new_file_path, code)` — 新規 `.mm` を `std/` に仮配置 → 既存 `std/*.mm` を全検証 → 仮ファイルを自動除去（例外時も cleanup）
+    - ✅ 深層レイヤー（cross-file dependencies）: token-level import scan が複数行・複数宣言を検出し、`agent/dependency_invalidation.py` が compiler と同じ importer-relative → std fallback の順で import を解決して暗黙の `std/prelude.mm` 依存 edge を加える。解決不能・malformed import はファイルとその推移的 dependents を fail-closed で `undetermined` に分類する。`mumei.std-dependency-invalidation/v1` 記述子には symlink / path alias を統合した依存関係を含め、`check_blast_radius` は各 broken_files エントリに `dependency_relation`（`re_derive` / `undetermined` / `unaffected`）を付記し、各 per-spec/per-member 結果および `summary.json` にも `dependency_invalidation` を保持する。検出のみで再検証・契約差分・シンボル解決・サイクル解析・外部 std path 解決は `checks_not_performed` に列挙（C07 stale_dependents と同じ「検出≠再計算」方針）。
   - `attempt_heal(client, model, broken_info, mumei_client, max_retries=3)` — 既存 `fix_strategy.get_fix` を再利用し、壊れた既存ファイルを自動修復
   - `proliferate(mumei_repo_dir, max_proposals=3, dry_run=False)` — 全体オーケストレーター
     - 各提案を独立処理（1 件の失敗が他をブロックしない）
@@ -7622,6 +7623,7 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `analyze_gaps` の依存グラフ、trusted atom、TODO 検出、ランキング
   - `generate_specs_from_gaps` の `max_count` リスペクト + forge 互換性
   - `check_blast_radius` の broken_files 報告、例外時 cleanup
+  - `tests/test_dependency_invalidation.py` — 45 ケース: token-level import scan、compiler-mirrored resolution、symlink aliases、暗黙 prelude edge、unresolved / unreadable import の fail-closed 分類、blast-radius join（`dependency_relation` 分類 + 記述子同封）
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
   - Lean fallback CLI フラグ伝搬と `summary.json` 内 `lean_fallback` 監査フィールドの保持を検証

@@ -9,9 +9,11 @@ for backwards compatibility.
 from __future__ import annotations
 
 import logging
+import posixpath
 from pathlib import Path
 from typing import Any
 
+from agent.dependency_invalidation import dependency_invalidation_map
 from agent.mumei_client import MumeiClient
 from agent.thought_log import (
     ThoughtProcess,
@@ -26,6 +28,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Blast radius check
 # ---------------------------------------------------------------------------
+
+
+def _repo_key(path: Path, repo: Path) -> str | None:
+    try:
+        relative = path.relative_to(repo).as_posix()
+    except ValueError:
+        try:
+            relative = path.resolve().relative_to(repo.resolve()).as_posix()
+        except ValueError:
+            return None
+    relative = posixpath.normpath(relative)
+    if relative == ".." or relative.startswith("../"):
+        return None
+    return relative
 
 
 def check_blast_radius(
@@ -54,14 +70,38 @@ def check_blast_radius(
         new_file_path.write_text(code, encoding="utf-8")
         wrote_new = True
 
+        # Dependency-aware invalidation map (detection only): which
+        # existing files transitively import the candidate. Computed
+        # while the candidate is on disk so its node exists in the
+        # scanned graph.
+        inv_map: dict[str, Any] | None = None
+        rel_changed = _repo_key(new_file_path, mumei_repo_dir)
+        if rel_changed is not None:
+            try:
+                inv_map = dependency_invalidation_map(std_dir, rel_changed)
+                result["dependency_invalidation"] = inv_map
+            except (OSError, ValueError):
+                pass
+
         # Verify every existing .mm file (excluding the new one)
         for mm_file in sorted(std_dir.rglob("*.mm")):
             if mm_file.resolve() == new_file_path.resolve():
                 continue
             verify = mumei_client.verify(str(mm_file))
             if not verify["success"]:
+                rel_broken = _repo_key(mm_file, mumei_repo_dir)
+                dependency_relation = "undetermined"
+                if inv_map is not None and rel_broken is not None:
+                    if rel_broken in inv_map["re_derive"]:
+                        dependency_relation = "re_derive"
+                    elif rel_broken in inv_map["unaffected"]:
+                        dependency_relation = "unaffected"
                 result["broken_files"].append(
-                    {"file": str(mm_file), "error": verify.get("stderr", "")}
+                    {
+                        "file": str(mm_file),
+                        "error": verify.get("stderr", ""),
+                        "dependency_relation": dependency_relation,
+                    }
                 )
         result["all_passed"] = len(result["broken_files"]) == 0
     finally:
