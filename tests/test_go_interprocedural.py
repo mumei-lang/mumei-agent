@@ -21377,6 +21377,104 @@ def test_chan_elem_external_group_registration_same_function(
     ("declarations", "expected"),
     [
         (
+            "var GC chan int64\n"
+            "func G() chan int64 { return GC }\n"
+            "func F(x int64) int64 {\n"
+            "\td := G()\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GC\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func G() chan int64 { return GS[0] }\n"
+            "func F(x int64) int64 {\n"
+            "\td := G()\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GS[0]\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GS[0]\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GC chan int64\n"
+            "func Get() chan int64 { return GC }\n"
+            "func Put(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\td := Get()\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tPut(f, x)\n"
+            "\treturn <-GC\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(i int64, x int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GS[0]\n"
+            "}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_elem_external_alias_swap_preserves_external_queue(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+    assert any(transfer.imported for transfer in result.calls)
+
+
+def test_chan_local_swap_stays_effect_pure(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\td := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-d\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        (
             "var GS []chan int64\n"
             "func F(x int64) int64 {\n"
             "\td := GS[0]\n"

@@ -16266,9 +16266,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 value, fn, params, locals_, transfers, count, 0
             )
             chan_root = self._chan_root(binding.id)
-            if chan_root in params or (
-                chan_root in self.external_chan_locals
-            ):
+            external_ids = {
+                channel_id
+                for channel_id in (binding.id, chan_root)
+                if channel_id in params
+                or channel_id in self.external_chan_locals
+            }
+            if external_ids:
                 # `ch <- x` on a channel parameter or a
                 # callee-produced queue (`ch := g()`) — the queue is
                 # shared beyond this function, so the send is an
@@ -16278,9 +16282,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `indirect_writes` — a later `<-ch` CAN observe
                 # this exact value, so dropping them would
                 # under-approximate.
-                stored_deps = value_deps | (
-                    self.external_chan_selectors.get(
-                        chan_root, frozenset()
+                stored_deps = value_deps | frozenset().union(
+                    *(
+                        self.external_chan_selectors.get(
+                            channel_id, frozenset()
+                        )
+                        for channel_id in external_ids
                     )
                 )
                 self.indirect_writes |= stored_deps
@@ -22328,26 +22335,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # on the alias's own slot would hide the send
                     # from `<-ch`.
                     chan_id = self._chan_root(binding.id)
+                    external_ids = {
+                        channel_id
+                        for channel_id in (binding.id, chan_id)
+                        if channel_id in params
+                        or channel_id in self.external_chan_locals
+                    }
                     group_external = (
                         self._chan_group_external_tokens(chan_id)
                     )
-                    if chan_id in params or (
-                        chan_id in self.external_chan_locals
-                    ) or group_external:
-                        self.indirect_writes |= stored | (
-                            self.external_chan_selectors.get(
-                                chan_id, frozenset()
-                            )
-                        )
-                        if group_external:
-                            self.indirect_writes |= frozenset().union(
-                                *(
-                                    self.external_chan_selectors.get(
-                                        token, frozenset()
-                                    )
-                                    for token in group_external
+                    if external_ids or group_external:
+                        self.indirect_writes |= stored | frozenset().union(
+                            *(
+                                self.external_chan_selectors.get(
+                                    channel_id, frozenset()
+                                )
+                                for channel_id in (
+                                    external_ids | group_external
                                 )
                             )
+                        )
                     elif chan_id in locals_:
                         locals_[chan_id] = (
                             locals_.get(chan_id, frozenset())
