@@ -5405,6 +5405,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         value_deps: frozenset[int] = frozenset(),
         key_deps: frozenset[int] = frozenset(),
         chan_group: str | None = None,
+        external_chan_chan_origins: frozenset[int] | None = None,
     ) -> None:
         """Bind `for` range names to dep-free (external-state) values.
 
@@ -5426,6 +5427,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
             deps = value_deps if pos == 1 else key_deps
             binding = self.bindings_by_span.get(self.node_key(name))
             if binding is not None:
+                if (
+                    external_chan_chan_origins is not None
+                    and pos == 1
+                    and self._chan_chan_fact(binding.type)
+                ):
+                    scope[binding.id] = deps
+                    self.chan_aliases.pop(binding.id, None)
+                    self.local_chan_chans.discard(binding.id)
+                    self.external_chan_locals.add(binding.id)
+                    if not conditional:
+                        self.external_chan_selectors.pop(
+                            binding.id, None
+                        )
+                    self._set_chan_chan_param_origins(
+                        binding.id,
+                        external_chan_chan_origins,
+                        conditional,
+                        scope,
+                    )
+                    continue
                 if (
                     chan_group is not None
                     and self._chan_chan_fact(binding.type)
@@ -5464,6 +5485,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         "binding_unavailable", _span(name)
                     )
                 rb = self.bindings.get(ref.binding_id)
+                if (
+                    external_chan_chan_origins is not None
+                    and pos == 1
+                    and rb is not None
+                    and self._chan_chan_fact(rb.type)
+                ):
+                    self._mark_external_chan_group_member(
+                        ref.binding_id
+                    )
+                    self.chan_aliases.pop(ref.binding_id, None)
+                    self.local_chan_chans.discard(ref.binding_id)
+                    self.external_chan_locals.add(ref.binding_id)
+                    self._store(
+                        scope,
+                        params,
+                        ref.binding_id,
+                        deps,
+                        conditional,
+                    )
+                    if not conditional:
+                        self.external_chan_selectors.pop(
+                            ref.binding_id, None
+                        )
+                    self._set_chan_chan_param_origins(
+                        ref.binding_id,
+                        external_chan_chan_origins,
+                        conditional,
+                        scope,
+                    )
+                    continue
                 if (
                     chan_group is not None
                     and rb is not None
@@ -7004,8 +7055,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return frozenset({params[external[0]]})
         external_elem = (
-            self._external_chan_chan_elem_index(operand, params)
+            self._external_chan_chan_elem_index(
+                operand if operand is not None else inner,
+                params,
+            )
             if operand is not None
+            or (
+                inner is not None
+                and inner.type == "index_expression"
+            )
             else None
         )
         if external_elem is not None and external_elem[0] in params:
@@ -15742,6 +15800,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and self._chan_chan_elem_collection(
                                     range_binding.type
                                 )
+                                and range_ref.binding_id not in params
                             ):
                                 local_chan_chan_range = (
                                     range_ref.binding_id
@@ -16212,6 +16271,44 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else frozenset()
                         ),
                         local_chan_chan_range,
+                        (
+                            frozenset(
+                                {params[target]}
+                            )
+                            if (
+                                fact is not None
+                                and self._chan_chan_elem_collection(
+                                    fact
+                                )
+                                and (
+                                    member is not None
+                                    or container_var is not None
+                                    or (
+                                        opaque_range is not None
+                                        and opaque_range in params
+                                    )
+                                )
+                                and target in params
+                            )
+                            else (
+                                frozenset()
+                                if (
+                                    fact is not None
+                                    and self._chan_chan_elem_collection(
+                                        fact
+                                    )
+                                    and (
+                                        member is not None
+                                        or container_var is not None
+                                        or (
+                                            opaque_range is not None
+                                            and opaque_range in params
+                                        )
+                                    )
+                                )
+                                else None
+                            )
+                        ),
                     )
                     if (
                         (

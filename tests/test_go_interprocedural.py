@@ -17377,6 +17377,96 @@ def test_chan_chan_container_parameter_indexes_are_external(
     assert result.effects == "unknown"
 
 
+def test_chan_chan_parameter_container_extraction_keeps_origin_and_index(
+    go_types_helper,
+):
+    source = (
+        "func F_direct(p []chan chan int64, i int) int64 {\n"
+        "\treturn <-(<-p[i])\n"
+        "}\n"
+        "func F_extract(p []chan chan int64, i int) int64 {\n"
+        "\tq := p[i]\n"
+        "\treturn <-(<-q)\n"
+        "}\n"
+        "func F_range(p []chan chan int64) int64 {\n"
+        "\tfor _, q := range p {\n"
+        "\t\treturn <-(<-q)\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n"
+    )
+    unit_result = unit(go_types_helper, source)
+    direct = named(*unit_result, "F_direct")
+    extracted = named(*unit_result, "F_extract")
+    ranged = named(*unit_result, "F_range")
+    assert direct.available and direct.return_dependencies == frozenset(
+        {0, 1}
+    )
+    assert extracted.available, extracted.gaps
+    assert extracted.return_dependencies == direct.return_dependencies
+    assert extracted.effects == direct.effects
+    assert ranged.available, ranged.gaps
+    assert ranged.return_dependencies == frozenset({0})
+    assert ranged.effects == "unknown"
+
+
+@pytest.mark.parametrize("imported", [False, True])
+def test_external_chan_chan_container_extraction_and_range(
+    go_types_helper, imported
+):
+    qualifier = "lib.GS" if imported else "GS"
+    files = {
+        "a.go": (
+            "package p\n"
+            + ('import "lib"\n' if imported else "")
+            + "func F_direct(i int) int64 {\n"
+            + f"\treturn <-(<-{qualifier}[i])\n"
+            + "}\n"
+            + "func F_extract(i int) int64 {\n"
+            + f"\tq := {qualifier}[i]\n"
+            + "\treturn <-(<-q)\n"
+            + "}\n"
+            + "func F_range() int64 {\n"
+            + f"\tfor _, q := range {qualifier} {{\n"
+            + "\t\treturn <-(<-q)\n"
+            + "\t}\n"
+            + "\treturn 0\n"
+            + "}\n"
+        )
+    }
+    if imported:
+        imports = {
+            "lib": {
+                "lib.go": (
+                    "package lib\n"
+                    "var GS []chan chan int64\n"
+                )
+            }
+        }
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+    else:
+        files["a.go"] = files["a.go"].replace(
+            "func F_direct", "var GS []chan chan int64\nfunc F_direct"
+        )
+        _, snapshot, summaries = package_unit(go_types_helper, files)
+    direct = named_package(files, snapshot, summaries, "F_direct")
+    extracted = named_package(files, snapshot, summaries, "F_extract")
+    ranged = named_package(files, snapshot, summaries, "F_range")
+    assert direct.available and direct.return_dependencies == frozenset(
+        {0}
+    )
+    assert extracted.available, extracted.gaps
+    assert extracted.return_dependencies == direct.return_dependencies
+    assert extracted.effects == direct.effects
+    assert ranged.available, ranged.gaps
+    assert ranged.effects == "unknown"
+
+
 @pytest.mark.parametrize(
     ("container_type", "index"),
     [
