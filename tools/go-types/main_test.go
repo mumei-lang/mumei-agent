@@ -280,6 +280,33 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 	}
 }
 
+func TestImportedStructFieldDeclaresNamedValueType(t *testing.T) {
+	unit := []namedSource{{
+		"a.go",
+		"package p\nimport \"lib\"\nfunc F(t *lib.S) int64 { return t.A.B }",
+	}}
+	imports := []importedUnit{{"lib", []namedSource{{
+		"types.go",
+		"package lib\ntype S3 struct{ B int64 }\ntype S struct{ A S3 }",
+	}}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	s3, ok := members["S3"]
+	if !ok || s3.Kind != "type" || s3.Type.Kind != "struct" {
+		t.Fatalf("the nested named struct type is missing: %+v", s3)
+	}
+	a, ok := members["A"]
+	if !ok || a.Type.Kind != "struct" || a.Type.TypeID != s3.ID {
+		t.Fatalf("the field's struct type identity was not declared: %+v", a)
+	}
+}
+
 func TestImportedMethodChanResultAdmits(t *testing.T) {
 	// `ch, n := st.M()` — an imported method whose signature
 	// declares a scalar-element `chan` among its results records

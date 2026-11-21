@@ -10998,13 +10998,12 @@ def test_bound_base_field_read_nested_is_admitted(go_types_helper):
     )
 
 
-def test_bound_base_field_read_nested_scalar_stays_closed(go_types_helper):
-    # `t.A.B` — the intermediate field `A` is a struct *value*, not
-    # a pointer, so the chain cannot walk deeper through it.
+def test_bound_base_field_read_named_struct_intermediate_is_admitted(
+    go_types_helper,
+):
     lib = {
         "lib": {
-            "m.go": "package lib\ntype T int64\n"
-            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+            "m.go": "package lib\n"
             "type S3 struct{ B int64 }\ntype S4 struct{ A S3 }\n"
         }
     }
@@ -11020,7 +11019,283 @@ def test_bound_base_field_read_nested_scalar_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    members = {member.name: member.id for member in snapshot.imported_members}
+    assert {members["S4"], members["A"], members["S3"]} <= set(
+        result.pinned
+    )
+
+
+def test_bound_base_field_read_pins_nested_imported_type_staleness(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S) int64 { return t.A.B }\n"
+    }
+    lib = {
+        "lib": {
+            "s3.go": "package lib\ntype S3 struct{ B int64 }\n",
+            "s.go": "package lib\ntype S struct{ A S3 }\n",
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    members = {member.name: member.id for member in snapshot.imported_members}
+    assert {members["S"], members["A"], members["S3"]} <= set(
+        result.pinned
+    )
+    lib2 = {"lib": dict(lib["lib"])}
+    lib2["lib"]["s3.go"] = (
+        "package lib\ntype S3 struct{ B int64; C bool }\n"
+    )
+    snapshot2 = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib2),
+        files,
+        target_arch="amd64",
+    )
+    known = {binding.id for binding in snapshot2.bindings} | {
+        member.id for member in snapshot2.imported_members
+    }
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_bound_base_field_read_pins_nested_imported_field_staleness(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S) int64 { return t.A.B }\n"
+    }
+    lib = {
+        "lib": {
+            "s3.go": "package lib\ntype S3 struct{ B int64 }\n",
+            "s.go": "package lib\ntype S struct{ A S3 }\n",
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    members = {member.name: member.id for member in snapshot.imported_members}
+    assert {members["S"], members["A"], members["S3"]} <= set(
+        result.pinned
+    )
+    lib2 = {"lib": dict(lib["lib"])}
+    lib2["lib"]["s.go"] = (
+        "package lib\ntype S4 struct{ B int64 }\ntype S struct{ A S4 }\n"
+    )
+    snapshot2 = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib2),
+        files,
+        target_arch="amd64",
+    )
+    known = {binding.id for binding in snapshot2.bindings} | {
+        member.id for member in snapshot2.imported_members
+    }
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+@pytest.mark.parametrize("field_expr", ["t.A.B", "(*t).A.B"])
+def test_bound_pointer_named_struct_value_intermediate_read(
+    go_types_helper, field_expr
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        f"func F(t *S) int64 {{ return {field_expr} }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("types", "field_expr"),
+    [
+        (
+            "type S5 struct{ D int64 }\n"
+            "type S4 struct{ C S5 }\ntype S struct{ A S4 }\n",
+            "t.A.C.D",
+        ),
+        (
+            "type P2 struct{ N int64 }\n"
+            "type S3 struct{ P *P2 }\ntype S struct{ A S3 }\n",
+            "t.A.P.N",
+        ),
+        (
+            "type S3 struct{ B int64 }\n"
+            "type W2 struct{ A S3 }\ntype S struct{ W *W2 }\n",
+            "t.W.A.B",
+        ),
+    ],
+)
+def test_bound_pointer_named_struct_value_intermediate_chains(
+    go_types_helper, types, field_expr
+):
+    files = {
+        "a.go": "package p\n"
+        + types
+        + f"func F(t *S) int64 {{ return {field_expr} }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_bound_pointer_named_struct_value_intermediate_store_is_admitted(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func F(t *S, x int64) int64 {\n"
+        "\tt.A.B = x\n"
+        "\treturn t.A.B\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize("allocation", ["&S{}", "new(S)"])
+def test_bound_pointer_named_struct_value_intermediate_local_allocation(
+    go_types_helper, allocation
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        f"func F(x int64) int64 {{ t := {allocation}; "
+        "t.A.B = x; return t.A.B }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        ("t.A.B++", frozenset({0})),
+        ("t.A.B += x", frozenset({0, 1})),
+    ],
+)
+def test_bound_pointer_named_struct_value_intermediate_inc_dec(
+    go_types_helper, statement, expected
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func F(t *S, x int64) int64 {\n"
+        f"\t{statement}\n"
+        "\treturn t.A.B\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+def test_bound_pointer_method_store_through_named_struct_value_field(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func (t *S) Set(x int64) { t.A.B = x }\n"
+        "func F(t *S, x int64) int64 { t.Set(x); return t.A.B }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("types", "field_expr"),
+    [
+        ("type S struct{ A struct{ B int64 } }\n", "t.A.B"),
+        ("type S struct{ A []int64 }\n", "t.A[0]"),
+    ],
+)
+def test_bound_pointer_anonymous_or_slice_intermediate_stays_closed(
+    go_types_helper, types, field_expr
+):
+    files = {
+        "a.go": "package p\n"
+        + types
+        + f"func F(t *S) int64 {{ return {field_expr} }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
     assert not result.available
+    assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_local_struct_value_nested_field_behavior_is_unchanged(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func F(x int64) int64 {\n"
+        "\tst := S{A: S3{B: x}}\n"
+        "\treturn st.A.B\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
 
 
 def test_nested_field_write_is_admitted(go_types_helper):
@@ -11144,9 +11419,9 @@ def test_nested_field_write_receiver_observes_folded_deps(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_nested_field_write_struct_value_stays_closed(go_types_helper):
-    # `t.A.B = v` — the intermediate field `A` is a struct *value*,
-    # not a pointer, so the chain cannot walk deeper through it.
+def test_nested_field_write_through_named_struct_intermediate_is_admitted(
+    go_types_helper,
+):
     lib = {
         "lib": {
             "m.go": "package lib\n"
@@ -11157,7 +11432,7 @@ def test_nested_field_write_struct_value_stays_closed(go_types_helper):
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S4, v int64) int64 {\n"
         "\tt.A.B = v\n"
-        "\treturn 0\n}\n"
+        "\treturn t.A.B\n}\n"
     }
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
@@ -11167,7 +11442,9 @@ def test_nested_field_write_struct_value_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
 
 
 def test_bound_base_field_read_string_field_stays_closed(go_types_helper):

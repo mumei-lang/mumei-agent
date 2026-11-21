@@ -4110,6 +4110,9 @@ embedded `*Q` still fails the window). Other unnamed composites
 (`[]T`/`map` values, `type_id`-less bindings) stay closed
 (`binding_unavailable`).
 Struct params/results stay closed at the signature gate.
+Bound-pointer field chains also admit named struct-valued
+intermediates (`t.A.B` and `(*t).A.B`), pinning each resolved
+struct type; anonymous struct intermediates remain closed.
 
 The hard boundary is the aliasing invariant the dep-free bound-
 pointer field read relies on: a bound pointer must never alias a

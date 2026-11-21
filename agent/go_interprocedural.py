@@ -4098,6 +4098,8 @@ class _Builder:
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
+        *,
+        intermediate: bool = False,
     ) -> tuple[tuple[PackageMember, ...], PackageMember, Any] | None:
         """The `(pointee members, field member, root ref)` triple
         `t.F` names.
@@ -4106,7 +4108,7 @@ class _Builder:
         state — external like `lib.VS.F`, so the read is dep-free and
         records against the field's identity. The operand must be a
         bound identifier whose pointer fact names the pointee `type`
-member, or one explicit dereference of one (`(*t).F` — the same
+        member, or one explicit dereference of one (`(*t).F` — the same
         auto-deref spelled out), possibly through intermediate
         pointer-typed selections (`t.W.N` walks field `W`'s `*W2`
         member to `W2`, then resolves `N` there) — every `type`
@@ -4114,9 +4116,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         through its own `import` reference to a scalar-or-pointer
         `var` member, like the imported-struct-var path — or, for a
         package-local struct type, through the field's `local`
-        reference to its `scope`-less `variable` binding. A promoted
-        method's `func` member, a non-scalar field, a computed base,
-        or any unresolvable name returns None.
+        reference to its `scope`-less `variable` binding. Only when
+        `intermediate=True` may a named struct-valued field also be
+        returned, so recursive selection can pin its type identity;
+        anonymous struct fields stay closed. A promoted method's
+        `func` member, a non-scalar leaf, a computed base, or any
+        unresolvable name returns None.
         """
         operand = node.child_by_field_name("operand")
         field = node.child_by_field_name("field")
@@ -4136,7 +4141,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             field_member is None
             or field_member.name.encode("utf-8") != field.text
             or field_member.kind not in {"var", "variable"}
-            or field_member.type.kind not in {"integer", "boolean", "pointer"}
+            or field_member.type.kind
+            not in (
+                {"integer", "boolean", "pointer", "struct"}
+                if intermediate
+                else {"integer", "boolean", "pointer"}
+            )
+            or field_member.type.kind == "struct"
+            and not field_member.type.type_id
         ):
             return None
         return pointees, field_member, root_ref
@@ -4436,12 +4448,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         with parentheses either side) contributes its pointee `type`
         member — or the local `type` binding it names — and supplies
         the root reference; a nested selection
-        (`t.W`) recurses through `_bound_field_read` and extends the
-        chain with the field's own member — pinned so redeclaring
-        `W` flags the summary — followed by the field's pointee
-        `type` member when the field is pointer-typed. The tuple's
+        (`t.W`) recurses through `_bound_field_read` with
+        `intermediate=True` and extends the chain with the field's own
+        member — pinned so redeclaring `W` flags the summary —
+        followed by the field's pointee `type` member when the field
+        is pointer-typed, or when it is a named struct-valued field.
+        Anonymous struct intermediates remain closed. The tuple's
         last element is always the deepest pointee. Anything else —
-        a computed base, a double deref, a non-pointer field —
+        a computed base, a double deref, or an unresolvable field —
         returns None.
         """
         while operand.type == "parenthesized_expression":
@@ -4467,29 +4481,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if operand is None:
                 return None
         if operand.type == "selector_expression":
-            inner = self._bound_field_read(operand, locals_, params)
+            inner = self._bound_field_read(
+                operand, locals_, params, intermediate=True
+            )
             if inner is None:
                 return None
             inner_pointees, inner_field, root_ref = inner
-            if (
-                inner_field.type.kind != "pointer"
-                or not inner_field.type.type_id
-            ):
-                return None
-            pointee = self._pointee_type(inner_field.type.type_id)
-            if pointee is None:
-                return None
-            if pointee.type.kind == "pointer":
-                # `t.W` on a `W PP` field (`type PP *S`) — the named
-                # pointer type's member IS the pointer; its whole
-                # fact pins, and the pointee resolves one hop deeper
-                # through its `elem`.
-                self._pin_fact_identities(inner_field.type)
-                pointee = self._pointer_underlying_pointee(
-                    pointee, inner_field.id
-                )
+            if inner_field.type.kind == "pointer":
+                if not inner_field.type.type_id:
+                    return None
+                pointee = self._pointee_type(inner_field.type.type_id)
                 if pointee is None:
                     return None
+                if pointee.type.kind == "pointer":
+                    # `t.W` on a `W PP` field (`type PP *S`) — the named
+                    # pointer type's member IS the pointer; its whole
+                    # fact pins, and the pointee resolves one hop deeper
+                    # through its `elem`.
+                    self._pin_fact_identities(inner_field.type)
+                    pointee = self._pointer_underlying_pointee(
+                        pointee, inner_field.id
+                    )
+                    if pointee is None:
+                        return None
+            elif inner_field.type.kind == "struct":
+                if not inner_field.type.type_id:
+                    return None
+                pointee = self._pointee_type(inner_field.type.type_id)
+                if (
+                    pointee is None
+                    or pointee.kind != "type"
+                    or pointee.type.kind != "struct"
+                ):
+                    return None
+            else:
+                return None
             return (*inner_pointees, inner_field, pointee), root_ref
         if operand.type != "identifier" or operand.text == b"_":
             return None

@@ -754,6 +754,9 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 		}
 	}
 	if kind == "var" {
+		if _, ok := obj.Type().Underlying().(*types.Struct); ok {
+			ix.recordPointeeMembers(obj.Type(), map[string]bool{})
+		}
 		// A pointer-typed var's pointee identity must be declared too:
 		// the consumer needs the pointee's own fact to classify a
 		// `*lib.V` dereference read, exactly like a signature's
