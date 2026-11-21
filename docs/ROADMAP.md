@@ -4278,7 +4278,9 @@ with the indexes' own, and a parallel assign (`s[i].F, s[j].F
 St{...}`) lands like any element write — the only write Go
 allows on a map element — and whole-value extraction or range
 binding of a supported named struct element preserves Go's
-value-copy semantics while reusing collection-field share groups.
+value-copy semantics while reusing collection-field share groups,
+including struct-field roots such as `o.A[i]`/`range o.A` and
+one-level nested roots such as `s[0][i]`/`range s[0]`.
 A COLLECTION field on the element extracts like `a := st.F` on a
 composite: `b := s[i].F` /
 `b = s[i].F` (and deeper `s[i].F.G`) binds the field's own

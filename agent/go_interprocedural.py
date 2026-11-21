@@ -2933,8 +2933,56 @@ class _Builder:
                     nested, member, seen
                 )
 
-    def _struct_element_container_target(
+    def _struct_element_nested_range_target(
         self, node: Any, params: dict | None = None
+    ) -> tuple[Any, str, Any] | None:
+        current = node
+        while (
+            current is not None
+            and current.type == "parenthesized_expression"
+        ):
+            current = next(
+                (
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if current is None or current.type != "index_expression":
+            return None
+        target = self._opaque_container_index_target(current)
+        if target is None or target[2]:
+            return None
+        ref, index, _ = target
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            ref.kind == "import"
+            or binding is None
+            or self._package_level(binding)
+            or binding.type is None
+            or binding.type.kind not in {"slice", "array", "map"}
+            or binding.type.elem is None
+        ):
+            return None
+        container_fact = binding.type.elem
+        if (
+            container_fact.kind not in {"slice", "array", "map"}
+            or container_fact.elem is None
+            or not self._named_value_struct_supported(
+                container_fact.elem
+            )
+        ):
+            return None
+        self._pin_fact_identities(binding.type)
+        return container_fact, ref.binding_id, index
+
+    def _struct_element_container_target(
+        self,
+        node: Any,
+        params: dict | None = None,
+        *,
+        range_container: bool = False,
     ) -> tuple[Any, Any, str, frozenset, frozenset] | None:
         current = node
         while (
@@ -2951,10 +2999,17 @@ class _Builder:
             )
         if current is None:
             return None
+        range_index_container = (
+            range_container and current.type == "index_expression"
+        )
         container = (
-            current.child_by_field_name("operand")
-            if current.type == "index_expression"
-            else current
+            current
+            if range_index_container
+            else (
+                current.child_by_field_name("operand")
+                if current.type == "index_expression"
+                else current
+            )
         )
         while (
             container is not None
@@ -2968,12 +3023,76 @@ class _Builder:
                 ),
                 None,
             )
-        if container is None or container.type == "index_expression":
+        if container is None:
             return None
         root_id = None
         root_node = container
         container_fact = None
-        if container.type == "identifier":
+        nested_target = None
+        nested_depth = 0
+        if range_index_container:
+            nested_target = self._opaque_container_index_target(
+                current
+            )
+            if nested_target is None or nested_target[2]:
+                return None
+            nested_depth = 1
+        elif container.type == "index_expression":
+            nested_target = self._opaque_container_index_target(
+                current
+            )
+            inner_indexes = (
+                nested_target[2] if nested_target is not None else None
+            )
+            if nested_target is None or len(inner_indexes or ()) != 1:
+                return None
+            nested_depth = len(inner_indexes or ())
+        if nested_target is not None:
+            root_ref = nested_target[0]
+            root_id = root_ref.binding_id
+            root_binding = self.bindings.get(root_id)
+            if (
+                root_ref.kind == "import"
+                or root_binding is None
+                or root_binding.type is None
+                or self._package_level(root_binding)
+            ):
+                return None
+            root_node = container
+            while root_node is not None and root_node.type in {
+                "index_expression",
+                "parenthesized_expression",
+            }:
+                root_node = (
+                    next(
+                        (
+                            child
+                            for child in root_node.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                    if root_node.type == "parenthesized_expression"
+                    else root_node.child_by_field_name("operand")
+                )
+            if (
+                root_node is None
+                or root_node.type != "identifier"
+                or self.references.get(self.node_key(root_node))
+                != root_ref
+            ):
+                return None
+            container_fact = root_binding.type
+            for _ in range(nested_depth):
+                if (
+                    container_fact is None
+                    or container_fact.kind not in {"slice", "array", "map"}
+                    or container_fact.elem is None
+                ):
+                    return None
+                self._pin_fact_identities(container_fact)
+                container_fact = container_fact.elem
+        elif container.type == "identifier":
             ref = self.references.get(self.node_key(container))
             root_id = ref.binding_id if ref is not None else None
             binding = self.bindings.get(root_id)
@@ -3095,9 +3214,15 @@ class _Builder:
         )
 
     def _struct_element_container_snapshot(
-        self, node: Any, params: dict | None = None
+        self,
+        node: Any,
+        params: dict | None = None,
+        *,
+        range_container: bool = False,
     ) -> tuple[Any, tuple[frozenset, dict[str, frozenset]]] | None:
-        target = self._struct_element_container_target(node, params)
+        target = self._struct_element_container_target(
+            node, params, range_container=range_container
+        )
         if target is None:
             return None
         _container_fact, elem, root_id, root_tokens, container_tokens = (
@@ -7641,6 +7766,13 @@ class _Builder:
             else None
         )
         struct_element_container_fact = fact
+        nested_struct_index_target = (
+            self._opaque_container_index_target(node)
+            if len(indexes) == 2
+            and inner is not None
+            and inner.type == "identifier"
+            else None
+        )
         if (
             inner is not None
             and inner.type == "identifier"
@@ -7663,6 +7795,18 @@ class _Builder:
                 and not self._package_level(root_binding)
             ):
                 struct_element_container_fact = root_binding.type
+                for _ in range(len(indexes) - 1):
+                    if (
+                        struct_element_container_fact is None
+                        or struct_element_container_fact.kind
+                        not in container_kinds
+                        or struct_element_container_fact.elem is None
+                    ):
+                        struct_element_container_fact = None
+                        break
+                    struct_element_container_fact = (
+                        struct_element_container_fact.elem
+                    )
         elif (
             inner is not None
             and inner.type == "selector_expression"
@@ -7670,7 +7814,14 @@ class _Builder:
         ):
             struct_element_container_fact = opaque_field[2].type
         struct_element_candidate = (
-            len(indexes) == 1
+            (
+                len(indexes) == 1
+                or (
+                    len(indexes) == 2
+                    and nested_struct_index_target is not None
+                    and len(nested_struct_index_target[2] or ()) == 1
+                )
+            )
             and call_operand is None
             and package_var is None
             and member is None
@@ -20176,9 +20327,40 @@ class _Builder:
                 computed = None
                 local_chan_chan_range = None
                 local_chan_chan_range_fact = None
+                nested_range_container = (
+                    self._struct_element_nested_range_target(
+                        right, params
+                    )
+                    if (
+                        right is not None
+                        and len(lefts) == 2
+                        and lefts[1].type == "identifier"
+                        and lefts[1].text != b"_"
+                    )
+                    else None
+                )
+                nested_range_index_deps = frozenset()
+                if (
+                    nested_range_container is not None
+                    and nested_range_container[2].type
+                    not in _INDEX_LITERALS
+                ):
+                    nested_range_index_deps = self.expression(
+                        nested_range_container[2],
+                        fn,
+                        params,
+                        scope,
+                        transfers,
+                        count,
+                        0,
+                    )
                 struct_range_value = (
                     self._struct_element_container_snapshot(
-                        right, params
+                        right,
+                        params,
+                        range_container=(
+                            nested_range_container is not None
+                        ),
                     )
                     if right is not None
                     else None
@@ -20202,7 +20384,9 @@ class _Builder:
                 ):
                     opaque_range_field = (
                         self._opaque_container_field_target(
-                            right, params
+                            right,
+                            params,
+                            allow_struct_elements=True,
                         )
                     )
                 if (
@@ -20427,6 +20611,7 @@ class _Builder:
                     or computed is not None
                     or opaque_range is not None
                     or opaque_range_field is not None
+                    or nested_range_container is not None
                 ):
                     # Ranging a container in external state — an
                     # imported member (`lib.VA`, `lib.VM`), the
@@ -20454,6 +20639,7 @@ class _Builder:
                         or computed is not None
                         or opaque_range is not None
                         or opaque_range_field is not None
+                        or nested_range_container is not None
                     ):
                         fact = (
                             bound[2]
@@ -20469,7 +20655,12 @@ class _Builder:
                                             opaque_range
                                         ].type
                                         if opaque_range is not None
-                                        else opaque_range_field[2].type
+                                        else (
+                                            opaque_range_field[2].type
+                                            if opaque_range_field
+                                            is not None
+                                            else nested_range_container[0]
+                                        )
                                     )
                                 )
                             )
@@ -20486,7 +20677,12 @@ class _Builder:
                                     else (
                                         opaque_range
                                         if opaque_range is not None
-                                        else opaque_range_field[1]
+                                        else (
+                                            opaque_range_field[1]
+                                            if opaque_range_field
+                                            is not None
+                                            else nested_range_container[1]
+                                        )
                                     )
                                 )
                             )
@@ -20803,6 +20999,13 @@ class _Builder:
                         ) | self._opaque_container_deps(
                             opaque_range_field[0], scope
                         )
+                    elif nested_range_container is not None:
+                        value_deps = (
+                            nested_range_index_deps
+                            | self._opaque_container_deps(
+                                nested_range_container[1], scope
+                            )
+                        )
                     elif opaque_range is not None:
                         # `for range s` — each element (and a map's
                         # key, when only one name binds) carries the
@@ -20943,6 +21146,7 @@ class _Builder:
                             or computed is not None
                             or opaque_range is not None
                             or opaque_range_field is not None
+                            or nested_range_container is not None
                         )
                         and fact is not None
                         and len(lefts) >= 1
@@ -21811,6 +22015,13 @@ class _Builder:
                         ):
                             extra |= self._opaque_container_deps(
                                 opaque_range_field[0], inner
+                            )
+                        if (
+                            nested_range_container is not None
+                            and not elem_static
+                        ):
+                            extra |= self._opaque_container_deps(
+                                nested_range_container[1], inner
                             )
                         if elem_escaped:
                             # A func iterator's callee reads escaped
