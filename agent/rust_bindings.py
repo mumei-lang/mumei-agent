@@ -39,6 +39,16 @@ _PRELUDE_NAMES = frozenset(
         "u128", "usize", "f32", "f64", "Self",
     }
 )
+_PRELUDE_TYPE_NAMES = frozenset(
+    {
+        "Vec", "String", "Box", "Option", "Result", "Default", "Clone",
+        "Copy", "Iterator", "ToString", "ToOwned", "AsRef", "AsMut",
+        "Borrow", "Into", "From", "TryFrom", "TryInto", "Send", "Sync",
+        "Sized", "Unpin", "Fn", "FnMut", "FnOnce", "bool", "char", "str",
+        "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
+        "u64", "u128", "usize", "f32", "f64", "Self",
+    }
+)
 _PRELUDE_PATTERN_PATHS = frozenset({"Some", "None", "Ok", "Err"})
 _INERT_ATTRIBUTES = frozenset(
     {
@@ -568,7 +578,7 @@ class _RustBindings:
         )
         if type_record is not None:
             record = type_record
-        else:
+        elif type_boundary is None and name not in _PRELUDE_TYPE_NAMES:
             value_record, value_boundary = self._lookup_with_boundary(
                 name, node.start_byte, "value"
             )
@@ -588,6 +598,17 @@ class _RustBindings:
                 if unresolved not in self.unresolved:
                     self.unresolved.append(unresolved)
                 return
+        else:
+            value_boundary = None
+            record = None
+        if record is None:
+            reason = type_boundary or value_boundary or (
+                "prelude_name" if name in _PRELUDE_NAMES else "unknown_name"
+            )
+            unresolved = Unresolved(self.span(node), name, reason)
+            if unresolved not in self.unresolved:
+                self.unresolved.append(unresolved)
+            return
         reference = Reference(self.span(node), record.binding.id, "read")
         if reference not in self.references:
             self.references.append(reference)

@@ -903,6 +903,39 @@ fn local_is_not_a_const_argument() {
     assert raw[unknown.span.start : unknown.span.end] == b"Unknown"
 
 
+def test_generic_argument_fallback_respects_glob_barriers_and_prelude_types():
+    source = """
+const Vec: usize = 1;
+const Hidden: usize = 2;
+struct Generic<T>;
+fn prelude_type() { let _: Generic<Vec>; }
+fn glob_barrier() { use external::*; let _: Generic<Hidden>; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    vec_start = source.index("Generic<Vec>") + len("Generic<")
+    hidden_start = source.index("Generic<Hidden>") + len("Generic<")
+    assert not any(
+        reference.span.start == vec_start for reference in report.references
+    )
+    assert any(
+        item.span.start == vec_start
+        and item.name == "Vec"
+        and item.reason == "prelude_name"
+        for item in report.unresolved
+    )
+    assert not any(
+        reference.span.start == hidden_start for reference in report.references
+    )
+    assert any(
+        item.span.start == hidden_start
+        and item.name == "Hidden"
+        and item.reason == "glob_import"
+        for item in report.unresolved
+    )
+    assert raw[vec_start : vec_start + len("Vec")] == b"Vec"
+
+
 def test_mutability_does_not_spread_into_nested_rust_patterns():
     source = """
 struct S { f: Option<u8>, field: u8 }
