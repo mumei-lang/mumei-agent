@@ -8661,7 +8661,7 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    常時実行する。metrics の `proven` / proof density は source-count heuristic
    であり、certificate-derived count との density 比較は意図的に行わない。
 
-**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py -q`
+**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py tests/test_llm_provider_contract.py -q`
 
 ## 大規模ケースでの合成性報告（agent 側 local checkpoint）— ✅ Implemented
 
