@@ -5225,8 +5225,8 @@ procedural attributes or non-standard derives create `macro_invocation`
 gaps. The fail-closed reader rejects stale, malformed, or internally
 inconsistent reports. It is metadata only, not a proof or verdict. It
 adds no default route and changes no audit, Seal Grade, or Lean
-behavior. C06 remains partially delivered; the TypeScript lexical report
-is the remaining language follow-on.
+behavior. Rust (#1033) and Solidity (#1038) lexical reports are delivered;
+this PR adds TypeScript for this C06 lexical-report scope.
 
 ### C06 Solidity lexical binding report (`sol-bindings`)
 
@@ -5243,8 +5243,26 @@ does not claim to resolve imported or dynamic behavior. Unsupported
 constructs and inline assembly remain explicitly gapped. The fail-closed
 reader rejects stale, malformed, or internally inconsistent reports.
 It adds no default route and changes no audit, Seal Grade, or Lean
-behavior. C06 remains partially delivered; TypeScript is the remaining
-language follow-on.
+behavior. Rust (#1033) and Solidity (#1038) lexical reports are delivered;
+this PR adds TypeScript for this C06 lexical-report scope.
+
+### C06 TypeScript lexical binding report (`ts-bindings`)
+
+`python -m agent ts-bindings <file>` emits
+`mumei.ts-lexical-bindings/v1`, a bounded, single-file tree-sitter report
+of TypeScript lexical declarations, scopes, references and writes,
+source-annotated scalar type facts, functions, conservative calls,
+unresolved names, and explicit analysis gaps. `.tsx` files use the TSX
+grammar. It models hoisting, block scopes, closures, imports, and generic
+type parameters without inferring from expressions or claiming compiler
+resolution.
+
+The report is lexical metadata, not a type check, proof, or verdict.
+Dynamic `eval`, `with`, decorators, unsupported qualified types, and other
+uncertain behavior remain explicitly unresolved or gapped. The fail-closed
+reader rejects stale, malformed, or inconsistent reports. Rust (#1033) and
+Solidity (#1038) are delivered; this PR adds TypeScript for this C06 scope.
+It adds no default route and changes no audit, Seal Grade, or Lean behavior.
 
 ### rust-summaries `--summary-aware-calls`
 

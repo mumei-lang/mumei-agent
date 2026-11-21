@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased: TypeScript lexical binding report
+
+- Added `ts-bindings`, an opt-in tree-sitter report of single-file TypeScript
+  lexical declarations, scopes, references, source-annotated type facts,
+  conservative calls, unresolved names, and analysis gaps. `.tsx` files use the
+  TSX grammar; dynamic and unsupported behavior remains explicit. The report is
+  lexical metadata, not a type check, proof, or verdict. Rust (#1033) and
+  Solidity (#1038) lexical reports are delivered; this PR adds TypeScript for
+  this C06 scope, with no default route, audit, Seal Grade, or Lean changes.
+
 ## Unreleased: Solidity lexical binding report
 
 - Added `sol-bindings`, an opt-in tree-sitter report of single-file Solidity
@@ -7,9 +17,9 @@
   unresolved names, and analysis gaps. Solidity widths are recorded only for
   explicit supported types, including `address` and `bytesN`; imported and
   unsupported behavior remains unresolved or gapped. The report is lexical
-  metadata, not a type check, proof, or verdict. C06 remains partially
-  delivered, with TypeScript as the remaining language follow-on and no
-  default route, audit, Seal Grade, or Lean changes.
+  metadata, not a type check, proof, or verdict. Rust (#1033) and Solidity
+  (#1038) lexical reports are delivered; this PR adds TypeScript for this C06
+  scope, with no default route, audit, Seal Grade, or Lean changes.
 
 ## Unreleased: Rust lexical binding report
 
@@ -19,9 +29,9 @@
   behavior remain explicit; the report is lexical metadata, not a type check,
   proof, or verdict. Inert attributes and standard derives are accepted;
   conditional-compilation attributes and unknown procedural attributes or
-  derives create explicit gaps. C06 remains partially delivered, with no
-  default route, audit, Seal Grade, or Lean changes; Solidity is now delivered
-  and TypeScript is the remaining language follow-on.
+  derives create explicit gaps. Rust (#1033) and Solidity (#1038) lexical
+  reports are delivered; this PR adds TypeScript for this C06 scope, with no
+  default route, audit, Seal Grade, or Lean changes.
 
 ## Unreleased: Solidity access control
 

@@ -28,7 +28,18 @@ from typing import Any
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 PROFILE_RESOLUTION = "lexical"
 TYPE_KINDS = frozenset(
-    {"int", "float", "bool", "char", "unit", "address", "fixed_bytes", "named", "unknown"}
+    {
+        "int",
+        "float",
+        "bool",
+        "char",
+        "unit",
+        "address",
+        "fixed_bytes",
+        "bigint",
+        "named",
+        "unknown",
+    }
 )
 REFERENCE_KINDS = frozenset({"read", "write", "call"})
 CALL_KINDS = frozenset(
@@ -46,6 +57,11 @@ CALL_KINDS = frozenset(
         "opaque_expression",
         "opaque_overload",
         "opaque_virtual",
+        "opaque_generator",
+        "opaque_optional",
+        "opaque_tagged",
+        "opaque_super",
+        "opaque_ambient",
         "conversion",
         "error_constructor",
         "opaque_new",
@@ -85,10 +101,13 @@ BINDING_KINDS = frozenset(
         "return_parameter",
         "constructor",
         "user_type",
+        "class",
+        "ambient",
+        "namespace",
     }
 )
 FUNCTION_BINDING_KINDS = frozenset(
-    {"function", "associated_function", "modifier", "constructor"}
+    {"function", "associated_function", "modifier", "constructor", "ambient"}
 )
 FUNCTION_PARAMETER_KINDS = frozenset(
     {"parameter", "self_parameter", "return_parameter"}
@@ -109,13 +128,17 @@ CALL_KINDS_WITH_TARGET = frozenset(
         "emit",
         "modifier",
         "base_constructor",
+        "opaque_generator",
+        "opaque_ambient",
     }
 )
 CALL_TARGET_BINDING_KINDS = {
     "opaque_virtual": frozenset({"function"}),
     "constructor": frozenset({"struct"}),
     "opaque_import": frozenset({"import"}),
-    "opaque_new": frozenset({"contract"}),
+    "opaque_new": frozenset({"contract", "class"}),
+    "opaque_generator": frozenset({"function", "associated_function"}),
+    "opaque_ambient": frozenset({"ambient"}),
     "error_constructor": frozenset({"error"}),
     "emit": frozenset({"event"}),
     "modifier": frozenset({"modifier"}),
@@ -142,6 +165,8 @@ NON_ASSIGNABLE_WRITE_KINDS = frozenset(
         "error",
         "user_type",
         "generic_parameter",
+        "class",
+        "namespace",
     }
 )
 UNRESOLVED_REASONS = frozenset(
@@ -156,6 +181,9 @@ UNRESOLVED_REASONS = frozenset(
         "ambiguous_overload",
         "private_base_member",
         "unresolved_base",
+        "implicit_global",
+        "arguments_object",
+        "with_scope",
     }
 )
 GAP_REASONS = frozenset(
@@ -169,6 +197,12 @@ GAP_REASONS = frozenset(
         "conditional_compilation",
         "unresolved_base",
         "inline_assembly",
+        "temporal_dead_zone",
+        "const_reassignment",
+        "dynamic_eval",
+        "dynamic_function",
+        "with_statement",
+        "decorator",
     }
 )
 
@@ -453,6 +487,8 @@ def _type_fact(value: Any) -> TypeFact:
         _fail(width == 1 and signed_value is None)
     elif kind == "char":
         _fail(width == 32 and signed_value is None)
+    elif kind == "bigint":
+        _fail(width == 0 and signed_value is True)
     elif kind == "address":
         _fail(width == 160 and signed_value is False)
         _fail(name in {"address", "address payable"})
