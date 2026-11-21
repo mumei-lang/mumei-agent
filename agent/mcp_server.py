@@ -2708,6 +2708,185 @@ def evidence_check_accept(sequence_json: str, check_json: str) -> str:
     return _ok({"acceptance": acceptance})
 
 
+@mcp.tool()
+def evidence_acceptance_eval(
+    descriptor_path: str,
+    expected_fingerprint: str | None = None,
+) -> str:
+    """Fold a declared Core acceptance descriptor.
+
+    Reads the descriptor through the same bounded reader as
+    `evidence-acceptance-eval` and returns its representation-level
+    evaluation. This does not run Core; `checks_not_performed` is returned
+    verbatim. It is not Evidence acceptance, a verdict, or grade promotion.
+
+    Args:
+        descriptor_path: Path to a declared Core acceptance descriptor.
+        expected_fingerprint: Optional declared record fingerprint used
+            only for the representation-level `attempt_bound` comparison.
+
+    Returns:
+        JSON with `evaluation` on success or a redacted `error` on failure.
+    """
+    if not _valid_declared_path(descriptor_path):
+        return _err("descriptor_path must be a nonempty single-line path")
+    if expected_fingerprint is not None and not isinstance(
+        expected_fingerprint, str
+    ):
+        return _err("expected_fingerprint must be a string or null")
+
+    from agent.evidence_acceptance_eval import run_eval
+
+    try:
+        evaluation = run_eval(
+            argparse.Namespace(
+                descriptor=descriptor_path,
+                expected_fingerprint=expected_fingerprint,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [descriptor_path])
+        )
+    return _ok({"evaluation": evaluation})
+
+
+@mcp.tool()
+def freshness_eval(
+    record_path: str,
+    reference_time: str,
+    max_age_seconds: int,
+) -> str:
+    """Fold a declared record's freshness claim against a declared clock.
+
+    Reads the record through the same bounded reader as `freshness-eval`
+    and returns its representation-level evaluation. This does not run
+    Core; `checks_not_performed` is returned verbatim. It is not Evidence
+    acceptance, a verdict, or grade promotion.
+
+    Args:
+        record_path: Path to the declared producer record.
+        reference_time: Caller-declared RFC 3339 reference time.
+        max_age_seconds: Caller-declared freshness window in seconds.
+
+    Returns:
+        JSON with `evaluation` on success or a redacted `error` on failure.
+    """
+    if not _valid_declared_path(record_path):
+        return _err("record_path must be a nonempty single-line path")
+    if not isinstance(max_age_seconds, int) or isinstance(
+        max_age_seconds, bool
+    ):
+        return _err("max_age_seconds must be an int")
+
+    from agent.freshness_eval import run_eval
+
+    try:
+        evaluation = run_eval(
+            argparse.Namespace(
+                record=record_path,
+                reference_time=reference_time,
+                max_age_seconds=max_age_seconds,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [record_path])
+        )
+    return _ok({"evaluation": evaluation})
+
+
+@mcp.tool()
+def binding_eval(record_path: str, evidence_path: str) -> str:
+    """Fold a declared evidence document's binding to record bytes.
+
+    Reads both paths through the same bounded readers as `binding-eval`
+    and returns its representation-level binding. This does not run Core;
+    `checks_not_performed` is returned verbatim. It is not Evidence
+    acceptance, a verdict, or grade promotion.
+
+    Args:
+        record_path: Path to the record whose raw bytes are hashed.
+        evidence_path: Path to the declared evidence JSON document.
+
+    Returns:
+        JSON with `binding` on success or a redacted `error` on failure.
+    """
+    declared_paths = [record_path, evidence_path]
+    for name, path in (
+        ("record_path", record_path),
+        ("evidence_path", evidence_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+
+    from agent.binding_eval import run_eval
+
+    try:
+        binding = run_eval(
+            argparse.Namespace(
+                record=record_path,
+                evidence=evidence_path,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"binding": binding})
+
+
+@mcp.tool()
+def recovery_eval(record_path: str, evidence_paths: list[str]) -> str:
+    """Fold declared evaluation documents over a record's open checks.
+
+    Reads all paths through the same bounded readers as `recovery-eval`;
+    this MCP request is capped at 64 evidence documents. The result is
+    representation-level only and returns `checks_not_performed` verbatim.
+    This does not run Core or verify evidence. It is not Evidence
+    acceptance, a verdict, or grade promotion.
+
+    Args:
+        record_path: Path to the declared record.
+        evidence_paths: Nonempty paths to declared evaluation documents
+            (at most 64).
+
+    Returns:
+        JSON with `recovery` on success or redacted `error` on failure.
+    """
+    if not _valid_declared_path(record_path):
+        return _err("record_path must be a nonempty single-line path")
+    if not isinstance(evidence_paths, list) or not evidence_paths:
+        return _err("evidence_paths must be a nonempty list")
+
+    from agent.recovery_eval import MAX_RECOVERY_EVIDENCE_DOCUMENTS, run_eval
+
+    if len(evidence_paths) > MAX_RECOVERY_EVIDENCE_DOCUMENTS:
+        return _err(
+            "evidence_paths exceeds the maximum of "
+            f"{MAX_RECOVERY_EVIDENCE_DOCUMENTS} documents"
+        )
+    for index, path in enumerate(evidence_paths):
+        if not _valid_declared_path(path):
+            return _err(
+                f"evidence_paths[{index}] must be a nonempty single-line path"
+            )
+    declared_paths = [record_path, *evidence_paths]
+
+    try:
+        recovery = run_eval(
+            argparse.Namespace(
+                record=record_path,
+                evidence=evidence_paths,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"recovery": recovery})
+
+
 def _redact_declared_paths(text: str, declared: list[str]) -> str:
     # Failure text goes to a model: declared checkout-local paths
     # stay out of it — basenames only.

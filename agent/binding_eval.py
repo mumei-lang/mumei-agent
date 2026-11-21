@@ -77,23 +77,29 @@ def _read_declared(path: str) -> dict:
     return value
 
 
+def run_eval(args: argparse.Namespace) -> dict:
+    record = _read_record(args.record)
+    document = _read_declared(args.evidence)
+    output_path = getattr(args, "output", None)
+    if output_path is not None:
+        out_path = Path(output_path)
+        try:
+            if Path(args.record).samefile(out_path) or Path(
+                args.evidence
+            ).samefile(out_path):
+                raise ValueError(
+                    "--output may not overwrite a declared input document"
+                )
+        except FileNotFoundError:
+            pass
+    return evaluate_evidence_binding(record, document)
+
+
 def main_eval(args: argparse.Namespace | None = None) -> int:
     try:
-        record = _read_record(args.record)
-        document = _read_declared(args.evidence)
+        assert args is not None
+        binding = run_eval(args)
         output_path = getattr(args, "output", None)
-        if output_path is not None:
-            out_path = Path(output_path)
-            try:
-                if Path(args.record).samefile(out_path) or Path(
-                    args.evidence
-                ).samefile(out_path):
-                    raise ValueError(
-                        "--output may not overwrite a declared input document"
-                    )
-            except FileNotFoundError:
-                pass
-        binding = evaluate_evidence_binding(record, document)
         text = json.dumps(binding, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)

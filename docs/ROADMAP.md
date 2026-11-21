@@ -6890,6 +6890,15 @@ Planning only: nothing is spawned, dispatched or accepted. Declared
 inputs join the path validation and error redaction applied to the
 other declared-path tools.
 
+### C11 declared evidence folds as MCP tools
+
+The MCP tools `evidence_acceptance_eval`, `freshness_eval`,
+`binding_eval`, and `recovery_eval` mirror the four spawn-free CLI folds
+over bounded declared inputs. They preserve `checks_not_performed` and
+redact declared paths in errors; recovery requests accept at most 64
+evidence paths. They make no Core command or subprocess call and add no
+authority, Evidence acceptance, verdict, or grade promotion. C11 stays
+partial; Core meaning and acceptance, C12's demand gate and grade promotion are unchanged.
 
 ### C10 runtime/ABI assurance — design memo
 

@@ -73,22 +73,28 @@ def _read_declared(path: str) -> dict:
     return value
 
 
+def run_eval(args: argparse.Namespace) -> dict:
+    descriptor = _read_declared(args.descriptor)
+    output_path = getattr(args, "output", None)
+    if output_path is not None:
+        out_path = Path(output_path)
+        try:
+            if Path(args.descriptor).samefile(out_path):
+                raise ValueError(
+                    "--output may not overwrite a declared input document"
+                )
+        except FileNotFoundError:
+            pass
+    return evaluate_core_acceptance(
+        descriptor, getattr(args, "expected_fingerprint", None)
+    )
+
+
 def main_eval(args: argparse.Namespace | None = None) -> int:
     try:
-        descriptor = _read_declared(args.descriptor)
+        assert args is not None
+        evaluation = run_eval(args)
         output_path = getattr(args, "output", None)
-        if output_path is not None:
-            out_path = Path(output_path)
-            try:
-                if Path(args.descriptor).samefile(out_path):
-                    raise ValueError(
-                        "--output may not overwrite a declared input document"
-                    )
-            except FileNotFoundError:
-                pass
-        evaluation = evaluate_core_acceptance(
-            descriptor, getattr(args, "expected_fingerprint", None)
-        )
         text = json.dumps(evaluation, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)
