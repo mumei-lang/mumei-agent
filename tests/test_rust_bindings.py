@@ -616,6 +616,29 @@ fn builtin(x: i8) -> i8 { x }
     )
 
 
+def test_raw_identifiers_are_normalized_in_declarations_and_references():
+    source = """
+fn r#helper() {}
+fn caller() { helper(); r#helper(); }
+fn raw_parameter(r#type: u8) {
+    let r#match = r#type;
+    r#match;
+}
+fn missing_call() { r#missing(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    helper = _bindings(report, "helper", "function")[0]
+    assert all(call.target == helper.id for call in report.calls[:2])
+    assert all(call.kind == "direct_local" for call in report.calls[:2])
+    assert len(_bindings(report, "type", "parameter")) == 1
+    assert len(_bindings(report, "match", "local")) == 1
+    missing = next(
+        unresolved for unresolved in report.unresolved if unresolved.name == "missing"
+    )
+    assert report.resolve(missing.span) is None
+    assert report.calls[-1].kind == "unresolved"
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)

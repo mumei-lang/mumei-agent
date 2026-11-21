@@ -161,6 +161,13 @@ class _RustBindings:
             return ""
         return self.raw[node.start_byte : node.end_byte].decode("utf-8")
 
+    @staticmethod
+    def _normalize_identifier(name: str) -> str:
+        return "::".join(
+            part[2:] if part.startswith("r#") else part
+            for part in name.split("::")
+        )
+
     def build(self) -> LexicalBindingReport:
         root_scope = _Scope(self.root, 0, "")
         self.scopes.append(root_scope)
@@ -236,7 +243,9 @@ class _RustBindings:
         name_override: str | None = None,
         generic_kind: str = "",
     ) -> _Record:
-        name = self.text(name_node) if name_override is None else name_override
+        name = self._normalize_identifier(
+            self.text(name_node) if name_override is None else name_override
+        )
         declaration = self.span(name_node)
         scope_start = 0 if scope is None else scope.start
         scope_end = 0 if scope is None else scope.end
@@ -845,7 +854,7 @@ class _RustBindings:
         if pattern is None:
             return []
         if pattern.type in {"identifier", "self"}:
-            name = self.text(pattern)
+        name = self._normalize_identifier(self.text(pattern))
             found, _ = self._lookup_with_boundary(name, pattern.start_byte, "value")
             if found is not None and found.binding.kind in {
                 "const", "static", "struct",
@@ -988,10 +997,14 @@ class _RustBindings:
     ) -> None:
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             self.unresolved.append(
-                Unresolved(self.span(node), self.text(node), "qualified_path")
+                Unresolved(
+                    self.span(node),
+                    self._normalize_identifier(self.text(node)),
+                    "qualified_path",
+                )
             )
             return
-        name = self.text(node)
+        name = self._normalize_identifier(self.text(node))
         record, boundary = self._lookup_with_boundary(name, node.start_byte, namespace)
         if record is not None and record.binding.kind in expected_kinds:
             self.references.append(Reference(self.span(node), record.binding.id, "read"))
@@ -1002,6 +1015,7 @@ class _RustBindings:
         self.unresolved.append(Unresolved(self.span(node), name, reason))
 
     def _lookup_with_boundary(self, name: str, position: int, namespace: str) -> tuple[_Record | None, str | None]:
+        name = self._normalize_identifier(name)
         blocked: str | None = None
         for scope in reversed(self.scopes):
             if scope.module_depth < self.module_depth and self.module_depth > 0:
@@ -1069,6 +1083,7 @@ class _RustBindings:
         return kind not in {"enum", "trait", "union", "type_alias", "module", "associated_const", "associated_function"}
 
     def _name_imported_or_glob(self, name: str, position: int) -> bool:
+        name = self._normalize_identifier(name)
         for scope in reversed(self.scopes):
             if name in scope.bindings and any(r.binding.kind == "import" for r in scope.bindings[name]):
                 return True
@@ -1077,7 +1092,7 @@ class _RustBindings:
         return False
 
     def _reference(self, node: Any, kind: str = "read", namespace: str = "value") -> _Record | None:
-        name = self.text(node)
+        name = self._normalize_identifier(self.text(node))
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             self.unresolved.append(Unresolved(self.span(node), name, "qualified_path"))
             return None
