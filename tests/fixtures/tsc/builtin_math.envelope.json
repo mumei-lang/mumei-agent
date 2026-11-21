@@ -1,0 +1,30 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [],
+  "file_name": "input.ts",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [],
+      "library": true,
+      "name": "Math",
+      "span": {
+        "end": 20,
+        "start": 16
+      }
+    }
+  ],
+  "source": "const maximum = Math.max(1, 2);\n",
+  "typescript_version": "5.9.3",
+  "unsupported": []
+}

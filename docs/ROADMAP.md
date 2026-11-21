@@ -5316,6 +5316,21 @@ only. Exact source-content equality detects stale output, not compiler
 authenticity. Imports and inline assembly fail closed. This slice makes no
 trust, audit, Evidence acceptance, Seal Grade, ABI, runtime, or proof claim.
 
+### C06 first compiler-backed TypeScript binding slice
+
+The pure reader consumes an operator-produced envelope from pinned TypeScript
+5.9.3; TypeScript 7.0.2 has no JavaScript compiler API. The agent never launches
+Node or the helper and adds no CLI or MCP route. It compares single-file
+identifier symbol declaration spans with the same-source lexical report,
+returning metadata only. Exact source-content equality detects stale output,
+not compiler authenticity. Only `lib.es2022.d.ts` is loaded, so DOM and Node
+globals such as `console` fail closed with a diagnostic error. Imports,
+dynamic imports, `require`, external module references, and triple-slash
+references fail closed. This slice makes no trust, audit, Evidence acceptance,
+Seal Grade, runtime, or proof claim.
+Compiler intrinsics with no declaration, such as `undefined` and `globalThis`,
+are reported as builtins; a reference with no symbol still fails closed.
+
 ### C06 TypeScript lexical binding report (`ts-bindings`)
 
 `python -m agent ts-bindings <file>` emits

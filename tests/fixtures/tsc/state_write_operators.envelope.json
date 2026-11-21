@@ -1,0 +1,49 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [],
+  "file_name": "input.ts",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [
+        {
+          "end": 24,
+          "start": 19
+        }
+      ],
+      "library": false,
+      "name": "count",
+      "span": {
+        "end": 35,
+        "start": 30
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 24,
+          "start": 19
+        }
+      ],
+      "library": false,
+      "name": "count",
+      "span": {
+        "end": 44,
+        "start": 39
+      }
+    }
+  ],
+  "source": "let other = 0;\nlet count = 0;\ncount++;\ncount += 1;\n",
+  "typescript_version": "5.9.3",
+  "unsupported": []
+}

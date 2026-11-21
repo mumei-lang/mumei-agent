@@ -1,0 +1,49 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [],
+  "file_name": "input.ts",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [
+        {
+          "end": 28,
+          "start": 23
+        }
+      ],
+      "library": false,
+      "name": "value",
+      "span": {
+        "end": 71,
+        "start": 66
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 57,
+          "start": 50
+        }
+      ],
+      "library": false,
+      "name": "capture",
+      "span": {
+        "end": 91,
+        "start": 84
+      }
+    }
+  ],
+  "source": "class Counter {\n  read(value: number) {\n    const capture = () => value;\n    return capture();\n  }\n}\n",
+  "typescript_version": "5.9.3",
+  "unsupported": []
+}

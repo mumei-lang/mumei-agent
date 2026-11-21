@@ -1,0 +1,58 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [],
+  "file_name": "input.ts",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [
+        {
+          "end": 6,
+          "start": 5
+        }
+      ],
+      "library": false,
+      "name": "M",
+      "span": {
+        "end": 57,
+        "start": 56
+      }
+    },
+    {
+      "declarations": null,
+      "library": false,
+      "name": "a",
+      "span": {
+        "end": 68,
+        "start": 67
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 54,
+          "start": 53
+        }
+      ],
+      "library": false,
+      "name": "m",
+      "span": {
+        "end": 77,
+        "start": 76
+      }
+    }
+  ],
+  "source": "type M = { [K in \"a\" | \"b\"]: number };\ndeclare const m: M;\nconst { a: x } = m;\n",
+  "typescript_version": "5.9.3",
+  "unsupported": []
+}
