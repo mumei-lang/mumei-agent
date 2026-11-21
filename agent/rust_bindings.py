@@ -158,7 +158,7 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
-        self.current_function: str | None = ""
+        self.current_function = ""
         self.call_owner = ""
         self.module_depth = 0
         self.in_extern = False
@@ -555,7 +555,7 @@ class _RustBindings:
                 name_node,
                 "generic_parameter",
                 binder_scope,
-                self.current_function,
+                self.current_function or None,
                 scope.module_depth,
                 item=False,
                 generic_kind="lifetime",
@@ -767,7 +767,7 @@ class _RustBindings:
             body = node.child_by_field_name("body")
             old_function, old_owner = self.current_function, self.call_owner
             old_extern = self.in_extern
-            self.current_function = None
+            self.current_function = ""
             self.call_owner = ""
             try:
                 self._generic_references(node.child_by_field_name("type_parameters"))
@@ -1311,7 +1311,7 @@ class _RustBindings:
                     binding_scope.start <= position < binding_scope.end
                 ):
                     continue
-                if record.owner_function != self.current_function:
+                if (record.owner_function or None) != (self.current_function or None):
                     blocked = "item_boundary"
                     continue
                 generic_records.append(record)
@@ -1331,7 +1331,11 @@ class _RustBindings:
                     continue
                 if not self._in_namespace(record, namespace):
                     continue
-                if not record.item and record.owner_function != self.current_function:
+                if (
+                    not record.item
+                    and (record.owner_function or None)
+                    != (self.current_function or None)
+                ):
                     blocked = "item_boundary"
                     continue
                 return record, None

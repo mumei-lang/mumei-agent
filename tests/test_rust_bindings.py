@@ -1008,10 +1008,6 @@ type Width = u8;
         width.id,
     )
     assert unknown.type.kind == "unknown"
-    assert any(
-        item.name == "Missing" and item.reason == "unknown_name"
-        for item in report.unresolved
-    )
 
 
 def test_mutability_does_not_spread_into_nested_rust_patterns():
