@@ -183,6 +183,16 @@ function createEnvelope(source, extension) {
     if (ts.isShorthandPropertyAssignment(parent) && parent.name === identifier) {
       return checker.getShorthandAssignmentValueSymbol(parent);
     }
+    if (ts.isExportSpecifier(parent)) {
+      return checker.getExportSpecifierLocalTargetSymbol(parent);
+    }
+    if (ts.isExportAssignment(parent) && parent.expression === identifier) {
+      const symbol = checker.getSymbolAtLocation(identifier);
+      return symbol !== undefined &&
+        (symbol.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(symbol)
+        : symbol;
+    }
     return checker.getSymbolAtLocation(identifier);
   }
 
@@ -190,6 +200,15 @@ function createEnvelope(source, extension) {
     const parent = identifier.parent;
     if (ts.isShorthandPropertyAssignment(parent) && parent.name === identifier) {
       return true;
+    }
+    if (ts.isExportSpecifier(parent)) {
+      return (
+        parent.propertyName === identifier ||
+        (parent.propertyName === undefined && parent.name === identifier)
+      );
+    }
+    if (ts.isExportAssignment(parent)) {
+      return parent.expression === identifier;
     }
     if (ts.getNameOfDeclaration(parent) === identifier) {
       return false;

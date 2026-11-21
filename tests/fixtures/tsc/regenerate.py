@@ -11,6 +11,7 @@ FIXTURE_NAMES = {
     "block_scope_shadowing": ".ts",
     "builtin_math": ".ts",
     "class_closure": ".ts",
+    "export_local": ".ts",
     "function_overloads": ".ts",
     "function_param_call": ".ts",
     "import_source": ".ts",

@@ -24,6 +24,7 @@ FIXTURE_NAMES = (
     "class_closure",
     "function_overloads",
     "function_param_call",
+    "export_local",
     "import_source",
     "intrinsic_globals",
     "state_write_operators",
@@ -32,6 +33,7 @@ FIXTURE_NAMES = (
 )
 POSITIVE_FIXTURES = (
     ("function_param_call", ["agree", "agree"]),
+    ("export_local", ["agree", "agree"]),
     ("block_scope_shadowing", ["agree", "agree"]),
     ("function_overloads", ["agree", "agree"]),
     ("class_closure", ["agree", "agree"]),
@@ -121,6 +123,27 @@ def test_math_is_reported_as_a_library_builtin():
     assert reference["status"] == "builtin"
     assert reference["library"] is True
     assert reference["declarations"] == []
+
+
+def test_export_references_bind_to_the_local_declaration():
+    source = _source("export_local")
+    snapshot = load_ts_compiler_snapshot(
+        (FIXTURES / "export_local.envelope.json").read_bytes(),
+        source,
+    )
+    comparison = compare_with_lexical(
+        snapshot,
+        build_ts_bindings(source),
+    )
+
+    assert [item["name"] for item in comparison["references"]] == [
+        "value",
+        "value",
+    ]
+    assert all(
+        item["declarations"] == [{"start": 6, "end": 11}]
+        for item in comparison["references"]
+    )
 
 
 def test_declaration_free_intrinsics_are_reported_as_library_builtins():
