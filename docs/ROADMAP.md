@@ -4394,9 +4394,11 @@ group just like passing one queue. Arrays share the referenced
 queues despite value-copying the array header. These escapes apply
 recursively when the container elements are nested queues.
 
-Container-value closure capture, taking its address, struct-field
-store or return, nested containers such as `[][]chan chan T`, and
-non-scalar leaves such as `[]chan chan ... chan []T` remain closed.
+A direct outermost composite-literal return of local chan-chan queues
+is admitted; container-value closure capture, taking its address,
+struct-field store or return, nested containers such as
+`[][]chan chan T`, and non-scalar leaves such as
+`[]chan chan ... chan []T` remain closed.
 Imported-call container arguments also remain closed.
 
 ### C07 scalar-element *nested* local containers
