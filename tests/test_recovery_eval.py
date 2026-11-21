@@ -79,6 +79,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "machine_code_callee_saved_preservation_assumed_for_external_callees",
             "machine_code_entry_wrapper_tv",
             "machine_code_f64_scalar_function_tv",
+            "machine_code_composite_register_aggregate_tv",
             "machine_code_tv_mxcsr_control_state",
             "machine_code_tv_nan_payload_bits",
         }
@@ -102,6 +103,7 @@ def test_object_accept_reports_have_no_recovery_performer(schema):
         "object_translation_correspondence",
         "machine_code_entry_wrapper_tv",
         "machine_code_f64_scalar_function_tv",
+        "machine_code_composite_register_aggregate_tv",
     ]
     record = {
         "schema_version": schema,

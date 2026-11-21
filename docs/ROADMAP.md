@@ -7297,6 +7297,15 @@ remain unestablished and not performed; the agent never discharges
 Direct calls with f64 arguments fail closed in Core. This is not an
 IEEE-754-conformance, ABI, runtime, or full object-TV claim.
 
+#### Core #1241/#1242/#1243 composite aggregate register machine-code TV
+
+Core's `machine_code_composite_register_aggregate_tv` is consumed only when
+listed in `checks_performed`; it covers one-/two-leaf struct parameters,
+results and direct-call struct values with integer and/or f64 leaves under an
+assumed SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx,
+f64 leaves in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI,
+runtime or full object-TV claim.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

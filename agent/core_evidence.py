@@ -1587,6 +1587,8 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
         "machine_code_entry_wrapper_tv",
         "machine_code_f64_scalar_function_tv",
+        # Bounded assumed-SysV aggregate evidence; this does not validate an ABI.
+        "machine_code_composite_register_aggregate_tv",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
     }
