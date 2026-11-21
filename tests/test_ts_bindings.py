@@ -156,7 +156,7 @@ function outside() { selfName(); Inner; }
 
 def test_catch_and_for_bindings_have_narrow_scopes():
     source = """
-try { throw 1; } catch (error) { error; }
+try { throw 1; } catch (error) { error = 1; }
 error;
 for (let index = 0; index < 2; index++) { index; }
 index;
@@ -174,6 +174,9 @@ index;
         and index.scope.start <= reference.span.start < index.scope.end
     ]
     assert inside_error.binding_id == error.id
+    assert error.mutable
+    assert inside_error.kind == "write"
+    assert not any(gap.reason == "const_reassignment" for gap in report.gaps)
     assert len(inside_index) == 4
     assert all(reference.binding_id == index.id for reference in inside_index)
     assert any(item.name == "error" for item in _unresolved(report, "error"))

@@ -523,6 +523,7 @@ class _TypeScriptBindings:
                 "parameter",
                 self.span(node),
                 frozenset({"value"}),
+                mutable=True,
                 declaration_function=function_id,
             )
 
