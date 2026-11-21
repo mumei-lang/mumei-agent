@@ -1591,6 +1591,7 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_composite_register_aggregate_tv",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
+        "machine_code_tv_sysv_memory_class_aggregate_abi",
     }
 )
 
@@ -1599,6 +1600,7 @@ MACHINE_TV_ASSUMPTION_MARKERS = frozenset(
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
+        "machine_code_tv_sysv_memory_class_aggregate_abi",
     }
 )
 

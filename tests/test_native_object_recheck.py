@@ -70,6 +70,7 @@ BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_composite_register_aggregate_tv",
     "machine_code_tv_mxcsr_control_state",
     "machine_code_tv_nan_payload_bits",
+    "machine_code_tv_sysv_memory_class_aggregate_abi",
     "object_translation_correspondence",
 }
 EXPECTED_DISCHARGED = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
@@ -204,6 +205,7 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
         "machine_code_composite_register_aggregate_tv",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
+        "machine_code_tv_sysv_memory_class_aggregate_abi",
     ]
     core = _write_core(tmp_path, stdout=descriptor)
     bundle = _write_bundle(tmp_path)
@@ -239,6 +241,7 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
         "machine_code_f64_scalar_function_tv",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
+        "machine_code_tv_sysv_memory_class_aggregate_abi",
     ):
         assert check not in report["discharged_checks"]
         assert check in report["checks_not_performed"]

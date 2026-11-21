@@ -17,6 +17,7 @@ from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
 from agent.native_object_accept import (
     CHECK_VOCABULARY,
     NATIVE_EVIDENCE_ACCEPTANCE_SCHEMA,
+    OBJECT_ACCEPT_CHECKS,
     OBJECT_ACCEPT_WITH_LINK_SCOPE,
     OBJECT_ACCEPT_WITHOUT_LINK_SCOPE,
     OBJECT_SOURCE_MACHINE_CODE_CHECK,
@@ -40,6 +41,15 @@ COMPOSITE_SSE_AGGREGATE_REGISTER_CONVENTION = (
     "result_rax_or_xmm0_two_eightbyte_aggregates_classified_integer_gprs_"
     "sse_xmm_result_rax_rdx_xmm0_xmm1"
 )
+COMPOSITE_WIDE_AGGREGATE_REGISTER_CONVENTION = (
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax_"
+    "llvm_first_class_aggregates_split_into_registers_result_rax_rdx_rcx_xmm0_xmm1"
+)
+COMPOSITE_WIDE_SSE_AGGREGATE_REGISTER_CONVENTION = (
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_xmm0_7_"
+    "result_rax_or_xmm0_llvm_first_class_aggregates_split_into_registers_"
+    "result_rax_rdx_rcx_xmm0_xmm1"
+)
 COMPOSITE_AGGREGATE_SOURCE = (
     "struct P { x: i64, y: i64 }\n"
     "atom sum(p: P) -> i64 requires: true; ensures: true; "
@@ -59,6 +69,30 @@ COMPOSITE_MIXED_F64_SOURCE = (
     "atom getb(q: Q) -> f64 requires: true; ensures: true; body: { q.b };\n"
     "atom use_q(x: f64) -> f64 requires: true; ensures: true; "
     "body: { getb(mkq(1, x)) };\n"
+    "atom main() -> i64 requires: true; ensures: true; body: { 0 };\n"
+)
+COMPOSITE_THREE_LEAF_SOURCE = (
+    "struct T { a: i64, b: i64, c: i64 }\n"
+    "atom sum3(p: T) -> i64 requires: true; ensures: true; "
+    "body: { p.a + p.b + p.c };\n"
+    "atom mk3(a: i64, b: i64, c: i64) -> T requires: true; ensures: true; "
+    "body: { T { a: a, b: b, c: c } };\n"
+    "atom caller() -> i64 requires: true; ensures: true; "
+    "body: { sum3(mk3(1, 2, 3)) };\n"
+    "atom fwd(p: T) -> i64 requires: true; ensures: true; "
+    "body: { sum3(p) };\n"
+    "atom main() -> i64 requires: true; ensures: true; body: { 0 };\n"
+)
+COMPOSITE_WIDE_MIXED_F64_SOURCE = (
+    "struct Q { a: i64, b: f64, c: i64, d: f64 }\n"
+    "atom sum4(q: Q) -> f64 requires: true; ensures: true; "
+    "body: { q.b + q.d };\n"
+    "atom mk4(a: i64, b: f64, c: i64, d: f64) -> Q requires: true; "
+    "ensures: true; body: { Q { a: a, b: b, c: c, d: d } };\n"
+    "atom caller(x: f64) -> f64 requires: true; ensures: true; "
+    "body: { sum4(mk4(1, x, 2, x)) };\n"
+    "atom fwd(q: Q) -> f64 requires: true; ensures: true; "
+    "body: { sum4(q) };\n"
     "atom main() -> i64 requires: true; ensures: true; body: { 0 };\n"
 )
 F64_SOURCE = (
@@ -446,6 +480,52 @@ def test_composite_aggregate_check_requires_performed_descriptor_list(
         )
     )
     _assert_partition(report, expected)
+
+
+@pytest.mark.parametrize(
+    "register_convention",
+    [
+        COMPOSITE_WIDE_AGGREGATE_REGISTER_CONVENTION,
+        COMPOSITE_WIDE_SSE_AGGREGATE_REGISTER_CONVENTION,
+    ],
+)
+@pytest.mark.parametrize("placement", ["performed", "not_performed"])
+def test_memory_class_aggregate_marker_never_discharges(
+    tmp_path, capsys, placement, register_convention
+):
+    marker = "machine_code_tv_sysv_memory_class_aggregate_abi"
+    assert marker in MACHINE_TV_ASSUMPTION_MARKERS
+    assert marker not in OBJECT_ACCEPT_CHECKS
+    performed = [
+        check for check in DESCRIPTOR["checks_performed"] if check != marker
+    ]
+    not_performed = [
+        check for check in DESCRIPTOR["checks_not_performed"] if check != marker
+    ]
+    if placement == "performed":
+        performed.append(marker)
+    else:
+        not_performed.append(marker)
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": performed,
+        "checks_not_performed": not_performed,
+        "register_convention_assumed": register_convention,
+    }
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"] == "accepted"
+    assert marker not in report["discharged_checks"]
+    assert marker in report["checks_not_performed"]
+    assert report["register_convention_assumed"] == register_convention
+    expected_discharged = BASE_DISCHARGED | (
+        set(performed) & OBJECT_ACCEPT_CHECKS
+    )
+    _assert_partition(report, expected_discharged)
 
 
 @pytest.mark.parametrize(
@@ -862,6 +942,8 @@ def _require_bundle(built: subprocess.CompletedProcess) -> None:
         F64_SOURCE,
         COMPOSITE_AGGREGATE_SOURCE,
         COMPOSITE_MIXED_F64_SOURCE,
+        COMPOSITE_THREE_LEAF_SOURCE,
+        COMPOSITE_WIDE_MIXED_F64_SOURCE,
     ],
     ids=(
         "simple-atom",
@@ -869,6 +951,8 @@ def _require_bundle(built: subprocess.CompletedProcess) -> None:
         "scalar-f64",
         "composite-integer-aggregate",
         "composite-mixed-integer-f64-aggregate",
+        "composite-three-leaf-integer-aggregate",
+        "composite-four-leaf-mixed-f64-aggregate",
     ),
 )
 def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_text):
@@ -955,25 +1039,44 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
     elif source_text in (
         COMPOSITE_AGGREGATE_SOURCE,
         COMPOSITE_MIXED_F64_SOURCE,
+        COMPOSITE_THREE_LEAF_SOURCE,
+        COMPOSITE_WIDE_MIXED_F64_SOURCE,
     ):
         aggregate_check = "machine_code_composite_register_aggregate_tv"
-        expected_convention = (
-            COMPOSITE_AGGREGATE_REGISTER_CONVENTION
-            if source_text == COMPOSITE_AGGREGATE_SOURCE
-            else COMPOSITE_SSE_AGGREGATE_REGISTER_CONVENTION
-        )
+        expected_conventions = {
+            COMPOSITE_AGGREGATE_SOURCE: COMPOSITE_AGGREGATE_REGISTER_CONVENTION,
+            COMPOSITE_MIXED_F64_SOURCE: COMPOSITE_SSE_AGGREGATE_REGISTER_CONVENTION,
+            COMPOSITE_THREE_LEAF_SOURCE: (
+                COMPOSITE_WIDE_AGGREGATE_REGISTER_CONVENTION
+            ),
+            COMPOSITE_WIDE_MIXED_F64_SOURCE: (
+                COMPOSITE_WIDE_SSE_AGGREGATE_REGISTER_CONVENTION
+            ),
+        }
+        expected_convention = expected_conventions[source_text]
         assert aggregate_check in descriptor["checks_performed"]
         assert aggregate_check in report["discharged_checks"]
-        equivalent_functions = (
-            ("sum", "mk", "caller", "fwd")
-            if source_text == COMPOSITE_AGGREGATE_SOURCE
-            else ("mkq", "getb", "use_q")
-        )
+        equivalent_functions_by_source = {
+            COMPOSITE_AGGREGATE_SOURCE: ("sum", "mk", "caller", "fwd"),
+            COMPOSITE_MIXED_F64_SOURCE: ("mkq", "getb", "use_q"),
+            COMPOSITE_THREE_LEAF_SOURCE: ("sum3", "mk3", "caller", "fwd"),
+            COMPOSITE_WIDE_MIXED_F64_SOURCE: ("sum4", "mk4", "caller", "fwd"),
+        }
+        equivalent_functions = equivalent_functions_by_source[source_text]
         for name in equivalent_functions:
             assert (
                 descriptor["functions"][name]["outcome"]
                 == "equivalent_within_profile"
             )
+        marker = "machine_code_tv_sysv_memory_class_aggregate_abi"
+        assert marker not in descriptor["checks_performed"]
+        assert marker in report["checks_not_performed"]
+        assert marker not in report["discharged_checks"]
+        if source_text in (
+            COMPOSITE_THREE_LEAF_SOURCE,
+            COMPOSITE_WIDE_MIXED_F64_SOURCE,
+        ):
+            assert marker in descriptor["checks_not_performed"]
         assert (
             descriptor["register_convention_assumed"]
             == expected_convention

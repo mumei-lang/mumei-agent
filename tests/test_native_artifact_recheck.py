@@ -142,6 +142,7 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
         "machine_code_leaf_function_tv",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
+        "machine_code_tv_sysv_memory_class_aggregate_abi",
         "object_call_edge_correspondence",
         "object_link_correspondence",
         "object_symbol_correspondence",

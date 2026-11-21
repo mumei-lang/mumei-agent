@@ -24,18 +24,24 @@ or historical-execution claim. `machine_code_leaf_function_tv`,
 `machine_code_callee_saved_preservation_assumed_for_external_callees`,
 `machine_code_entry_wrapper_tv`, `machine_code_f64_scalar_function_tv`,
 `machine_code_composite_register_aggregate_tv`,
-`machine_code_tv_mxcsr_control_state`, `machine_code_tv_nan_payload_bits` and
+`machine_code_tv_mxcsr_control_state`, `machine_code_tv_nan_payload_bits`,
+`machine_code_tv_sysv_memory_class_aggregate_abi` and
 `object_translation_correspondence` stay unperformed. This recheck report is
 never a recovery performer.
 
 Machine-TV recheck and object acceptance (not native-object-recheck) consume
 Core's `machine_code_composite_register_aggregate_tv` only when listed in
-`checks_performed`; it covers one-/two-leaf struct parameters, results and
-direct-call struct values with integer and/or f64 leaves under an assumed
-SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx, f64 leaves
-in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI, runtime or full
-object-TV claim. Native-object-recheck itself never discharges this machine-TV
-check.
+`checks_performed`; it covers one- through four-leaf struct parameters,
+results and direct-call struct values with integer and/or f64 leaves. One- and
+two-leaf values use Core's existing assumed SysV eightbyte convention;
+integer arguments use rdi–r9 and f64 arguments xmm0–xmm7, with the whole
+aggregate fitting and never split or stack-passed. Aggregate results are
+limited to three integer leaves in rax/rdx/rcx and two f64 leaves in
+xmm0/xmm1. Aggregates wider than two leaves assume LLVM first-class aggregate
+register lowering, not SysV C-ABI classification, and
+`machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed. This
+makes no ABI, runtime or full object-TV claim. Native-object-recheck itself
+never discharges this machine-TV check.
 """
 
 from __future__ import annotations
@@ -76,6 +82,7 @@ OBJECT_RECHECK_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_composite_register_aggregate_tv",
     "machine_code_tv_mxcsr_control_state",
     "machine_code_tv_nan_payload_bits",
+    "machine_code_tv_sysv_memory_class_aggregate_abi",
     "object_translation_correspondence",
 }
 
