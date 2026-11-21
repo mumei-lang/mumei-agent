@@ -11222,6 +11222,100 @@ def test_bound_base_field_read_pins_nested_imported_field_staleness(
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
+@pytest.mark.parametrize(
+    ("changed_file", "changed_source", "extra_files"),
+    [
+        ("s3.go", "package p\ntype S3 struct{ E2 }\n", {}),
+        (
+            "e.go",
+            "package p\ntype E struct{ *E3 }\n",
+            {"e3.go": "package p\ntype E3 struct{ B int64 }\n"},
+        ),
+        ("e.go", "package p\ntype E struct{ B int32 }\n", {}),
+    ],
+)
+def test_bound_pointer_promoted_local_leaf_staleness(
+    go_types_helper, changed_file, changed_source, extra_files
+):
+    files = {
+        "e.go": "package p\ntype E struct{ B int64 }\n",
+        "e2.go": "package p\ntype E2 struct{ B int64 }\n",
+        "s3.go": "package p\ntype S3 struct{ E }\n",
+        "s.go": "package p\ntype S struct{ A S3 }\n",
+        "f.go": "package p\nfunc F(t *S) int64 { return int64(t.A.B) }\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    changed = dict(files)
+    changed[changed_file] = changed_source
+    changed.update(extra_files)
+    _, snapshot2, _ = package_unit(go_types_helper, changed)
+    known = {binding.id for binding in snapshot2.bindings}
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+@pytest.mark.parametrize(
+    ("changed_file", "changed_source", "extra_files"),
+    [
+        ("s3.go", "package lib\ntype S3 struct{ E2 }\n", {}),
+        (
+            "e.go",
+            "package lib\ntype E struct{ *E3 }\n",
+            {"e3.go": "package lib\ntype E3 struct{ B int64 }\n"},
+        ),
+        ("e.go", "package lib\ntype E struct{ B int32 }\n", {}),
+    ],
+)
+def test_bound_pointer_promoted_imported_leaf_staleness(
+    go_types_helper, changed_file, changed_source, extra_files
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S) int64 { return int64(t.A.B) }\n"
+    }
+    lib = {
+        "lib": {
+            "e.go": "package lib\ntype E struct{ B int64 }\n",
+            "e2.go": "package lib\ntype E2 struct{ B int64 }\n",
+            "s3.go": "package lib\ntype S3 struct{ E }\n",
+            "s.go": "package lib\ntype S struct{ A S3 }\n",
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    changed_lib = {"lib": dict(lib["lib"])}
+    changed_lib["lib"][changed_file] = changed_source
+    changed_lib["lib"].update(extra_files)
+    snapshot2 = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, changed_lib),
+        files,
+        target_arch="amd64",
+    )
+    known = {binding.id for binding in snapshot2.bindings} | {
+        member.id for member in snapshot2.imported_members
+    }
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
 @pytest.mark.parametrize("field_expr", ["t.A.B", "(*t).A.B"])
 def test_bound_pointer_named_struct_value_intermediate_read(
     go_types_helper, field_expr
