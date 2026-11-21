@@ -15562,6 +15562,75 @@ def test_bound_closure_local_channel_send_rejects_escaping_channels(
 
 
 @pytest.mark.parametrize(
+    "declarations, library",
+    [
+        pytest.param(
+            "func mk(p chan int64) chan int64 { return p }\n"
+            "func F(x int64) int64 { a := make(chan int64, 1); "
+            "c := mk(a); g := func() { c <- x }; g(); return <-a }",
+            None,
+            id="parameter-alias",
+        ),
+        pytest.param(
+            "var GC = make(chan int64, 1)\n"
+            "func mk() chan int64 { return GC }\n"
+            "func F(x int64) int64 { c := mk(); "
+            "g := func() { c <- x }; g(); return <-GC }",
+            None,
+            id="callee-alias",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := lib.Mk(); "
+            "g := func() { c <- x }; g(); return <-lib.GC }",
+            "var GC = make(chan int64, 1)\n"
+            "func Mk() chan int64 { return GC }\n",
+            id="imported-alias",
+        ),
+    ],
+)
+def test_bound_closure_captured_channel_requires_local_origin(
+    go_types_helper, declarations, library
+):
+    files = {
+        "a.go": "package p\n"
+        + ('import "lib"\n' if library is not None else "")
+        + declarations
+    }
+    if library is None:
+        snapshot = _snapshot_for(go_types_helper, files)
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+    else:
+        imports = {"lib": {"lib.go": "package lib\n" + library}}
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+    assert not result.available
+    assert any(gap.reason == "unsupported_expression" for gap in result.gaps)
+
+
+def test_bound_closure_channel_alias_direct_send_keeps_dependency(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func mk(p chan int64) chan int64 { return p }\n"
+            "func F(x int64) int64 { a := make(chan int64, 1); "
+            "c := mk(a); c <- x; return <-a }",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
     "run_declaration",
     [
         pytest.param(

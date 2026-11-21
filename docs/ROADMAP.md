@@ -3097,8 +3097,9 @@ written value's deps on that binding at the call site
 function name inside the literal body (`return G(x)`)
 needs no capture — only the send/go/defer statements
 that target a shared queue stay closed. A captured local plain
-integer/boolean channel admits a literal send only when every
-enclosing-function reference is a send-channel, receive, builtin
+integer/boolean channel with only local `make`, `nil`, or zero-value
+origins admits a literal send only when every enclosing-function
+reference is a send-channel, receive, builtin
 `close`/`len`/`cap` argument, or range operand, and the literal is
 invoked synchronously as a direct call of its bound name or an
 immediately invoked literal; `go`, `defer`, and callback invocations

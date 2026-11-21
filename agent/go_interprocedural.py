@@ -24553,6 +24553,30 @@ class _Builder:
             stack.extend(_children(cur))
         return True
 
+    def _local_channel_origin_body(
+        self, literal_node: Any, chan_id: str
+    ) -> Any | None:
+        binding = self.bindings.get(chan_id)
+        span = getattr(binding, "span", None)
+        if span is None or getattr(span, "file", None) != self.current_file:
+            return None
+        current = literal_node
+        while current is not None:
+            if current.type in {
+                "func_literal",
+                "function_declaration",
+                "method_declaration",
+            }:
+                body = current.child_by_field_name("body")
+                if (
+                    body is not None
+                    and body.start_byte <= span.start
+                    and span.end <= body.end_byte
+                ):
+                    return body
+            current = current.parent
+        return None
+
     def _literal_invoked_synchronously(self, literal_node: Any) -> bool:
         def synchronous_call(call: Any) -> bool:
             parent = call.parent
@@ -24935,6 +24959,13 @@ class _Builder:
                     if ref is not None and ref.binding_id
                     else None
                 )
+                origin_body = (
+                    self._local_channel_origin_body(
+                        node, ref.binding_id
+                    )
+                    if ref is not None
+                    else None
+                )
                 literal_internal = (
                     binding is not None
                     and ref is not None
@@ -24974,6 +25005,10 @@ class _Builder:
                     and ref.binding_id not in self.local_chan_chans
                     and ref.binding_id not in self.external_chan_locals
                     and ref.binding_id not in self.escaped
+                    and origin_body is not None
+                    and self._literal_channel_has_local_origin(
+                        ref.binding_id, origin_body
+                    )
                     and self._chan_only_operations(ref.binding_id, node)
                     and self._literal_invoked_synchronously(node)
                 )
