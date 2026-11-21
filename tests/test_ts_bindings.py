@@ -673,6 +673,20 @@ function f(value: any, tag: any) {
     assert {"opaque_method", "opaque_optional", "opaque_tagged", "opaque_new"} <= kinds
 
 
+def test_computed_class_and_object_names_scan_key_expressions():
+    source = """
+function key() { return "name"; }
+class C { [key()]() {} [key()] = 1; }
+const object = { [key()]: 1, plain: 2 };
+"""
+    report = build_ts_bindings(source)
+    key = _bindings(report, "key", "function")[0]
+    calls = [call for call in report.calls if call.target == key.id]
+    assert len(calls) == 3
+    assert not _refs(report, source, "plain")
+    assert not _unresolved(report, "plain")
+
+
 def test_multibyte_spans_hash_and_output_are_deterministic():
     source = 'const greeting = "💡"; function f() { return greeting; }'
     report = build_ts_bindings(source)

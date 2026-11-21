@@ -985,6 +985,9 @@ class _TypeScriptBindings:
     ) -> None:
         info = self.function_infos.get(node.id)
         record = self.function_records.get(node.id)
+        name = node.child_by_field_name("name")
+        if name is not None and name.type == "computed_property_name":
+            self._scan(name, enclosing_owner, None, with_scopes)
         for child in self.children(node):
             if child.type == "decorator":
                 self._scan(child, "", None, with_scopes)
@@ -1031,6 +1034,9 @@ class _TypeScriptBindings:
             if member.type == "method_definition":
                 self._scan_function(member, owner, with_scopes)
             elif member.type == "public_field_definition":
+                name = member.child_by_field_name("name")
+                if name is not None and name.type == "computed_property_name":
+                    self._scan(name, owner, None, with_scopes)
                 self._scan_type(member.child_by_field_name("type"))
                 value = member.child_by_field_name("value")
                 self._scan(value, "", None, with_scopes)
