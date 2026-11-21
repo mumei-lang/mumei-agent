@@ -1,20 +1,31 @@
-"""Tests for the C02 evidence MCP tools.
+"""Tests for the C02 and C11 declared-evidence MCP tools.
 
 `evidence_identity_check` re-runs the CLI route's bounded byte
 comparison in-process; `evidence_check_accept` restores declared
-sequence/check documents and evaluates them — neither spawns Core.
+sequence/check documents and evaluates them. C11 fold tools preserve
+CLI payloads and remain spawn-free.
 """
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
-from agent import mcp_server
+from agent import (
+    binding_eval as binding_route,
+    evidence_acceptance_eval as acceptance_route,
+    freshness_eval as freshness_route,
+    mcp_server,
+    recovery_eval as recovery_route,
+)
 from agent.verification_attempt import (
     AttemptEvidenceCheck,
     AttemptEvent,
@@ -1156,3 +1167,540 @@ class TestVerifyPlanTool:
         for path in inputs.values():
             assert path not in out["error"]
         assert missing not in out["error"]
+
+
+def _fold_payload(raw: str) -> dict:
+    return json.loads(raw)
+
+
+def _fold_write_json(path: Path, value: dict | list) -> Path:
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
+
+
+def _fold_cli_payload(module, argv: list[str], output_path: Path) -> dict:
+    parser = argparse.ArgumentParser()
+    module.build_eval_parser(parser)
+    args = parser.parse_args([*argv, "--output", str(output_path)])
+    assert module.main_eval(args) == 0
+    return json.loads(output_path.read_text(encoding="utf-8"))
+
+
+def _fold_assert_error(raw: str) -> dict:
+    payload = _fold_payload(raw)
+    assert payload["status"] == "error"
+    assert isinstance(payload["error"], str)
+    return payload
+
+
+def _fold_acceptance_descriptor(**overrides) -> dict:
+    descriptor = {
+        "schema_version": "mumei.source-evidence-acceptance/v1",
+        "acceptance": "evaluated",
+        "accepted": True,
+        "scope": "saved_source_record_and_fresh_same_profile_recheck",
+        "checks_performed": ["representation_check", "fresh_source_recheck"],
+        "checks_not_performed": ["producer_authenticity"],
+        "evidence_fingerprint": "a" * 64,
+    }
+    descriptor.update(overrides)
+    return descriptor
+
+
+def _fold_binding_document(subject_digest: str) -> dict:
+    return {
+        "schema_version": "mumei.producer-signature/v1",
+        "subject_digest": subject_digest,
+        "algorithm": "ed25519",
+        "signature": "ab" * 64,
+        "producer_key_id": "key-1",
+    }
+
+
+def _fold_record(checks: list[str]) -> dict:
+    return {
+        "schema_version": "mumei.example-record/v1",
+        "checks_not_performed": checks,
+    }
+
+
+def _fold_acceptance_evidence(record_bytes: bytes, *, accepted=True) -> dict:
+    return {
+        "schema_version": "mumei.source-evidence-acceptance/v1",
+        "accepted": accepted,
+        "evidence_fingerprint": hashlib.sha256(record_bytes).hexdigest(),
+    }
+
+
+class TestEvidenceAcceptanceEvalTool:
+    def test_accepted_descriptor_cli_parity_without_and_with_fingerprint(
+        self, tmp_path
+    ) -> None:
+        descriptor = _fold_write_json(
+            tmp_path / "descriptor.json", _fold_acceptance_descriptor()
+        )
+        cases = (
+            (None, None),
+            ("a" * 64, True),
+            ("b" * 64, False),
+        )
+        for index, (fingerprint, attempt_bound) in enumerate(cases):
+            argv = ["--descriptor", str(descriptor)]
+            if fingerprint is not None:
+                argv.extend(["--expected-fingerprint", fingerprint])
+            cli = _fold_cli_payload(
+                acceptance_route, argv, tmp_path / f"acceptance-{index}.json"
+            )
+            tool = _fold_payload(
+                mcp_server.evidence_acceptance_eval(
+                    str(descriptor), fingerprint
+                )
+            )
+            assert tool["status"] == "ok"
+            assert tool["evaluation"] == cli
+            assert cli["accepted"] is True
+            if attempt_bound is None:
+                assert "attempt_bound" not in cli
+            else:
+                assert cli["attempt_bound"] is attempt_bound
+
+    @pytest.mark.parametrize("path", ["", "line\nbreak", None, 7])
+    def test_invalid_descriptor_paths_are_rejected(self, path) -> None:
+        payload = _fold_assert_error(
+            mcp_server.evidence_acceptance_eval(path)
+        )
+        assert "descriptor_path must be a nonempty single-line path" in (
+            payload["error"]
+        )
+
+    def test_missing_descriptor_path_is_redacted(self, tmp_path) -> None:
+        missing = tmp_path / "missing-descriptor.json"
+        payload = _fold_assert_error(
+            mcp_server.evidence_acceptance_eval(str(missing))
+        )
+        assert str(tmp_path) not in payload["error"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [b" " * (1024 * 1024 + 1), b"[]", b"\xff"],
+        ids=["oversized", "non-object", "invalid-utf8"],
+    )
+    def test_invalid_descriptor_documents_fail_statically(
+        self, tmp_path, body: bytes
+    ) -> None:
+        descriptor = tmp_path / "bad-descriptor.json"
+        descriptor.write_bytes(body)
+        payload = _fold_assert_error(
+            mcp_server.evidence_acceptance_eval(str(descriptor))
+        )
+        assert payload["status"] == "error"
+
+    @pytest.mark.parametrize("fingerprint", ["not-a-digest", 7, True])
+    def test_malformed_expected_fingerprint_is_an_error(
+        self, tmp_path, fingerprint
+    ) -> None:
+        descriptor = _fold_write_json(
+            tmp_path / "descriptor.json", _fold_acceptance_descriptor()
+        )
+        payload = _fold_assert_error(
+            mcp_server.evidence_acceptance_eval(
+                str(descriptor), fingerprint
+            )
+        )
+        assert "attempt_bound" not in payload
+
+
+class TestFreshnessEvalTool:
+    def test_fresh_stale_and_unclaimed_records_match_cli(self, tmp_path) -> None:
+        reference = "2026-11-18T01:00:00Z"
+        cases = (
+            ({"produced_at": "2026-11-18T00:00:00Z"}, 7200, True),
+            ({"produced_at": "2026-11-18T00:00:00Z"}, 1800, False),
+            ({}, 7200, False),
+        )
+        for index, (record_value, age, expected) in enumerate(cases):
+            record = _fold_write_json(
+                tmp_path / f"record-{index}.json", record_value
+            )
+            cli = _fold_cli_payload(
+                freshness_route,
+                [
+                    "--record",
+                    str(record),
+                    "--reference-time",
+                    reference,
+                    "--max-age-seconds",
+                    str(age),
+                ],
+                tmp_path / f"freshness-{index}.json",
+            )
+            tool = _fold_payload(
+                mcp_server.freshness_eval(str(record), reference, age)
+            )
+            assert tool["status"] == "ok"
+            assert tool["evaluation"] == cli
+            assert cli["within_window"] is expected
+            if index == 2:
+                assert cli["freshness_claimed"] is False
+
+    @pytest.mark.parametrize("path", ["", "line\nbreak", None, 7])
+    def test_invalid_record_paths_are_rejected(self, path) -> None:
+        payload = _fold_assert_error(
+            mcp_server.freshness_eval(
+                path, "2026-11-18T01:00:00Z", 1
+            )
+        )
+        assert "record_path must be a nonempty single-line path" in (
+            payload["error"]
+        )
+
+    def test_missing_record_path_is_redacted(self, tmp_path) -> None:
+        missing = tmp_path / "a\\b.json"
+        payload = _fold_assert_error(
+            mcp_server.freshness_eval(
+                str(missing), "2026-11-18T01:00:00Z", 1
+            )
+        )
+        assert str(tmp_path) not in payload["error"]
+        assert repr(str(missing))[1:-1] not in payload["error"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [b" " * (1024 * 1024 + 1), b"[]", b"\xff"],
+        ids=["oversized", "non-object", "invalid-utf8"],
+    )
+    def test_invalid_record_documents_fail_statically(
+        self, tmp_path, body: bytes
+    ) -> None:
+        record = tmp_path / "bad-record.json"
+        record.write_bytes(body)
+        payload = _fold_assert_error(
+            mcp_server.freshness_eval(
+                str(record), "2026-11-18T01:00:00Z", 1
+            )
+        )
+        assert payload["status"] == "error"
+
+    @pytest.mark.parametrize("max_age", [True, "1"])
+    def test_max_age_requires_non_boolean_integer(self, tmp_path, max_age) -> None:
+        missing = str(tmp_path / "unread-record.json")
+        payload = _fold_assert_error(
+            mcp_server.freshness_eval(
+                missing, "2026-11-18T01:00:00Z", max_age
+            )
+        )
+        assert payload["error"] == "max_age_seconds must be an int"
+
+    @pytest.mark.parametrize("max_age", [True, "3600"])
+    def test_dispatch_rejects_coerced_max_age_values(
+        self, tmp_path, max_age
+    ) -> None:
+        record = _fold_write_json(tmp_path / "record.json", {})
+        with pytest.raises(ToolError):
+            asyncio.run(
+                mcp_server.mcp.call_tool(
+                    "freshness_eval",
+                    {
+                        "record_path": str(record),
+                        "reference_time": "2026-11-18T01:00:00Z",
+                        "max_age_seconds": max_age,
+                    },
+                )
+            )
+
+    def test_dispatch_accepts_strict_integer_max_age(self, tmp_path) -> None:
+        record = _fold_write_json(tmp_path / "record.json", {})
+        content = asyncio.run(
+            mcp_server.mcp.call_tool(
+                "freshness_eval",
+                {
+                    "record_path": str(record),
+                    "reference_time": "2026-11-18T01:00:00Z",
+                    "max_age_seconds": 3600,
+                },
+            )
+        )
+        payload = _fold_payload(content[0][0].text)
+        assert payload["status"] == "ok"
+        assert payload["evaluation"]["freshness_claimed"] is False
+
+    def test_bad_reference_time_is_an_error(self, tmp_path) -> None:
+        record = _fold_write_json(tmp_path / "record.json", {})
+        payload = _fold_assert_error(
+            mcp_server.freshness_eval(str(record), "not-a-time", 10)
+        )
+        assert payload["error"] == "invalid reference time"
+
+
+class TestBindingEvalTool:
+    def test_bound_and_mismatched_documents_match_cli(self, tmp_path) -> None:
+        record_bytes = b'{"schema_version":"mumei.example-record/v1","claim":1}'
+        record = tmp_path / "record.json"
+        record.write_bytes(record_bytes)
+        digest = hashlib.sha256(record_bytes).hexdigest()
+        for index, subject in enumerate((digest, "b" * 64)):
+            evidence = _fold_write_json(
+                tmp_path / f"evidence-{index}.json",
+                _fold_binding_document(subject),
+            )
+            cli = _fold_cli_payload(
+                binding_route,
+                ["--record", str(record), "--evidence", str(evidence)],
+                tmp_path / f"binding-{index}.json",
+            )
+            tool = _fold_payload(
+                mcp_server.binding_eval(str(record), str(evidence))
+            )
+            assert tool["status"] == "ok"
+            assert tool["binding"] == cli
+            assert cli["bound"] is (index == 0)
+            assert cli["record_digest"] == digest
+
+    @pytest.mark.parametrize(
+        ("record_path", "evidence_path", "error_key"),
+        [
+            ("", "evidence.json", "record_path"),
+            ("line\nbreak", "evidence.json", "record_path"),
+            (None, "evidence.json", "record_path"),
+            ("record.json", "", "evidence_path"),
+            ("record.json", "line\nbreak", "evidence_path"),
+            ("record.json", 7, "evidence_path"),
+        ],
+    )
+    def test_invalid_binding_paths_are_rejected(
+        self, record_path, evidence_path, error_key
+    ) -> None:
+        payload = _fold_assert_error(
+            mcp_server.binding_eval(record_path, evidence_path)
+        )
+        assert f"{error_key} must be a nonempty single-line path" in (
+            payload["error"]
+        )
+
+    def test_missing_record_path_is_redacted(self, tmp_path) -> None:
+        evidence = _fold_write_json(
+            tmp_path / "evidence.json", _fold_binding_document("a" * 64)
+        )
+        missing = tmp_path / "a\\b.json"
+        payload = _fold_assert_error(
+            mcp_server.binding_eval(str(missing), str(evidence))
+        )
+        assert str(tmp_path) not in payload["error"]
+        assert repr(str(missing))[1:-1] not in payload["error"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [b" " * (1024 * 1024 + 1), b"[]", b"\xff"],
+        ids=["oversized", "non-object", "invalid-utf8"],
+    )
+    def test_invalid_evidence_documents_fail_statically(
+        self, tmp_path, body: bytes
+    ) -> None:
+        record = tmp_path / "record.bin"
+        record.write_bytes(b"record")
+        evidence = tmp_path / "bad-evidence.json"
+        evidence.write_bytes(body)
+        payload = _fold_assert_error(
+            mcp_server.binding_eval(str(record), str(evidence))
+        )
+        assert payload["status"] == "error"
+
+
+class TestRecoveryEvalTool:
+    def test_recovered_failed_and_no_evidence_match_cli(self, tmp_path) -> None:
+        record_bytes = json.dumps(_fold_record(["claim_truth"])).encode()
+        record = tmp_path / "record.json"
+        record.write_bytes(record_bytes)
+        cases = (
+            (_fold_acceptance_evidence(record_bytes), "recovered"),
+            (
+                _fold_acceptance_evidence(record_bytes, accepted=False),
+                "evidence_failed",
+            ),
+            ({"schema_version": "mumei.unknown/v1"}, "no_evidence"),
+        )
+        for index, (document, expected) in enumerate(cases):
+            evidence = _fold_write_json(
+                tmp_path / f"evidence-{index}.json", document
+            )
+            cli = _fold_cli_payload(
+                recovery_route,
+                ["--record", str(record), "--evidence", str(evidence)],
+                tmp_path / f"recovery-{index}.json",
+            )
+            tool = _fold_payload(
+                mcp_server.recovery_eval(str(record), [str(evidence)])
+            )
+            assert tool["status"] == "ok"
+            assert tool["recovery"] == cli
+            assert cli["checks"]["claim_truth"] == expected
+
+    def test_lone_surrogate_record_returns_utf8_payload(self, tmp_path) -> None:
+        record = _fold_write_json(
+            tmp_path / "record.json", _fold_record(["\ud800"])
+        )
+        evidence = _fold_write_json(
+            tmp_path / "evidence.json",
+            {"schema_version": "mumei.unknown/v1"},
+        )
+        raw = mcp_server.recovery_eval(str(record), [str(evidence)])
+        raw.encode("utf-8")
+        payload = json.loads(raw)
+        assert payload["recovery"]["checks"]["\ud800"] == "no_evidence"
+
+    def test_binding_document_for_other_record_does_not_recover_binding(
+        self, tmp_path
+    ) -> None:
+        record_bytes = json.dumps(
+            _fold_record(["evidence_binding"])
+        ).encode()
+        other_record_bytes = b'{"schema_version":"mumei.other-record/v1"}'
+        record = tmp_path / "record.json"
+        other_record = tmp_path / "other-record.json"
+        record.write_bytes(record_bytes)
+        other_record.write_bytes(other_record_bytes)
+        subject = hashlib.sha256(other_record_bytes).hexdigest()
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json", _fold_binding_document(subject)
+        )
+        other_binding = _fold_payload(
+            mcp_server.binding_eval(str(other_record), str(envelope))
+        )["binding"]
+        assert other_binding["bound"] is True
+        assert other_binding["record_digest"] == hashlib.sha256(
+            other_record_bytes
+        ).hexdigest()
+        binding_document = _fold_write_json(
+            tmp_path / "binding.json", other_binding
+        )
+        cli = _fold_cli_payload(
+            recovery_route,
+            [
+                "--record",
+                str(record),
+                "--evidence",
+                str(binding_document),
+            ],
+            tmp_path / "recovery.json",
+        )
+        tool = _fold_payload(
+            mcp_server.recovery_eval(str(record), [str(binding_document)])
+        )
+        assert tool["recovery"] == cli
+        assert cli["checks"]["evidence_binding"] == "evidence_failed"
+
+    @pytest.mark.parametrize("record_path", ["", "line\nbreak", None, 7])
+    def test_invalid_record_paths_are_rejected(self, record_path) -> None:
+        payload = _fold_assert_error(
+            mcp_server.recovery_eval(record_path, ["doc.json"])
+        )
+        assert "record_path must be a nonempty single-line path" in (
+            payload["error"]
+        )
+
+    @pytest.mark.parametrize(
+        "evidence_paths",
+        [
+            [],
+            "doc.json",
+            None,
+            ("doc.json",),
+            [""],
+            ["line\nbreak"],
+            [7],
+        ],
+    )
+    def test_invalid_evidence_paths_are_rejected(
+        self, tmp_path, evidence_paths
+    ) -> None:
+        record = str(tmp_path / "record.json")
+        payload = _fold_assert_error(
+            mcp_server.recovery_eval(record, evidence_paths)
+        )
+        assert "evidence_paths" in payload["error"]
+
+    def test_too_many_evidence_paths_are_rejected_before_reads(
+        self, tmp_path
+    ) -> None:
+        paths = [str(tmp_path / f"{index}.json") for index in range(65)]
+        payload = _fold_assert_error(
+            mcp_server.recovery_eval(str(tmp_path / "record.json"), paths)
+        )
+        assert "maximum of 64" in payload["error"]
+        assert str(tmp_path) not in payload["error"]
+
+    def test_missing_evidence_path_is_redacted(self, tmp_path) -> None:
+        record = _fold_write_json(
+            tmp_path / "record.json", _fold_record(["claim_truth"])
+        )
+        missing = tmp_path / "missing-evidence.json"
+        payload = _fold_assert_error(
+            mcp_server.recovery_eval(str(record), [str(missing)])
+        )
+        assert str(tmp_path) not in payload["error"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [b" " * (1024 * 1024 + 1), b"[]", b"\xff"],
+        ids=["oversized", "non-object", "invalid-utf8"],
+    )
+    def test_invalid_evidence_documents_fail_statically(
+        self, tmp_path, body: bytes
+    ) -> None:
+        record = _fold_write_json(
+            tmp_path / "record.json", _fold_record(["claim_truth"])
+        )
+        evidence = tmp_path / "bad-evidence.json"
+        evidence.write_bytes(body)
+        payload = _fold_assert_error(
+            mcp_server.recovery_eval(str(record), [str(evidence)])
+        )
+        assert payload["status"] == "error"
+
+
+class TestEvidenceFoldToolsDoNotSpawn:
+    def test_all_four_routes_are_spawn_free(self, monkeypatch, tmp_path) -> None:
+        def forbidden(*args, **kwargs):
+            raise AssertionError("evidence fold MCP tools must not spawn")
+
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
+        monkeypatch.setattr(subprocess, "run", forbidden)
+
+        descriptor = _fold_write_json(
+            tmp_path / "descriptor.json", _fold_acceptance_descriptor()
+        )
+        record_bytes = json.dumps(_fold_record(["claim_truth"])).encode()
+        record = tmp_path / "record.json"
+        record.write_bytes(record_bytes)
+        evidence = _fold_write_json(
+            tmp_path / "evidence.json",
+            _fold_acceptance_evidence(record_bytes),
+        )
+
+        assert _fold_payload(
+            mcp_server.evidence_acceptance_eval(str(descriptor))
+        )["status"] == "ok"
+        assert _fold_payload(
+            mcp_server.freshness_eval(
+                str(record), "2026-11-18T01:00:00Z", 7200
+            )
+        )["status"] == "ok"
+        assert _fold_payload(
+            mcp_server.binding_eval(str(record), str(evidence))
+        )["status"] == "ok"
+        assert _fold_payload(
+            mcp_server.recovery_eval(str(record), [str(evidence)])
+        )["status"] == "ok"
+
+
+class TestMcpPayloadSerialization:
+    def test_non_ascii_payload_remains_unescaped(self) -> None:
+        raw = mcp_server._ok({"label": "日本語"})
+        assert "日本語" in raw
+        assert r"\u65e5" not in raw
+        assert json.loads(raw)["label"] == "日本語"
+
+    def test_error_payload_escapes_lone_surrogates(self) -> None:
+        raw = mcp_server._err("\ud800")
+        raw.encode("utf-8")
+        assert json.loads(raw)["error"] == "\ud800"

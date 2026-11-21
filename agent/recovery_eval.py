@@ -13,7 +13,8 @@ a check (`recovery_enforcement` stays), never verifies the supporting
 documents (`evidence_authenticity` stays — they are trusted as
 declared) and never binds a document to the record it is said to
 cover (`evidence_binding` stays). A malformed or non-object input
-fails statically.
+fails statically. The MCP tool caps supporting documents at 64 paths;
+this MCP-only request bound does not change the CLI route.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from pathlib import Path
 from agent.core_evidence import evaluate_unperformed_check_recovery
 
 MAX_DOCUMENT_BYTES = 1024 * 1024
+MAX_RECOVERY_EVIDENCE_DOCUMENTS = 64
 
 
 def build_eval_parser(parser: argparse.ArgumentParser) -> None:
@@ -75,30 +77,36 @@ def _read_declared(path: str) -> dict:
     return _parse_declared(_read_declared_bytes(path))
 
 
+def run_eval(args: argparse.Namespace) -> dict:
+    record_bytes = _read_declared_bytes(args.record)
+    record = _parse_declared(record_bytes)
+    # SHA-256 of the record's raw bytes — the digest a bound
+    # binding document must pin to count toward `evidence_binding`.
+    record_digest = hashlib.sha256(record_bytes).hexdigest()
+    evidence_paths = list(args.evidence)
+    output_path = getattr(args, "output", None)
+    if output_path is not None:
+        out_path = Path(output_path)
+        for declared in [args.record, *evidence_paths]:
+            try:
+                if Path(declared).samefile(out_path):
+                    raise ValueError(
+                        "--output may not overwrite a declared input "
+                        "document"
+                    )
+            except FileNotFoundError:
+                pass
+    evidence = [_read_declared(path) for path in evidence_paths]
+    return evaluate_unperformed_check_recovery(
+        record, evidence, record_digest=record_digest
+    )
+
+
 def main_eval(args: argparse.Namespace | None = None) -> int:
     try:
-        record_bytes = _read_declared_bytes(args.record)
-        record = _parse_declared(record_bytes)
-        # SHA-256 of the record's raw bytes — the digest a bound
-        # binding document must pin to count toward `evidence_binding`.
-        record_digest = hashlib.sha256(record_bytes).hexdigest()
-        evidence_paths = list(args.evidence)
+        assert args is not None
+        recovery = run_eval(args)
         output_path = getattr(args, "output", None)
-        if output_path is not None:
-            out_path = Path(output_path)
-            for declared in [args.record, *evidence_paths]:
-                try:
-                    if Path(declared).samefile(out_path):
-                        raise ValueError(
-                            "--output may not overwrite a declared input "
-                            "document"
-                        )
-                except FileNotFoundError:
-                    pass
-        evidence = [_read_declared(path) for path in evidence_paths]
-        recovery = evaluate_unperformed_check_recovery(
-            record, evidence, record_digest=record_digest
-        )
         text = json.dumps(recovery, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)

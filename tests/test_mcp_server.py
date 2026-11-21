@@ -86,6 +86,10 @@ class TestGetAgentStatus:
             "send_latent_message_batch",
             "async_send_latent_message",
             "run_nlae_pipeline",
+            "evidence_acceptance_eval",
+            "freshness_eval",
+            "binding_eval",
+            "recovery_eval",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
@@ -158,6 +162,10 @@ class TestGetAgentStatus:
         assert "native_observations_recheck" in registered
         assert "send_latent_message" in registered
         assert "verify_code_spec_traceability" in registered
+        assert "evidence_acceptance_eval" in registered
+        assert "freshness_eval" in registered
+        assert "binding_eval" in registered
+        assert "recovery_eval" in registered
 
 
 # ---------------------------------------------------------------------------

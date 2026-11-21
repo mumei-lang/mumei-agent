@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased: C11 declared evidence folds as MCP tools
+
+- Exposed `evidence-acceptance-eval`, `freshness-eval`, `binding-eval`, and
+  `recovery-eval` as MCP tools with CLI-parity report payloads, bounded
+  declared-file reads, path-redacted errors, and no Core subprocess or new
+  authority. MCP recovery requests accept at most 64 evidence documents.
+
 ## Unreleased: TypeScript lexical binding report
 
 - Added `ts-bindings`, an opt-in tree-sitter report of single-file TypeScript
