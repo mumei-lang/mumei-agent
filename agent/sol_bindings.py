@@ -1527,6 +1527,10 @@ class _SolBindings:
                 and candidate.owner is not None
                 and other.parameter_count == candidate.parameter_count
                 and self._is_derived_from(other.owner, candidate.owner, set())
+                and (
+                    other.override
+                    or (candidate.body is None and other.body is not None)
+                )
                 for other in candidates
             )
         ]

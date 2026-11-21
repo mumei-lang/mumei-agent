@@ -632,6 +632,45 @@ contract Ambiguous is OtherBase {
     assert _unresolved(report, "f", "ambiguous_overload")
 
 
+def test_derived_implementation_replaces_bodyless_interface_function():
+    source = """
+interface I { function f(uint) external; }
+contract C is I {
+    function f(uint value) public {}
+    function caller() internal { f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    implementation = next(
+        binding
+        for binding in _bindings(report, "f", "function")
+        if source.index("contract C") < binding.span.start
+    )
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(1)"
+    )
+    assert call.target == implementation.id
+    assert call.kind in {"direct_local", "opaque_virtual"}
+    assert not _unresolved(report, "f", "ambiguous_overload")
+
+
+def test_different_arity_bodyless_base_function_remains_ambiguous():
+    source = """
+interface I { function f(uint) external; }
+abstract contract C is I {
+    function f(uint first, uint second) public {}
+    function caller() internal { f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(1)"
+    )
+    assert call.kind == "opaque_overload"
+    assert call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
+
+
 def test_overloads_and_virtual_dispatch_are_not_direct_local_calls():
     source = """
 contract Base {
