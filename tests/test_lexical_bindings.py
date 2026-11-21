@@ -16,6 +16,7 @@ from agent.lexical_bindings import (
     binding_id,
     load_lexical_report,
 )
+from agent.rust_bindings import PROFILE as RUST_PROFILE, build_rust_bindings
 
 PROFILE = "test.lexical/v1"
 SOURCE = "fn f() {}"
@@ -53,6 +54,19 @@ def _load(doc=None, source=SOURCE):
         source,
         profile=PROFILE,
         target=TARGET,
+    )
+
+
+def _producer_document(source):
+    return json.loads(build_rust_bindings(source, pointer_width=64).to_json())
+
+
+def _load_producer_document(doc, source):
+    return load_lexical_report(
+        json.dumps(doc),
+        source,
+        profile=RUST_PROFILE,
+        target={"pointer_width": 64},
     )
 
 
@@ -199,3 +213,113 @@ def test_resolve_returns_the_referenced_binding_and_never_resolves_unresolved_na
     )
     assert with_unresolved.resolve(ByteSpan(5, 6)) is None
     assert not with_unresolved.complete
+
+
+def test_reader_rejects_reference_and_unresolved_at_the_same_span():
+    source = "fn f(x:i32){ x; }"
+    doc = _producer_document(source)
+    reference = next(
+        item
+        for item in doc["references"]
+        if source.encode()[item["span"]["start"] : item["span"]["end"]] == b"x"
+    )
+    doc["unresolved"].append(
+        {"span": copy.deepcopy(reference["span"]), "name": "x", "reason": "unknown_name"}
+    )
+    doc["complete"] = False
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+
+@pytest.mark.parametrize("tamper", ["duplicate", "function_kind", "parameter_kind"])
+def test_reader_validates_function_records_and_parameter_kinds(tamper):
+    source = "fn f(x:i32){ x; }"
+    doc = _producer_document(source)
+    function = doc["functions"][0]
+    if tamper == "duplicate":
+        doc["functions"].append(copy.deepcopy(function))
+    elif tamper == "function_kind":
+        function["binding_id"] = function["parameters"][0]
+    else:
+        function["parameters"] = [function["binding_id"]]
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_kind", "callee"),
+    [
+        ("fn caller(){ callee(); } fn callee(){}", "direct_local", "callee"),
+        ("fn caller(){ callee(); } fn callee<T>(){}", "opaque_generic", "callee"),
+        ("async fn callee(){} fn caller(){ callee(); }", "opaque_async", "callee"),
+        (
+            'extern "C" { fn callee(); } fn caller(){ callee(); }',
+            "opaque_bodyless",
+            "callee",
+        ),
+        (
+            "use outside::callee; fn caller(){ callee(); }",
+            "opaque_import",
+            "callee",
+        ),
+        ("fn caller(callee:fn()){ callee(); }", "opaque_value", "callee"),
+        ("struct Callee(); fn caller(){ Callee(); }", "constructor", "Callee"),
+    ],
+)
+def test_reader_requires_targets_for_targeted_call_kinds(source, expected_kind, callee):
+    doc = _producer_document(source)
+    call = next(
+        item
+        for item in doc["calls"]
+        if source.encode()[item["span"]["start"] : item["span"]["end"]].startswith(
+            f"{callee}(".encode()
+        )
+    )
+    assert call["kind"] == expected_kind
+    assert call["target"]
+    call["target"] = ""
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+
+@pytest.mark.parametrize(
+    "kind", ["unresolved", "opaque_path", "opaque_method", "opaque_expression"]
+)
+def test_reader_rejects_targets_for_empty_target_call_kinds(kind):
+    source = "fn caller(){ callee(); } fn callee(){}"
+    doc = _producer_document(source)
+    doc["calls"][0]["kind"] = kind
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+
+def test_reader_validates_call_owners_and_direct_local_function_bodies():
+    source = "fn caller(x:i32){ callee(); } fn callee(){}"
+    doc = _producer_document(source)
+    parameter_id = next(
+        item["id"] for item in doc["bindings"] if item["name"] == "x"
+    )
+    doc["calls"][0]["owner"] = parameter_id
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+    source = 'extern "C" { fn callee(); } fn caller(){ callee(); }'
+    doc = _producer_document(source)
+    assert doc["calls"][0]["kind"] == "opaque_bodyless"
+    doc["calls"][0]["kind"] = "direct_local"
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+
+def test_reader_rejects_write_references_to_non_assignable_bindings():
+    source = "const K:u8=0; fn f(){ K = 1; }"
+    doc = _producer_document(source)
+    reference = next(
+        item
+        for item in doc["references"]
+        if source.encode()[item["span"]["start"] : item["span"]["end"]] == b"K"
+    )
+    assert reference["kind"] == "read"
+    reference["kind"] = "write"
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)

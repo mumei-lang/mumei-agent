@@ -77,13 +77,53 @@ def test_reassignment_is_write_and_compound_assignment_is_read_write():
     )[0].mutable
 
 
-def test_dereference_compound_assignment_reads_and_writes_the_pointer():
+def test_dereference_compound_assignment_only_reads_the_pointer_binding():
     source = "fn f(mut pointer: &mut i32){ *pointer += 1; }"
     report = build_rust_bindings(source, pointer_width=64)
     binding = _bindings(report, "pointer", "parameter")[0]
     refs = _refs(report, source, "pointer")
-    assert [ref.kind for ref in refs] == ["read", "write"]
+    assert [ref.kind for ref in refs] == ["read"]
     assert all(ref.binding_id == binding.id for ref in refs)
+
+
+@pytest.mark.parametrize(
+    ("place", "root", "expected", "index_read", "compound"),
+    [
+        ("*p", "p", ["read"], False, False),
+        ("*p", "p", ["read"], False, True),
+        ("s.0", "s", ["write"], False, False),
+        ("s.f", "s", ["write"], False, False),
+        ("a[i]", "a", ["write"], True, False),
+        ("s.f.g", "s", ["write"], False, False),
+        ("s.f", "s", ["read", "write"], False, True),
+        ("a[i]", "a", ["read", "write"], True, True),
+        ("(*p).f", "p", ["read"], False, False),
+        ("p.as_mut().f", "p", ["read"], False, False),
+    ],
+)
+def test_place_assignments_reference_the_binding_root(
+    place, root, expected, index_read, compound
+):
+    operator = "+=" if compound else "="
+    value = "1" if compound else "2"
+    source = (
+        "struct S { f: i32 } "
+        "fn f(mut s:S, mut a:[i32;4], mut p:&mut S, i:usize) { "
+        f"{place} {operator} {value}; }}"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    assert [ref.kind for ref in _refs(report, source, root)] == expected
+    assert bool(_refs(report, source, "i")) is index_read
+    if index_read:
+        assert [ref.kind for ref in _refs(report, source, "i")] == ["read"]
+
+
+def test_assignment_to_const_is_a_read_with_an_unsupported_gap():
+    source = "const K:u8=0; fn f(){ K = 1; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert [ref.kind for ref in _refs(report, source, "K")] == ["read"]
+    assert any(g.reason == "unsupported_syntax" for g in report.gaps)
+    assert not report.complete
 
 
 def test_block_scope_and_nested_item_boundary_are_explicit():
@@ -148,6 +188,213 @@ def test_match_const_patterns_imported_names_and_or_patterns():
     )
     later_use = build_rust_bindings(later_use_source, pointer_width=64)
     assert _unresolved(later_use, "K", "unknown_name")
+
+
+@pytest.mark.parametrize(
+    ("source", "local_names"),
+    [
+        ("fn f(value:i32){ let _ = value; }", []),
+        ("fn f(pair:(i32,i32)){ let (head, _) = pair; head; }", ["head"]),
+        ("fn f(array:[i32;2]){ let [_, item] = array; item; }", ["item"]),
+        ("fn f(pair:(i32,i32)){ let (head, ..) = pair; head; }", ["head"]),
+        ("fn f(array:[i32;3]){ let [head, ..] = array; head; }", ["head"]),
+        (
+            "struct S { a:i32 } fn f(value:S){ let S { a: _, .. } = value; }",
+            [],
+        ),
+        ("fn f(value:i32){ let Some(_) = value; }", []),
+    ],
+)
+def test_wildcard_and_rest_patterns_bind_only_named_identifiers(source, local_names):
+    report = build_rust_bindings(source, pointer_width=64)
+    assert {binding.name for binding in report.bindings if binding.kind == "local"} == set(
+        local_names
+    )
+    assert not any(g.reason == "unsupported_syntax" for g in report.gaps)
+    if "Some(_)" in source:
+        assert _unresolved(report, "Some", "prelude_name")
+
+
+def test_literal_range_and_captured_range_patterns_are_supported():
+    source = (
+        "fn f(value:i32){ match value { -1 => (), 1.5 => (), "
+        "1..=5 => (), ..=5 => (), 1.. => (), "
+        "'a'..='z' => (), 'x' => (), \"text\" => (), true => (), "
+        "w @ 2..=3 => w, _ => () } }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    assert not report.gaps
+    assert len(_bindings(report, "w", "local")) == 1
+    assert {
+        binding.name for binding in report.bindings if binding.kind == "local"
+    } == {"w"}
+    assert any(ref.binding_id == _bindings(report, "w", "local")[0].id for ref in _refs(report, source, "w"))
+    assert report.complete
+
+
+def test_range_pattern_path_bounds_resolve_or_remain_unresolved():
+    source = "const K:i32=0; const L:i32=5; fn f(v:i32){ match v { K..=L => (), _ => () } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert [ref.binding_id for ref in _refs(report, source, "K")] == [
+        _bindings(report, "K", "const")[0].id
+    ]
+    assert [ref.binding_id for ref in _refs(report, source, "L")] == [
+        _bindings(report, "L", "const")[0].id
+    ]
+    assert not report.gaps
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "reason"),
+    [
+        (
+            "mod m { const K:i32=0; } fn f(v:i32){ match v { m::K..=m::K => (), _ => () } }",
+            "m::K",
+            "qualified_path",
+        ),
+        (
+            "fn f(v:i32){ match v { Some..=None => (), _ => () } }",
+            "Some",
+            "prelude_name",
+        ),
+    ],
+)
+def test_unresolved_range_path_bounds_are_not_bound(source, name, reason):
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, name, reason)
+    assert not report.gaps
+
+
+@pytest.mark.parametrize(
+    ("source", "constructor", "binding_kind", "reason"),
+    [
+        (
+            "struct S { a:i32 } fn f(value:S){ let S { a } = value; a; }",
+            "S",
+            "struct",
+            None,
+        ),
+        (
+            "struct S(i32); fn f(value:S){ match value { S(x) => x } }",
+            "S",
+            "struct",
+            None,
+        ),
+        (
+            "fn f(value:i32){ match value { Some(_) => (), Ok(_) => (), Err(_) => (), None => () } }",
+            "Some",
+            None,
+            "prelude_name",
+        ),
+        (
+            "fn f(value:i32){ match value { Some { field: _, .. } => (), _ => () } }",
+            "Some",
+            None,
+            "prelude_name",
+        ),
+        (
+            "enum E { V(i32) } fn f(value:E){ match value { E::V(x) => x } }",
+            "E::V",
+            None,
+            "qualified_path",
+        ),
+    ],
+)
+def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
+    source, constructor, binding_kind, reason
+):
+    report = build_rust_bindings(source, pointer_width=64)
+    if binding_kind is not None:
+        binding = _bindings(report, constructor, binding_kind)[0]
+        assert any(ref.binding_id == binding.id for ref in _refs(report, source, constructor))
+    else:
+        assert _unresolved(report, constructor, reason)
+        if constructor == "Some" and "Ok(_)" in source:
+            for name in ("Some", "Ok", "Err", "None"):
+                assert _unresolved(report, name, "prelude_name")
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "allow(dead_code)",
+        "warn(dead_code)",
+        "deny(dead_code)",
+        "forbid(dead_code)",
+        "expect(dead_code)",
+        "deprecated",
+        "must_use",
+        "inline",
+        "cold",
+        "doc = \"text\"",
+        "repr(C)",
+        "non_exhaustive",
+        "track_caller",
+        "no_mangle",
+        "export_name = \"f\"",
+        "link_name = \"f\"",
+        "link_section = \".text\"",
+        "used",
+        "test",
+        "ignore",
+        "should_panic",
+        "automatically_derived",
+        "rustfmt::skip",
+        "clippy::some_lint",
+    ],
+)
+def test_allowlisted_attributes_do_not_create_gaps(attribute):
+    report = build_rust_bindings(f"#[{attribute}] fn f(){{}}", pointer_width=64)
+    assert not report.gaps
+
+
+def test_derive_attribute_policy_and_conditional_compilation_gaps():
+    standard = build_rust_bindings(
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, "
+        "std::fmt::Debug, core::cmp::Eq)] struct S;",
+        pointer_width=64,
+    )
+    assert not standard.gaps
+    nonstandard = build_rust_bindings(
+        "#[derive(Serialize)] struct S;", pointer_width=64
+    )
+    assert [gap.reason for gap in nonstandard.gaps] == ["macro_invocation"]
+    for attribute in ("cfg(feature=\"x\")", "cfg_attr(feature=\"x\", allow(dead_code))"):
+        source = f"#[{attribute}] fn f(){{}}"
+        report = build_rust_bindings(source, pointer_width=64)
+        assert [gap.reason for gap in report.gaps] == ["conditional_compilation"]
+        assert not report.complete
+        assert load_lexical_report(
+            report.to_json(), source, profile=PROFILE, target={"pointer_width": 64}
+        ).to_json() == report.to_json()
+    inner_conditional = build_rust_bindings(
+        "#![cfg(feature=\"x\")] fn f(){}", pointer_width=64
+    )
+    assert [gap.reason for gap in inner_conditional.gaps] == [
+        "conditional_compilation"
+    ]
+    unknown = build_rust_bindings("#[my_proc_macro] fn f(){}", pointer_width=64)
+    assert [gap.reason for gap in unknown.gaps] == ["macro_invocation"]
+    inner_unknown = build_rust_bindings("#![my_proc_macro] fn f(){}", pointer_width=64)
+    assert [gap.reason for gap in inner_unknown.gaps] == ["macro_invocation"]
+
+
+def test_inner_and_nested_attributes_are_classified():
+    source = (
+        "#![allow(dead_code)] struct S { #[unknown_field] value:i32 } "
+        "fn f(#[unknown_parameter] value:i32) { "
+        "#[unknown_statement] let local = value; "
+        "#[unknown_expression] { local; } "
+        "match value { #[unknown_arm] _ => () } }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    assert [gap.reason for gap in report.gaps] == [
+        "macro_invocation",
+        "macro_invocation",
+        "macro_invocation",
+        "macro_invocation",
+        "macro_invocation",
+    ]
 
 
 def test_if_while_for_and_let_else_scopes():

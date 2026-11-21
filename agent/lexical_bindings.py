@@ -46,6 +46,21 @@ BINDING_KINDS = frozenset(
         "associated_const",
     }
 )
+NON_ASSIGNABLE_WRITE_KINDS = frozenset(
+    {
+        "function",
+        "struct",
+        "enum",
+        "const",
+        "type_alias",
+        "trait",
+        "union",
+        "module",
+        "import",
+        "associated_function",
+        "associated_const",
+    }
+)
 UNRESOLVED_REASONS = frozenset(
     {
         "prelude_name",
@@ -64,6 +79,7 @@ GAP_REASONS = frozenset(
         "glob_import",
         "pattern_name_ambiguous",
         "or_pattern_mismatch",
+        "conditional_compilation",
     }
 )
 
@@ -445,6 +461,7 @@ def load_lexical_report(
                 for binding in bindings
             )
         )
+        binding_kinds = {binding.id: binding.kind for binding in bindings}
 
         references: list[Reference] = []
         for item in _array(top["references"]):
@@ -453,6 +470,10 @@ def load_lexical_report(
             identifier = _string(record["binding_id"])
             kind = _string(record["kind"])
             _fail(identifier in ids and kind in REFERENCE_KINDS)
+            _fail(
+                kind != "write"
+                or binding_kinds[identifier] not in NON_ASSIGNABLE_WRITE_KINDS
+            )
             references.append(Reference(span, identifier, kind))
 
         unresolved: list[Unresolved] = []
@@ -466,8 +487,12 @@ def load_lexical_report(
                 )
             )
             _fail(unresolved[-1].reason in UNRESOLVED_REASONS)
+        _fail(not ({reference.span for reference in references} & {
+            entry.span for entry in unresolved
+        }))
 
         functions: list[Function] = []
+        function_ids: set[str] = set()
         for item in _array(top["functions"]):
             record = _object(
                 item,
@@ -483,13 +508,24 @@ def load_lexical_report(
                 },
             )
             identifier = _string(record["binding_id"])
-            _fail(identifier in ids)
+            _fail(
+                identifier in ids
+                and binding_kinds[identifier] in {"function", "associated_function"}
+                and identifier not in function_ids
+            )
+            function_ids.add(identifier)
             body_value = record["body"]
             body = None if body_value is None else _span(
                 body_value, boundaries, len(source_bytes)
             )
             parameters = tuple(_string(value) for value in _array(record["parameters"]))
-            _fail(all(value in ids for value in parameters))
+            _fail(
+                all(
+                    value in ids
+                    and binding_kinds[value] in {"parameter", "self_parameter"}
+                    for value in parameters
+                )
+            )
             functions.append(
                 Function(
                     identifier,
@@ -508,6 +544,7 @@ def load_lexical_report(
                 for function in functions
             )
         )
+        functions_by_id = {function.binding_id: function for function in functions}
 
         calls: list[Call] = []
         for item in _array(top["calls"]):
@@ -520,8 +557,23 @@ def load_lexical_report(
             owner = _string(record["owner"])
             target_id = _string(record["target"])
             kind = _string(record["kind"])
-            _fail((not owner or owner in ids) and (not target_id or target_id in ids))
             _fail(kind in CALL_KINDS)
+            _fail(not owner or owner in functions_by_id)
+            _fail(not target_id or target_id in ids)
+            if kind == "direct_local":
+                target_function = functions_by_id.get(target_id)
+                _fail(target_function is not None and target_function.body is not None)
+            elif kind in {
+                "opaque_generic",
+                "opaque_async",
+                "opaque_bodyless",
+                "opaque_import",
+                "opaque_value",
+                "constructor",
+            }:
+                _fail(bool(target_id))
+            else:
+                _fail(not target_id)
             calls.append(Call(span, arguments, owner, target_id, kind))
 
         gaps: list[Gap] = []

@@ -6,8 +6,10 @@
   lexical bindings, scopes, references, explicit scalar type facts, and
   conservative call classifications. Unresolved names and unsupported
   behavior remain explicit; the report is lexical metadata, not a type check,
-  proof, or verdict. C06 remains partially delivered, with no default route,
-  audit, Seal Grade, or Lean changes.
+  proof, or verdict. Inert attributes and standard derives are accepted;
+  conditional-compilation attributes and unknown procedural attributes or
+  derives create explicit gaps. C06 remains partially delivered, with no
+  default route, audit, Seal Grade, or Lean changes.
 
 ## Unreleased: Solidity access control
 

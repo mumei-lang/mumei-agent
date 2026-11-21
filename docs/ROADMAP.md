@@ -5101,11 +5101,15 @@ This report is lexical, not type-checked: it does not infer types from
 initializers, resolve qualified paths or imported declarations, or
 claim dynamic, macro, and other unsupported behavior. Such symbols
 remain unresolved and unsupported syntax is recorded as a gap; either
-makes the report incomplete. The fail-closed reader rejects stale,
-malformed, or internally inconsistent reports. It is metadata only,
-not a proof or verdict. It adds no default route and changes no audit,
-Seal Grade, or Lean behavior. C06 remains partially delivered;
-Solidity and TypeScript lexical reports are follow-on work.
+makes the report incomplete. Attribute handling is explicit: inert
+compiler/tool attributes and standard derives do not create gaps,
+`cfg`/`cfg_attr` create `conditional_compilation` gaps, and unknown
+procedural attributes or non-standard derives create `macro_invocation`
+gaps. The fail-closed reader rejects stale, malformed, or internally
+inconsistent reports. It is metadata only, not a proof or verdict. It
+adds no default route and changes no audit, Seal Grade, or Lean
+behavior. C06 remains partially delivered; Solidity and TypeScript
+lexical reports are follow-on work.
 
 ### rust-summaries `--summary-aware-calls`
 
