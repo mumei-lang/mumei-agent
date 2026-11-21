@@ -2293,8 +2293,13 @@ class _Builder:
                     i
                     for i in callee.return_dependencies or ()
                     if i < len(target_fn.parameters)
-                    and self._param_container_shares_memory(
-                        target_fn.parameters[i].type
+                    and (
+                        self._param_container_shares_memory(
+                            target_fn.parameters[i].type
+                        )
+                        or self._scalar_chan_fact(
+                            target_fn.parameters[i].type
+                        )
                     )
                 )
             toks = {self.node_key(rhs)}
@@ -2342,6 +2347,15 @@ class _Builder:
                             # slices/maps/pointers still shares
                             # the elements' memory, so it folds.
                             continue
+                        # `ident_toks` reaches what the token map
+                        # alone misses: a `chan` arg's queue (seeded
+                        # on first use) and a struct arg's slot —
+                        # `s := G(c)` may return `[]chan{c}`, so the
+                        # queue joins the result's share group. The
+                        # identifier's own token set still folds in —
+                        # an array arg seeds backing tokens the
+                        # helper does not re-emit.
+                        toks |= self._opaque_container_ident_toks(arg)
                         toks |= self._opaque_container_tokens.get(
                             arg_ref.binding_id, frozenset()
                         )
@@ -8100,6 +8114,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or self._scalar_elem_nested_collection(
                         fn.receiver.type
                     )
+                    or self._chan_elem_collection(fn.receiver.type)
                 )
             )
             # Pointer-typed parameters/results are admitted too: the
@@ -8151,6 +8166,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or (
                         self._scalar_elem_collection(p.type)
                         or self._scalar_elem_nested_collection(p.type)
+                        # A `[]chan T`/`map[K]chan T` parameter
+                        # admits like the scalar-element form: the
+                        # element queues are caller-shared memory,
+                        # so `s[i] <- x` reaches `indirect_writes`
+                        # like any element store does.
+                        or self._chan_elem_collection(p.type)
                     )
                 )
                 for p in fn.parameters
@@ -8205,6 +8226,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or (
                         self._scalar_elem_collection(r.type)
                         or self._scalar_elem_nested_collection(r.type)
+                        # A `[]chan T`/`map[K]chan T` result binds
+                        # like the local `s :=` form — the caller
+                        # names the group's backing.
+                        or self._chan_elem_collection(r.type)
                     )
                 )
                 for r in fn.results
@@ -8280,6 +8305,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and (
                 self._scalar_elem_collection(p.type)
                 or self._scalar_elem_nested_collection(p.type)
+                or self._chan_elem_collection(p.type)
             )
             and self._param_container_shares_memory(p.type)
         )
@@ -8287,6 +8313,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if p.binding_id and (
                 self._scalar_elem_collection(p.type)
                 or self._scalar_elem_nested_collection(p.type)
+                or self._chan_elem_collection(p.type)
             ):
                 self._opaque_container_tokens[p.binding_id] = (
                     shared_container_ids
@@ -14977,6 +15004,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # this exact value, so dropping them would
                 # under-approximate.
                 self.indirect_writes |= value_deps
+                for holder_id in self._opaque_container_holders(
+                    frozenset({binding.id})
+                ) - {binding.id}:
+                    # The queue may also sit inside a `[]chan{c}`
+                    # share group — the send reaches `<-s[j]` too,
+                    # depositing like an element send does (the
+                    # external name's own slot stays external-only).
+                    holder_old = locals_.get(
+                        holder_id, frozenset()
+                    )
+                    if holder_id in params:
+                        holder_old = holder_old | frozenset(
+                            {params[holder_id]}
+                        )
+                    self._store(
+                        locals_, params, holder_id,
+                        holder_old | value_deps, conditional,
+                    )
                 transfers.append(
                     CallTransfer(
                         FileSpan(

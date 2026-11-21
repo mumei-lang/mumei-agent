@@ -19779,7 +19779,7 @@ def test_container_builtin_dep_free_param_write_marks_effects(
     [
         # `delete(m, k)` on an UNBOUND map — no share group
         # exists, so the builtin stays opaque.
-        "func F(m map[int64]chan int64, x int64) int64 {\n"
+        "func F(m map[int64][]chan int64, x int64) int64 {\n"
         "\tdelete(m, 1)\n"
         "\treturn x\n}\n",
         # `a = nil` drops the backing token — `a[0]` afterwards
@@ -20132,6 +20132,104 @@ def test_chan_elem_container_send_receive(
     ],
 )
 def test_chan_elem_container_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # A `[]chan T` parameter — the element queues are
+        # caller-shared memory: `s[i] <- x` deposits into the
+        # param's share group like an element store and `<-s[i]`
+        # reads it back beside the queue's existing contents.
+        (
+            "func F(s []chan int64, x int64) int64 {\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `map[K]chan T` parameters ride the same group.
+        (
+            "func F(m map[int64]chan int64, x int64) int64 {\n"
+            "\tm[0] <- x\n"
+            "\treturn <-m[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A callee's send through a `[]chan` parameter reaches
+        # caller memory — `G` records the write like `s[0] = v`,
+        # so `<-a[0]` in the caller observes `x`.
+        (
+            "func G(s []chan int64, v int64) {\n"
+            "\ts[0] <- v\n"
+            "}\n"
+            "func F(a []chan int64, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn <-a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A `[]chan T` result binds like the local `s :=` form —
+        # the caller names the group's backing.
+        (
+            "func G() []chan int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\treturn []chan int64{c}\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\ts := G()\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A param queue inside a local group: `c <- x` deposits
+        # into the group's holders so `<-s[j]` observes it (the
+        # external send only reached `indirect_writes` before).
+        (
+            "func F(c chan int64, x int64) int64 {\n"
+            "\ts := []chan int64{c}\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `s := G(c)` — the callee's `[]chan` result aliases the
+        # `chan` argument's queue: an element send lands on `c`.
+        (
+            "func G(c chan int64) []chan int64 {\n"
+            "\treturn []chan int64{c}\n"
+            "}\n"
+            "func F(c chan int64, x int64) int64 {\n"
+            "\ts := G(c)\n"
+            "\ts[0] <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_elem_container_param_result(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # An `[N]chan` parameter stays closed like the local
+        # array form — the copy detaches the names but the
+        # queues inside still share.
+        "func F(a [1]chan int64, x int64) int64 {\n"
+        "\ta[0] <- x\n"
+        "\treturn <-a[0]\n}\n",
+        # `[]chan chan T` params stay closed like the local form.
+        "func F(s []chan chan int64, x int64) int64 {\n"
+        "\treturn 0\n}\n",
+    ],
+)
+def test_chan_elem_container_param_stays_closed(
     go_types_helper, declarations
 ):
     result = named(*unit(go_types_helper, declarations))
@@ -26526,6 +26624,8 @@ def _opaque_composite_lib():
             "\treturn [1][1][]int64{{{x}}}\n}\n"
             "func US(a [1][]int64, b int64) {}\n"
             "func US2(a [1][1][]int64, b int64) {}\n"
+            "func IdAS(a [1]struct{ F []int64 }) [1]struct{ F []int64 } {\n"
+            "\treturn a\n}\n"
             "var VA []int64\n"
         }
     }
@@ -28200,6 +28300,26 @@ def test_opaque_composite_range_over_bound_map_key_rejoins(
     )
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_struct_array_arg_shares_result(
+    go_types_helper,
+):
+    # `r := lib.IdAS(arr); r[0] = St{F: {y}}` — the opaque callee
+    # may hand the array arg's backing back, so an element store
+    # through the result lands in `arr`'s group and an extracted
+    # `arr[0].F` element reads `y`'s dep.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\tarr := [1]struct{ F []int64 }{{F: []int64{x}}}\n"
+        "\tr := lib.IdAS(arr)\n"
+        "\tr[0] = struct{ F []int64 }{F: []int64{y}}\n"
+        "\ts := arr[0].F\n"
+        "\treturn s[0]\n}",
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})

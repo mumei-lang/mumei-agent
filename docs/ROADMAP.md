@@ -4130,8 +4130,17 @@ closures stay: `d := s[i]` extracts no channel name (the same
 closure `b := a[i]` keeps for scalar elements — a bare index
 sharer yields no binding), `[]chan chan T` stays closed (a
 channel value travelling the group would alias under a second
-dep set), and `close(s[i])`, `for range`, `select` and
-param/result shapes stay opaque.
+dep set), `close(s[i])`, `for range` and `select` stay opaque.
+
+A chan-element collection PARAMETER or RESULT admits like the
+scalar-element form — `func F(s []chan int64)`, `func G()
+[]chan int64`, `m map[K]chan int64`: the parameter seeds its own
+share group (sibling `[]chan` params share one group like
+`G(a, a)` does for slices), so `s[i] <- x` deposits into the
+group and lands in `indirect_writes` — a callee's send through a
+`[]chan` parameter reaches caller memory exactly like `s[0] =
+v` does. A `[]chan` result binds like the local `s :=` form.
+`[N]chan` and `[]chan chan` signatures stay closed.
 
 ### C07 scalar-element *nested* local containers
 
