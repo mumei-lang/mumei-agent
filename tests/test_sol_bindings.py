@@ -256,6 +256,32 @@ contract C {
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        "enum Status { Ready } contract C { Status value; }",
+        "contract C { enum Status { Ready } Status value; }",
+    ],
+)
+def test_file_and_contract_enums_are_type_names(source):
+    report = build_sol_bindings(source)
+    enum = _bindings(report, "Status", "enum")[0]
+    value = _bindings(report, "value", "state_variable")[0]
+    reference = _refs(report, source, "Status", "read")[0]
+    assert value.type.kind == "named"
+    assert value.type.type_id == enum.id
+    assert reference.binding_id == enum.id
+
+
+def test_unknown_enum_type_stays_unresolved():
+    source = "contract C { MissingStatus value; }"
+    report = build_sol_bindings(source)
+    value = _bindings(report, "value", "state_variable")[0]
+    assert value.type.kind == "unknown"
+    assert _unresolved(report, "MissingStatus", "unknown_name")
+    assert not _refs(report, source, "MissingStatus")
+
+
+@pytest.mark.parametrize(
     "type_name",
     [
         "string",
