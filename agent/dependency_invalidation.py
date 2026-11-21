@@ -5,6 +5,7 @@ resolution and the implicit prelude dependency. It is detection-only
 metadata: no check is re-run, no contract diff is produced, and no
 persistent cache or evidence acceptance is implied.
 """
+
 from __future__ import annotations
 
 import posixpath
@@ -52,11 +53,7 @@ def _resolve_import_target(
     while std_target.startswith("./"):
         std_target = std_target[2:]
     if std_target.startswith("std/"):
-        std_path = (
-            std_target
-            if std_target.endswith(".mm")
-            else std_target + ".mm"
-        )
+        std_path = std_target if std_target.endswith(".mm") else std_target + ".mm"
         std_fallback = posixpath.normpath(std_path)
         if std_fallback in file_keys:
             return std_fallback
@@ -97,9 +94,9 @@ def _build_import_graph(
 
     prelude = IMPLICIT_IMPORTS[0]
     if prelude in graph:
-        for key in graph:
-            if key != prelude:
-                graph[key] = sorted(set(graph[key]) | {prelude})
+        for key, deps in graph.items():
+            if key != prelude and prelude not in deps:
+                graph[key] = sorted([*deps, prelude])
 
     return graph, unresolved
 

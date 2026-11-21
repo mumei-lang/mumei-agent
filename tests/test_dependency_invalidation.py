@@ -1,4 +1,5 @@
 """Tests for dependency invalidation and its blast-radius join."""
+
 from __future__ import annotations
 
 import os
@@ -34,24 +35,19 @@ def _repo(tmp_path: Path, files: dict[str, str]) -> Path:
 
 class TestDeclaredImportTargets:
     def test_plain_and_aliased_imports(self):
-        text = (
-            'import "std/core" as core;\n'
-            'import "std/math/safe_mul";\n'
-        )
+        text = 'import "std/core" as core;\nimport "std/math/safe_mul";\n'
         assert _declared_import_targets(text) == [
             "std/core",
             "std/math/safe_mul",
         ]
 
     def test_leading_whitespace_accepted(self):
-        assert _declared_import_targets('  import "std/core" as core;') == [
-            "std/core"
-        ]
+        assert _declared_import_targets('  import "std/core" as core;') == ["std/core"]
 
     def test_commented_usage_lines_ignored(self):
         text = (
-            "// Usage: import \"std/core\" as core;\n"
-            "//   import \"std/alloc\" as alloc;\n"
+            '// Usage: import "std/core" as core;\n'
+            '//   import "std/alloc" as alloc;\n'
             'import "std/json" as json;\n'
         )
         assert _declared_import_targets(text) == ["std/json"]
@@ -60,7 +56,7 @@ class TestDeclaredImportTargets:
         assert _declared_import_targets("atom a()\n    requires: true;") == []
 
     def test_malformed_lines_ignored(self):
-        assert _declared_import_targets('import std/core as core;') == []
+        assert _declared_import_targets("import std/core as core;") == []
         assert _declared_import_targets('import "std/core"') == []
 
 
@@ -189,9 +185,7 @@ class TestInvalidationMap:
                     dependency: "atom dep()\n    requires: true;\n",
                 },
             )
-            m = dependency_invalidation_map(
-                repo / "std", f"std/{dependency}"
-            )
+            m = dependency_invalidation_map(repo / "std", f"std/{dependency}")
             assert f"std/{importer}" in m["re_derive"]
             assert m["unresolved_imports"] == {}
 
@@ -214,9 +208,7 @@ class TestInvalidationMap:
             },
         )
         m = dependency_invalidation_map(repo / "std", "std/other.mm")
-        assert m["unresolved_imports"] == {
-            "std/math/f.mm": ["../../outside"]
-        }
+        assert m["unresolved_imports"] == {"std/math/f.mm": ["../../outside"]}
         assert m["undetermined"] == ["std/math/f.mm"]
 
     def test_implicit_prelude_edge_invalidates_every_other_file(self, tmp_path):
@@ -240,9 +232,7 @@ class TestInvalidationMap:
         m = dependency_invalidation_map(repo / "std", "std/core.mm")
         assert m["implicit_imports"] == []
 
-    def test_prelude_importing_core_invalidates_prelude_and_all_files(
-        self, tmp_path
-    ):
+    def test_prelude_importing_core_invalidates_prelude_and_all_files(self, tmp_path):
         repo = _repo(
             tmp_path,
             {
