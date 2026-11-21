@@ -964,6 +964,16 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
         )
         assert aggregate_check in descriptor["checks_performed"]
         assert aggregate_check in report["discharged_checks"]
+        equivalent_functions = (
+            ("sum", "mk", "caller", "fwd")
+            if source_text == COMPOSITE_AGGREGATE_SOURCE
+            else ("mkq", "getb", "use_q")
+        )
+        for name in equivalent_functions:
+            assert (
+                descriptor["functions"][name]["outcome"]
+                == "equivalent_within_profile"
+            )
         assert (
             descriptor["register_convention_assumed"]
             == expected_convention

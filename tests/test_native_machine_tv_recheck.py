@@ -1351,6 +1351,10 @@ def test_real_core_rechecks_machine_tv_composite_integer_aggregate(
     descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
     check = "machine_code_composite_register_aggregate_tv"
     assert check in descriptor["checks_performed"]
+    for name in ("sum", "mk", "caller", "fwd"):
+        assert (
+            descriptor["functions"][name]["outcome"] == "equivalent_within_profile"
+        )
     assert (
         descriptor["register_convention_assumed"]
         == COMPOSITE_AGGREGATE_REGISTER_CONVENTION
@@ -1380,6 +1384,10 @@ def test_real_core_rechecks_machine_tv_composite_mixed_integer_f64_aggregate(
     descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
     check = "machine_code_composite_register_aggregate_tv"
     assert check in descriptor["checks_performed"]
+    for name in ("mkq", "getb", "use_q"):
+        assert (
+            descriptor["functions"][name]["outcome"] == "equivalent_within_profile"
+        )
     assert (
         descriptor["register_convention_assumed"]
         == COMPOSITE_SSE_AGGREGATE_REGISTER_CONVENTION
