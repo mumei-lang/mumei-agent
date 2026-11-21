@@ -811,9 +811,13 @@ class _RustBindings:
         pattern = node.child_by_field_name("pattern")
         annotation = node.child_by_field_name("type")
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
-        mutable = _has_keyword(self.text(node)[: self.text(node).find(":")], "mut")
         identifiers = []
-        for name_node, name_mutable in self._pattern_names(pattern, scope):
+        names = self._pattern_names(pattern, scope)
+        mutable_specifier = any(
+            child.type == "mutable_specifier" for child in node.named_children
+        )
+        names = self._apply_outer_mutability(names, pattern, mutable_specifier)
+        for name_node, name_mutable in names:
             record = self._make_record(
                 name_node,
                 "parameter",
@@ -822,7 +826,7 @@ class _RustBindings:
                 self.module_depth,
                 item=False,
                 type_fact=fact,
-                mutable=mutable or name_mutable,
+                mutable=name_mutable,
             )
             self._add_to_scope(scope, record)
             identifiers.append(record.binding.id)
@@ -869,7 +873,9 @@ class _RustBindings:
                 return TypeFact("float", text, int(text[1:]), None, "")
         return _UNKNOWN
 
-    def _pattern_names(self, pattern: Any | None, scope: _Scope) -> list[tuple[Any, bool]]:
+    def _pattern_names(
+        self, pattern: Any | None, scope: _Scope, mutable: bool = False
+    ) -> list[tuple[Any, bool]]:
         if pattern is None:
             return []
         if pattern.type in {"identifier", "self"}:
@@ -889,14 +895,7 @@ class _RustBindings:
                     Unresolved(self.span(pattern), name, "prelude_name")
                 )
                 return []
-            return [
-                (
-                    pattern,
-                    _has_keyword(self.text(pattern.parent), "mut")
-                    if pattern.parent
-                    else False,
-                )
-            ]
+            return [(pattern, mutable)]
         if pattern.type in {
             "_",
             "wildcard_pattern",
@@ -942,6 +941,12 @@ class _RustBindings:
                 Unresolved(self.span(pattern), self.text(pattern), "qualified_path")
             )
             return []
+        if pattern.type == "mut_pattern":
+            out = []
+            for child in pattern.named_children:
+                if child.type != "mutable_specifier":
+                    out.extend(self._pattern_names(child, scope, True))
+            return out
         if pattern.type == "tuple_struct_pattern":
             out: list[tuple[Any, bool]] = []
             constructor = pattern.child_by_field_name("type")
@@ -950,12 +955,15 @@ class _RustBindings:
             for child in pattern.named_children:
                 if child == constructor:
                     continue
-                out.extend(self._pattern_names(child, scope))
+                out.extend(self._pattern_names(child, scope, mutable))
             return out
         if pattern.type == "field_pattern":
             value = pattern.child_by_field_name("pattern")
+            field_mutable = mutable or any(
+                child.type == "mutable_specifier" for child in pattern.named_children
+            ) or _has_keyword(self.text(pattern), "mut")
             if value is not None:
-                return self._pattern_names(value, scope)
+                return self._pattern_names(value, scope, field_mutable)
             field = next(
                 (
                     node
@@ -964,11 +972,12 @@ class _RustBindings:
                 ),
                 None,
             )
-            return [] if field is None else [(field, False)]
+            return [] if field is None else [(field, field_mutable)]
         if pattern.type == "or_pattern":
             alternatives = pattern.named_children
             name_sets: list[list[tuple[Any, bool]]] = [
-                self._pattern_names(alternative, scope) for alternative in alternatives
+                self._pattern_names(alternative, scope, mutable)
+                for alternative in alternatives
             ]
             normalized = [tuple(sorted(self.text(n) for n, _ in values)) for values in name_sets]
             if normalized and any(names != normalized[0] for names in normalized[1:]):
@@ -994,22 +1003,44 @@ class _RustBindings:
             for child in pattern.named_children:
                 if pattern.type == "struct_pattern" and child == pattern.child_by_field_name("type"):
                     continue
+                if child.type == "mutable_specifier":
+                    continue
                 if child.type == "field_identifier" and pattern.type == "struct_pattern":
-                    out.append((child, False))
+                    out.append((child, mutable))
                     continue
                 if child.type == "type_identifier" and pattern.type == "struct_pattern":
                     continue
-                out.extend(self._pattern_names(child, scope))
+                out.extend(self._pattern_names(child, scope, mutable))
             return out
         if pattern.type in {"match_pattern", "condition"}:
             out = []
             for child in pattern.named_children:
                 if child.type in {"binary_expression", "call_expression"}:
                     continue
-                out.extend(self._pattern_names(child, scope))
+                out.extend(self._pattern_names(child, scope, mutable))
             return out
         self.gaps.append(Gap("unsupported_syntax", self.span(pattern)))
         return []
+
+    def _apply_outer_mutability(
+        self,
+        names: list[tuple[Any, bool]],
+        pattern: Any | None,
+        is_mutable: bool,
+    ) -> list[tuple[Any, bool]]:
+        if not is_mutable:
+            return names
+        if pattern is not None and pattern.type == "captured_pattern":
+            capture = next(
+                (
+                    child
+                    for child in pattern.named_children
+                    if child.type in {"identifier", "self"}
+                ),
+                None,
+            )
+            return [(name, mutable or name == capture) for name, mutable in names]
+        return [(name, True) for name, _mutable in names]
 
     def _record_pattern_path(
         self, node: Any, namespace: str, expected_kinds: set[str]
@@ -1134,8 +1165,11 @@ class _RustBindings:
         if alternative is not None:
             self._expr(alternative)
         names = self._pattern_names(pattern, scope)
-        mutable = _has_keyword(self.text(pattern), "mut") or _has_keyword(
-            self.raw[node.start_byte : pattern.start_byte].decode("utf-8"), "mut"
+        mutable_specifier = any(
+            child.type == "mutable_specifier" for child in node.named_children
+        )
+        names = self._apply_outer_mutability(
+            names, pattern, mutable_specifier
         )
         for name_node, name_mutable in names:
             record = self._make_record(
@@ -1146,7 +1180,7 @@ class _RustBindings:
                 self.module_depth,
                 item=False,
                 type_fact=fact,
-                mutable=mutable or name_mutable,
+                mutable=name_mutable,
             )
             self._add_to_scope(scope, record)
 

@@ -707,6 +707,30 @@ def test_turbofish_method_calls_traverse_the_receiver():
     )
 
 
+def test_pattern_mutability_is_preserved_per_binding():
+    source = """
+fn parameters((mut c, d): (i32, i32)) {}
+fn locals(pair: (i32, i32), value: S) {
+    let (mut a, b) = pair;
+    let S { mut field, ref mut other } = value;
+    let mut capture @ Some(inner) = None;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    expected = {
+        ("c", "parameter"): True,
+        ("d", "parameter"): False,
+        ("a", "local"): True,
+        ("b", "local"): False,
+        ("field", "local"): True,
+        ("other", "local"): True,
+        ("capture", "local"): True,
+        ("inner", "local"): False,
+    }
+    for (name, kind), mutable in expected.items():
+        assert _bindings(report, name, kind)[0].mutable is mutable
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)
