@@ -6913,6 +6913,52 @@ def test_interface_parameter_signature_pin_flags_stale_dependents(
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
+def test_interface_field_receiver_signature_pin_flags_stale_dependents(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(w W, x int64) int64 { w.i.M(x); return x }\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(x int64) R }\n",
+        "w.go": "package p\ntype W struct{ i I }\n",
+        "r.go": "package p\ntype R *int64\n",
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    r_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "R" and binding.kind == "type"
+    )
+    assert r_id in result.pinned
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+
+    changed = {
+        **files,
+        "r.go": "package p\ntype R struct{ v int64 }\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report_imports(go_types_helper, changed, {}),
+        changed,
+        target_arch="amd64",
+    )
+    known = {binding.id for binding in snapshot2.bindings}
+    assert f_id in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
 def test_interface_alias_parameter_pins_underlying_identity(
     go_types_helper,
 ):

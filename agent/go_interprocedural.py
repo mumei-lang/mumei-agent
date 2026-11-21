@@ -29675,7 +29675,7 @@ class _Builder:
 
     def _interface_parameter_field_receiver(
         self, node: Any, params: dict[str, int]
-    ) -> str | None:
+    ) -> tuple[str, frozenset[str], str | None] | None:
         selectors = []
         current = self._strip_parens(node)
         while current is not None and current.type == "selector_expression":
@@ -29700,6 +29700,7 @@ class _Builder:
         struct_fact = self._struct_value_fact(root_binding.type)
         if struct_fact is None or not struct_fact.type_id:
             return None
+        struct_type_ids = {struct_fact.type_id}
         for index, field in enumerate(reversed(selectors)):
             field_ref = self.references.get(self.node_key(field))
             member = self._field_identity(field_ref)
@@ -29716,14 +29717,17 @@ class _Builder:
             ):
                 return None
             if index == len(selectors) - 1:
+                if member.type.kind != "interface":
+                    return None
                 return (
-                    root_ref.binding_id
-                    if member.type.kind == "interface"
-                    else None
+                    root_ref.binding_id,
+                    frozenset(struct_type_ids),
+                    member.type.type_id or None,
                 )
             struct_fact = self._struct_value_fact(member.type)
             if struct_fact is None or not struct_fact.type_id:
                 return None
+            struct_type_ids.add(struct_fact.type_id)
         return None
 
     def _interface_dispatch_call(
@@ -29781,12 +29785,53 @@ class _Builder:
                 receiver_id is not None
                 and receiver_id.type == "selector_expression"
             ):
-                admitted = (
-                    self._interface_parameter_field_receiver(
-                        receiver_id, params
-                    )
-                    is not None
+                field_receiver = self._interface_parameter_field_receiver(
+                    receiver_id, params
                 )
+                if field_receiver is not None:
+                    _, struct_type_ids, interface_type_id = field_receiver
+                    self.pinned.update(struct_type_ids)
+                    if interface_type_id:
+                        self.pinned.add(interface_type_id)
+                        interface_binding = self.bindings.get(
+                            interface_type_id
+                        )
+                        if interface_binding is not None:
+                            self.pinned.update(
+                                interface_binding.signature_type_ids
+                            )
+                        interface_member = self.members.get(
+                            interface_type_id
+                        )
+                        if interface_member is not None:
+                            self.pinned.update(
+                                interface_member.signature_type_ids
+                            )
+                    method_field = function_node.child_by_field_name(
+                        "field"
+                    )
+                    method_ref = (
+                        self.references.get(self.node_key(method_field))
+                        if method_field is not None
+                        else None
+                    )
+                    method_binding = (
+                        self.members.get(method_ref.binding_id)
+                        if method_ref is not None
+                        and method_ref.kind == "import"
+                        else (
+                            self.bindings.get(method_ref.binding_id)
+                            if method_ref is not None
+                            else None
+                        )
+                    )
+                    if method_binding is not None:
+                        self.pinned.update(
+                            getattr(
+                                method_binding, "signature_type_ids", ()
+                            )
+                        )
+                    admitted = True
             elif (
                 receiver_id is not None
                 and receiver_id.type == "call_expression"
