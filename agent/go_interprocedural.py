@@ -15193,8 +15193,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             conditional,
                         )
                     self.indirect_writes |= value_deps
-                    for token in self._opaque_container_tokens.get(
-                        root_id, ()
+                    # Sorted so the recorded transfer order is
+                    # deterministic across runs — a set's iteration
+                    # order would differ between identical inputs.
+                    # The key handles the mixed member identities
+                    # (binding ids and node keys).
+                    for token in sorted(
+                        self._opaque_container_tokens.get(
+                            root_id, frozenset()
+                        ),
+                        key=repr,
                     ):
                         # The group may hold a caller-owned queue
                         # (`s := []chan{c}` with param `c`) — a send
