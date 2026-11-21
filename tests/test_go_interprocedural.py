@@ -21311,6 +21311,68 @@ def test_chan_elem_external_group_members(
     assert result.effects == "unknown"
 
 
+def test_chan_elem_external_group_registration_is_not_a_local_container(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var GS []chan int64\n"
+        "func H() {\n"
+        "\ts := []chan int64{GS[0]}\n"
+        "\t_ = s\n"
+        "}\n"
+        "func FClose() { close(GS[0]) }\n"
+        "func FSend(x int64) { GS[0] <- x }\n"
+        "func FSendRecv(x int64) int64 {\n"
+        "\tGS[0] <- x\n"
+        "\treturn <-GS[0]\n"
+        "}\n",
+    )
+    gs_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "GS"
+    )
+    assert named(source, snapshot, summaries, name="H").available
+
+    for name in ("FClose", "FSend", "FSendRecv"):
+        result = named(source, snapshot, summaries, name=name)
+        assert result.available
+        assert result.effects == "unknown"
+        assert any(
+            transfer.imported and transfer.target == gs_id
+            for transfer in result.calls
+        )
+        if name == "FSendRecv":
+            assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_elem_external_group_registration_same_function(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var GS []chan int64\n"
+        "func F() {\n"
+        "\ts := []chan int64{GS[0]}\n"
+        "\t_ = s\n"
+        "\tclose(GS[0])\n"
+        "}\n",
+    )
+    result = named(source, snapshot, summaries)
+    gs_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "GS"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert any(
+        transfer.imported and transfer.target == gs_id
+        for transfer in result.calls
+    )
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [

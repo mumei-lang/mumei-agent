@@ -2069,9 +2069,11 @@ class _Builder:
         to the OLD group's surviving sharers (found by intersecting
         the snapshot), not to the reseated `s`'s new set."""
         toks = self._opaque_container_tokens
-        toks[member_id] = toks.get(member_id, frozenset()) | frozenset(
-            {member_id}
-        )
+        if member_id not in self._external_chan_group_tokens:
+            toks[member_id] = (
+                toks.get(member_id, frozenset())
+                | frozenset({member_id})
+            )
         current = toks.get(root_id, frozenset())
         if pre_root_set is not None and not pre_root_set <= current:
             # The root reseated earlier in this statement — its set
@@ -2441,16 +2443,16 @@ class _Builder:
             for tok in self._opaque_container_tokens.get(holder, ()):
                 if (
                     isinstance(tok, str)
-                    and tok in self._opaque_container_tokens
+                    and (
+                        tok in self._opaque_container_tokens
+                        or tok in self._external_chan_group_tokens
+                    )
                 ):
                     members.add(tok)
         return sorted(members)
 
     def _mark_external_chan_group_member(self, token: str) -> None:
         self._external_chan_group_tokens.add(token)
-        self._opaque_container_tokens.setdefault(
-            token, frozenset({token})
-        )
 
     def _chan_group_value_tokens(self, node: Any) -> set[str]:
         while node is not None and node.type == "literal_element":
@@ -2498,11 +2500,12 @@ class _Builder:
         ):
             return set()
         token = self._chan_root(binding.id)
-        self._opaque_container_tokens.setdefault(
-            token, frozenset({token})
-        )
         if token in self.external_chan_locals:
             self._mark_external_chan_group_member(token)
+        else:
+            self._opaque_container_tokens.setdefault(
+                token, frozenset({token})
+            )
         return {token}
 
     def _chan_detached_toks(self, toks: Any) -> Any:
