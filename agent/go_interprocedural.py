@@ -6027,6 +6027,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
         member = self.members.get(target_id)
         return member is not None and self._chan_chan_fact(member.type)
 
+    def _chan_elem_container_id(self, target_id: str) -> bool:
+        """A transfer target naming an external chan-element
+        container — `GS[i] <- x` / `<-GS[i]` records on the
+        container's package-var or imported-member identity, so a
+        callee's recorded op on it means it may have stored an
+        argument's queue into caller-visible state."""
+        binding = self.bindings.get(target_id)
+        if (
+            binding is not None
+            and binding.kind == "variable"
+            and binding.type is not None
+            and self._chan_elem_collection(binding.type)
+        ):
+            return True
+        member = self.members.get(target_id)
+        return (
+            member is not None
+            and member.type is not None
+            and self._chan_elem_collection(member.type)
+        )
+
     def _chan_call_args(self, node: Any) -> Any | None:
         """The call's `argument_list` node, unwrapping parens —
         `ch, _ = (g(q))` must still see `q`."""
@@ -18930,6 +18951,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._promote_chan_arg_roots(
                         arguments, "", locals_, params
                     )
+                if self._calls_touch_external_chan(
+                    callee.calls, self._chan_elem_container_id
+                ):
+                    # `GS[i] = c` inside the callee handed an
+                    # argument's queue to an external chan-element
+                    # container — the same promotion keeps later
+                    # `GS[j] <- x` sends observable on `<-c`.
+                    self._promote_chan_arg_roots(
+                        arguments, "", locals_, params
+                    )
         return result
 
     def _propagate_func_alias(
@@ -20959,6 +20990,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._promote_chan_arg_roots(
                         arguments, "", locals_, params
                     )
+                if self._calls_touch_external_chan(
+                    callee.calls, self._chan_elem_container_id
+                ):
+                    # `m.GS[i] = c` inside the method — the same
+                    # promotion the direct-call site applies.
+                    self._promote_chan_arg_roots(
+                        arguments, "", locals_, params
+                    )
         return result
 
     def _immediate_literal_call(
@@ -21406,6 +21445,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         declared.calls, self._chan_chan_id
                     ):
                         # `cc <- q` inside the declared callee —
+                        # the same argument-root promotion.
+                        self._promote_chan_arg_roots(
+                            arguments, "", locals_, params
+                        )
+                    if self._calls_touch_external_chan(
+                        declared.calls, self._chan_elem_container_id
+                    ):
+                        # `GS[i] = c` inside the declared callee —
                         # the same argument-root promotion.
                         self._promote_chan_arg_roots(
                             arguments, "", locals_, params
