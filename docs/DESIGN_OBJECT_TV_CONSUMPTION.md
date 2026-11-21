@@ -179,10 +179,12 @@ Option 2, staged:
 2. **Slice 2 (Core, other session):** object-stage TV in Core and the
    `recheck-object` / `accept-object` commands. Deferred on the agent side
    until it lands.
-3. **Slice 3 (agent, after slice 2):** the two routes above, CLI + MCP, the
-   performer registration, and a mumei-demo scenario including a C13 negative
-   control (source↔LLVM accept + artifact reproduction never recover
-   `object_translation_correspondence`).
+3. **Slice 3 (agent, after slice 2):** the two routes above, CLI + MCP, and a
+   mumei-demo scenario including a C13 negative control (source↔LLVM accept +
+   artifact reproduction never recover `object_translation_correspondence`).
+   As landed, `native-object-accept` discharges the check in its own report
+   but is **not** registered as a recovery performer (see Option 2 above);
+   the earlier plan to register it in `_CHECK_PERFORMERS` was superseded.
 
 What stays host duty forever: linker and relocation semantics at link time,
 loader/libc/kernel/hardware, the ABI, and anything outside the object-TV
@@ -206,10 +208,11 @@ profile.
 - `artifact_semantics` の流用（Option 1）は、既存の source↔LLVM の主張と
   LLVM↔object の主張が区別できなくなるため却下。新しい独立語彙
   `object_translation_correspondence` を置く。
-- accept/recheck の分担は Option A と同じ。回収（performer）できるのは accept
-  レポートだけで、recheck は回収しない。
+- accept/recheck の分担は Option A と同じ。ただし着地した `native-object-accept`
+  は自分のレポートでチェックを discharge するだけで、回収（performer）としては
+  登録しない（当初の performer 登録案は撤回）。recheck も回収しない。
 - 段階ごとの別レポートを合成して end-to-end の主張を作ることはしない
   （`runtime_observation_semantics` と同じ理由: 1回の実行で観測されたものだけが主張になる）。
-- Core 側のコマンド名・スキーマ名は仮説扱い。Core が実装したら、その名前をそのまま採用する。
-- 今すぐ agent 側でできるのはスライス1（語彙の予約と、境界ルートでの「未実施」明示）だけ。
-  performer 登録は Core の実装後。
+- Core #1228 が `accept-object` と `mumei.native-evidence-acceptance/v1` を出し、
+  agent はその名前をそのまま採用した（スライス3着地）。
+- スライス1（語彙の予約と、境界ルートでの「未実施」明示）は先行して着地済み。

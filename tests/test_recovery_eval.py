@@ -101,6 +101,27 @@ def test_object_translation_correspondence_has_no_recovery_performer(schema):
     assert evaluation["unrecovered"] == [check]
 
 
+def test_accepted_object_accept_report_cannot_recover_sibling_object_translation():
+    check = "object_translation_correspondence"
+    build_id = "a" * 64
+    record = {
+        "schema_version": "mumei.native-accept-report/v1",
+        "expected_build_id": build_id,
+        "checks_not_performed": [check],
+    }
+    evidence = _doc(
+        "mumei.native-object-accept-report/v1",
+        acceptance="accepted",
+        expected_build_id=build_id,
+        discharged_checks=[check],
+        normalized={"stdout": {"sha256": "b" * 64}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(record, [evidence])
+    assert evaluation["checks"] == {check: "no_evidence"}
+    assert evaluation["recovered"] == []
+    assert evaluation["unrecovered"] == [check]
+
+
 def test_foreign_self_report_cannot_recover_object_translation():
     check = "object_translation_correspondence"
     record = {
