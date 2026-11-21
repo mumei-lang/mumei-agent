@@ -26624,6 +26624,8 @@ def _opaque_composite_lib():
             "\treturn [1][1][]int64{{{x}}}\n}\n"
             "func US(a [1][]int64, b int64) {}\n"
             "func US2(a [1][1][]int64, b int64) {}\n"
+            "func IdAS(a [1]struct{ F []int64 }) [1]struct{ F []int64 } {\n"
+            "\treturn a\n}\n"
             "var VA []int64\n"
         }
     }
@@ -28298,6 +28300,26 @@ def test_opaque_composite_range_over_bound_map_key_rejoins(
     )
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_composite_struct_array_arg_shares_result(
+    go_types_helper,
+):
+    # `r := lib.IdAS(arr); r[0] = St{F: {y}}` — the opaque callee
+    # may hand the array arg's backing back, so an element store
+    # through the result lands in `arr`'s group and an extracted
+    # `arr[0].F` element reads `y`'s dep.
+    result = _opaque_composite_result(
+        go_types_helper,
+        "func F(x, y int64) int64 {\n"
+        "\tarr := [1]struct{ F []int64 }{{F: []int64{x}}}\n"
+        "\tr := lib.IdAS(arr)\n"
+        "\tr[0] = struct{ F []int64 }{F: []int64{y}}\n"
+        "\ts := arr[0].F\n"
+        "\treturn s[0]\n}",
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})

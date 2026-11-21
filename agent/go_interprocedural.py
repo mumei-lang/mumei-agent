@@ -2351,8 +2351,14 @@ class _Builder:
                         # alone misses: a `chan` arg's queue (seeded
                         # on first use) and a struct arg's slot —
                         # `s := G(c)` may return `[]chan{c}`, so the
-                        # queue joins the result's share group.
+                        # queue joins the result's share group. The
+                        # identifier's own token set still folds in —
+                        # an array arg seeds backing tokens the
+                        # helper does not re-emit.
                         toks |= self._opaque_container_ident_toks(arg)
+                        toks |= self._opaque_container_tokens.get(
+                            arg_ref.binding_id, frozenset()
+                        )
             return frozenset(toks)
         if rhs.type == "identifier":
             ref = self.references.get(self.node_key(rhs))
