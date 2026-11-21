@@ -6439,7 +6439,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if nested_call is None or nested_call.kind != "conversion":
                 continue
-            operand = argument.child_by_field_name("operand")
+            if argument.type == "type_conversion_expression":
+                operand = argument.child_by_field_name("operand")
+            else:
+                conversion_arguments = _children(
+                    argument.child_by_field_name("arguments")
+                )
+                operand = (
+                    conversion_arguments[0]
+                    if len(conversion_arguments) == 1
+                    else None
+                )
             while (
                 operand is not None
                 and operand.type == "parenthesized_expression"

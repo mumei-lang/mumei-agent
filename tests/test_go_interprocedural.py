@@ -16420,7 +16420,9 @@ def test_local_chan_chan_direct_conversion_argument_stays_closed(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
-    assert result.gaps and result.gaps[0].reason == "unresolved_or_opaque_call"
+    assert [gap.reason for gap in result.gaps] == [
+        "unresolved_or_opaque_call"
+    ]
 
 
 def test_chan_chan_call_result_receive_carries_queue_deps(go_types_helper):
