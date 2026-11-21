@@ -1029,6 +1029,19 @@ class _Builder:
         self._func_elem_inner_donors: dict[str, dict[str, set[str]]] = {}
         self._func_elem_surrogate_seq = 0
         self._chan_queue_seq = 0
+        # binding_id -> the surrogate `_chan_queue_detach` parked its
+        # old queue under, recorded only for the assignment statement
+        # currently storing. A token set captured at that statement's
+        # pre-state still writes the member's OLD id while the group
+        # it joined already renamed it to the surrogate — cleared per
+        # `=` statement before its pre-state capture.
+        self._chan_detached: dict[str, str] = {}
+        # Chan member identities captured in the CURRENT `=`
+        # statement's pre-state token sets — `c, s = make(chan),
+        # append(s, c)` joins `c` into `s`'s group only AFTER `c`'s
+        # own slot reseated, so `_chan_queue_detach` parks the old
+        # queue even though it is not in a holder set yet.
+        self._chan_prestate_members: set[str] = set()
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -2392,6 +2405,18 @@ class _Builder:
                 ):
                     members.add(tok)
         return sorted(members)
+
+    def _chan_detached_toks(self, toks: Any) -> Any:
+        """Translate a token set captured at an assignment statement's
+        pre-state through the chan-queue detaches that ran during its
+        earlier stores — the member id it carries still writes `c`
+        where the group it joins renamed that member to `c`'s parked
+        surrogate."""
+        if not self._chan_detached:
+            return toks
+        return frozenset(
+            self._chan_detached.get(tok, tok) for tok in toks
+        )
 
     def _opaque_container_bind(
         self, rhs: Any
@@ -5752,12 +5777,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if hid != binding_id and binding_id in toks:
                 shared = True
         if not shared:
-            return
+            # `c, s = make(chan), append(s, c)` — a later slot of
+            # THIS statement joins `c` into a group from its
+            # pre-state snapshot, so the queue must park under a
+            # surrogate even though no holder names it yet.
+            if binding_id not in self._chan_prestate_members:
+                return
         self._chan_queue_seq += 1
         sur = (
             binding_id + "/chan_queue/" + str(self._chan_queue_seq)
         )
         self._opaque_container_tokens[sur] = frozenset({sur})
+        # The statement that reseated `c` may later consume a token
+        # set captured at its pre-state (`a, b = b, a` parallel
+        # stores, `s = append(s, c)` joins) — those still write `c`
+        # where they mean the OLD queue. Map it for the rest of this
+        # statement; the FIRST detach in it is the pre-state queue.
+        self._chan_detached.setdefault(binding_id, sur)
         locals_[sur] = locals_.get(binding_id, frozenset())
         if binding_id in params:
             locals_[sur] = locals_[sur] | frozenset(
@@ -8691,6 +8727,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_stmt_reads = self._stmt_reads
         saved_ptr_deps = self._ptr_deps
         saved_chan_aliases = self.chan_aliases
+        saved_chan_detached = self._chan_detached
+        saved_chan_prestate = self._chan_prestate_members
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
         saved_defer_result_deps = self._defer_result_deps
@@ -8713,6 +8751,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._stmt_reads = {}
         self._ptr_deps = {}
         self.chan_aliases = {}
+        self._chan_detached = {}
+        self._chan_prestate_members = set()
         self.field_chan_queues = {}
         self.external_chan_locals = set()
         self._defer_result_deps = frozenset()
@@ -8787,6 +8827,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._stmt_reads = saved_stmt_reads
             self._ptr_deps = saved_ptr_deps
             self.chan_aliases = saved_chan_aliases
+            self._chan_detached = saved_chan_detached
+            self._chan_prestate_members = saved_chan_prestate
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
             self._caller_visible_params = saved_caller_visible
@@ -11671,6 +11713,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # resolves against the pre-state like the dep set does:
             # the per-slot reseat hands `b` the backing `a` named
             # BEFORE `a`'s own store redirected it to `b`'s.
+            self._chan_detached.clear()
+            self._chan_prestate_members = set()
             pre_container_toks: dict[int, Any] = {}
             if len(lefts) == len(rights):
                 for pre_i in range(len(refs)):
@@ -11729,6 +11773,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if pre_bind is not None:
                             pre_container_toks[pre_i] = pre_bind
+            for pre_set in pre_container_toks.values():
+                if pre_set:
+                    self._chan_prestate_members |= {
+                        tok for tok in pre_set if isinstance(tok, str)
+                    }
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -12265,12 +12314,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # group instead — `_chan_queue_detach`
                         # redirects these aliases to its surrogate,
                         # so skip the copy-out for them.
-                        group_member = any(
-                            ref.binding_id in toks
-                            for hid, toks in (
-                                self._opaque_container_tokens.items()
+                        group_member = (
+                            any(
+                                ref.binding_id in toks
+                                for hid, toks in (
+                                    self._opaque_container_tokens.items()
+                                )
+                                if hid != ref.binding_id
                             )
-                            if hid != ref.binding_id
+                            # A pending same-statement join keeps
+                            # the OLD queue under the surrogate
+                            # `_chan_queue_detach` parks — the alias
+                            # then redirects to it there instead of
+                            # detaching to a private copy here.
+                            or ref.binding_id
+                            in self._chan_prestate_members
                         )
                         for alias_id, target in list(
                             self.chan_aliases.items()
@@ -12451,12 +12509,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self._opaque_container_tokens.get(
                                         ref.binding_id, frozenset()
                                     )
-                                    | new_toks
+                                    | self._chan_detached_toks(new_toks)
                                 )
                         elif new_toks is not None:
                             self._opaque_container_tokens[
                                 ref.binding_id
-                            ] = new_toks
+                            ] = self._chan_detached_toks(new_toks)
                         elif (
                             (
                                 self._scalar_elem_collection(bound.type)
@@ -12487,7 +12545,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # token, so the argument's whole
                                 # group unions in beside the fresh
                                 # backing.
-                                fresh_toks = set(append_toks)
+                                fresh_toks = set(
+                                    self._chan_detached_toks(
+                                        append_toks
+                                    )
+                                )
                             else:
                                 fresh_toks = {
                                     self.node_key(reseat_rhs)
@@ -12526,7 +12588,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 reseat_rhs
                             ):
                                 self._chan_group_join(
-                                    appended, ref.binding_id
+                                    self._chan_detached.get(
+                                        appended, appended
+                                    ),
+                                    ref.binding_id,
                                 )
                 if broadcast:
                     self.indirect_writes |= value

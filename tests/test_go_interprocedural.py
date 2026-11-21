@@ -20965,6 +20965,47 @@ def test_chan_elem_external_unsupported_stays_closed(
             "\treturn <-c2\n}\n",
             frozenset({0}),
         ),
+        # `c, s = make(chan), append(s, c)` — the pre-state `c` the
+        # append named is the OLD queue: the reseat parks it under
+        # a surrogate so the send on `c1`'s sibling member still
+        # reaches `<-s[1]`, and a send INTO `s[1]` lands on the old
+        # queue an earlier alias keeps.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\te := c\n"
+            "\tc, s = make(chan int64, 4), append(s, c)\n"
+            "\ts[1] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # Same parallel reseat — `<-c` reads the FRESH queue: the
+        # send through `s[1]` went to the parked old one.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tc, s = make(chan int64, 4), append(s, c)\n"
+            "\ts[1] <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset(),
+        ),
+        # And the other order stays correct — the append's member
+        # joins before `c` reseats, so `s[0]`'s sends reach `<-s[1]`
+        # and `s[1]`'s send reaches the old queue via its member.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\ts, c = append(s, c), make(chan int64, 4)\n"
+            "\tc1 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_chan_elem_append(go_types_helper, declarations, expected):
