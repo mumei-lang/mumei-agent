@@ -2026,13 +2026,30 @@ class _Builder:
         ):
             return None, None
         # `t := s` aliases the container header — `t[i].F` and
-        # `s[i].F` name the same field slot, so callers key the
-        # slot under a canonical root: the first-sorting same-typed
-        # name in the root's share group. Extracted names (`b`'s
-        # type is the member's, not the container's) and field
-        # slots themselves never qualify, so the choice is stable
-        # no matter which alias minted the slot first. A composite
-        # root's only same-typed holder is itself.
+        # `s[i].F` name the same field slot. A slot already riding
+        # this share group wins: the canonical name below shifts
+        # when the representative reseats, but the slot's tokens
+        # stay attached to the surviving aliases, so reusing the
+        # existing owner keeps extractions on one group.
+        slot_suffix = f"\x00{member.id}"
+        existing = min(
+            (
+                sid
+                for sid in self._opaque_container_sharers(
+                    root_ref.binding_id
+                )
+                if sid.endswith(slot_suffix)
+            ),
+            default=None,
+        )
+        if existing is not None:
+            return existing[: -len(slot_suffix)], member
+        # First mint under a canonical root: the first-sorting
+        # same-typed name in the root's share group. Extracted
+        # names (`b`'s type is the member's, not the container's)
+        # never qualify, so the choice is stable no matter which
+        # alias minted the slot first. A composite root's only
+        # same-typed holder is itself.
         root_binding = self.bindings.get(root_ref.binding_id)
         root_type = getattr(root_binding, "type", None)
         canonical = min(
@@ -2363,12 +2380,30 @@ class _Builder:
             # the group so `a[i] = x` lands on the slot `s.F[j]`
             # reads. Different fields mint different token sets but
             # all reach `s`, matching the composite's own conflation.
-            self._opaque_container_tokens[root_id] = (
-                self._opaque_container_tokens.get(
-                    root_id, frozenset()
-                )
-                | toks
+            # The slot rides every CONTAINER sharer's set — not only
+            # the canonical name it was minted under — so that name
+            # reseating away leaves the slot attached to the
+            # surviving aliases' group. Extracted member names are
+            # sharers too but never gain tokens: their set IS their
+            # backing's identity.
+            root_t = getattr(
+                self.bindings.get(root_id), "type", None
             )
+            for holder_id in self._opaque_container_sharers(root_id):
+                if (
+                    "\x00" in holder_id
+                    or getattr(
+                        self.bindings.get(holder_id), "type", None
+                    )
+                    != root_t
+                ):
+                    continue
+                self._opaque_container_tokens[holder_id] = (
+                    self._opaque_container_tokens.get(
+                        holder_id, frozenset()
+                    )
+                    | toks
+                )
             return toks
         return None
 
@@ -10663,6 +10698,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             reseat_roots: set[str] = set()
             for fkey, root_id, old_toks, new_toks in reseat_plan:
                 reseat_roots.add(root_id)
+                # Only container-typed sharers gain the new
+                # backing's tokens — an extracted member name's set
+                # is its backing's identity and stays put.
+                root_t = getattr(
+                    self.bindings.get(root_id), "type", None
+                )
                 if conditional or self._may_skip > 0:
                     # `if c { s.F = v }` — the untaken path keeps
                     # `s.F` aimed at its old backing, so the reseat
@@ -10675,12 +10716,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             | new_toks
                         )
-                        self._opaque_container_tokens[root_id] = (
-                            self._opaque_container_tokens.get(
-                                root_id, frozenset()
-                            )
-                            | new_toks
-                        )
+                        for holder_id in (
+                            self._opaque_container_sharers(root_id)
+                        ):
+                            if (
+                                "\x00" not in holder_id
+                                and getattr(
+                                    self.bindings.get(holder_id),
+                                    "type",
+                                    None,
+                                )
+                                == root_t
+                            ):
+                                self._opaque_container_tokens[
+                                    holder_id
+                                ] = (
+                                    self._opaque_container_tokens.get(
+                                        holder_id, frozenset()
+                                    )
+                                    | new_toks
+                                )
                     continue
                 if new_toks is None:
                     # `s.F = nil` or an untracked RHS — the field's
@@ -10689,6 +10744,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._opaque_container_tokens.pop(fkey, None)
                 else:
                     self._opaque_container_tokens[fkey] = new_toks
+                    for holder_id in (
+                        self._opaque_container_sharers(root_id)
+                    ):
+                        if (
+                            "\x00" not in holder_id
+                            and getattr(
+                                self.bindings.get(holder_id),
+                                "type",
+                                None,
+                            )
+                            == root_t
+                        ):
+                            self._opaque_container_tokens[
+                                holder_id
+                            ] = (
+                                self._opaque_container_tokens.get(
+                                    holder_id, frozenset()
+                                )
+                                | new_toks
+                            )
             if not (conditional or self._may_skip > 0):
                 # The root's token set is exactly the union of its
                 # live field keys — a subtract-per-field update
