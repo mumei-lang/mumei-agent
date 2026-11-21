@@ -1,9 +1,23 @@
-"""Shared data model and strict reader for lexical binding reports."""
+"""Shared data model and strict reader for lexical binding reports.
+
+Call target rules: ``direct_local`` requires a body-bearing function;
+``opaque_generic``, ``opaque_async``, ``opaque_bodyless``,
+``opaque_virtual``, ``opaque_import``, ``opaque_value``,
+``opaque_call_options``, ``opaque_new``, ``constructor``,
+``error_constructor``, ``emit``, ``modifier``, and
+``base_constructor`` require a binding target. ``unresolved``,
+``opaque_overload``, ``opaque_path``, ``opaque_method``,
+``opaque_expression``, ``opaque_member``, ``conversion``, and
+``builtin`` require an empty target. ``opaque_new`` targets a contract,
+``constructor`` a struct, ``error_constructor`` an error, ``emit`` an
+event, ``modifier`` a modifier, and ``base_constructor`` a contract.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +39,17 @@ CALL_KINDS = frozenset(
         "opaque_path",
         "unresolved",
         "opaque_expression",
+        "opaque_overload",
+        "opaque_virtual",
+        "conversion",
+        "error_constructor",
+        "opaque_new",
+        "opaque_call_options",
+        "opaque_member",
+        "builtin",
+        "emit",
+        "modifier",
+        "base_constructor",
     }
 )
 BINDING_KINDS = frozenset(
@@ -44,8 +69,51 @@ BINDING_KINDS = frozenset(
         "self_parameter",
         "associated_function",
         "associated_const",
+        "contract",
+        "interface",
+        "library",
+        "state_variable",
+        "modifier",
+        "event",
+        "error",
+        "return_parameter",
+        "constructor",
+        "user_type",
     }
 )
+FUNCTION_BINDING_KINDS = frozenset(
+    {"function", "associated_function", "modifier", "constructor"}
+)
+FUNCTION_PARAMETER_KINDS = frozenset(
+    {"parameter", "self_parameter", "return_parameter"}
+)
+CALL_KINDS_WITH_TARGET = frozenset(
+    {
+        "direct_local",
+        "opaque_generic",
+        "opaque_async",
+        "opaque_bodyless",
+        "opaque_virtual",
+        "constructor",
+        "opaque_value",
+        "opaque_import",
+        "opaque_call_options",
+        "opaque_new",
+        "error_constructor",
+        "emit",
+        "modifier",
+        "base_constructor",
+    }
+)
+CALL_TARGET_BINDING_KINDS = {
+    "constructor": frozenset({"struct"}),
+    "opaque_import": frozenset({"import"}),
+    "opaque_new": frozenset({"contract"}),
+    "error_constructor": frozenset({"error"}),
+    "emit": frozenset({"event"}),
+    "modifier": frozenset({"modifier"}),
+    "base_constructor": frozenset({"contract"}),
+}
 NON_ASSIGNABLE_WRITE_KINDS = frozenset(
     {
         "function",
@@ -59,6 +127,13 @@ NON_ASSIGNABLE_WRITE_KINDS = frozenset(
         "import",
         "associated_function",
         "associated_const",
+        "contract",
+        "interface",
+        "library",
+        "modifier",
+        "event",
+        "error",
+        "user_type",
     }
 )
 UNRESOLVED_REASONS = frozenset(
@@ -69,6 +144,10 @@ UNRESOLVED_REASONS = frozenset(
         "module_boundary",
         "qualified_path",
         "unknown_name",
+        "builtin",
+        "ambiguous_overload",
+        "private_base_member",
+        "unresolved_base",
     }
 )
 GAP_REASONS = frozenset(
@@ -80,6 +159,8 @@ GAP_REASONS = frozenset(
         "pattern_name_ambiguous",
         "or_pattern_mismatch",
         "conditional_compilation",
+        "unresolved_base",
+        "inline_assembly",
     }
 )
 
@@ -364,6 +445,13 @@ def _type_fact(value: Any) -> TypeFact:
         _fail(width == 1 and signed_value is None)
     elif kind == "char":
         _fail(width == 32 and signed_value is None)
+    elif kind == "address":
+        _fail(width == 160 and signed_value is False)
+        _fail(name in {"address", "address payable"})
+    elif kind == "fixed_bytes":
+        _fail(width in range(8, 257, 8) and signed_value is False)
+        match = re.fullmatch(r"bytes([1-9]|[12][0-9]|3[0-2])", name)
+        _fail(match is not None and int(match.group(1)) * 8 == width)
     return TypeFact(kind, name, width, signed_value, type_id_value)
 
 
@@ -510,7 +598,7 @@ def load_lexical_report(
             identifier = _string(record["binding_id"])
             _fail(
                 identifier in ids
-                and binding_kinds[identifier] in {"function", "associated_function"}
+                and binding_kinds[identifier] in FUNCTION_BINDING_KINDS
                 and identifier not in function_ids
             )
             function_ids.add(identifier)
@@ -522,7 +610,7 @@ def load_lexical_report(
             _fail(
                 all(
                     value in ids
-                    and binding_kinds[value] in {"parameter", "self_parameter"}
+                    and binding_kinds[value] in FUNCTION_PARAMETER_KINDS
                     for value in parameters
                 )
             )
@@ -563,17 +651,13 @@ def load_lexical_report(
             if kind == "direct_local":
                 target_function = functions_by_id.get(target_id)
                 _fail(target_function is not None and target_function.body is not None)
-            elif kind in {
-                "opaque_generic",
-                "opaque_async",
-                "opaque_bodyless",
-                "opaque_import",
-                "opaque_value",
-                "constructor",
-            }:
+            elif kind in CALL_KINDS_WITH_TARGET:
                 _fail(bool(target_id))
             else:
                 _fail(not target_id)
+            target_kinds = CALL_TARGET_BINDING_KINDS.get(kind)
+            if target_kinds is not None:
+                _fail(binding_kinds[target_id] in target_kinds)
             calls.append(Call(span, arguments, owner, target_id, kind))
 
         gaps: list[Gap] = []
