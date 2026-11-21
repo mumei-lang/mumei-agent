@@ -17599,6 +17599,57 @@ def test_chan_chan_range_assignment_preserves_external_queue_state(
     assert {0, 2} <= param_range.return_dependencies
 
 
+def test_chan_chan_local_range_assignment_keeps_externality(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "var GCC chan chan int64\n"
+            "func F_param(p chan chan int64, c chan int64) {\n"
+            "\tp <- c\n"
+            "}\n"
+            "func F_param_range(p chan chan int64, c chan int64) {\n"
+            "\ts := []chan chan int64{}\n"
+            "\tfor _, p = range s {}\n"
+            "\tp <- c\n"
+            "}\n"
+            "func F_package(c chan int64) {\n"
+            "\tGCC <- c\n"
+            "}\n"
+            "func F_package_range(c chan int64) {\n"
+            "\ts := []chan chan int64{}\n"
+            "\tfor _, GCC = range s {}\n"
+            "\tGCC <- c\n"
+            "}\n"
+            "func F_alias(p chan chan int64, c chan int64) {\n"
+            "\tq := p\n"
+            "\tq <- c\n"
+            "}\n"
+            "func F_alias_range(p chan chan int64, c chan int64) {\n"
+            "\tq := p\n"
+            "\ts := []chan chan int64{}\n"
+            "\tfor _, q = range s {}\n"
+            "\tq <- c\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    for baseline_name, range_name in [
+        ("F_param", "F_param_range"),
+        ("F_package", "F_package_range"),
+        ("F_alias", "F_alias_range"),
+    ]:
+        baseline = named_package(
+            files, snapshot, summaries, baseline_name
+        )
+        ranged = named_package(files, snapshot, summaries, range_name)
+        assert baseline.available, baseline.gaps
+        assert ranged.available, ranged.gaps
+        assert baseline.effects == "unknown"
+        assert ranged.effects == baseline.effects
+
+
 @pytest.mark.parametrize("copy_kind", ["short_declaration", "assignment"])
 @pytest.mark.parametrize("send_through_copy", [False, True])
 @pytest.mark.parametrize(

@@ -5477,14 +5477,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._ptr_deps[binding.id] = deps
             else:
                 ref = self.references.get(self.node_key(name))
+                rb = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None
+                    else None
+                )
+                package_channel = (
+                    rb is not None
+                    and rb.kind == "variable"
+                    and self._package_level(rb)
+                    and self._chan_chan_fact(rb.type)
+                )
                 if ref is None or (
                     ref.binding_id not in scope
                     and ref.binding_id not in params
+                    and not package_channel
                 ):
                     raise _Unsupported(
                         "binding_unavailable", _span(name)
                     )
-                rb = self.bindings.get(ref.binding_id)
                 if (
                     external_chan_chan_origins is not None
                     and pos == 1
@@ -5517,6 +5528,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and self._chan_chan_fact(rb.type)
                 ):
                     root_id = self._chan_root(ref.binding_id)
+                    external_queue = (
+                        ref.binding_id in params
+                        or ref.binding_id in self.external_chan_locals
+                        or root_id in self.external_chan_locals
+                        or ref.binding_id
+                        in self._external_chan_group_tokens
+                        or root_id in self._external_chan_group_tokens
+                        or bool(
+                            self.external_chan_selectors.get(
+                                ref.binding_id
+                            )
+                        )
+                        or bool(
+                            self.external_chan_selectors.get(root_id)
+                        )
+                        or bool(
+                            self._chan_chan_param_origins.get(
+                                ref.binding_id
+                            )
+                        )
+                        or bool(
+                            self._chan_chan_param_origins.get(root_id)
+                        )
+                        or bool(
+                            self._chan_group_external_tokens(root_id)
+                        )
+                        or self._external_chan_chan_source(
+                            name, params
+                        )
+                        is not None
+                    )
                     self._store(
                         scope,
                         params,
@@ -5524,8 +5566,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         deps,
                         True,
                     )
-                    self._local_chan_chan_init(root_id)
-                    self._chan_group_join(root_id, chan_group)
+                    if external_queue:
+                        self._local_chan_chan_external_reseat(
+                            root_id, name, params, scope, True
+                        )
+                        self._join_chan_chan_container_members(
+                            chan_group,
+                            {root_id},
+                            params,
+                            scope,
+                            True,
+                        )
+                    else:
+                        self._local_chan_chan_init(root_id)
+                        self._chan_group_join(root_id, chan_group)
                     continue
                 if (
                     chan_group is not None
