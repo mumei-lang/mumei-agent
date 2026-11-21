@@ -3523,6 +3523,66 @@ def verify_plan(
 
 
 @mcp.tool()
+def evidence_check_schedule(
+    core_path: str,
+    schedule_path: str,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Check a saved attempt schedule's static Core representation.
+
+    Feeds the declared schedule bytes to `evidence check-schedule
+    --stdin --json` as one declared attempt — the same wiring as the
+    `evidence-check-schedule` CLI route. Selection requires Core's exact
+    representation and consistency diagnostic; a `selected` schedule
+    outcome names only a manifest-declared-success exit, never Evidence
+    acceptance or grade promotion. Mid-run drift reports `inputs_changed`
+    with no claimed outcome.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        schedule_path: Absolute path to the saved
+            `mumei.attempt-schedule/v1` document (at most 64 KiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds
+            (at most 60000).
+
+    Returns:
+        JSON with `report` — the
+        `mumei.evidence-check-schedule-report/v1` document — on success,
+        or `error` on a declared failure.
+    """
+    try:
+        from agent.evidence_check_schedule import run_check_schedule
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("schedule_path", schedule_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        schedule=schedule_path,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_check_schedule(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, schedule_path]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def evidence_check(
     core_path: str,
     evidence_path: str,

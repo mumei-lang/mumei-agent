@@ -6787,6 +6787,22 @@ C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
 remains open.
 
+### C11 Core attempt-schedule representation check
+
+The `evidence-check-schedule` CLI route and `evidence_check_schedule`
+MCP tool consume Core's `evidence check-schedule --stdin --json`
+diagnostic over a declared `mumei.attempt-schedule/v1` document. The
+route selects only the exact representation-and-consistency diagnostic
+and reports its schedule outcome and attempt count. A `selected` outcome
+means only the schedule's manifest-declared-success exit; adapter
+execution, reported-outcome truth, Evidence acceptance, and grade
+promotion remain unperformed. The declared schedule bytes and Core
+executable are fingerprinted and rechecked after the attempt; drift
+suppresses selection.
+
+C11 stays partial; this route adds no Evidence acceptance or grade
+promotion.
+
 ### C11 audit scheduled-attempt evidence check
 
 `audit --schedule-core PATH` (with `--enable-scheduled-verification`)

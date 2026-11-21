@@ -57,6 +57,7 @@ _SUBCOMMANDS = {
     "sol-summaries-attempt",
     "sol-summaries-reuse-attempt",
     "evidence-check",
+    "evidence-check-schedule",
     "evidence-check-accept",
     "evidence-check-list",
     "evidence-check-consistency",
@@ -688,6 +689,24 @@ def main() -> None:
         evidence_check_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_check_main(args))
+    elif command == "evidence-check-schedule":
+        import argparse
+        from agent.evidence_check_schedule import (
+            build_check_schedule_parser as evidence_check_schedule_build_parser,
+            main_check_schedule as evidence_check_schedule_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check-schedule",
+            description=(
+                "Run a declared Core attempt-schedule representation "
+                "check as one attempt and emit the reconciled lineage "
+                "plus the declared schedule outcome."
+            ),
+        )
+        evidence_check_schedule_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_check_schedule_main(args))
     elif command == "evidence-check-list":
         import argparse
         from agent.evidence_check_list import (
