@@ -5876,6 +5876,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
             elif entry[0] == "local_chan_group":
                 _, binding, chan_group, old_root = entry
+                origins = self._chan_chan_param_origin(recv, params)
+                strong_update = not (
+                    conditional
+                    or preserve_chan_alias
+                    or self._may_skip > 0
+                )
+                if (
+                    strong_update
+                    and self._chan_chan_param_origins.get(
+                        binding.id, frozenset()
+                    )
+                    != origins
+                ):
+                    self._detach_chan_aliases(
+                        binding.id, locals_, params
+                    )
                 if old_root is not None:
                     self._chan_group_join(old_root, chan_group)
                     self.chan_aliases[binding.id] = old_root
@@ -5888,8 +5904,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._chan_group_join(binding.id, chan_group)
                 self._set_chan_chan_param_origins(
                     binding.id,
-                    self._chan_chan_param_origin(recv, params),
-                    conditional or preserve_chan_alias or self._may_skip > 0,
+                    origins,
+                    not strong_update,
                     locals_,
                 )
             else:
@@ -6004,6 +6020,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         descriptor). Park the group's membership under a surrogate
         queue token carrying the old contents: `<-s[i]` keeps the
         pre-reseat sends while `<-c` reads only the fresh queue."""
+        if binding_id in self._chan_detached:
+            return
         shared = False
         for hid, toks in self._opaque_container_tokens.items():
             if hid != binding_id and binding_id in toks:
@@ -6026,7 +6044,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # where they mean the OLD queue. Map it for the rest of this
         # statement; the FIRST detach in it is the pre-state queue.
         self._chan_detached.setdefault(binding_id, sur)
-        locals_[sur] = locals_.get(binding_id, frozenset())
+        old_origins = self._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        locals_[sur] = (
+            locals_.get(binding_id, frozenset()) | old_origins
+        )
+        if old_origins:
+            self._chan_chan_param_origins[sur] = old_origins
         if binding_id in params:
             locals_[sur] = locals_[sur] | frozenset(
                 {params[binding_id]}
@@ -6079,6 +6104,64 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._opaque_container_tokens[binding_id] = frozenset(
             {binding_id}
         )
+
+    def _detach_chan_aliases(
+        self, binding_id: str, locals_: dict, params: dict
+    ) -> None:
+        aliases = [
+            alias_id
+            for alias_id, target in self.chan_aliases.items()
+            if target == binding_id
+        ]
+        if not aliases:
+            return
+        old_queue = locals_.get(binding_id)
+        if old_queue is None:
+            old_queue = (
+                frozenset({params[binding_id]})
+                if binding_id in params
+                else frozenset()
+            )
+        old_origins = self._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        old_queue |= old_origins
+        external = (
+            binding_id in self.external_chan_locals
+            or binding_id in params
+        )
+        selectors = self.external_chan_selectors.get(
+            binding_id, frozenset()
+        )
+        for alias_id in aliases:
+            self.chan_aliases.pop(alias_id, None)
+            alias_slot = locals_.get(alias_id)
+            if alias_slot is None:
+                alias_slot = (
+                    frozenset({params[alias_id]})
+                    if alias_id in params
+                    else frozenset()
+                )
+            locals_[alias_id] = alias_slot | old_queue
+            alias_origins = (
+                self._chan_chan_param_origins.get(
+                    alias_id, frozenset()
+                )
+                | old_origins
+            )
+            if alias_origins:
+                self._chan_chan_param_origins[alias_id] = (
+                    alias_origins
+                )
+            if external:
+                self.external_chan_locals.add(alias_id)
+                if selectors:
+                    self.external_chan_selectors[alias_id] = (
+                        self.external_chan_selectors.get(
+                            alias_id, frozenset()
+                        )
+                        | selectors
+                    )
 
     def _chan_alias_target(
         self, node: Any, locals_: dict, params: dict
@@ -10046,9 +10129,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else rights[0]
                 )
                 if self._scalar_chan_binding(binding.id):
+                    chan_origins = self._chan_chan_param_origin(
+                        chan_rhs, params
+                    )
+                    previous_origins = self._chan_chan_param_origins.get(
+                        binding.id, frozenset()
+                    )
+                    if (
+                        not (conditional or self._may_skip > 0)
+                        and previous_origins != chan_origins
+                    ):
+                        self._detach_chan_aliases(
+                            binding.id, locals_, params
+                        )
                     self._set_chan_chan_param_origins(
                         binding.id,
-                        self._chan_chan_param_origin(chan_rhs, params),
+                        chan_origins,
                         conditional or self._may_skip > 0,
                         locals_,
                     )
@@ -12537,6 +12633,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_prestate_members |= {
                         tok for tok in pre_set if isinstance(tok, str)
                     }
+            lhs_binding_ids = {
+                getattr(ref, "binding_id", None) for ref in refs
+            }
+            for i, alias_target in enumerate(chan_alias_targets):
+                source_id = (
+                    alias_target.id if alias_target is not None else None
+                )
+                target_id = getattr(refs[i], "binding_id", None)
+                if (
+                    source_id is not None
+                    and source_id in lhs_binding_ids
+                    and source_id != target_id
+                ):
+                    self._chan_prestate_members.add(source_id)
             if not compound:
                 chan_origin_updates: dict[str, frozenset[int]] = {}
                 for i, ref in enumerate(refs):
@@ -12555,6 +12665,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._chan_chan_param_origin(rhs_node, params)
                     )
                 for binding_id, origins in chan_origin_updates.items():
+                    previous = self._chan_chan_param_origins.get(
+                        binding_id, frozenset()
+                    )
+                    if (
+                        not (conditional or self._may_skip > 0)
+                        and previous != origins
+                    ):
+                        self._chan_queue_detach(
+                            binding_id, locals_, params
+                        )
+                        self._detach_chan_aliases(
+                            binding_id, locals_, params
+                        )
                     self._set_chan_chan_param_origins(
                         binding_id,
                         origins,
@@ -13109,7 +13232,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             continue
                     if chan_alias is not None:
-                        self.chan_aliases[ref.binding_id] = chan_alias.id
+                        self.chan_aliases[ref.binding_id] = (
+                            self._chan_detached.get(
+                                chan_alias.id, chan_alias.id
+                            )
+                        )
                         # A reseat redirects only the name — the
                         # `_store` below would overwrite
                         # `locals_[ref.binding_id]`, but that slot
@@ -13126,7 +13253,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         passthrough = call_result_targets[i]
                         if passthrough is not None:
                             self.chan_aliases[ref.binding_id] = (
-                                passthrough.id
+                                self._chan_detached.get(
+                                    passthrough.id, passthrough.id
+                                )
                             )
                         else:
                             self.chan_aliases.pop(

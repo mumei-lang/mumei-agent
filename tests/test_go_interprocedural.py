@@ -16627,6 +16627,38 @@ def test_chan_chan_param_origins_follow_scalar_channel_reassignments(
     assert result.return_dependencies == expected
 
 
+@pytest.mark.parametrize(
+    "callee",
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\treturn <-e\n}\n"
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := d\n\td = <-cc2\n"
+            "\treturn <-e\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := d\n"
+            "\td, e = make(chan int64, 1), d\n"
+            "\treturn <-e\n}\n"
+        ),
+    ],
+)
+def test_chan_chan_param_origins_survive_reseating_an_alias(
+    go_types_helper, callee
+):
+    files = {"a.go": "package p\n" + callee}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "G")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
     # `cc <- q` inside `Publish` hands `q`'s queue to the outer
     # queue's domain — the caller's `chan` argument roots promote
