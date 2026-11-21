@@ -16406,6 +16406,49 @@ def test_chan_chan_call_result_receive_carries_queue_deps(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+@pytest.mark.parametrize(
+    "callee,caller",
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\treturn <-d\n}\n",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n\tc <- x\n"
+            "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+            "\treturn G(cc)\n}\n",
+        ),
+        (
+            "func G(cc chan chan int64) chan int64 {\n"
+            "\treturn <-cc\n}\n",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n\tc <- x\n"
+            "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+            "\td := G(cc)\n\treturn <-d\n}\n",
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\tfor d := range cc { return <-d }\n\treturn 0\n}\n",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n\tc <- x\n"
+            "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+            "\treturn G(cc)\n}\n",
+        ),
+    ],
+)
+def test_local_chan_chan_call_maps_received_queue_dependencies(
+    go_types_helper, callee, caller
+):
+    files = {"a.go": "package p\n" + callee + caller}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    callee_summary = named_package(files, snapshot, summaries, "G")
+    result = named_package(files, snapshot, summaries, "F")
+    assert callee_summary.available and callee_summary.effects == "unknown"
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
     # `cc <- q` inside `Publish` hands `q`'s queue to the outer
     # queue's domain — the caller's `chan` argument roots promote
