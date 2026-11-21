@@ -207,10 +207,10 @@ See `.env.example` for configuration details.
 | `extract-spec` | Extract forge spec from existing code or natural-language input | `uv run mumei-agent extract-spec --code-file src/foo.py` |
 | `harvest-tests` | Deterministically extract example, relation, property, and expected-failure observations from Python and Rust tests | `uv run mumei-agent harvest-tests tests/ --target add` |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
-| `cross-validate` | Cross-validate spec↔code consistency across multiple files | `uv run mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
+| `cross-validate` | Cross-validate spec↔code consistency across multiple files | `uv run mumei-agent cross-validate spec.mm src/foo.py --language python` |
 | `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
-| `propose` | Generate forge task specs from `analyze-std-gaps` output | `uv run mumei-agent propose --auto --mumei-repo ../mumei` |
-| `analyze-std-gaps` | Identify gaps in std/ coverage | `uv run mumei-agent analyze-std-gaps --mumei-repo ../mumei` |
+| `propose` | Generate forge task specs from `analyze-std-gaps` output | `uv run mumei-agent propose --gaps-json gaps.json` (from `analyze-std-gaps --output-json gaps.json`; `--auto` needs the mumei `mcp_server` module on `PYTHONPATH`) |
+| `analyze-std-gaps` | Identify gaps in std/ coverage | `uv run mumei-agent analyze-std-gaps --std-dir ../mumei/std` |
 | `health` | Show agent health status (LLM provider, mumei binary, etc.) | `uv run mumei-agent health` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `uv run mumei-agent mcp-server` |
 
