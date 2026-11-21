@@ -682,6 +682,60 @@ def test_generic_const_references_are_emitted_once(source):
     assert n_references[0].kind == "read"
 
 
+def test_higher_ranked_lifetimes_are_scoped_to_their_binders():
+    source = """
+trait Bound {}
+fn outer<'a, T>(parameter: &'a u8)
+where
+    T: for<'b> Bound<&'b T>,
+    for<'a> &'a u8: Bound,
+{
+    let _: for<'c> fn(&'c u8) -> &'c u8;
+    let _: &'a u8;
+    let _: dyn for<'d> Bound<&'d u8>;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    a_bindings = _bindings(report, "'a", "generic_parameter")
+    outer_a = next(
+        binding
+        for binding in a_bindings
+        if binding.scope is not None
+        and binding.scope.start < source.index("where")
+    )
+    bound_a = next(binding for binding in a_bindings if binding.id != outer_a.id)
+
+    def lifetime_reference(token: str, after: int = 0):
+        start = source.index(token, after) + token.index("'")
+        return next(
+            reference
+            for reference in report.references
+            if reference.span.start == start
+        )
+
+    assert lifetime_reference("&'a u8").binding_id == outer_a.id
+    shadowed_a = lifetime_reference("&'a u8", source.index("for<'a>"))
+    assert shadowed_a.binding_id == bound_a.id
+    assert (
+        lifetime_reference("&'a u8", source.index("let _: &'a")).binding_id
+        == outer_a.id
+    )
+
+    for lifetime in ("b", "c", "d"):
+        name = f"'{lifetime}"
+        binding = _bindings(report, name, "generic_parameter")[0]
+        reference = lifetime_reference(f"&{name} ")
+        assert reference.binding_id == binding.id
+        assert binding.scope is not None
+        assert binding.scope.start <= reference.span.start < binding.scope.end
+    assert not any(
+        item.reason == "item_boundary"
+        and raw[item.span.start : item.span.end].startswith(b"'")
+        for item in report.unresolved
+    )
+
+
 def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     source = "type T=u8; fn generic<T>(x:T){} fn outside(x:T){}"
     report = build_rust_bindings(source, pointer_width=64)
@@ -723,6 +777,47 @@ fn outer<T, const N: usize>() {
         and unresolved.span.start > source.index("fn inner")
     ]
     assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
+
+
+def test_nested_impl_and_trait_methods_use_their_own_generics():
+    source = """
+fn outer<T>() {
+    struct Local;
+    impl<U> Bound<U> for Local {
+        fn method(&self, value: U) -> U {
+            fn nested() { let _: U; }
+            let _: T;
+            value
+        }
+    }
+    trait Tr<V> {
+        fn bodyless(&self, value: V);
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_generic = _bindings(report, "U", "generic_parameter")[0]
+    trait_generic = _bindings(report, "V", "generic_parameter")[0]
+    raw = source.encode()
+    impl_references = [
+        reference
+        for reference in report.references
+        if raw[reference.span.start : reference.span.end] == b"U"
+    ]
+    trait_references = [
+        reference
+        for reference in report.references
+        if raw[reference.span.start : reference.span.end] == b"V"
+    ]
+    assert impl_references
+    assert all(reference.binding_id == impl_generic.id for reference in impl_references)
+    assert trait_references
+    assert all(reference.binding_id == trait_generic.id for reference in trait_references)
+    assert {
+        (item.name, item.reason)
+        for item in report.unresolved
+        if item.reason == "item_boundary"
+    } == {("T", "item_boundary"), ("U", "item_boundary")}
 
 
 def test_where_clauses_record_generic_parameters_without_binding_other_names():
@@ -860,6 +955,59 @@ fn local_is_not_a_const_argument() {
         reference.span.start == local_position for reference in report.references
     )
     assert raw[unknown.span.start : unknown.span.end] == b"Unknown"
+
+
+def test_generic_argument_fallback_respects_glob_barriers_and_prelude_types():
+    source = """
+const Vec: usize = 1;
+const Hidden: usize = 2;
+struct Generic<T>;
+fn prelude_type() { let _: Generic<Vec>; }
+fn glob_barrier() { use external::*; let _: Generic<Hidden>; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    vec_start = source.index("Generic<Vec>") + len("Generic<")
+    hidden_start = source.index("Generic<Hidden>") + len("Generic<")
+    assert not any(
+        reference.span.start == vec_start for reference in report.references
+    )
+    assert any(
+        item.span.start == vec_start
+        and item.name == "Vec"
+        and item.reason == "prelude_name"
+        for item in report.unresolved
+    )
+    assert not any(
+        reference.span.start == hidden_start for reference in report.references
+    )
+    assert any(
+        item.span.start == hidden_start
+        and item.name == "Hidden"
+        and item.reason == "glob_import"
+        for item in report.unresolved
+    )
+    assert raw[vec_start : vec_start + len("Vec")] == b"Vec"
+
+
+def test_bodyless_trait_const_generic_facts_finalize_after_item_predeclaration():
+    source = """
+trait Tr {
+    fn good<const N: Width>();
+    fn unknown<const M: Missing>();
+}
+type Width = u8;
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    width = _bindings(report, "Width", "type_alias")[0]
+    good = _bindings(report, "N", "generic_parameter")[0]
+    unknown = _bindings(report, "M", "generic_parameter")[0]
+    assert (good.type.kind, good.type.bit_width, good.type.type_id) == (
+        "int",
+        8,
+        width.id,
+    )
+    assert unknown.type.kind == "unknown"
 
 
 def test_mutability_does_not_spread_into_nested_rust_patterns():
