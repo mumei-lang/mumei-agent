@@ -4144,6 +4144,15 @@ def native_object_accept(
     entry-wrapper behavior, CRT, loader/libc, ABI/runtime semantics, optimizer
     semantics, producer authenticity and historical execution remain outside
     the claim.
+    Core #1233's scalar-f64 function check is consumed only when listed in
+    `checks_performed`; it is limited to Core's f64 profile with XMM
+    argument/result registers assumed, not validated. MXCSR RNE, masked
+    exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain
+    unestablished and not performed; the agent never discharges the
+    external-callee, MXCSR, or NaN-payload assumption markers even if a
+    descriptor lists them as performed. Direct calls with f64 arguments fail
+    closed in Core. This is not an IEEE-754 conformance, ABI, runtime, or full
+    object-TV claim.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -4766,6 +4775,14 @@ def native_machine_tv_recheck(
     libc behavior is covered; this is not an ABI-correctness, runtime or full
     object-TV claim, and `object_translation_correspondence` stays
     unperformed. The report is not a recovery performer.
+    Core's `machine_code_f64_scalar_function_tv` is consumed only when listed
+    in `checks_performed` and is limited to Core's f64 profile with XMM
+    argument/result registers assumed, not validated. MXCSR RNE, masked
+    exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain
+    unestablished and not performed; the agent never discharges the MXCSR or
+    NaN-payload markers even if a descriptor lists them as performed. Direct
+    calls with f64 arguments fail closed in Core. This makes no IEEE-754
+    conformance, ABI, runtime or full object-TV claim.
     `machine_tv_recheck` is claimed only for uniquely-mapped exit codes
     (0 `checked`, 3 `inconclusive`); mid-run drift reports `inputs_changed`
     with no claimed outcome. Every outcome echoes `expected_build_id`.

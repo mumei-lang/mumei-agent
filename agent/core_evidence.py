@@ -1569,6 +1569,8 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
 # a separate runtime-observation check. object_translation_correspondence is
 # the full object-TV check; none is a recovery performer or makes a linker,
 # loader, ABI, or runtime claim.
+# Core's scalar-f64 TV check is limited to its f64 profile with XMM registers
+# assumed; MXCSR control state and NaN payload bits are not established.
 OBJECT_CHECK_VOCABULARY = frozenset(
     {
         "object_call_edge_correspondence",
@@ -1584,6 +1586,17 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_callee_saved_register_preservation",
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
         "machine_code_entry_wrapper_tv",
+        "machine_code_f64_scalar_function_tv",
+        "machine_code_tv_mxcsr_control_state",
+        "machine_code_tv_nan_payload_bits",
+    }
+)
+
+MACHINE_TV_ASSUMPTION_MARKERS = frozenset(
+    {
+        "machine_code_callee_saved_preservation_assumed_for_external_callees",
+        "machine_code_tv_mxcsr_control_state",
+        "machine_code_tv_nan_payload_bits",
     }
 )
 

@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.core_evidence import (
+    MACHINE_TV_ASSUMPTION_MARKERS,
+    OBJECT_CHECK_VOCABULARY,
+)
 from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
 from agent.native_machine_tv_recheck import (
     CHECK_VOCABULARY,
@@ -62,11 +65,21 @@ RECORD = {
     "files": {key: {} for key in FILE_MEMBERS},
 }
 BASE_DISCHARGED = frozenset({"artifact_semantics", "claim_truth"})
-OBJECT_MACHINE_CHECKS = OBJECT_CHECK_VOCABULARY - {
-    "object_translation_correspondence",
-    "machine_code_callee_saved_preservation_assumed_for_external_callees",
-}
+OBJECT_MACHINE_CHECKS = MACHINE_TV_OBJECT_CHECKS
 ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
+F64_REGISTER_CONVENTION = (
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_"
+    "xmm0_7_result_rax_or_xmm0"
+)
+F64_SOURCE = (
+    "atom fadd(x: f64, y: f64) -> f64 requires: true; ensures: true; "
+    "body: { x * y + x };\n"
+    "atom feq(x: f64, y: f64) -> bool requires: true; "
+    "ensures: result == (x == y); body: { x == y };\n"
+    "atom mixed(x: i64, y: f64) -> f64 requires: true; ensures: true; "
+    "body: { y };\n"
+    "atom main() -> i64 requires: true; ensures: true; body: { 0 };\n"
+)
 EXPECTED_CHECKED = BASE_DISCHARGED | (
     set(DESCRIPTOR["checks_performed"]) & OBJECT_MACHINE_CHECKS
 )
@@ -491,12 +504,19 @@ def test_entry_wrapper_check_requires_performed_descriptor_list(
     assert "object_entry_wrapper_semantics" not in report["checks_not_performed"]
 
 
+def test_machine_tv_assumption_marker_set_is_exact():
+    assert MACHINE_TV_ASSUMPTION_MARKERS == frozenset(
+        {
+            "machine_code_callee_saved_preservation_assumed_for_external_callees",
+            "machine_code_tv_mxcsr_control_state",
+            "machine_code_tv_nan_payload_bits",
+        }
+    )
+
+
 @pytest.mark.parametrize(
     "check",
-    [
-        "machine_code_callee_saved_register_preservation",
-        "machine_code_callee_saved_preservation_assumed_for_external_callees",
-    ],
+    ["machine_code_callee_saved_register_preservation"],
 )
 def test_callee_saved_check_is_discharged_only_when_listed(
     tmp_path, capsys, check
@@ -546,6 +566,66 @@ def test_callee_saved_check_stays_unperformed_when_absent(
     report = json.loads(out)
     assert check in report["checks_not_performed"]
     assert check not in report["discharged_checks"]
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_discharged"),
+    [("performed", True), ("not_performed", False), ("absent", False)],
+)
+def test_f64_check_requires_performed_descriptor_list(
+    tmp_path, capsys, placement, expected_discharged
+):
+    check = "machine_code_f64_scalar_function_tv"
+    performed = [
+        name for name in DESCRIPTOR["checks_performed"] if name != check
+    ]
+    not_performed = [
+        name for name in DESCRIPTOR["checks_not_performed"] if name != check
+    ]
+    if placement == "performed":
+        performed.append(check)
+    elif placement == "not_performed":
+        not_performed.append(check)
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": performed,
+        "checks_not_performed": not_performed,
+        "register_convention_assumed": F64_REGISTER_CONVENTION,
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert (check in report["discharged_checks"]) is expected_discharged
+    assert (check in report["checks_not_performed"]) is not expected_discharged
+    assert report["register_convention_assumed"] == F64_REGISTER_CONVENTION
+    _assert_partition(report, _expected_discharged_checks(descriptor))
+
+
+@pytest.mark.parametrize("marker", sorted(MACHINE_TV_ASSUMPTION_MARKERS))
+def test_assumption_markers_never_discharge_when_forged(
+    tmp_path, capsys, marker
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [*DESCRIPTOR["checks_performed"], marker],
+        "checks_not_performed": [
+            check
+            for check in DESCRIPTOR["checks_not_performed"]
+            if check != marker
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert marker not in report["discharged_checks"]
+    assert marker in report["checks_not_performed"]
+    _assert_partition(report, _expected_discharged_checks(descriptor))
 
 
 @pytest.mark.parametrize(
@@ -1128,6 +1208,31 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
     assert report["checks_not_performed"] == sorted(
         ALL_CHECKS - expected_discharged
     )
+
+
+@pytest.mark.integration
+def test_real_core_rechecks_machine_tv_scalar_f64(tmp_path, capsys, real_core):
+    bundle, source = _build_real_bundle(tmp_path, real_core, F64_SOURCE)
+    build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
+    descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
+    f64_check = "machine_code_f64_scalar_function_tv"
+    assert f64_check in descriptor["checks_performed"]
+    assert descriptor["register_convention_assumed"] == F64_REGISTER_CONVENTION
+    for marker in MACHINE_TV_ASSUMPTION_MARKERS:
+        assert marker in descriptor["checks_not_performed"]
+        assert marker not in descriptor["checks_performed"]
+
+    argv = _args(Path(real_core), bundle, source)
+    argv[argv.index("--expected-build-id") + 1] = build_id
+    code, out, err = _run(capsys, argv)
+    assert code == 0, err
+    report = json.loads(out)
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["register_convention_assumed"] == F64_REGISTER_CONVENTION
+    assert f64_check in report["discharged_checks"]
+    for marker in MACHINE_TV_ASSUMPTION_MARKERS:
+        assert marker in report["checks_not_performed"]
+        assert marker not in report["discharged_checks"]
 
 
 DIRECT_CALL_SOURCE = (
