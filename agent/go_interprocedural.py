@@ -21703,6 +21703,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             saw_index = True
                         root = root.child_by_field_name("operand")
                 if root is not None and root.type == "composite_literal":
+                    literal_operand = operand
+                    while (
+                        literal_operand is not None
+                        and literal_operand.type
+                        == "parenthesized_expression"
+                    ):
+                        literal_operand = next(
+                            (
+                                child
+                                for child in literal_operand.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        literal_operand is None
+                        or literal_operand.type != "composite_literal"
+                    ):
+                        raise _Unsupported(
+                            "unsupported_operator", _span(node)
+                        )
                     type_node = root.child_by_field_name("type")
                     pointee_id = self._struct_literal_type_id(type_node)
                     if pointee_id is None:

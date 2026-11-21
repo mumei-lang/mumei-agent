@@ -8036,6 +8036,22 @@ def test_struct_literal_address_of_non_struct_literals_stays_closed(
         assert result.gaps[0].reason == "unsupported_operator", expr
 
 
+def test_address_of_struct_literal_subexpression_stays_closed(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ A []int64 }\n"
+        "func F(i int64) int64 {\n"
+        "\tp := &(S{A: []int64{10, 20}}.A[i])\n"
+        "\treturn *p\n"
+        "}",
+    )
+    result = named(*data)
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_operator"
+
+
 def test_struct_literal_address_pins_named_type_staleness(
     go_types_helper,
 ):
