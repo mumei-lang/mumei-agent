@@ -658,6 +658,48 @@ fn outer<T, const N: usize>() {
     assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
 
 
+def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
+    source = """
+type T = u8;
+const N: u8 = 1;
+fn plain(value: T) { let _ = N; }
+fn qualified() {
+    let _: crate::T;
+    let _: self::N;
+    let _: super::X;
+    let _: Self::T;
+    let _: <T as Tr>::X;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    alias = _bindings(report, "T", "type_alias")[0]
+    plain_parameter = _bindings(report, "value", "parameter")[0]
+    assert plain_parameter.type.type_id == alias.id
+    assert any(
+        reference.binding_id == _bindings(report, "N", "const")[0].id
+        for reference in report.references
+    )
+    qualified_paths = {
+        source.encode()[unresolved.span.start : unresolved.span.end].decode()
+        for unresolved in report.unresolved
+        if unresolved.reason == "qualified_path"
+    }
+    assert qualified_paths == {
+        "crate::T",
+        "self::N",
+        "super::X",
+        "Self::T",
+        "<T as Tr>::X",
+    }
+    assert not any(
+        reference.span
+        == unresolved.span
+        for reference in report.references
+        for unresolved in report.unresolved
+        if unresolved.reason == "qualified_path"
+    )
+
+
 def test_local_type_alias_precedes_primitive_type_facts():
     source = """
 type u8 = u16;

@@ -484,6 +484,9 @@ class _RustBindings:
                 in {"function_item", "function_signature_item"}
             ):
                 continue
+            if candidate.type in {"scoped_identifier", "scoped_type_identifier"}:
+                self._record_qualified_path(candidate)
+                continue
             candidates.append(candidate)
             stack.extend(reversed(self._children(candidate)))
         for candidate in candidates:
@@ -863,6 +866,9 @@ class _RustBindings:
         text = self.text(node).strip()
         if not text:
             return _UNKNOWN
+        if node.type in {"scoped_identifier", "scoped_type_identifier"}:
+            self._record_qualified_path(node)
+            return _UNKNOWN
         if text == "()":
             return TypeFact("unit", "()", 0, None, "")
         if (
@@ -1174,7 +1180,7 @@ class _RustBindings:
     def _reference(self, node: Any, kind: str = "read", namespace: str = "value") -> _Record | None:
         name = self._normalize_identifier(self.text(node))
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
-            self.unresolved.append(Unresolved(self.span(node), name, "qualified_path"))
+            self._record_qualified_path(node)
             return None
         record, boundary = self._lookup_with_boundary(name, node.start_byte, namespace)
         if record is not None:
@@ -1183,6 +1189,15 @@ class _RustBindings:
         reason = boundary or ("prelude_name" if name in _PRELUDE_NAMES else "unknown_name")
         self.unresolved.append(Unresolved(self.span(node), name, reason))
         return None
+
+    def _record_qualified_path(self, node: Any) -> None:
+        unresolved = Unresolved(
+            self.span(node),
+            self._normalize_identifier(self.text(node)),
+            "qualified_path",
+        )
+        if unresolved not in self.unresolved:
+            self.unresolved.append(unresolved)
 
     def _let(self, node: Any, scope: _Scope) -> None:
         pattern = node.child_by_field_name("pattern")
@@ -1228,7 +1243,7 @@ class _RustBindings:
             self._reference(node)
             return
         if kind in {"scoped_identifier", "scoped_type_identifier", "generic_function"}:
-            self.unresolved.append(Unresolved(self.span(node), self.text(node), "qualified_path"))
+            self._record_qualified_path(node)
             return
         if kind == "call_expression":
             self._call(node)
