@@ -3535,9 +3535,13 @@ def evidence_check_adapter(
     `evidence-check-adapter` CLI route. Selection requires Core's exact
     representation diagnostic and agreement with the local
     `AdapterDescriptor.from_manifest` view of attempt argv, stdin and
-    verdict-marker count. The report does not echo adapter ids, argv,
-    stdin, markers or manifest content. Selection does not execute an
-    adapter, assess command safety, accept Evidence or promote a grade.
+    verdict-marker count. Declared argv/stdin remain inert; markers are
+    self-report vocabulary and `max_memory_mb` is a declared ceiling.
+    The report does not echo adapter ids, argv, stdin, markers or manifest
+    content. The route does not execute an adapter, assess command safety
+    or host policy, enforce resources, claim producer authenticity, accept
+    Evidence or promote a grade. Selection is only a manifest-declared-
+    success exit; input drift suppresses selection.
 
     Args:
         core_path: Absolute path to the mumei Core executable.

@@ -12,7 +12,8 @@ attempt argv, stdin and verdict-marker count. Selection means only that
 Core validated the manifest representation: argv and stdin stay inert
 without host opt-in, markers are self-report vocabulary, and
 `max_memory_mb` is a declared ceiling. The route does not execute an
-adapter, assess command safety, accept Evidence or promote a grade.
+adapter, assess command safety or host policy, enforce resources, claim
+producer authenticity, accept Evidence or promote a grade.
 """
 
 from __future__ import annotations
@@ -200,8 +201,10 @@ def build_check_adapter_parser(
     if parser is None:
         parser = argparse.ArgumentParser(prog="evidence-check-adapter")
     parser.description = (
-        "Run a declared Core adapter-manifest representation check as "
-        "one attempt and emit the reconciled lineage and bounded diagnostic."
+        "Check a declared adapter manifest's static representation and "
+        "Core/local consistency only; declared argv/stdin stay inert; no "
+        "adapter execution, command safety, host policy, resource enforcement, "
+        "producer authenticity, Evidence acceptance or grade promotion."
     )
     parser.add_argument(
         "--core",
@@ -218,8 +221,8 @@ def build_check_adapter_parser(
         metavar="PATH",
         help=(
             "Declared saved mumei.verifier-adapter/v1 manifest "
-            "(absolute regular-file path, at most 65536 bytes); its "
-            "bytes are fed to the check on stdin."
+            "(absolute regular-file path, at most 65536 bytes); its bytes "
+            "are fed to the check on stdin and declared argv/stdin stay inert."
         ),
     )
     parser.add_argument(

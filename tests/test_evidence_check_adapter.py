@@ -90,6 +90,7 @@ def _write_core(
     *,
     exit_code: int = 0,
     stdout: dict | str | None = DIAGNOSTIC,
+    stderr: str | None = None,
     sleep_seconds: float = 0,
 ) -> Path:
     if stdout is None:
@@ -97,6 +98,9 @@ def _write_core(
     else:
         stdout_text = stdout if isinstance(stdout, str) else json.dumps(stdout)
         stdout_command = f"printf '%s' {shlex.quote(stdout_text)}\n"
+    stderr_command = (
+        "" if stderr is None else f"printf '%s' {shlex.quote(stderr)} >&2\n"
+    )
     core = tmp_path / "mumei-stub"
     core.write_text(
         "#!/bin/sh\n"
@@ -112,6 +116,7 @@ def _write_core(
         f'    if [ "$got" = "{expected_sha256}" ]; then\n'
         + (f"        sleep {sleep_seconds}\n" if sleep_seconds else "")
         + f"        {stdout_command}"
+        + f"        {stderr_command}"
         + f"        exit {exit_code}\n"
         + "    fi\n"
         + "    exit 2\n"
@@ -195,6 +200,24 @@ def test_exact_diagnostic_selects_and_reconciles_manifest_fields(
     assert report["candidate"]["schema_version"] == (
         "mumei.verifier-evidence-candidate/v1"
     )
+
+
+def test_core_stderr_note_does_not_invalidate_diagnostic(
+    tmp_path: Path, capsys
+) -> None:
+    manifest = _write_manifest(tmp_path)
+    core = _write_core(
+        tmp_path,
+        hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        stderr="adapter declaration is inert\n",
+    )
+
+    code, stdout, _ = _run(capsys, _args(core, manifest))
+
+    assert code == 0
+    report = json.loads(stdout)
+    assert report["representation"] == "valid"
+    assert report["sequence"]["selected_result"] is not None
 
 
 def test_absent_optional_manifest_fields_are_reported(tmp_path: Path, capsys) -> None:
@@ -600,3 +623,47 @@ def test_real_core_accepts_manifest_and_selects_matching_diagnostic(
     assert report["candidate"]["schema_version"] == (
         "mumei.verifier-evidence-candidate/v1"
     )
+
+
+@pytest.mark.integration
+def test_real_core_accepts_minimal_manifest_fixture(
+    tmp_path: Path, capsys, real_core: str
+) -> None:
+    fixture = REPO_ROOT / "tests" / "fixtures" / "adapter_manifest_minimal.json"
+    manifest = _write_manifest(
+        tmp_path, data=fixture.read_bytes()
+    )
+
+    code, stdout, stderr = _run(
+        capsys,
+        _args(Path(real_core).resolve(), manifest),
+    )
+
+    assert code == 0, stderr
+    report = json.loads(stdout)
+    assert report["normalized"]["exit_code"] == 0
+    assert report["representation"] == "valid"
+    assert report["acceptance"] == "not_evaluated"
+    assert report["attempt_argv"] == "absent"
+    assert report["attempt_stdin"] == "absent"
+    assert report["verdict_marker_count"] == 0
+    assert report["sequence"]["selected_result"] is not None
+
+
+@pytest.mark.integration
+def test_real_core_rejects_invalid_manifest_without_selection(
+    tmp_path: Path, capsys, real_core: str
+) -> None:
+    manifest = _write_manifest(
+        tmp_path, data=b'{"schema_version":"mumei.not-verifier-adapter/v1"}\n'
+    )
+
+    code, stdout, stderr = _run(
+        capsys,
+        _args(Path(real_core).resolve(), manifest),
+    )
+
+    assert code == 0, stderr
+    report = json.loads(stdout)
+    assert report["normalized"]["exit_code"] != 0
+    _assert_unselected(report)

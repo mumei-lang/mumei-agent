@@ -719,9 +719,11 @@ def main() -> None:
         parser = argparse.ArgumentParser(
             prog="python -m agent evidence-check-adapter",
             description=(
-                "Run a declared Core adapter-manifest representation "
-                "check as one attempt and emit the reconciled lineage "
-                "and bounded diagnostic."
+                "Check a declared adapter manifest's static representation "
+                "and Core/local consistency only; declared argv/stdin stay "
+                "inert; no adapter execution, command safety, host policy, "
+                "resource enforcement, producer authenticity, Evidence "
+                "acceptance or grade promotion is performed."
             ),
         )
         evidence_check_adapter_build_parser(parser)
