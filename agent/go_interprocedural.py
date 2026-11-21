@@ -1962,6 +1962,22 @@ class _Builder:
         )
         return self._opaque_container_holders(toks) | {binding_id}
 
+    def _chan_elem_external_member(self, root_id: str) -> bool:
+        """Any queue inside `root_id`'s share group promoted to
+        caller-visible state (`GS[k] = c`, `GS = s`): sends into it
+        broadcast through `indirect_writes`, so group sends deposit
+        there and group reads union it."""
+        for holder_id in self._opaque_container_sharers(root_id):
+            for tok in self._opaque_container_tokens.get(
+                holder_id, frozenset()
+            ):
+                if (
+                    isinstance(tok, str)
+                    and tok in self.external_chan_locals
+                ):
+                    return True
+        return False
+
     def _opaque_container_deps(
         self, binding_id: str, locals_: dict[str, frozenset[int]]
     ) -> frozenset[int]:
@@ -17145,6 +17161,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             recv_deps = self._opaque_container_deps(
                                 root_id, locals_
                             )
+                            if self._chan_elem_external_member(root_id):
+                                # A member promoted external
+                                # (`GS[k] = c`, `GS = s`) receives
+                                # sends that land in
+                                # `indirect_writes` — the group read
+                                # observes them like `<-c` does.
+                                recv_deps |= self.indirect_writes
                             if (
                                 index_node is not None
                                 and index_node.type
