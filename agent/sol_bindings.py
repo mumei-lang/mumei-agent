@@ -1698,13 +1698,75 @@ class _SolBindings:
         expressions = [self._argument_expression(arg) for arg in args]
         for expression in expressions:
             self._expr(expression)
-        target = None
-        if callee is not None:
-            target = self._resolve_name(callee, reference_kind="call")
-        if target is None or target.binding.kind != "modifier":
-            self.calls.append(Call(self.span(node), tuple(self.span(a) for a in expressions), self.call_owner, "", "unresolved"))
-        else:
-            self.calls.append(Call(self.span(node), tuple(self.span(a) for a in expressions), self.call_owner, target.binding.id, "modifier"))
+        if callee is None:
+            self.calls.append(
+                Call(
+                    self.span(node),
+                    tuple(self.span(a) for a in expressions),
+                    self.call_owner,
+                    "",
+                    "unresolved",
+                )
+            )
+            return
+        name = self.text(callee)
+        target, reason = self._lookup(name, callee.start_byte, "value")
+        argument_spans = tuple(self.span(argument) for argument in expressions)
+        if target is not None and target.binding.kind == "modifier":
+            self._add_ref(callee, target, "call")
+            self.calls.append(
+                Call(
+                    self.span(node),
+                    argument_spans,
+                    self.call_owner,
+                    target.binding.id,
+                    "modifier",
+                )
+            )
+            return
+        if node.parent is not None and node.parent.type == "constructor_definition":
+            type_record = self._lookup_type_record(
+                name, callee.start_byte, self.current_contract
+            )
+            base_contract = (
+                None
+                if type_record is None
+                else self.contracts.get(type_record.binding.name)
+            )
+            if (
+                type_record is not None
+                and type_record.binding.kind == "contract"
+                and base_contract is not None
+                and self.current_contract is not None
+                and self._is_derived_from(
+                    self.current_contract, base_contract, set()
+                )
+            ):
+                self._add_ref(callee, type_record, "call")
+                self.calls.append(
+                    Call(
+                        self.span(node),
+                        argument_spans,
+                        self.call_owner,
+                        type_record.binding.id,
+                        "base_constructor",
+                    )
+                )
+                return
+        self._add_unresolved(
+            callee,
+            name,
+            reason or self._reason_for_missing(name, callee.start_byte, callee),
+        )
+        self.calls.append(
+            Call(
+                self.span(node),
+                argument_spans,
+                self.call_owner,
+                "",
+                "unresolved",
+            )
+        )
 
     def build(self) -> LexicalBindingReport:
         self._predeclare()

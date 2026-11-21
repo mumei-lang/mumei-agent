@@ -763,6 +763,61 @@ contract C {
     assert _load(report, source).to_json() == report.to_json()
 
 
+def test_constructor_modifier_position_resolves_base_constructor():
+    source = """
+contract Base { constructor(uint value) {} }
+contract Derived is Base { constructor() Base(1) {} }
+"""
+    report = build_sol_bindings(source)
+    base = _bindings(report, "Base", "contract")[0]
+    call = next(call for call in report.calls if call.kind == "base_constructor")
+    assert call.target == base.id
+    reference = next(
+        item
+        for item in report.references
+        if item.span.start == source.index("Base(1)") and item.kind == "call"
+    )
+    assert reference.binding_id == base.id
+
+
+def test_constructor_modifier_name_outside_inheritance_chain_is_unresolved():
+    source = """
+contract Base {}
+contract Other {}
+contract Derived is Base { constructor() Other() {} }
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call
+        for call in report.calls
+        if call.span.start == source.index("Other()")
+    )
+    assert call.kind == "unresolved"
+    assert call.target == ""
+    assert _unresolved(report, "Other", "unknown_name")
+    assert not any(
+        item.span.start == source.index("Other()") and item.kind == "call"
+        for item in report.references
+    )
+
+
+def test_constructor_modifier_wins_over_same_named_base_contract():
+    source = """
+contract Base { constructor(uint value) {} }
+contract Derived is Base {
+    modifier Base(uint value) { _; }
+    constructor() Base(1) {}
+}
+"""
+    report = build_sol_bindings(source)
+    modifier = _bindings(report, "Base", "modifier")[0]
+    call = next(
+        call for call in report.calls if call.span.start == source.index("Base(1)")
+    )
+    assert call.kind == "modifier"
+    assert call.target == modifier.id
+
+
 def test_builtins_member_reads_and_qualified_imports_stay_conservative():
     source = """
 import * as Lib from "lib.sol";
