@@ -1221,7 +1221,13 @@ class _Builder:
         fields: tuple[Any, ...],
         ident: Any,
         seen: frozenset[str],
-    ) -> tuple[str, Any | None] | None:
+        *,
+        include_path: bool = False,
+    ) -> (
+        tuple[str, Any | None]
+        | tuple[str, Any | None, tuple[Any, ...]]
+        | None
+    ):
         """`ident`'s promotion path through `fields`, if found.
 
         Selectors promote only through EMBEDDED (anonymous) fields
@@ -1240,10 +1246,16 @@ class _Builder:
         type is unenumerable (imported or anonymous) so `ident`
         may hide behind an invisible pointer, or None when no
         embedded field's type declares `ident` (its declaring
-        type is unreachable from the container's field list)."""
-        # (embedded field, the path's first pointer-typed field)
-        frontier: list[tuple[Any, Any | None]] = [
-            (f, ftype if ftype.kind == "pointer" else None)
+        type is unreachable from the container's field list).
+        With `include_path=True`, a value result also returns the
+        embedded members on that path."""
+        # (embedded field, the path's first pointer-typed field, path)
+        frontier: list[tuple[Any, Any | None, tuple[Any, ...]]] = [
+            (
+                f,
+                ftype if ftype.kind == "pointer" else None,
+                (f,) if include_path else (),
+            )
             for f in fields
             if getattr(f, "embedded", None) is not False
             and (getattr(f, "embedded", None) is True
@@ -1251,10 +1263,11 @@ class _Builder:
             and (ftype := getattr(f, "type", None)) is not None
         ]
         while frontier:
-            nxt: list[tuple[Any, Any | None]] = []
+            nxt: list[tuple[Any, Any | None, tuple[Any, ...]]] = []
             unenumerable: Any | None = None
             found_value = False
-            for f, ptr_field in frontier:
+            found_value_path: tuple[Any, ...] = ()
+            for f, ptr_field, path_fields in frontier:
                 ftype = f.type
                 pointee = (
                     ftype.elem if ftype.kind == "pointer" else ftype
@@ -1279,6 +1292,8 @@ class _Builder:
                     if ptr_field is not None:
                         return ("ptr", ptr_field)
                     found_value = True
+                    if not found_value_path:
+                        found_value_path = path_fields
                     continue
                 if tb.id in seen:
                     continue
@@ -1291,6 +1306,7 @@ class _Builder:
                         else (
                             gtype if gtype.kind == "pointer" else None
                         ),
+                        path_fields + (g,) if include_path else (),
                     )
                     for g in inner
                     if getattr(g, "embedded", None) is not False
@@ -1304,6 +1320,8 @@ class _Builder:
                 # compiler would have rejected the promotion as
                 # ambiguous, so the unenumerable type cannot carry
                 # this read in a valid program.
+                if include_path:
+                    return ("value", None, found_value_path)
                 return ("value", None)
             if unenumerable is not None:
                 return ("ptr", unenumerable.type)
@@ -3695,6 +3713,127 @@ class _Builder:
             if resolved_fields[j].id not in direct:
                 return False
         return True
+
+    def _value_promotion_chain(
+        self, ref: Any, resolved_fields: tuple[Any, ...]
+    ) -> tuple[Any, ...] | None:
+        """The embedded local fields crossed by a value-only
+        promotion in a tracked local composite selector chain."""
+        root_binding = self.bindings.get(ref.binding_id)
+        if (
+            root_binding is None
+            or root_binding.type is None
+            or self._type_fact_has_type_args(root_binding.type)
+        ):
+            return None
+        embedded_members: list[Any] = []
+        found_promotion = False
+        for i, ident in enumerate(resolved_fields):
+            container_binding = (
+                resolved_fields[i + 1]
+                if i + 1 < len(resolved_fields)
+                else root_binding
+            )
+            container_type = container_binding.type
+            if (
+                container_type is None
+                or self._type_fact_has_type_args(container_type)
+            ):
+                return None
+            if container_type.type_id:
+                type_binding = self.bindings.get(container_type.type_id)
+                if (
+                    type_binding is None
+                    or type_binding.kind != "type"
+                    or type_binding.span is None
+                ):
+                    return None
+                direct_fields = self._struct_fields(type_binding)
+            else:
+                if container_type.kind != "struct":
+                    return None
+                span = self.anon_struct_anchor.get(
+                    container_binding.id
+                ) or getattr(container_binding, "span", None)
+                if span is None:
+                    return None
+                direct_fields = self._fields_declared_after(span)
+            if ident.id in {field.id for field in direct_fields}:
+                continue
+            if self._has_anonymous_struct_member(direct_fields):
+                return None
+            promotion = self._promotion_path(
+                direct_fields,
+                ident,
+                frozenset(),
+                include_path=True,
+            )
+            if (
+                promotion is None
+                or promotion[0] != "value"
+                or len(promotion) < 3
+            ):
+                return None
+            found_promotion = True
+            for embedded_index, embedded in enumerate(promotion[2]):
+                embedded_type = embedded.type
+                if (
+                    embedded.id not in self.bindings
+                    or embedded_type is None
+                    or embedded_type.kind == "pointer"
+                    or self._type_fact_has_type_args(embedded_type)
+                ):
+                    return None
+                embedded_id = embedded_type.type_id
+                embedded_binding = self.bindings.get(embedded_id)
+                if (
+                    not embedded_id
+                    or embedded_binding is None
+                    or embedded_binding.kind != "type"
+                    or embedded_binding.span is None
+                    or self._type_fact_has_type_args(embedded_binding.type)
+                ):
+                    return None
+                if (
+                    embedded_index < len(promotion[2]) - 1
+                    and self._has_anonymous_struct_member(
+                        self._struct_fields(embedded_binding)
+                    )
+                ):
+                    return None
+                embedded_members.append(embedded)
+        return tuple(embedded_members) if found_promotion else None
+
+    def _has_anonymous_struct_member(self, fields: tuple[Any, ...]) -> bool:
+        pending = [getattr(field, "type", None) for field in fields]
+        seen: set[int] = set()
+        while pending:
+            fact = pending.pop()
+            if fact is None or id(fact) in seen:
+                continue
+            seen.add(id(fact))
+            if (
+                getattr(fact, "kind", None) == "struct"
+                and not getattr(fact, "type_id", "")
+            ):
+                return True
+            pending.extend(
+                (
+                    getattr(fact, "elem", None),
+                    getattr(fact, "key", None),
+                )
+            )
+        return False
+
+    def _pin_value_promotion_chain(
+        self, ref: Any, embedded_members: tuple[Any, ...]
+    ) -> None:
+        root_binding = self.bindings.get(ref.binding_id)
+        if root_binding is not None and root_binding.type is not None:
+            self._pin_fact_identities(root_binding.type)
+        for member in embedded_members:
+            self.pinned.add(member.id)
+            self._pin_fact_identities(member.type)
 
     def _package_composite_field_read(
         self, node: Any
@@ -9787,15 +9926,18 @@ class _Builder:
                 else None
             )
             leaf = self._field_identity(leaf_ref)
+            store_fields = (leaf,) + resolved_fields
             if (
                 leaf is None
                 or leaf_node is None
                 or leaf.name.encode("utf-8") != leaf_node.text
-                or not self._direct_field_chain(
-                    ref, (leaf,) + resolved_fields
-                )
             ):
                 return None
+            if not self._direct_field_chain(ref, store_fields):
+                promotion = self._value_promotion_chain(ref, store_fields)
+                if promotion is None:
+                    return None
+                self._pin_value_promotion_chain(ref, promotion)
             return "", ref, True
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
@@ -9840,9 +9982,13 @@ class _Builder:
                 ident is None
                 or field_node is None
                 or ident.name.encode("utf-8") != field_node.text
-                or not self._direct_field_chain(ref, (ident,))
             ):
                 return None
+            if not self._direct_field_chain(ref, (ident,)):
+                promotion = self._value_promotion_chain(ref, (ident,))
+                if promotion is None:
+                    return None
+                self._pin_value_promotion_chain(ref, promotion)
             return "", ref, False
         if binding.type.kind != "pointer":
             return None
@@ -21188,15 +21334,17 @@ class _Builder:
                     if not self._direct_field_chain(
                         ref, resolved_fields
                     ):
-                        # `st.V` where `V` promotes through embedded
-                        # `*Q` reads caller memory the conflated set
-                        # cannot represent — a dep-free answer here
-                        # would also report `effects` dishonestly, so
-                        # promoted reads stay closed like promoted
-                        # writes.
-                        raise _Unsupported(
-                            "non_parameter_reference", _span(node)
+                        promotion = self._value_promotion_chain(
+                            ref, resolved_fields
                         )
+                        if promotion is None:
+                            # Pointer crossings and unenumerable
+                            # promotion paths can read memory outside
+                            # the tracked local's conflated dep set.
+                            raise _Unsupported(
+                                "non_parameter_reference", _span(node)
+                            )
+                        self._pin_value_promotion_chain(ref, promotion)
                     return locals_.get(ref.binding_id, frozenset())
                 # `G.V` / `G.A.N` — a field of a package-level
                 # composite (or pointer) var: package state is
