@@ -15030,19 +15030,661 @@ def test_chan_chan_parameter_close_admitted(go_types_helper):
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("src", "expected", "effects"),
+    [
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tc <- x\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 2)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\te := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar r int64\n"
+            "\tfor d := range cc {\n"
+            "\t\td <- x\n"
+            "\t\tr = <-c\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tselect {\n"
+            "\tcase cc <- c:\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tselect {\n"
+            "\tcase d := <-cc:\n"
+            "\t\td <- x\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td, ok := <-cc\n"
+            "\tif ok {\n"
+            "\t\td <- x\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\td, _ = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\tif b {\n"
+            "\t\td = <-cc\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64 = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar cc chan chan int64\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar cc chan chan int64 = make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar cc = make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc2 := cc\n"
+            "\tcc2 <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 2)\n"
+            "\tclose(cc)\n"
+            "\t_ = len(cc)\n"
+            "\t_ = cap(cc)\n"
+            "\treturn x\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tcc = make(chan chan int64, 1)\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\tfor d = range cc {\n"
+            "\t\td <- x\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d chan int64\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\t\td <- x\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- s[0]\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tother := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\tother <- x\n"
+            "\td <- 0\n"
+            "\treturn <-c\n}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tother := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- make(chan int64, 1)\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\tother <- 0\n"
+            "\treturn <-c\n}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "func G(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n"
+            "func F(x int64) int64 { return G(x) }\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- GC\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- GS[0]\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- s[0]\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+    ],
+)
+def test_local_chan_chan_share_group(
+    go_types_helper, src, expected, effects
+):
+    result = named(*unit(go_types_helper, src))
+    assert result.available, src
+    assert result.return_dependencies == expected, src
+    assert result.effects == effects, src
+    if effects == "unknown":
+        assert any(call.imported for call in result.calls), src
+
+
+def test_local_chan_chan_group_keeps_imported_member_external(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc <- lib.GC\n"
+        "\td := <-cc\n"
+        "\td <- x\n"
+        "\treturn <-lib.GC\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GC chan int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    assert any(call.imported for call in result.calls)
+
+
+@pytest.mark.parametrize(
+    "case, src, expected, effects",
+    [
+        (
+            "multi-value var declaration keeps a callee result external",
+            "func G(p int64) (int64, chan chan int64) {\n"
+            "\treturn p, make(chan chan int64)\n"
+            "}\n"
+            "func F(p int64) int64 {\n"
+            "\tvar n, cc = G(p)\n"
+            "\t_ = cc\n"
+            "\treturn n\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "parallel chan chan assignment resolves pre-state groups",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ta := make(chan chan int64, 1)\n"
+            "\tb := make(chan chan int64, 1)\n"
+            "\ta <- c\n"
+            "\ta, b = b, a\n"
+            "\td := <-b\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "aliases retain pre-receive queue contents",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\te := c\n"
+            "\tc <- x\n"
+            "\tc = <-cc\n"
+            "\treturn <-e\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "select receive detaches the previous channel alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ta := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := a\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\t\td <- x\n"
+            "\t}\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "select with default preserves the skipped receive alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc <- 7\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "if receive reassignment preserves the skipped alias",
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tif b {\n"
+            "\t\td = <-cc\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "comma-ok receive reassignment preserves the skipped alias",
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tif b {\n"
+            "\t\td, _ = <-cc\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "closed empty chan chan range preserves the old alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64)\n"
+            "\tclose(cc)\n"
+            "\td := c\n"
+            "\tfor d = range cc {\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "single-case select receive drops the old alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc <- 7\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "unconditional receive reassignment drops the old alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc <- 7\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\td = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "multi-value var receive joins the local chan chan group",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tvar d, ok = <-cc\n"
+            "\t_ = ok\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "received channel group joins the destination queue",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc2 := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tcc2 <- <-cc\n"
+            "\td := <-cc2\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "scalar channel receive can be sent to another queue",
+            # Sending a received channel value is supported; using that
+            # receive as an operation target remains closed.
+            "func F(x int64) int64 {\n"
+            "\tin := make(chan int64, 1)\n"
+            "\tout := make(chan int64, 1)\n"
+            "\tin <- x\n"
+            "\tout <- <-in\n"
+            "\treturn <-out\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+    ],
+)
+def test_local_chan_chan_review_regressions(
+    go_types_helper, case, src, expected, effects
+):
+    result = named(*unit(go_types_helper, src))
+    assert result.available, case
+    assert result.return_dependencies == expected, case
+    assert result.effects == effects, case
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
-    # Deeper nesting, a local `make(chan chan)` queue, and a `chan
-    # chan` local var stay closed — a channel value flowing between
-    # two LOCAL queues has no dep-set model.
+    # Local queues cannot escape the share-group model or become
+    # caller-visible through deeper channel nesting.
     for src in (
         "func F(ccc chan chan chan int64) int64 {\n"
         "\treturn 0\n}\n",
+        "func G(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tG(cc)\n"
+        "\treturn 0\n}\n",
+        "func G(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tgo G(cc)\n"
+        "\treturn 0\n}\n",
+        "func F() chan chan int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn cc\n}\n",
+        "var Global chan chan int64\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tGlobal = cc\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\ts := []chan chan int64{cc}\n"
+        "\t_ = s\n"
+        "\treturn 0\n}\n",
+        "type St struct{ C chan chan int64 }\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tst := St{}\n"
+        "\tst.C = cc\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\th := func() chan chan int64 { return cc }\n"
+        "\t_ = h\n"
+        "\treturn 0\n}\n",
+        "func G() chan chan int64 { return nil }\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc = G()\n"
+        "\t_ = cc\n"
+        "\treturn 0\n}\n",
+        "func F(p chan chan int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc = p\n"
+        "\t_ = cc\n"
+        "\treturn 0\n}\n",
         "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn <-(<-cc)\n}\n",
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\t(<-cc) <- x\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
+        "\tccc := make(chan chan chan int64)\n"
+        "\t_ = ccc\n"
+        "\treturn 0\n}\n",
+        "func F() int64 {\n"
         "\tcc := make(chan chan int64)\n"
-        "\t_ = cc\n\treturn x\n}\n",
+        "\ts := []chan chan int64{cc}\n"
+        "\t_ = s\n"
+        "\treturn 0\n}\n",
+        "func F(cc chan chan int64) int64 {\n"
+        "\tlocal := make(chan chan int64, 1)\n"
+        "\tlocal <- <-cc\n"
+        "\treturn 0\n}\n",
+        "var GCC chan chan int64\n"
+        "func G(p *chan chan int64) { *p = GCC }\n"
         "func F(x int64) int64 {\n"
-        "\tvar cc chan chan int64\n"
-        "\t_ = cc\n\treturn x\n}\n",
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tG(&cc)\n"
+        "\td := <-cc\n"
+        "\td <- x\n"
+        "\treturn 0\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available, src
@@ -15540,7 +16182,8 @@ def test_chan_parameter_records_effects_and_staleness(go_types_helper):
 
 
 def test_chan_parameter_boundaries_stay_closed(go_types_helper):
-    # Non-scalar elements and a receive-valued binding stay closed.
+    # Non-scalar elements stay closed. A local chan-chan queue now
+    # binds a receive-valued name through its share group.
     # A scalar `chan` result (`Res`) admits — ops on the bound name
     # follow the external queue model — and a select over a `chan`
     # parameter admits: each comm case binds the queue's deps and
@@ -15571,7 +16214,8 @@ def test_chan_parameter_boundaries_stay_closed(go_types_helper):
     }
     assert not results["Ptr"].available
     assert results["Res"].available
-    assert not results["Alias"].available
+    assert results["Alias"].available
+    assert results["Alias"].effects == "none_in_supported_fragment"
     assert results["Sel"].available
     assert results["Sel"].return_dependencies == frozenset({0, 1})
 
@@ -18157,6 +18801,29 @@ def test_select_receive_binds_queue_deps(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_select_receive_strongly_updates_scalar_assignment(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(p, q int64) int64 {\n"
+            "\tch := make(chan int64, 1)\n"
+            "\tch <- q\n"
+            "\tv := p\n"
+            "\tselect {\n"
+            "\tcase v = <-ch:\n"
+            "\t\treturn v\n"
+            "\tdefault:\n"
+            "\t\treturn 0\n"
+            "\t}\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_select_comma_ok_and_assign_forms(go_types_helper):
@@ -20786,14 +21453,14 @@ def test_chan_elem_external(go_types_helper, declarations, expected):
 def test_chan_elem_external_pins_container_type(go_types_helper):
     # The operand's WHOLE container fact pins — a named container
     # type's redeclare churns its identity, so an unchanged-looking
-    # `GS[i]` op must flag the summary stale.
+    # extraction `GS[i]` must flag the summary stale.
     source, snapshot, summaries = unit(
         go_types_helper,
         "type CS []chan int64\n"
         "var GS CS\n"
-        "func F(x int64) int64 {\n"
-        "\tGS[0] <- x\n"
-        "\treturn <-GS[0]\n}\n",
+        "func F() int64 {\n"
+        "\td := GS[0]\n"
+        "\treturn <-d\n}\n",
     )
     result = named(source, snapshot, summaries)
     assert result.available
@@ -20830,6 +21497,693 @@ def test_chan_elem_external_close(go_types_helper):
 
 
 @pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # An extracted external queue reads prior container sends.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\td := GS[0]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Sends through the extracted name broadcast to the container.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Different element indices are conflated in external state.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # The map key's dependencies join the extracted queue read.
+        (
+            "var GM map[int64]chan int64\n"
+            "func F(k int64) int64 {\n"
+            "\td := GM[k]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Package-level arrays support extraction too.
+        (
+            "var GA [4]chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGA[1] <- x\n"
+            "\td := GA[1]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Both var declaration forms bind an external channel name.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\tvar d = GS[0]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\tvar d chan int64 = GS[0]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Reseating a local channel onto an external element is admitted.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := make(chan int64, 1)\n"
+            "\td = GS[0]\n"
+            "\tGS[1] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # A conditional reseat remains visible through the old alias.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64, f bool) int64 {\n"
+            "\td := make(chan int64, 1)\n"
+            "\te := d\n"
+            "\tif f { d = GS[0] }\n"
+            "\tGS[1] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # Range over the bound name sees sends through the container.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\td := GS[0]\n"
+            "\tvar r int64\n"
+            "\tfor v := range d {\n"
+            "\t\tr = v\n"
+            "\t\tbreak\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+        ),
+        # A close through an extracted name is a caller-visible effect.
+        (
+            "var GS []chan int64\n"
+            "func F() {\n"
+            "\td := GS[0]\n"
+            "\tclose(d)\n}\n",
+            frozenset(),
+        ),
+        # Select receives use the extracted channel's external queue.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\td := GS[0]\n"
+            "\tselect {\n"
+            "\tcase v := <-d:\n"
+            "\t\treturn v\n"
+            "\tdefault:\n"
+            "\t\treturn 0\n"
+            "\t}\n}\n",
+            frozenset({0}),
+        ),
+        # Each name in a multi-short-declaration extraction is external.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td, e := GS[0], GS[1]\n"
+            "\td <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # Extracting a queue stored from a local channel preserves its
+        # identity with the original local name.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tGS[0] = c\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # A callee's extraction transfer makes its send visible to callers.
+        (
+            "var GS []chan int64\n"
+            "func Put(x int64) {\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tPut(x)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A queue extracted and passed to a callee's chan param
+        # receives that callee's send effects.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\tG(d, x)\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # A map element passed as an argument also carries its index deps.
+        (
+            "var GM map[int64]chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(k int64, x int64) int64 {\n"
+            "\tG(GM[k], x)\n"
+            "\treturn <-GM[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # An external element passed to a goroutine call is broadcast too.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tgo G(GS[0], x)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted external queue passed directly to a callee's chan
+        # param receives that callee's send effects.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tG(GS[0], x)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A callee returning an external element hands its caller the
+        # external queue (`c := Mk()` is an external name).
+        (
+            "var GS []chan int64\n"
+            "func Mk() chan int64 { return GS[0] }\n"
+            "func F(x int64) int64 {\n"
+            "\tc := Mk()\n"
+            "\tc <- x\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # The extracted name retains selector deps for a later send.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\td <- 1\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An alias of an extracted name uses the same selector deps.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\te := d\n"
+            "\te <- 1\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Select-send arms broadcast the extracted selector deps.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\td := GS[i]\n"
+            "\tselect {\n"
+            "\tcase d <- 1:\n"
+            "\tcase c <- 1:\n"
+            "\t}\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Passing an extracted name to a sender preserves its selector.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64) { c <- 1 }\n"
+            "func F(i int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\tG(d)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Map selector deps also survive a send through the extracted name.
+        (
+            "var GM map[int64]chan int64\n"
+            "func F(k int64) int64 {\n"
+            "\td := GM[k]\n"
+            "\td <- 1\n"
+            "\treturn <-GM[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Parenthesized extraction.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := (GS[0])\n"
+            "\td <- x\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted name stored back into the container.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\tGS[1] = d\n"
+            "\tGS[1] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # An element assigned to a package-level chan var.
+        (
+            "var GS []chan int64\n"
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGC = GS[0]\n"
+            "\tGC <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted name joining a local chan-element literal.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\ts := []chan int64{d}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A select send arm through the extracted name.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\td := GS[0]\n"
+            "\tselect {\n"
+            "\tcase d <- x:\n"
+            "\tcase c <- 1:\n"
+            "\t}\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external_extract(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_chan_elem_external_extract_callee_read_matches_direct_read(
+    go_types_helper,
+):
+    extracted = named(
+        *unit(
+            go_types_helper,
+            "var GS []chan int64\n"
+            "func Get() int64 {\n"
+            "\td := GS[0]\n"
+            "\treturn <-d\n}\n",
+        ),
+        name="Get",
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "var GS []chan int64\n"
+            "func Get() int64 { return <-GS[0] }\n",
+        ),
+        name="Get",
+    )
+    assert extracted.available and direct.available
+    assert extracted.return_dependencies == direct.return_dependencies
+    assert extracted.effects == direct.effects == "unknown"
+    assert any(t.imported for t in extracted.calls)
+
+
+def test_chan_elem_external_imported_extract(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64, x int64) int64 {\n"
+        "\tlib.GS[0] <- x\n"
+        "\td := lib.GS[k]\n"
+        "\treturn <-d\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GS []chan int64\n"}}
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    transfers = [
+        c
+        for c in result.calls
+        if c.imported and c.target == members["GS"]["id"]
+    ]
+    assert len(transfers) >= 1
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # A package chan in a literal reads sends made through the group.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\tGC <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Sends through a literal member reach the external queue.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+        ),
+        # External chan-element queues in literals remain connected.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GS[0]}\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GS[0]}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted external name keeps group externality.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\ts := []chan int64{d}\n"
+            "\td <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\ts := []chan int64{d}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Element stores add external queues to the group.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := make([]chan int64, 1)\n"
+            "\ts[0] = GC\n"
+            "\tGC <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Appended external queues join the group too.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{make(chan int64, 1)}\n"
+            "\ts = append(s, GC)\n"
+            "\tGC <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+        # Extracted members retain external group reads.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\td := s[0]\n"
+            "\tGC <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Passing a group member to a sender broadcasts externally.
+        (
+            "var GC chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\tG(s[0], x)\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external_group_members(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+def test_chan_elem_external_group_registration_is_not_a_local_container(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var GS []chan int64\n"
+        "func H() {\n"
+        "\ts := []chan int64{GS[0]}\n"
+        "\t_ = s\n"
+        "}\n"
+        "func FClose() { close(GS[0]) }\n"
+        "func FSend(x int64) { GS[0] <- x }\n"
+        "func FSendRecv(x int64) int64 {\n"
+        "\tGS[0] <- x\n"
+        "\treturn <-GS[0]\n"
+        "}\n",
+    )
+    gs_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "GS"
+    )
+    assert named(source, snapshot, summaries, name="H").available
+
+    for name in ("FClose", "FSend", "FSendRecv"):
+        result = named(source, snapshot, summaries, name=name)
+        assert result.available
+        assert result.effects == "unknown"
+        assert any(
+            transfer.imported and transfer.target == gs_id
+            for transfer in result.calls
+        )
+        if name == "FSendRecv":
+            assert result.return_dependencies == frozenset({0})
+
+
+def test_chan_elem_external_group_registration_same_function(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var GS []chan int64\n"
+        "func F() {\n"
+        "\ts := []chan int64{GS[0]}\n"
+        "\t_ = s\n"
+        "\tclose(GS[0])\n"
+        "}\n",
+    )
+    result = named(source, snapshot, summaries)
+    gs_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "GS"
+    )
+    assert result.available
+    assert result.effects == "unknown"
+    assert any(
+        transfer.imported and transfer.target == gs_id
+        for transfer in result.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        (
+            "var GC chan int64\n"
+            "func G() chan int64 { return GC }\n"
+            "func F(x int64) int64 {\n"
+            "\td := G()\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GC\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func G() chan int64 { return GS[0] }\n"
+            "func F(x int64) int64 {\n"
+            "\td := G()\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GS[0]\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GS[0]\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GC chan int64\n"
+            "func Get() chan int64 { return GC }\n"
+            "func Put(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\td := Get()\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tPut(f, x)\n"
+            "\treturn <-GC\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(i int64, x int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-GS[0]\n"
+            "}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_elem_external_alias_swap_preserves_external_queue(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+    assert any(transfer.imported for transfer in result.calls)
+
+
+def test_chan_local_swap_stays_effect_pure(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\td := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\td, e = e, d\n"
+            "\tf := e\n"
+            "\tf <- x\n"
+            "\treturn <-d\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(i int64, x int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func G() chan int64 { return GS[0] }\n"
+            "func F(x int64) int64 {\n"
+            "\td := G()\n"
+            "\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external_alias_survives_make_reseat(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # `[][]chan` nests stay closed — the operand of the inner
@@ -20837,9 +22191,22 @@ def test_chan_elem_external_close(go_types_helper):
         "var GS [][]chan int64\nfunc F(x int64) {\n\tGS[0][0] <- x\n}\n",
         # `[]chan chan` non-scalar elements stay closed.
         "var GS []chan chan int64\nfunc F(c chan int64) {\n\tGS[0] <- c\n}\n",
-        # `d := GS[i]` extraction stays closed — the element queue
-        # has no declared identity of its own.
-        "var GS []chan int64\nfunc F() int64 {\n\td := GS[0]\n\treturn <-d\n}\n",
+        # A second index into a nested element container stays closed.
+        "var GS [][]chan int64\nfunc F() int64 {\n\td := GS[0][0]\n\treturn <-d\n}\n",
+        # Chan-valued chan elements remain non-scalar and closed.
+        "var GS []chan chan int64\nfunc F(x chan int64) {\n\td := GS[0]\n\td <- x\n}\n",
+        # Comma-ok map extraction remains closed.
+        "var GM map[int64]chan int64\nfunc F(k int64) int64 {\n\td, ok := GM[k]\n"
+        "\tif ok { return <-d }\n\treturn 0\n}\n",
+        # Function-literal calls with extracted channel arguments stay closed.
+        "var GS []chan int64\nfunc F(x int64) int64 {\n"
+        "\tfunc(c chan int64) { c <- x }(GS[0])\n"
+        "\treturn <-GS[0]\n}\n",
+        # A closure capturing an extracted name stays closed, like a
+        # captured `d := GC`.
+        "var GS []chan int64\nfunc F(x int64) int64 {\n"
+        "\td := GS[0]\n\tgo func() { d <- x }()\n"
+        "\treturn <-GS[0]\n}\n",
     ],
 )
 def test_chan_elem_external_unsupported_stays_closed(

@@ -601,6 +601,7 @@ class TestProliferateDryRun:
             "// auto-generated\n"
             "atom core_ok(x: i64) ensures: true; body: x;\n"
         )
+        summary_path = tmp_path / "summary.json"
 
         with patch("agent.proliferate.generate_code") as gen_mock, patch(
             "agent.proliferate.AgentConfig"
@@ -620,13 +621,22 @@ class TestProliferateDryRun:
             client_mock.return_value = verify_client
 
             results = proliferate.proliferate(
-                tmp_path, dry_run=True, max_proposals=1
+                tmp_path,
+                dry_run=True,
+                max_proposals=1,
+                output_json=summary_path,
             )
 
         assert len(results) >= 1
         assert results[0]["success"] is True
         assert results[0].get("dry_run") is True
         assert results[0]["code"] == fake_code
+        assert "dependency_invalidation" in results[0]
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert (
+            summary["details"][0]["dependency_invalidation"]
+            == results[0]["dependency_invalidation"]
+        )
 
     def test_benchmark_feedback_is_recorded_in_summary(
         self, tmp_path: Path, mock_mumei_client
@@ -769,6 +779,7 @@ class TestProliferateDryRun:
         original_content = (std / "existing.mm").read_text(encoding="utf-8")
 
         fake_code = "atom new_ok(x: i64) ensures: true; body: x;\n"
+        summary_path = tmp_path / "summary.json"
 
         with patch("agent.proliferate.generate_code") as gen_mock, patch(
             "agent.proliferate.AgentConfig"
@@ -796,7 +807,10 @@ class TestProliferateDryRun:
             client_mock.return_value = verify_client
 
             results = proliferate.proliferate(
-                tmp_path, dry_run=True, max_proposals=1
+                tmp_path,
+                dry_run=True,
+                max_proposals=1,
+                output_json=summary_path,
             )
 
         # attempt_heal must never be called in dry-run mode.
@@ -808,6 +822,9 @@ class TestProliferateDryRun:
         assert len(results) >= 1
         assert results[0].get("dry_run") is True
         assert results[0].get("reason") == "blast_radius_broken_dry_run"
+        assert "dependency_invalidation" in results[0]
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert "dependency_invalidation" in summary["details"][0]
 
 
 # ---------------------------------------------------------------------------

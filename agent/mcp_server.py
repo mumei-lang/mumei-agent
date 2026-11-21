@@ -3565,9 +3565,12 @@ def native_exit_status_recheck(
     only for uniquely-mapped exit codes (0 `reproduced`, 3
     `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. A `reproduced` run reports `discharged_checks` —
-    `artifact_semantics` and `claim_truth` — with the remaining checks
-    in `checks_not_performed`. The produced stdout is a fixed
-    diagnostic line, so no evidence candidate is emitted.
+    `artifact_semantics`, `claim_truth` and
+    `os_exit_status_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. The fixed diagnostic stdout has
+    no bound carrier and is not a recovery performer. Every outcome
+    echoes `expected_build_id`, so the report can serve as the record
+    for accepted sibling evidence with the same Core-authenticated ID.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3639,10 +3642,12 @@ def native_exit_status_accept(
     `acceptance` is claimed only for uniquely-mapped exit codes
     (0 `accepted`, 3 `inconclusive`); mid-run drift reports
     `inputs_changed` with no claimed outcome. An `accepted` run reports
-    `discharged_checks` — `artifact_semantics` and `claim_truth` — with
-    the remaining checks in `checks_not_performed`. The produced
-    acceptance descriptor is anonymous, so no evidence candidate is
-    emitted.
+    `discharged_checks` — `artifact_semantics`, `claim_truth` and
+    `os_exit_status_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. Its bound acceptance descriptor
+    can recover that observation through `recovery-eval`. Every outcome
+    echoes `expected_build_id`; accepted sibling reports sharing that
+    Core-authenticated ID can recover one another's channel checks.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3714,9 +3719,12 @@ def native_stdout_recheck(
     claimed only for uniquely-mapped exit codes (0 `reproduced`, 3
     `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. A `reproduced` run reports `discharged_checks` —
-    `artifact_semantics` and `claim_truth` — with the remaining checks
-    in `checks_not_performed`. The produced stdout is a fixed
-    diagnostic line, so no evidence candidate is emitted.
+    `artifact_semantics`, `claim_truth` and `os_stdout_observation` —
+    with the remaining C02 and runtime checks in
+    `checks_not_performed`. The fixed diagnostic stdout has no bound
+    carrier and is not a recovery performer. Every outcome echoes
+    `expected_build_id`, so the report can serve as the record for
+    accepted sibling evidence with the same Core-authenticated ID.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3788,10 +3796,12 @@ def native_stdout_accept(
     `acceptance` is claimed only for uniquely-mapped exit codes
     (0 `accepted`, 3 `inconclusive`); mid-run drift reports
     `inputs_changed` with no claimed outcome. An `accepted` run reports
-    `discharged_checks` — `artifact_semantics` and `claim_truth` — with
-    the remaining checks in `checks_not_performed`. The produced
-    acceptance descriptor is anonymous, so no evidence candidate is
-    emitted.
+    `discharged_checks` — `artifact_semantics`, `claim_truth` and
+    `os_stdout_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. Its bound acceptance descriptor
+    can recover that observation through `recovery-eval`. Every outcome
+    echoes `expected_build_id`; accepted sibling reports sharing that
+    Core-authenticated ID can recover one another's channel checks.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3846,6 +3856,79 @@ def native_stdout_accept(
 
 
 @mcp.tool()
+def native_observations_accept(
+    core_path: str,
+    bundle_dir: str,
+    source_path: str,
+    expected_build_id: str,
+    attempt_timeout_ms: int = 60000,
+) -> str:
+    """Accept all pinned native observations from one invocation (C02/C10).
+
+    Runs `native-bundle accept-observations` as one declared attempt —
+    the same wiring as the `native-observations-accept` CLI route. Core
+    rebuilds and checks the pinned artifact, then executes the reproduced
+    program once and matches exit status, stdout and stderr against the
+    runtime pins. An accepted run discharges `runtime_observation_semantics`
+    and the three channel observation checks for that bounded invocation;
+    this does not claim ABI or general runtime/process semantics.
+    `acceptance` is claimed only for uniquely-mapped exit codes
+    (0 `accepted`, 3 `inconclusive`); mid-run drift reports
+    `inputs_changed` with no claimed outcome. Every outcome echoes
+    `expected_build_id`, which accepted sibling reports can share through
+    `recovery-eval`.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        bundle_dir: Absolute path to the declared bundle directory —
+            native-bundle.json plus every member it declares.
+        source_path: Absolute path to the declared .mm source file (at
+            most 64 KiB); the bundle's own labels/paths are never read.
+        expected_build_id: SHA-256 of native-bundle.json obtained
+            through a separately trusted channel (64 lowercase hex).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.native-observations-accept-report/v1` document — on
+        success, or `error` on a declared failure.
+    """
+    try:
+        from agent.native_observations_accept import run_observations_accept
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("bundle_dir", bundle_dir),
+        ("source_path", source_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        bundle=bundle_dir,
+        source=source_path,
+        expected_build_id=expected_build_id,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_observations_accept(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, bundle_dir, source_path]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def native_stderr_recheck(
     core_path: str,
     bundle_dir: str,
@@ -3863,9 +3946,12 @@ def native_stderr_recheck(
     claimed only for uniquely-mapped exit codes (0 `reproduced`, 3
     `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. A `reproduced` run reports `discharged_checks` —
-    `artifact_semantics` and `claim_truth` — with the remaining checks
-    in `checks_not_performed`. The produced stdout is a fixed
-    diagnostic line, so no evidence candidate is emitted.
+    `artifact_semantics`, `claim_truth` and `os_stderr_observation` —
+    with the remaining C02 and runtime checks in
+    `checks_not_performed`. The fixed diagnostic stdout has no bound
+    carrier and is not a recovery performer. Every outcome echoes
+    `expected_build_id`, so the report can serve as the record for
+    accepted sibling evidence with the same Core-authenticated ID.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3937,10 +4023,12 @@ def native_stderr_accept(
     `acceptance` is claimed only for uniquely-mapped exit codes
     (0 `accepted`, 3 `inconclusive`); mid-run drift reports
     `inputs_changed` with no claimed outcome. An `accepted` run reports
-    `discharged_checks` — `artifact_semantics` and `claim_truth` — with
-    the remaining checks in `checks_not_performed`. The produced
-    acceptance descriptor is anonymous, so no evidence candidate is
-    emitted.
+    `discharged_checks` — `artifact_semantics`, `claim_truth` and
+    `os_stderr_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. Its bound acceptance descriptor
+    can recover that observation through `recovery-eval`. Every outcome
+    echoes `expected_build_id`; accepted sibling reports sharing that
+    Core-authenticated ID can recover one another's channel checks.
 
     Args:
         core_path: Absolute path to the mumei Core executable.

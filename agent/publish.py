@@ -30,6 +30,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from agent.config import AgentConfig
+from agent import proofcert
 from agent.mumei_client import create_mumei_client
 from agent.publish_helpers import (
     _SAFE_NAME_RE,
@@ -253,10 +254,50 @@ def publish(
     mapper = SpecCodeMapper()
     mapping_result = mapper.build_mapping(spec, code)
     spec_code_mapping = mapper.to_json(mapping_result.mappings)
-    verify_result = client.verify(
-        str(generated_path),
-        spec_code_mapping=spec_code_mapping,
+    # Generate the proof certificate alongside the JSON report: it is the
+    # canonical document carrying the P5-A harness metadata (the declared
+    # ``artifact_paths`` the consumer validates below). The verify --json
+    # report itself never carries those keys.
+    certificate_path = generated_path.with_suffix(".proof.json")
+    cert_args = ["--proof-cert", "--output", str(certificate_path)]
+    # Keep aside a certificate left by a previous run so the wiring
+    # below can only consume the file THIS verification produced —
+    # under the MCP path the verdict call and the cert-emitting call
+    # are separate, and a stale file would otherwise be reported as
+    # current.  It is restored when this run produces no certificate,
+    # so a failing re-run never loses the earlier proof.
+    stale_cert = (
+        certificate_path.read_bytes()
+        if certificate_path.is_file()
+        else None
     )
+    certificate_path.unlink(missing_ok=True)
+    # ``--proof-cert`` is a CLI-only flag — the MCP ``validate_logic``
+    # tool cannot emit a certificate file — so on an MCP-routed client
+    # the publish verdict still comes from the MCP path and a second,
+    # CLI-only pass produces the certificate (passing extra_args would
+    # silently downgrade the verdict to the local CLI).  On the plain
+    # CLI client the same call emits both.
+    try:
+        from agent.mcp_client import MumeiMCPClient as _MCPClient
+    except Exception:
+        _MCPClient = None
+    if (
+        _MCPClient is not None
+        and isinstance(client, _MCPClient)
+        and client.mode != "unavailable"
+    ):
+        verify_result = client.verify(
+            str(generated_path),
+            spec_code_mapping=spec_code_mapping,
+        )
+        client.verify(str(generated_path), extra_args=cert_args)
+    else:
+        verify_result = client.verify(
+            str(generated_path),
+            spec_code_mapping=spec_code_mapping,
+            extra_args=cert_args,
+        )
     if not verify_result["success"]:
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
         result["verify_error"] = verify_result
@@ -292,6 +333,34 @@ def publish(
         spec_code_mapping = mapper.to_json(mapping_result.mappings)
         report["spec_code_mapping"] = spec_code_mapping
         result["proof_certificate"] = report
+    # Consumer wiring for the canonical ``artifact_paths`` contract: a
+    # mumei-produced certificate or bundle records the paths the harness
+    # should collect or validate; verify each declared path resolves.
+    # Paths are read from the certificate file — the verify --json report
+    # never carries them.
+    if certificate_path.is_file():
+        cert_doc = proofcert.ProofCertificate.from_path(certificate_path)
+        # Repo-relative so the JSON result stays portable across
+        # environments (the absolute runner path means nothing
+        # off-box).  An absolute ``target_file`` can place the cert
+        # outside the repo — keep the absolute path then rather than
+        # crash after a passing verification.
+        try:
+            cert_file_display = str(certificate_path.relative_to(cwd))
+        except ValueError:
+            cert_file_display = str(certificate_path)
+        result["proof_certificate_file"] = cert_file_display
+        declared_paths = proofcert.artifact_paths_of(cert_doc)
+        if declared_paths:
+            result["artifact_paths_status"] = (
+                proofcert.validate_artifact_paths(
+                    declared_paths, base_dir=cwd
+                )
+            )
+    elif stale_cert is not None:
+        # This run produced no certificate — restore the previous one
+        # rather than leaving the module without its last proof.
+        certificate_path.write_bytes(stale_cert)
     result["spec_code_mapping"] = spec_code_mapping
 
     logger.info("Verification passed")

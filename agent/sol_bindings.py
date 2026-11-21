@@ -85,6 +85,7 @@ class _Record:
     override: bool = False
     location: str = ""
     underlying: Any | None = None
+    parameter_count: int = 0
 
 
 @dataclass(eq=False)
@@ -169,6 +170,7 @@ class _SolBindings:
         override: bool = False,
         location: str = "",
         underlying: Any | None = None,
+        parameter_count: int = 0,
     ) -> _Record:
         name = name_override or self.text(name_node)
         scope_start, scope_end = self._scope_for_id(binding_scope)
@@ -195,6 +197,7 @@ class _SolBindings:
             override,
             location,
             underlying,
+            parameter_count,
         )
         self.records.append(record)
         self.bindings.append(binding)
@@ -386,6 +389,7 @@ class _SolBindings:
             visibility=self._visibility(node),
             virtual=bool(re.search(r"\bvirtual\b", self.text(node))),
             override=bool(re.search(r"\boverride\b", self.text(node))),
+            parameter_count=len(self._type_nodes_in_parameters(node)),
         )
 
     def _predeclare_constructor(self, node: Any, owner: _Contract) -> _Record:
@@ -515,6 +519,8 @@ class _SolBindings:
     ) -> TypeFact:
         if node is None:
             return _UNKNOWN
+        if any(child.type in {"mapping", "["} for child in self._walk(node)):
+            return _UNKNOWN
         name = self.text(node).strip()
         direct = name.replace(" ", "")
         if direct == "bool":
@@ -588,17 +594,16 @@ class _SolBindings:
     def _lookup_type_record(
         self, name: str, position: int, owner: _Contract | None
     ) -> _Record | None:
-        records = self.file_scope.records.get(name, [])
-        found = self._matching_records(records, position, "type")
-        record, ambiguous = self._choose(found)
-        if record is not None:
-            return record
         if owner is not None:
             inherited, _reason = self._lookup_contract(
                 name, owner, position, "type"
             )
-            return inherited
-        return None
+            if inherited is not None:
+                return inherited
+        records = self.file_scope.records.get(name, [])
+        found = self._matching_records(records, position, "type")
+        record, _ambiguous = self._choose(found)
+        return record
 
     def _lookup_contract(
         self,
@@ -608,6 +613,38 @@ class _SolBindings:
         namespace: str,
         visited: set[str] | None = None,
     ) -> tuple[_Record | None, str | None]:
+        if namespace == "value":
+            layers = self._contract_layers(
+                name, contract, namespace, visited
+            )
+            functions: list[_Record] = []
+            private_match = False
+            for index, (_layer, records) in enumerate(layers):
+                if not records:
+                    continue
+                if index > 0:
+                    private_match = private_match or any(
+                        record.binding.kind in {"function", "state_variable"}
+                        and record.visibility == "private"
+                        for record in records
+                    )
+                    records = [
+                        record
+                        for record in records
+                        if record.visibility != "private"
+                    ]
+                if not records:
+                    continue
+                if any(record.binding.kind != "function" for record in records):
+                    if functions:
+                        break
+                    return self._choose(records)
+                functions.extend(records)
+            if functions:
+                return self._choose(self._drop_overridden_functions(functions))
+            if private_match:
+                return None, "private_base_member"
+            return None, None
         visited = set() if visited is None else visited
         if contract.record.binding.id in visited:
             return None, None
@@ -642,6 +679,15 @@ class _SolBindings:
                 scope.records.get(name, []), position, namespace
             )
             if found:
+                if (
+                    namespace == "value"
+                    and self.current_contract is not None
+                    and scope is self.current_contract.scope
+                    and all(
+                        record.binding.kind == "function" for record in found
+                    )
+                ):
+                    continue
                 return self._choose(found)
         if self.current_contract is not None:
             record, reason = self._lookup_contract(
@@ -1443,6 +1489,51 @@ class _SolBindings:
                 return True
         return False
 
+    def _contract_layers(
+        self,
+        name: str,
+        contract: _Contract,
+        namespace: str,
+        visited: set[str] | None = None,
+    ) -> list[tuple[_Contract, list[_Record]]]:
+        visited = set() if visited is None else visited
+        if contract.record.binding.id in visited:
+            return []
+        visited.add(contract.record.binding.id)
+        records = self._matching_records(
+            contract.scope.records.get(name, []),
+            contract.body.start_byte,
+            namespace,
+        )
+        layers = [(contract, records)]
+        for base_name, _base_node in reversed(contract.bases):
+            base = self.contracts.get(base_name)
+            if base is not None:
+                layers.extend(
+                    self._contract_layers(name, base, namespace, visited)
+                )
+        return layers
+
+    def _drop_overridden_functions(
+        self, candidates: list[_Record]
+    ) -> list[_Record]:
+        return [
+            candidate
+            for candidate in candidates
+            if not any(
+                other is not candidate
+                and other.owner is not None
+                and candidate.owner is not None
+                and other.parameter_count == candidate.parameter_count
+                and self._is_derived_from(other.owner, candidate.owner, set())
+                and (
+                    other.override
+                    or (candidate.body is None and other.body is not None)
+                )
+                for other in candidates
+            )
+        ]
+
     def _call_expression(self, node: Any) -> None:
         function = node.child_by_field_name("function")
         args, expressions = self._call_arguments(node)
@@ -1609,13 +1700,75 @@ class _SolBindings:
         expressions = [self._argument_expression(arg) for arg in args]
         for expression in expressions:
             self._expr(expression)
-        target = None
-        if callee is not None:
-            target = self._resolve_name(callee, reference_kind="call")
-        if target is None or target.binding.kind != "modifier":
-            self.calls.append(Call(self.span(node), tuple(self.span(a) for a in expressions), self.call_owner, "", "unresolved"))
-        else:
-            self.calls.append(Call(self.span(node), tuple(self.span(a) for a in expressions), self.call_owner, target.binding.id, "modifier"))
+        if callee is None:
+            self.calls.append(
+                Call(
+                    self.span(node),
+                    tuple(self.span(a) for a in expressions),
+                    self.call_owner,
+                    "",
+                    "unresolved",
+                )
+            )
+            return
+        name = self.text(callee)
+        target, reason = self._lookup(name, callee.start_byte, "value")
+        argument_spans = tuple(self.span(argument) for argument in expressions)
+        if target is not None and target.binding.kind == "modifier":
+            self._add_ref(callee, target, "call")
+            self.calls.append(
+                Call(
+                    self.span(node),
+                    argument_spans,
+                    self.call_owner,
+                    target.binding.id,
+                    "modifier",
+                )
+            )
+            return
+        if node.parent is not None and node.parent.type == "constructor_definition":
+            type_record = self._lookup_type_record(
+                name, callee.start_byte, self.current_contract
+            )
+            base_contract = (
+                None
+                if type_record is None
+                else self.contracts.get(type_record.binding.name)
+            )
+            if (
+                type_record is not None
+                and type_record.binding.kind == "contract"
+                and base_contract is not None
+                and self.current_contract is not None
+                and self._is_derived_from(
+                    self.current_contract, base_contract, set()
+                )
+            ):
+                self._add_ref(callee, type_record, "call")
+                self.calls.append(
+                    Call(
+                        self.span(node),
+                        argument_spans,
+                        self.call_owner,
+                        type_record.binding.id,
+                        "base_constructor",
+                    )
+                )
+                return
+        self._add_unresolved(
+            callee,
+            name,
+            reason or self._reason_for_missing(name, callee.start_byte, callee),
+        )
+        self.calls.append(
+            Call(
+                self.span(node),
+                argument_spans,
+                self.call_owner,
+                "",
+                "unresolved",
+            )
+        )
 
     def build(self) -> LexicalBindingReport:
         self._predeclare()

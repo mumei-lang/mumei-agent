@@ -881,6 +881,7 @@ class _Builder:
         self._opaque_container_tokens: dict[
             str, frozenset[tuple[int, int, int]]
         ] = {}
+        self._external_chan_group_tokens: set[str] = set()
         self.bindings = {b.id: b for b in snapshot.bindings}
         # Package reports may declare the imported objects the unit
         # referenced; single-file snapshots never have them.
@@ -994,6 +995,11 @@ class _Builder:
         # `indirect_writes`, reads union it) rather than the
         # conflated-set model a `make(chan)` local uses.
         self.external_chan_locals: set[str] = set()
+        self.local_chan_chans: set[str] = set()
+        self.external_chan_selectors: dict[str, frozenset[int]] = {}
+        self._external_chan_elem_index_deps: dict[
+            tuple[int, int, int], frozenset[int]
+        ] = {}
         # Bindings that died at a scope join — a branch-local `t`
         # captured by a stored literal (`fs[0] = func() { return t }`)
         # still names the value its last write gave it. `_join`
@@ -1977,20 +1983,47 @@ class _Builder:
         return self._opaque_container_holders(toks) | {binding_id}
 
     def _chan_elem_external_member(self, root_id: str) -> bool:
-        """Any queue inside `root_id`'s share group promoted to
-        caller-visible state (`GS[k] = c`, `GS = s`): sends into it
-        broadcast through `indirect_writes`, so group sends deposit
-        there and group reads union it."""
-        for holder_id in self._opaque_container_sharers(root_id):
+        """Whether `root_id`'s group contains a caller-visible queue."""
+        return bool(self._chan_group_external_tokens(root_id))
+
+    def _chan_group_external_tokens(self, root_id: str) -> set[str]:
+        return {
+            tok
+            for holder_id in self._opaque_container_sharers(root_id)
             for tok in self._opaque_container_tokens.get(
                 holder_id, frozenset()
-            ):
-                if (
-                    isinstance(tok, str)
-                    and tok in self.external_chan_locals
-                ):
-                    return True
-        return False
+            )
+            if isinstance(tok, str)
+            and (
+                tok in self.external_chan_locals
+                or tok in self._external_chan_group_tokens
+            )
+        }
+
+    def _record_external_chan_selectors(
+        self, binding_id: str, node: Any
+    ) -> None:
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None:
+            return
+        deps = self._external_chan_elem_index_deps.get(
+            self.node_key(inner), frozenset()
+        )
+        if deps:
+            self.external_chan_selectors[binding_id] = (
+                self.external_chan_selectors.get(
+                    binding_id, frozenset()
+                )
+                | deps
+            )
 
     def _opaque_container_deps(
         self, binding_id: str, locals_: dict[str, frozenset[int]]
@@ -2017,6 +2050,8 @@ class _Builder:
             deps = deps | self._opaque_container_deps(
                 holder_id, locals_
             )
+        if self._chan_elem_external_member(binding_id):
+            deps |= self.indirect_writes
         return deps
 
     def _chan_group_join(
@@ -2035,9 +2070,11 @@ class _Builder:
         to the OLD group's surviving sharers (found by intersecting
         the snapshot), not to the reseated `s`'s new set."""
         toks = self._opaque_container_tokens
-        toks[member_id] = toks.get(member_id, frozenset()) | frozenset(
-            {member_id}
-        )
+        if member_id not in self._external_chan_group_tokens:
+            toks[member_id] = (
+                toks.get(member_id, frozenset())
+                | frozenset({member_id})
+            )
         current = toks.get(root_id, frozenset())
         if pre_root_set is not None and not pre_root_set <= current:
             # The root reseated earlier in this statement — its set
@@ -2301,6 +2338,8 @@ class _Builder:
                     )
                 if extra is None:
                     continue
+                if extra.type != "variadic_argument":
+                    toks |= self._chan_group_value_tokens(extra)
                 if extra.type == "index_expression":
                     # `s = append(s, t[0])` — the appended queue is a
                     # member of `t`'s chan share group; the result
@@ -2365,6 +2404,10 @@ class _Builder:
                 )
             if extra is None:
                 continue
+            members = self._chan_group_value_tokens(extra)
+            if members:
+                out.extend(sorted(members))
+                continue
             if extra.type == "index_expression":
                 # `s = append(s, t[0])` — under the element
                 # conflation every member of `t`'s group may be the
@@ -2401,10 +2444,70 @@ class _Builder:
             for tok in self._opaque_container_tokens.get(holder, ()):
                 if (
                     isinstance(tok, str)
-                    and tok in self._opaque_container_tokens
+                    and (
+                        tok in self._opaque_container_tokens
+                        or tok in self._external_chan_group_tokens
+                    )
                 ):
                     members.add(tok)
         return sorted(members)
+
+    def _mark_external_chan_group_member(self, token: str) -> None:
+        self._external_chan_group_tokens.add(token)
+
+    def _chan_group_value_tokens(self, node: Any) -> set[str]:
+        while node is not None and node.type == "literal_element":
+            node = next(
+                (c for c in node.named_children), None
+            )
+        while (
+            node is not None
+            and node.type == "parenthesized_expression"
+        ):
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
+        if node is None:
+            return set()
+        if node.type == "index_expression":
+            elem = self._chan_elem_index_target(node)
+            if elem is not None:
+                return set(self._chan_group_members(elem[0]))
+            external_elem = self._external_chan_elem_index(node, {})
+            if external_elem is not None:
+                token = external_elem[0]
+                self._mark_external_chan_group_member(token)
+                return {token}
+            return set()
+        external = self._external_chan_operand(node, {})
+        if external is not None and self._scalar_chan_fact(
+            external[1]
+        ):
+            token = external[0]
+            self._mark_external_chan_group_member(token)
+            return {token}
+        if node.type != "identifier":
+            return set()
+        ref = self.references.get(self.node_key(node))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None and ref.binding_id
+            else None
+        )
+        if (
+            binding is None
+            or not self._scalar_chan_binding(binding.id)
+        ):
+            return set()
+        token = self._chan_root(binding.id)
+        if token in self.external_chan_locals:
+            self._mark_external_chan_group_member(token)
+        else:
+            self._opaque_container_tokens.setdefault(
+                token, frozenset({token})
+            )
+        return {token}
 
     def _chan_detached_toks(self, toks: Any) -> Any:
         """Translate a token set captured at an assignment statement's
@@ -2808,6 +2911,7 @@ class _Builder:
             if elem.type == "keyed_element":
                 elem = elem.child_by_field_name("value")
             toks |= self._opaque_container_ident_toks(elem)
+            toks |= self._chan_group_value_tokens(elem)
         return frozenset(toks)
 
     def _opaque_call_container(
@@ -4545,6 +4649,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # statement level and lands here as the same read, and
         # imported-state writes (`lib.VA[i] = v`) match the
         # imported-var-write rule.
+        ext_elem = self._external_chan_elem_index(node, params)
+        if ext_elem is not None:
+            # `GS[i]` / `lib.GS[i]` naming an element queue of an
+            # external chan-element container as a value (`d :=
+            # GS[i]`, `G(GS[i])`): the queue has no identity of its
+            # own, so the read records on the container's identity
+            # like `<-GS[i]` does — a callee that extracts one makes
+            # its caller broadcast through `indirect_writes` — and
+            # the value surfaces what the queue may hold
+            # (`indirect_writes`) plus the index's own deps, like a
+            # bare external `GC` read.
+            target_id, _fact, index_node = ext_elem
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file, node.start_byte, node.end_byte
+                    ),
+                    target_id,
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+            base_deps = (
+                self.expression(
+                    index_node, fn, params, locals_, transfers, count,
+                    depth,
+                )
+                if (
+                    index_node is not None
+                    and index_node.type not in _INDEX_LITERALS
+                )
+                else frozenset()
+            )
+            key = self.node_key(node)
+            self._external_chan_elem_index_deps[key] = (
+                self._external_chan_elem_index_deps.get(
+                    key, frozenset()
+                )
+                | base_deps
+            )
+            return self.indirect_writes | base_deps
         operand = node.child_by_field_name("operand")
         index = node.child_by_field_name("index")
         # `lib.VA[i][j]` — a nested index chain: the outer index reads
@@ -5018,6 +5164,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         conditional: bool,
         value_deps: frozenset[int] = frozenset(),
         key_deps: frozenset[int] = frozenset(),
+        chan_group: str | None = None,
     ) -> None:
         """Bind `for` range names to dep-free (external-state) values.
 
@@ -5039,6 +5186,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             deps = value_deps if pos == 1 else key_deps
             binding = self.bindings_by_span.get(self.node_key(name))
             if binding is not None:
+                if (
+                    chan_group is not None
+                    and self._scalar_chan_binding(binding.id)
+                ):
+                    scope[binding.id] = deps
+                    self._chan_group_join(binding.id, chan_group)
+                    continue
                 if binding.type.kind not in {
                     "integer",
                     "boolean",
@@ -5062,6 +5216,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         "binding_unavailable", _span(name)
                     )
                 rb = self.bindings.get(ref.binding_id)
+                if (
+                    chan_group is not None
+                    and rb is not None
+                    and self._scalar_chan_binding(ref.binding_id)
+                ):
+                    self._store(
+                        scope,
+                        params,
+                        ref.binding_id,
+                        deps,
+                        conditional,
+                    )
+                    self._chan_group_join(
+                        ref.binding_id, chan_group
+                    )
+                    continue
                 if rb is not None and rb.type.kind == "pointer":
                     new = deps
                     if conditional:
@@ -5365,6 +5535,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         transfers: list[CallTransfer],
         count: list[int],
         conditional: bool,
+        preserve_chan_alias: bool,
     ) -> None:
         """Bind a select receive's LHS names inside the chosen case.
 
@@ -5382,6 +5553,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # lands, so `i, GB[Set(&r, i)] = <-ch` must read the OLD `i`
         # inside `Set`'s arguments. Resolve every target and evaluate
         # its extras first, then perform the stores.
+        local_chan_chan_root = self._local_chan_chan_receive(recv)
         pending: list[Any] = []
         for lhs in lefts:
             if lhs.text == b"_":
@@ -5594,6 +5766,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 ref = self.references.get(self.node_key(lhs))
                 if ref is not None and ref.binding_id:
                     binding = self.bindings.get(ref.binding_id)
+            if (
+                binding is not None
+                and local_chan_chan_root is not None
+                and self._scalar_chan_binding(binding.id)
+            ):
+                old_root = self._chan_root(binding.id)
+                pending.append(
+                    (
+                        "local_chan_group",
+                        binding,
+                        local_chan_chan_root,
+                        old_root
+                        if (preserve_chan_alias or self._may_skip > 0)
+                        and old_root != binding.id
+                        else None,
+                    )
+                )
+                continue
             if binding is None or binding.type.kind not in {
                 "integer",
                 "boolean",
@@ -5660,6 +5850,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         locals_, params, escaped_id,
                         esc_base | recv_deps, conditional,
                     )
+            elif entry[0] == "local_chan_group":
+                _, binding, chan_group, old_root = entry
+                if old_root is not None:
+                    self._chan_group_join(old_root, chan_group)
+                    self.chan_aliases[binding.id] = old_root
+                else:
+                    self.chan_aliases.pop(binding.id, None)
+                self.external_chan_locals.discard(binding.id)
+                self._store(
+                    locals_, params, binding.id, recv_deps, conditional
+                )
+                self._chan_group_join(binding.id, chan_group)
             else:
                 _, binding = entry
                 # `:=` binds fresh names (and a reused one keeps the
@@ -5828,6 +6030,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `s := []chan{ch}` after `ch = make`, or `d <- x`)
             # still records the caller-visible effect.
             self.external_chan_locals.add(sur)
+        if binding_id in self._external_chan_group_tokens:
+            self._mark_external_chan_group_member(sur)
         # The reseated name's own member set still lists the sharers
         # the old queue carried (`d := s[0]` minted `d` into `c`'s
         # set). They belong to the parked queue, not the fresh one:
@@ -6037,18 +6241,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         """The fact is a `chan (chan T)` whose inner element T is
         scalar — a channel-of-channels exactly one level deep.
 
-        The outer queue admits only under the external model: ops
-        on a `chan chan T` parameter, a callee-produced `chan chan`
-        name or a package-level one record imported effects against
-        the operand's own identity, and a channel SENT into it
-        (`cc <- ch`) is promoted into `external_chan_locals` because
-        the queue hands `ch`'s contents to the caller's domain. A
-        received channel (`c := <-cc`) binds dep-free as an external
-        name through the same machinery. Deeper nesting
-        (`chan chan chan T`) and local `make(chan chan T)` queues
-        stay closed — a channel value flowing between two LOCAL
-        queues would alias queues the conflated dep set cannot
-        track."""
+        A local queue uses the chan-element share-group model:
+        channels sent in and received out join its group, without
+        recording a transfer on the local outer queue. External
+        parameters, package vars and callee-produced queues retain
+        their caller-visible transfer model. Deeper nesting
+        (`chan chan chan T`) stays closed."""
         return (
             fact is not None
             and fact.kind == "chan"
@@ -6080,6 +6278,146 @@ member, or one explicit dereference of one (`(*t).F` — the same
             inner.child_by_field_name("operand"), params
         )
         return ext is not None and self._chan_chan_fact(ext[1])
+
+    def _local_chan_chan_id(self, node: Any) -> str | None:
+        """The root identity of a local `chan chan T` queue operand."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(inner))
+        if ref is None or not ref.binding_id:
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        root = self._chan_root(ref.binding_id)
+        if (
+            binding is None
+            or not self._chan_chan_fact(binding.type)
+            or (
+                ref.binding_id not in self.local_chan_chans
+                and root not in self.local_chan_chans
+            )
+        ):
+            return None
+        return root
+
+    def _local_chan_chan_receive(self, node: Any) -> str | None:
+        """The local `chan chan T` root read by a `<-cc` expression."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is not None and inner.type == "receive_statement":
+            inner = next(
+                (
+                    child
+                    for child in _children(inner)
+                    if child.type == "unary_expression"
+                    and (
+                        operator := child.child_by_field_name("operator")
+                    )
+                    is not None
+                    and operator.type == "<-"
+                ),
+                None,
+            )
+        if inner is None or inner.type != "unary_expression":
+            return None
+        operator = inner.child_by_field_name("operator")
+        if operator is None or operator.type != "<-":
+            return None
+        return self._local_chan_chan_id(
+            inner.child_by_field_name("operand")
+        )
+
+    def _local_chan_chan_anchor(self, binding_id: str) -> tuple[str, str]:
+        return ("local-chan-chan", binding_id)
+
+    def _local_chan_chan_init(self, binding_id: str) -> None:
+        self.local_chan_chans.add(binding_id)
+        binding = self.bindings.get(binding_id)
+        if binding is not None and binding.type is not None:
+            self._pin_fact_identities(binding.type)
+        self._opaque_container_tokens.setdefault(
+            binding_id,
+            frozenset(
+                {
+                    binding_id,
+                    self._local_chan_chan_anchor(binding_id),
+                }
+            ),
+        )
+
+    def _local_chan_chan_make_reseat(self, binding_id: str) -> None:
+        old_root = self._chan_root(binding_id)
+        old_tokens = self._opaque_container_tokens.get(
+            old_root,
+            frozenset({self._local_chan_chan_anchor(old_root)}),
+        )
+        self.chan_aliases.pop(binding_id, None)
+        self.local_chan_chans.add(binding_id)
+        binding = self.bindings.get(binding_id)
+        if binding is not None and binding.type is not None:
+            self._pin_fact_identities(binding.type)
+        self._opaque_container_tokens[binding_id] = (
+            self._opaque_container_tokens.get(binding_id, frozenset())
+            | old_tokens
+            | frozenset(
+                {
+                    binding_id,
+                    self._local_chan_chan_anchor(binding_id),
+                }
+            )
+        )
+
+    def _local_chan_chan_alias(
+        self, binding_id: str, target_root: str, conditional: bool
+    ) -> None:
+        old_root = self._chan_root(binding_id)
+        self._local_chan_chan_init(old_root)
+        self._local_chan_chan_init(target_root)
+        self.local_chan_chans.add(binding_id)
+        if not conditional:
+            self.chan_aliases[binding_id] = target_root
+            return
+        merged = (
+            self._opaque_container_tokens.get(old_root, frozenset())
+            | self._opaque_container_tokens.get(
+                target_root, frozenset()
+            )
+        )
+        holders = (
+            self._opaque_container_holders(
+                self._opaque_container_tokens.get(
+                    old_root, frozenset()
+                )
+            )
+            | self._opaque_container_holders(
+                self._opaque_container_tokens.get(
+                    target_root, frozenset()
+                )
+            )
+            | {old_root, target_root}
+        )
+        for holder_id in holders:
+            self._opaque_container_tokens[holder_id] = (
+                self._opaque_container_tokens.get(
+                    holder_id, frozenset()
+                )
+                | merged
+            )
 
     def _calls_touch_external_chan(
         self,
@@ -6113,10 +6451,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         a package-level chan var's binding, an imported member, or
         a scope-less struct field's `chan` member — so a callee's
         recorded ops on it mean the caller shares the queue. A
-        `chan chan` binding is shared at ANY scope: locals cannot
-        declare the type, so the binding is a package var, a
-        parameter, or a callee-produced name — all caller-visible
-        state."""
+        `chan chan` target is caller-visible when recorded: local
+        queues use the share-group model and never record a transfer
+        on their outer identity."""
         binding = self.bindings.get(target_id)
         if (
             binding is not None
@@ -6144,9 +6481,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
 
     def _chan_chan_id(self, target_id: str) -> bool:
-        """A transfer target naming a `chan chan` operand —
-        the outer queue is shared state at any scope (locals
-        cannot declare the type)."""
+        """A transfer target naming a caller-visible `chan chan`
+        operand; local queues use share groups and record no outer
+        queue transfer."""
         binding = self.bindings.get(target_id)
         if (
             binding is not None
@@ -8731,6 +9068,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_chan_prestate = self._chan_prestate_members
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
+        saved_local_chan_chans = self.local_chan_chans
+        saved_external_chan_selectors = self.external_chan_selectors
+        saved_external_chan_elem_index_deps = (
+            self._external_chan_elem_index_deps
+        )
         saved_defer_result_deps = self._defer_result_deps
         saved_func_args = self._func_arg_invocations
         saved_call_arg_deps = self._call_arg_deps
@@ -8755,6 +9097,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._chan_prestate_members = set()
         self.field_chan_queues = {}
         self.external_chan_locals = set()
+        self.local_chan_chans = set()
+        self.external_chan_selectors = {}
+        self._external_chan_elem_index_deps = {}
         self._defer_result_deps = frozenset()
         self._func_arg_invocations = {}
         self._call_arg_deps = {}
@@ -8831,6 +9176,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._chan_prestate_members = saved_chan_prestate
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
+            self.local_chan_chans = saved_local_chan_chans
+            self.external_chan_selectors = (
+                saved_external_chan_selectors
+            )
+            self._external_chan_elem_index_deps = (
+                saved_external_chan_elem_index_deps
+            )
             self._caller_visible_params = saved_caller_visible
             self._defer_result_deps = saved_defer_result_deps
             self._func_arg_invocations = saved_func_args
@@ -8992,6 +9344,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
+            if any(
+                self._local_chan_chan_id(expression) is not None
+                for expression in expressions
+            ):
+                raise _Unsupported("unsupported_return", _span(node))
             if len(expressions) == 0:
                 if not fn.results:
                     # A bare `return` in a void callee carries
@@ -9389,6 +9746,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     or self._chan_chan_receive(
                                         rights[i], params
                                     )
+                                    or self._local_chan_chan_receive(
+                                        rights[i]
+                                    )
                                     # `d := s[i]` — the element
                                     # queue a bound `[]chan`/
                                     # `map[K]chan` container
@@ -9396,6 +9756,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     # container's share group.
                                     or self._chan_elem_index_target(
                                         rights[i]
+                                    )
+                                    is not None
+                                    # `d := GS[i]` — an element queue
+                                    # of an external chan-element
+                                    # container binds an external name.
+                                    or self._external_chan_elem_index(
+                                        rights[i], params
                                     )
                                     is not None
                                 )
@@ -9422,6 +9789,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 and self._chan_chan_receive(
                                     rights[0], params
                                 )
+                                or (
+                                    self._is_chan_recv(
+                                        rights[0], len(lefts)
+                                    )
+                                    and self._local_chan_chan_receive(
+                                        rights[0]
+                                    )
+                                    is not None
+                                )
                             )
                         )
                     )
@@ -9432,6 +9808,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or (
                         self._chan_chan_fact(binding.type)
                         and (
+                            (
+                                len(lefts) == len(rights)
+                                and (
+                                    self._is_make_chan_call(rights[i])
+                                    or self._local_chan_chan_id(
+                                        rights[i]
+                                    )
+                                    is not None
+                                )
+                            )
+                            or
                             (
                                 len(lefts) == len(rights)
                                 and self._chan_result_call(
@@ -9477,7 +9864,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # Both the alias and the passthrough resolved
                     # against the pre-state above.
                     pre_target = pre_chan_targets[i]
-                    if pre_target is not None:
+                    local_chan_chan_target = (
+                        self._local_chan_chan_id(chan_rhs)
+                        if self._chan_chan_fact(binding.type)
+                        else None
+                    )
+                    if local_chan_chan_target is not None:
+                        self.chan_aliases[binding.id] = (
+                            local_chan_chan_target
+                        )
+                        self.local_chan_chans.add(binding.id)
+                    elif pre_target is not None:
                         self.chan_aliases[binding.id] = pre_target.id
                     elif (
                         elem_root := (
@@ -9503,6 +9900,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             elem_root[0],
                             chan_elem_root_sets.get(elem_root[0]),
                         )
+                    elif (
+                        local_chan_chan_root
+                        := self._local_chan_chan_receive(chan_rhs)
+                    ) is not None:
+                        self.chan_aliases.pop(binding.id, None)
+                        self.external_chan_locals.discard(binding.id)
+                        self._chan_group_join(
+                            binding.id, local_chan_chan_root
+                        )
                     else:
                         # `c, ok := <-cc` reusing an existing `c` —
                         # `:=` may rebind a name in the same scope
@@ -9511,6 +9917,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # resolving to the old queue.
                         self.chan_aliases.pop(binding.id, None)
                         self.external_chan_locals.add(binding.id)
+                        self._record_external_chan_selectors(
+                            binding.id, chan_rhs
+                        )
                         # `ch := lib.G(q)` — the imported callee
                         # may hand `q`'s queue back, so every
                         # `chan` argument joins the external
@@ -9533,6 +9942,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     else frozenset()
                                 ),
                             )
+                if (
+                    binding.type.kind == "chan"
+                    and self._chan_chan_fact(binding.type)
+                    and self._is_make_chan_call(chan_rhs)
+                ):
+                    self._local_chan_chan_init(binding.id)
                 if binding.type.kind == "function" or (
                     self._func_elem_collection(binding.type)
                     or self._func_elem_nested_collection(binding.type)
@@ -10137,6 +10552,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             is not None
                         )
                     )
+                    local_chan_chan_declared = (
+                        self._chan_chan_fact(binding.type)
+                        and (
+                            not value_nodes
+                            or (
+                                len(value_nodes) == len(names)
+                                and (
+                                    self._is_make_chan_call(
+                                        value_nodes[i]
+                                    )
+                                    or self._local_chan_chan_id(
+                                        value_nodes[i]
+                                    )
+                                    is not None
+                                )
+                            )
+                        )
+                    )
                     if (
                         binding.type.kind == "chan"
                         and (
@@ -10146,6 +10579,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # binding admits only a callee-declared
                                 # `chan chan` result, like `cc := G()`.
                                 and not chan_chan_declared
+                                and not local_chan_chan_declared
                             )
                             # `var ch, n = G(q)` — a multi-valued
                             # call admits per slot like the
@@ -10171,7 +10605,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         value_nodes[0], params
                                     )
                                 )
+                                and not (
+                                    len(value_nodes) == 1
+                                    and self._is_chan_recv(
+                                        value_nodes[0], len(names)
+                                    )
+                                    and self._local_chan_chan_receive(
+                                        value_nodes[0]
+                                    )
+                                    is not None
+                                )
                                 and not chan_chan_declared
+                                and not local_chan_chan_declared
                             )
                             or (
                                 value_nodes
@@ -10191,7 +10636,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     value_nodes[i]
                                 )
                                 is None
+                                and self._external_chan_elem_index(
+                                    value_nodes[i], params
+                                )
+                                is None
+                                and self._local_chan_chan_receive(
+                                    value_nodes[i]
+                                )
+                                is None
                                 and not chan_chan_declared
+                                and not local_chan_chan_declared
                             )
                         )
                     ):
@@ -10205,7 +10659,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
-                    if (
+                    local_chan_chan_root = (
+                        self._local_chan_chan_receive(value_nodes[0])
+                        if (
+                            binding.type.kind == "chan"
+                            and self._scalar_chan_binding(binding.id)
+                            and len(value_nodes) == 1
+                            and len(names) > 1
+                        )
+                        else None
+                    )
+                    if local_chan_chan_root is not None:
+                        self.chan_aliases.pop(binding.id, None)
+                        self.external_chan_locals.discard(binding.id)
+                        self._chan_group_join(
+                            binding.id, local_chan_chan_root
+                        )
+                    elif (
                         binding.type.kind == "chan"
                         and value_nodes
                         and len(value_nodes) == 1
@@ -10246,6 +10716,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     elif (
                         binding.type.kind == "chan"
                         and value_nodes
+                        and len(value_nodes) == len(names)
                         and not self._is_make_chan_call(value_nodes[i])
                     ):
                         chan_alias = self._chan_alias_target(
@@ -10253,11 +10724,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if chan_alias is not None:
                             self.chan_aliases[binding.id] = chan_alias.id
+                        elif (
+                            self._chan_chan_fact(binding.type)
+                            and (
+                                local_chan_chan_target
+                                := self._local_chan_chan_id(
+                                    value_nodes[i]
+                                )
+                            )
+                            is not None
+                        ):
+                            self.chan_aliases[binding.id] = (
+                                local_chan_chan_target
+                            )
+                            self.local_chan_chans.add(binding.id)
                         elif self._chan_chan_fact(binding.type):
                             # `var cc = G()` — a callee-declared
                             # `chan chan` result binds an external
                             # queue like `cc := G()` does.
                             self.external_chan_locals.add(binding.id)
+                        elif (
+                            local_chan_chan_root
+                            := self._local_chan_chan_receive(
+                                value_nodes[i]
+                            )
+                        ) is not None:
+                            self.chan_aliases.pop(binding.id, None)
+                            self.external_chan_locals.discard(
+                                binding.id
+                            )
+                            self._chan_group_join(
+                                binding.id, local_chan_chan_root
+                            )
                         elif (
                             elem_root := self._chan_elem_index_target(
                                 value_nodes[i]
@@ -10273,6 +10771,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             self._chan_group_join(
                                 binding.id, elem_root[0]
+                            )
+                        elif (
+                            self._external_chan_elem_index(
+                                value_nodes[i], params
+                            )
+                            is not None
+                        ):
+                            # `var d = GS[i]` — an external
+                            # container's element queue binds an
+                            # external name like `d := GS[i]`.
+                            self.chan_aliases.pop(binding.id, None)
+                            self.external_chan_locals.add(binding.id)
+                            self._record_external_chan_selectors(
+                                binding.id, value_nodes[i]
                             )
                         elif self._chan_result_call(value_nodes[i]) is not None:
                             passthrough = self._chan_result_passthrough(
@@ -10304,6 +10816,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                             else frozenset()
                                         ),
                                     )
+                    if (
+                        self._chan_chan_fact(binding.type)
+                        and (
+                            not value_nodes
+                            or (
+                                len(value_nodes) == len(names)
+                                and self._is_make_chan_call(
+                                    value_nodes[i]
+                                )
+                            )
+                        )
+                    ):
+                        self._local_chan_chan_init(binding.id)
                     if (
                         binding.type.kind == "function"
                         or self._func_elem_collection(binding.type)
@@ -10757,6 +11282,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or (len(lefts) != len(rights) and not multi)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
+            if not compound:
+                for index, rhs in enumerate(rights):
+                    if self._local_chan_chan_id(rhs) is None:
+                        continue
+                    lhs = (
+                        lefts[index]
+                        if len(lefts) == len(rights)
+                        else None
+                    )
+                    lhs_ref = (
+                        self.references.get(self.node_key(lhs))
+                        if lhs is not None and lhs.type == "identifier"
+                        else None
+                    )
+                    lhs_id = (
+                        lhs_ref.binding_id
+                        if lhs_ref is not None
+                        else None
+                    )
+                    if (
+                        lhs_id is None
+                        or (
+                            lhs_id not in self.local_chan_chans
+                            and self._chan_root(lhs_id)
+                            not in self.local_chan_chans
+                        )
+                    ):
+                        raise _Unsupported(
+                            "binding_unavailable", _span(node)
+                        )
             # Every LHS must be a bound identifier or `_` before any RHS
             # runs, matching the single-assignment check's error order.
             refs: list[Any] = []
@@ -11659,6 +12214,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(refs))
             ]
+            local_chan_chan_targets = [
+                self._local_chan_chan_id(
+                    rights[i]
+                    if len(lefts) == len(rights)
+                    else rights[0]
+                )
+                for i in range(len(refs))
+            ]
             # `s, d = t, s[0]` — a `d = s[i]` element reseat joins
             # the group `s` named at eval time, not the group an
             # earlier slot's store reseated `s` onto: snapshot each
@@ -11933,6 +12496,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and len(lefts) > 1
                         and self._chan_result_call_at(rights[0], i)
                         is not None
+                    ) or (
+                        # `d = GS[i]` reseats the name onto an
+                        # external container's element queue — the
+                        # same external hand-off `ch = g()` performs.
+                        len(lefts) == len(rights)
+                        and self._external_chan_elem_index(
+                            rights[i], params
+                        )
+                        is not None
                     )
                     chan_chan_result = self._chan_chan_fact(
                         self.bindings[ref.binding_id].type
@@ -11952,6 +12524,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             is not None
                         )
                     )
+                    local_chan_chan_lhs = (
+                        ref.binding_id in self.local_chan_chans
+                        or self._chan_root(ref.binding_id)
+                        in self.local_chan_chans
+                    )
+                    rhs_node = (
+                        rights[i]
+                        if len(lefts) == len(rights)
+                        else rights[0]
+                    )
+                    local_chan_chan_target = local_chan_chan_targets[i]
+                    if local_chan_chan_lhs:
+                        if fresh_make:
+                            self._local_chan_chan_make_reseat(
+                                ref.binding_id
+                            )
+                        elif local_chan_chan_target is not None:
+                            self._local_chan_chan_alias(
+                                ref.binding_id,
+                                local_chan_chan_target,
+                                conditional or self._may_skip > 0,
+                            )
+                        else:
+                            raise _Unsupported(
+                                "binding_unavailable", _span(node)
+                            )
+                        self.external_chan_locals.discard(
+                            ref.binding_id
+                        )
+                        continue
                     if chan_chan_result:
                         # `cc = G()` reseats a `chan chan` name to the
                         # callee-produced external queue like `cc :=
@@ -11992,6 +12594,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 rights[0], params
                             )
                         )
+                        or (
+                            len(lefts) == len(rights)
+                            and self._local_chan_chan_receive(
+                                rights[i]
+                            )
+                            is not None
+                        )
+                        or (
+                            len(rights) == 1
+                            and len(lefts) > 1
+                            and self._is_chan_recv(
+                                rights[0], len(lefts)
+                            )
+                            and self._local_chan_chan_receive(
+                                rights[0]
+                            )
+                            is not None
+                        )
                     )
                     if not self._scalar_chan_binding(ref.binding_id) or (
                         not fresh_make
@@ -12004,6 +12624,50 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "binding_unavailable", _span(node)
                         )
                     if chan_recv:
+                        local_chan_chan_root = (
+                            self._local_chan_chan_receive(rhs_node)
+                        )
+                        if local_chan_chan_root is not None:
+                            old_root = self._chan_root(
+                                ref.binding_id
+                            )
+                            preserve_old_root = (
+                                (conditional or self._may_skip > 0)
+                                and old_root != ref.binding_id
+                            )
+                            if preserve_old_root:
+                                self._chan_group_join(
+                                    old_root, local_chan_chan_root
+                                )
+                                self.chan_aliases[
+                                    ref.binding_id
+                                ] = old_root
+                            else:
+                                self.chan_aliases.pop(
+                                    ref.binding_id, None
+                                )
+                            self.external_chan_locals.discard(
+                                ref.binding_id
+                            )
+                            old_contents = locals_.get(
+                                ref.binding_id, frozenset()
+                            )
+                            if ref.binding_id in params:
+                                old_contents |= frozenset(
+                                    {params[ref.binding_id]}
+                                )
+                            self._store(
+                                locals_,
+                                params,
+                                ref.binding_id,
+                                old_contents | value,
+                                conditional,
+                            )
+                            self._chan_group_join(
+                                ref.binding_id,
+                                local_chan_chan_root,
+                            )
+                            continue
                         # `c = <-cc` / `c, _ = <-cc` — the received
                         # channel reseats the name to an external
                         # queue like `c := <-cc` binds it. The slot
@@ -12096,6 +12760,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.external_chan_locals.add(
                                 ref.binding_id
                             )
+                            self._record_external_chan_selectors(
+                                ref.binding_id,
+                                rights[i]
+                                if len(lefts) == len(rights)
+                                else rights[0],
+                            )
                             if root_before != ref.binding_id:
                                 self.external_chan_locals.add(
                                     root_before
@@ -12186,6 +12856,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             self.external_chan_locals.add(
                                 ref.binding_id
+                            )
+                            self._record_external_chan_selectors(
+                                ref.binding_id,
+                                rights[i]
+                                if len(lefts) == len(rights)
+                                else rights[0],
                             )
                             if root_before != ref.binding_id:
                                 self.external_chan_locals.add(
@@ -12303,6 +12979,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
+                        reseated_external = (
+                            ref.binding_id in self.external_chan_locals
+                        )
+                        reseated_selectors = (
+                            self.external_chan_selectors.get(
+                                ref.binding_id, frozenset()
+                            )
+                        )
                         # A `make` reseat leaves earlier aliases
                         # pointing at the OLD queue — it still
                         # exists for them (`ch = q; q = make(...)`).
@@ -12358,6 +13042,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_[alias_id] = (
                                 alias_slot or frozenset()
                             ) | (old_queue or frozenset())
+                            if reseated_external:
+                                self.external_chan_locals.add(alias_id)
+                                self.external_chan_selectors[alias_id] = (
+                                    self.external_chan_selectors.get(
+                                        alias_id, frozenset()
+                                    )
+                                    | reseated_selectors
+                                )
                 if not compound and ref is not None:
                     bound = self.bindings.get(ref.binding_id)
                     if bound is not None and (
@@ -12705,6 +13397,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             | inner_toks
                         )
+                    container = self.bindings.get(ref.binding_id)
+                    if (
+                        container is not None
+                        and self._chan_elem_collection(
+                            container.type
+                        )
+                        and len(lefts) == len(rights)
+                    ):
+                        for member in self._chan_group_value_tokens(
+                            rights[i]
+                        ):
+                            self._chan_group_join(
+                                member, ref.binding_id
+                            )
                 if i in func_elem_targets:
                     # Resolution-time sharers plus landing-time
                     # group — a parallel reseat (`a, a[0] = b, f`)
@@ -13486,6 +14192,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 package_pointee = None
                 range_ident = None
                 computed = None
+                local_chan_chan_range = None
                 # `range G()` where `G` returns `*[N]T` iterates the
                 # pointee's live elements like `range p` (verified
                 # `go run`): a mid-iteration `(*p)[i] = x` IS
@@ -13644,41 +14351,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         else call.target
                                     ),
                                 )
-                    if range_ident is not None:
-                        bound = self._bound_container_pointee(
-                            range_ident, locals_, params
+                if range_ident is not None:
+                    local_chan_chan_range = (
+                        self._local_chan_chan_id(range_ident)
+                    )
+                    bound = self._bound_container_pointee(
+                        range_ident, locals_, params
+                    )
+                    if bound is None:
+                        package_pointee = (
+                            self._package_container_pointee(
+                                range_ident
+                            )
                         )
-                        if bound is None:
-                            package_pointee = (
-                                self._package_container_pointee(
-                                    range_ident
-                                )
-                            )
-                        if bound is None and package_pointee is None:
-                            range_ref = self.references.get(
-                                self.node_key(range_ident)
-                            )
-                            if (
-                                range_ref is not None
-                                and range_ref.binding_id
-                                in self._opaque_container_tokens
-                            ):
-                                # `for range s` on `s := lib.G(a)`
-                                # — the elements carry the bound
-                                # container's conflated deps.
-                                opaque_range = range_ref.binding_id
-                        # `for range p` auto-derefs only a
-                        # pointer-to-array — the producer never
-                        # emits the slice/map shape, and the gate
-                        # keeps the admit honest anyway.
-                        if sugar:
-                            if bound is not None and bound[2].kind != "array":
-                                bound = None
-                            if (
-                                package_pointee is not None
-                                and package_pointee[1].kind != "array"
-                            ):
-                                package_pointee = None
+                    if bound is None and package_pointee is None:
+                        range_ref = self.references.get(
+                            self.node_key(range_ident)
+                        )
+                        if (
+                            local_chan_chan_range is None
+                            and range_ref is not None
+                            and range_ref.binding_id
+                            in self._opaque_container_tokens
+                        ):
+                            # `for range s` on `s := lib.G(a)`
+                            # — the elements carry the bound
+                            # container's conflated deps.
+                            opaque_range = range_ref.binding_id
+                    # `for range p` auto-derefs only a
+                    # pointer-to-array — the producer never
+                    # emits the slice/map shape, and the gate
+                    # keeps the admit honest anyway.
+                    if sugar:
+                        if bound is not None and bound[2].kind != "array":
+                            bound = None
+                        if (
+                            package_pointee is not None
+                            and package_pointee[1].kind != "array"
+                        ):
+                            package_pointee = None
                 if (
                     member is not None
                     or container_var is not None
@@ -14120,6 +14831,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             and fact.kind in {"map", "chan"}
                             else frozenset()
                         ),
+                        local_chan_chan_range,
                     )
                     if (
                         (
@@ -14216,9 +14928,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             "unsupported_statement", _span(clause)
                         )
                     chan = self._chan_binding(right, scope, params)
+                    if local_chan_chan_range is not None:
+                        chan = self.bindings.get(
+                            local_chan_chan_range
+                        )
+                    group_external = (
+                        self._chan_group_external_tokens(chan.id)
+                        if chan is not None
+                        and local_chan_chan_range is None
+                        else set()
+                    )
                     if chan is not None and (
                         chan.id in params
                         or chan.id in self.external_chan_locals
+                        or group_external
                     ):
                         # `for v := range ch` over a channel
                         # parameter iterates a queue the caller
@@ -14227,19 +14950,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # index for provenance, every earlier send
                         # via `indirect_writes`, and an imported
                         # transfer keeps `effects` honest.
-                        transfers.append(
-                            CallTransfer(
-                                FileSpan(
-                                    self.current_file,
-                                    right.start_byte,
-                                    right.end_byte,
-                                ),
-                                chan.id,
-                                (),
-                                frozenset(),
-                                imported=True,
+                        for target in sorted(
+                            group_external or {chan.id}
+                        ):
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        right.start_byte,
+                                        right.end_byte,
+                                    ),
+                                    target,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
                             )
-                        )
                         rdeps = (
                             (
                                 frozenset({params[chan.id]})
@@ -14489,6 +15215,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     chan = self.bindings.get(
                                         elem_root[0]
                                     )
+                                    for target in sorted(
+                                        self._chan_group_external_tokens(
+                                            elem_root[0]
+                                        )
+                                    ):
+                                        transfers.append(
+                                            CallTransfer(
+                                                FileSpan(
+                                                    self.current_file,
+                                                    right.start_byte,
+                                                    right.end_byte,
+                                                ),
+                                                target,
+                                                (),
+                                                frozenset(),
+                                                imported=True,
+                                            )
+                                        )
                                     rdeps = (
                                         rdeps
                                         | self._chan_group_read_deps(
@@ -14555,11 +15299,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if chan_elem:
                                 # `for c := range cc` — each element
                                 # is a channel received out of the
-                                # external `chan chan` queue, binding
-                                # an external name like `c := <-cc`.
-                                self.external_chan_locals.add(
-                                    binding.id
-                                )
+                                # `chan chan` queue. Local queues use
+                                # their share group; external queues
+                                # bind an external name like
+                                # `c := <-cc`.
+                                if local_chan_chan_range is not None:
+                                    self._chan_group_join(
+                                        binding.id,
+                                        local_chan_chan_range,
+                                    )
+                                else:
+                                    self.external_chan_locals.add(
+                                        binding.id
+                                    )
                             if chan is not None:
                                 # `for v := range ch` — the element
                                 # name re-joins the queue's widened
@@ -14615,17 +15367,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if chan_elem:
                                 # `for c = range cc` over an existing
-                                # scalar-`chan` name — same external
-                                # element binding as the `:=` form;
-                                # a stale `c := ch` alias must not
-                                # keep `<-c` resolving to the old
-                                # queue.
-                                self.chan_aliases.pop(
-                                    ref.binding_id, None
-                                )
-                                self.external_chan_locals.add(
+                                # scalar-`chan` name — detach its old
+                                # channel alias before joining the
+                                # local or external queue's group.
+                                old_root = self._chan_root(
                                     ref.binding_id
                                 )
+                                if (
+                                    local_chan_chan_range is not None
+                                    and old_root != ref.binding_id
+                                ):
+                                    self._chan_group_join(
+                                        old_root,
+                                        local_chan_chan_range,
+                                    )
+                                self.chan_aliases.pop(ref.binding_id, None)
+                                if local_chan_chan_range is not None:
+                                    self._chan_group_join(
+                                        ref.binding_id,
+                                        local_chan_chan_range,
+                                    )
+                                else:
+                                    self.external_chan_locals.add(
+                                        ref.binding_id
+                                    )
                             if chan is not None:
                                 range_elem = (
                                     ref.binding_id,
@@ -15640,6 +16405,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             lefts, recv, recv_deps, clause, fn,
                             params, branch, transfers, count,
                             conditional,
+                            preserve_chan_alias=(
+                                conditional or len(clauses) > 1
+                            ),
                         )
                     body = next(
                         (
@@ -15724,6 +16492,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if channel is None or value is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             binding = self._chan_binding(channel, locals_, params)
+            local_chan_chan = self._local_chan_chan_id(channel)
+            if local_chan_chan is not None:
+                received_chan_chan = self._local_chan_chan_receive(value)
+                if received_chan_chan is not None:
+                    for token in self._chan_group_members(
+                        received_chan_chan
+                    ):
+                        self._chan_group_join(token, local_chan_chan)
+                elif self._chan_chan_receive(value, params):
+                    raise _Unsupported(
+                        "binding_unavailable", _span(node)
+                    )
+                member_tokens = self._chan_group_value_tokens(value)
+                value_deps = self.expression(
+                    value, fn, params, locals_, transfers, count, 0
+                )
+                for token in member_tokens:
+                    self._chan_group_join(token, local_chan_chan)
+                self._store(
+                    locals_,
+                    params,
+                    local_chan_chan,
+                    locals_.get(local_chan_chan, frozenset())
+                    | value_deps,
+                    conditional,
+                )
+                return
             if binding is None:
                 # `GC <- x` / `lib.GC <- x` — a channel living in
                 # external state (package-level or imported `var`).
@@ -15835,6 +16630,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             count,
                             0,
                         )
+                    external_members = (
+                        self._chan_group_external_tokens(root_id)
+                    )
+                    if external_members:
+                        value_deps |= frozenset().union(
+                            *(
+                                self.external_chan_selectors.get(
+                                    token, frozenset()
+                                )
+                                for token in external_members
+                            )
+                        )
                     holders = self._opaque_container_holders(
                         self._opaque_container_tokens.get(
                             root_id, frozenset()
@@ -15877,6 +16684,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if (
                             token in params
                             or token in self.external_chan_locals
+                            or token in self._external_chan_group_tokens
                         ):
                             transfers.append(
                                 CallTransfer(
@@ -15987,9 +16795,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             value_deps = self.expression(
                 value, fn, params, locals_, transfers, count, 0
             )
-            if binding.id in params or (
-                binding.id in self.external_chan_locals
-            ):
+            chan_root = self._chan_root(binding.id)
+            external_ids = {
+                channel_id
+                for channel_id in (binding.id, chan_root)
+                if channel_id in params
+                or channel_id in self.external_chan_locals
+            }
+            if external_ids:
                 # `ch <- x` on a channel parameter or a
                 # callee-produced queue (`ch := g()`) — the queue is
                 # shared beyond this function, so the send is an
@@ -15999,10 +16812,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `indirect_writes` — a later `<-ch` CAN observe
                 # this exact value, so dropping them would
                 # under-approximate.
-                self.indirect_writes |= value_deps
+                stored_deps = value_deps | frozenset().union(
+                    *(
+                        self.external_chan_selectors.get(
+                            channel_id, frozenset()
+                        )
+                        for channel_id in external_ids
+                    )
+                )
+                self.indirect_writes |= stored_deps
                 for holder_id in self._opaque_container_holders(
-                    frozenset({binding.id})
-                ) - {binding.id}:
+                    frozenset({chan_root})
+                ) - {chan_root}:
                     # The queue may also sit inside a `[]chan{c}`
                     # share group — the send reaches `<-s[j]` too,
                     # depositing like an element send does (the
@@ -16016,7 +16837,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                     self._store(
                         locals_, params, holder_id,
-                        holder_old | value_deps, conditional,
+                        holder_old | stored_deps, conditional,
                     )
                 transfers.append(
                     CallTransfer(
@@ -16037,6 +16858,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     locals_.get(binding.id, frozenset()) | value_deps,
                     conditional,
                 )
+                for holder_id in self._opaque_container_holders(
+                    frozenset({chan_root})
+                ) - {chan_root}:
+                    holder_old = locals_.get(
+                        holder_id, frozenset()
+                    )
+                    if holder_id in params:
+                        holder_old |= frozenset({params[holder_id]})
+                    self._store(
+                        locals_, params, holder_id,
+                        holder_old | value_deps, conditional,
+                    )
                 # `d <- x` where `d` sits in a share group holding
                 # a caller-owned queue (`s := []chan{param}`,
                 # `d := s[i]`) mutates that queue too — record the
@@ -16054,9 +16887,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if token in params
                     or token in self.external_chan_locals
+                    or token in self._external_chan_group_tokens
                 }
                 if member_external:
-                    self.indirect_writes |= value_deps
+                    member_deps = value_deps | frozenset().union(
+                        *(
+                            self.external_chan_selectors.get(
+                                token, frozenset()
+                            )
+                            for token in member_external
+                        )
+                    )
+                    self.indirect_writes |= member_deps
                     # Sorted so the recorded transfer order is
                     # deterministic across runs — a set's iteration
                     # order would differ between identical inputs.
@@ -17471,6 +18313,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         operand, locals_, params
                     )
                     if binding is None:
+                        local_chan_chan = self._local_chan_chan_id(
+                            operand
+                        )
+                        if local_chan_chan is not None:
+                            local_binding = self.bindings.get(
+                                local_chan_chan
+                            )
+                            if (
+                                local_binding is not None
+                                and local_binding.type is not None
+                            ):
+                                self._pin_fact_identities(
+                                    local_binding.type
+                                )
+                            return self._chan_group_read_deps(
+                                local_chan_chan, locals_
+                            )
                         # `<-GC` / `<-lib.GC` — receiving a queue in
                         # external state: whatever earlier sends put
                         # in is in `indirect_writes`; the rest is
@@ -17568,6 +18427,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # `indirect_writes` — the group read
                                 # observes them like `<-c` does.
                                 recv_deps |= self.indirect_writes
+                                for token in sorted(
+                                    self._chan_group_external_tokens(
+                                        root_id
+                                    )
+                                ):
+                                    transfers.append(
+                                        CallTransfer(
+                                            FileSpan(
+                                                self.current_file,
+                                                node.start_byte,
+                                                node.end_byte,
+                                            ),
+                                            token,
+                                            (),
+                                            frozenset(),
+                                            imported=True,
+                                        )
+                                    )
                             if (
                                 index_node is not None
                                 and index_node.type
@@ -17680,6 +18557,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 binding.id, locals_
                             )
                         )
+                    group_external = (
+                        self._chan_group_external_tokens(binding.id)
+                    )
+                    if group_external:
+                        for token in sorted(group_external):
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        node.start_byte,
+                                        node.end_byte,
+                                    ),
+                                    token,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
                     return self._chan_group_read_deps(
                         binding.id, locals_
                     )
@@ -17690,6 +18585,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # can write through it, so the binding is marked
                 # escaped for the deref-store dependency fold.
                 operand = node.child_by_field_name("operand")
+                if self._local_chan_chan_id(operand) is not None:
+                    raise _Unsupported(
+                        "unsupported_operator", _span(node)
+                    )
                 # `&st` / `&st.V` on a tracked composite stays closed:
                 # the dep-free bound-pointer field read never sees
                 # st's conflated set, so letting a pointer alias it
@@ -17819,6 +18718,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 _key3(a) for a in call.arguments
             ):
                 raise _Unsupported("call_mapping_unavailable", _span(node), call.target)
+            function_node = node.child_by_field_name("function")
+            while (
+                function_node is not None
+                and function_node.type == "parenthesized_expression"
+            ):
+                function_node = next(
+                    (
+                        c
+                        for c in function_node.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            builtin_name = (
+                function_node.text
+                if function_node is not None
+                else b""
+            )
+            if not (
+                call.kind == "builtin"
+                and builtin_name in {b"close", b"len", b"cap"}
+            ):
+                if any(
+                    self._local_chan_chan_id(argument) is not None
+                    for argument in arguments
+                ):
+                    raise _Unsupported(
+                        "unresolved_or_opaque_call", _span(node)
+                    )
             if call.kind == "interface_dispatch":
                 return self._interface_dispatch_call(
                     node, call, arguments, fn, params, locals_,
@@ -18038,6 +18966,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         arguments[0], locals_, params
                     )
                     if binding is None:
+                        local_chan_chan = self._local_chan_chan_id(
+                            arguments[0]
+                        )
+                        if local_chan_chan is not None:
+                            local_binding = self.bindings.get(
+                                local_chan_chan
+                            )
+                            if (
+                                local_binding is not None
+                                and local_binding.type is not None
+                            ):
+                                self._pin_fact_identities(
+                                    local_binding.type
+                                )
+                            return frozenset()
                         # `close(GC)` / `close(lib.GC)` — closing a
                         # queue in external state is a caller-visible
                         # effect recorded on the var/member's own
@@ -18549,6 +19492,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
+                    local_chan_chan = self._local_chan_chan_id(
+                        arguments[0]
+                    )
+                    if local_chan_chan is not None:
+                        local_binding = self.bindings.get(
+                            local_chan_chan
+                        )
+                        if (
+                            local_binding is not None
+                            and local_binding.type is not None
+                        ):
+                            self._pin_fact_identities(
+                                local_binding.type
+                            )
+                        return frozenset()
                     chan = self._chan_binding(
                         arguments[0], locals_, params
                     )
@@ -19778,6 +20736,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `var v T`) carries no value read, so it is
                 # skipped rather than treated as an unbound dep.
                 ref = self.references.get(self.node_key(cur))
+                if self._local_chan_chan_id(cur) is not None:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(cur)
+                    )
                 if ref is not None and ref.kind != "universe":
                     bid = ref.binding_id
                     # `locals_` wins over the parameter ordinal: a
@@ -21999,10 +22961,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # on the alias's own slot would hide the send
                     # from `<-ch`.
                     chan_id = self._chan_root(binding.id)
-                    if chan_id in params or (
-                        chan_id in self.external_chan_locals
-                    ):
-                        self.indirect_writes |= stored
+                    external_ids = {
+                        channel_id
+                        for channel_id in (binding.id, chan_id)
+                        if channel_id in params
+                        or channel_id in self.external_chan_locals
+                    }
+                    group_external = (
+                        self._chan_group_external_tokens(chan_id)
+                    )
+                    if external_ids or group_external:
+                        self.indirect_writes |= stored | frozenset().union(
+                            *(
+                                self.external_chan_selectors.get(
+                                    channel_id, frozenset()
+                                )
+                                for channel_id in (
+                                    external_ids | group_external
+                                )
+                            )
+                        )
                     elif chan_id in locals_:
                         locals_[chan_id] = (
                             locals_.get(chan_id, frozenset())
@@ -22096,6 +23074,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 locals_, params, holder_id, stored,
                                 True,
                             )
+                        group_external = (
+                            self._chan_group_external_tokens(
+                                chan_elem[0]
+                            )
+                        )
+                        group_selectors = frozenset().union(
+                            *(
+                                self.external_chan_selectors.get(
+                                    token, frozenset()
+                                )
+                                for token in group_external
+                            )
+                        )
+                        self.indirect_writes |= (
+                            stored | group_selectors
+                        )
+                    elif (
+                        self._external_chan_elem_index(arg_node, params)
+                        is not None
+                    ):
+                        # `G(GS[i])` — an external container's
+                        # element queue: the callee's sends land in
+                        # the shared queue, broadcast like
+                        # `GS[i] <- x`.
                         self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state

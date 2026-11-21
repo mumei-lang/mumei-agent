@@ -154,6 +154,7 @@ class TestGetAgentStatus:
         assert "extract_spec_from_code" in registered
         assert "get_spec_guide_summary" in registered
         assert "get_spec_guidelines" in registered
+        assert "native_observations_accept" in registered
         assert "send_latent_message" in registered
         assert "verify_code_spec_traceability" in registered
 

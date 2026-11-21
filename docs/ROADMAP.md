@@ -788,16 +788,21 @@ exit 1 conflates a mismatched exit status with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and
+`os_exit_status_observation` — with the remaining checks in
 `checks_not_performed`; the exit-status match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_exit_status_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_exit_status_recheck` MCP tool (same `run_exit_status_recheck`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; recheck reports remain non-performers. C02/C10 stay
+partial.
 
 ### C02/C10 declared native-exit-status-accept route (native-exit-status-accept)
 
@@ -814,17 +819,23 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_exit_status_observation` — with the remaining checks in
+`checks_not_performed`;
 the exit-status match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_exit_status_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
 `native_exit_status_accept` MCP tool (same `run_exit_status_accept`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; accepted sibling reports sharing that
+Core-authenticated ID can recover one another's channel checks through
+`recovery-eval`. C02/C10 stay partial.
 
 ### C02/C10 declared native-stdout-recheck route (native-stdout-recheck)
 
@@ -841,16 +852,21 @@ exit 1 conflates a mismatched stdout digest with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and `os_stdout_observation` — with
+the remaining checks in
 `checks_not_performed`; the stdout digest match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_stdout_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stdout_recheck` MCP tool (same `run_stdout_recheck`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; recheck reports remain non-performers. C02/C10 stay
+partial.
 
 ### C02/C10 declared native-stdout-accept route (native-stdout-accept)
 
@@ -867,17 +883,23 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_stdout_observation` — with the remaining checks in
+`checks_not_performed`;
 the stdout digest match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_stdout_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
 `native_stdout_accept` MCP tool (same `run_stdout_accept`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; accepted sibling reports sharing that
+Core-authenticated ID can recover one another's channel checks through
+`recovery-eval`. C02/C10 stay partial.
 
 ### C02/C10 declared native-stderr-recheck route (native-stderr-recheck)
 
@@ -894,16 +916,21 @@ exit 1 conflates a mismatched stderr digest with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and `os_stderr_observation` — with
+the remaining checks in
 `checks_not_performed`; the stderr digest match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_stderr_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stderr_recheck` MCP tool (same `run_stderr_recheck`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; recheck reports remain non-performers. C02/C10 stay
+partial.
 
 ### C02/C10 declared native-stderr-accept route (native-stderr-accept)
 
@@ -920,17 +947,48 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_stderr_observation` — with the remaining checks in
+`checks_not_performed`;
 the stderr digest match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_stderr_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
 `native_stderr_accept` MCP tool (same `run_stderr_accept`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; accepted sibling reports sharing that
+Core-authenticated ID can recover one another's channel checks through
+`recovery-eval`. C02/C10 stay partial.
+
+### C02/C10 declared native-observations-accept route (native-observations-accept)
+
+`python -m agent native-observations-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares one invocation
+acceptance: `<core> native-bundle accept-observations
+--expected-build-id <id> --json <bundle> <source>` under a
+`mumei.native-observations-accept-request/v1` fingerprint binding the
+Core executable, the bundle record and every declared member, the
+source and the trusted-channel build ID. `acceptance` is claimed only
+for uniquely-mapped exit codes (`0 → accepted`, `3 → inconclusive`);
+exit 1 claims nothing, and mid-run drift reports `inputs_changed`
+without an outcome. Only exit 0 selects the anonymous
+`mumei.native-evidence-acceptance/v1` descriptor.
+
+An `accepted` run reports `artifact_semantics`, `claim_truth` and all
+four runtime checks in `discharged_checks`: the reproduced executable
+was observed once with its exit status, stdout and stderr matched to
+the pins. `runtime_observation_semantics` names that one bounded
+invocation; it is not an ABI, general runtime or process-semantics
+claim, and `historical_execution` remains unclaimed. The remaining C02
+checks stay in `checks_not_performed`. The route is also the
+`native_observations_accept` MCP tool (same report production,
+declared-path validation and basename redaction as the other spawn
+tools). C02/C10 stay partial.
 
 ### C02/C10 declared native-check route (native-check)
 
@@ -2846,13 +2904,28 @@ binds each element as an external channel like `c
 := <-cc`, and the comma-ok receives `c, ok :=
 <-cc`, `var c, ok = <-cc` and `c, _ = <-cc` reseat
 or bind the value slot to the received external
-queue. Deeper nesting (`chan chan chan T`), a
-local `make(chan chan T)` or `var cc chan chan T`,
-a `chan chan` alias reseat (`cc = q`), and a
-`make(chan chan T)` rebind all stay closed — a
-channel value flowing between two local queues
-would alias queues the conflated dep set cannot
-track. Still
+queue. A local `make(chan chan T)` or `var cc chan
+chan T` is admitted as a bound channel-element
+container under the existing conflated share-group
+model: each local channel sent into or received from
+the queue joins its group, as do aliases and members
+of other local channel-element groups. Local queue
+operations (`send`, `receive`, `close`, `len`, and
+`cap`) do not record a transfer on the outer queue
+identity. External members remain externally
+observable through the group: their reads and sends
+contribute indirect writes and imported transfers.
+Local queues stay closed when they escape through
+calls, returns, stores, or func-literal captures, and
+when reseated from a call result or parameter.
+Deeper nesting (`chan chan chan T`), `[]chan chan T`,
+and direct nested channel operations stay closed:
+passing a channel received from one local queue as a
+value to another (`dst <- <-src`) is supported and
+joins their share groups, but using that receive as
+the operation target (`(<-src) <- x`) or nesting a
+receive (`<-(<-src)`) remains closed.
+Still
 closed: non-scalar elements — while `select` now
 admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
@@ -4192,10 +4265,27 @@ CallTransfer on the *container's* identity exactly like a
 broadcast into `indirect_writes`, the read returns
 `indirect_writes` plus the index's own deps, and select
 alternatives resolve through the same send/receive operand
-paths. The honest closures mirror the bound case — `[][]chan`
-nests, `[]chan chan` non-scalar elements, and a `d := GS[i]`
-extraction all stay closed, and a `map[string]chan` variable
-key stays unreachable (a `string` value is never producible).
+paths. Extracting `d := GS[i]` (or `var d = GS[i]` /
+`var d chan T = GS[i]`) binds `d` as an external name: sends
+through it broadcast into `indirect_writes`, while reads union
+that set with the index's dependencies; sends through the extracted
+name also retain the extraction's index dependencies. The extraction itself
+records a transfer on the container identity, so a callee's
+extraction propagates to callers just like `ch = g()` does.
+Plain reseats (`d = GS[i]`) and conditional reseats are admitted
+through the same external-name path. A reseated group member
+keeps its old group membership as a sound over-approximation.
+Local chan-element share groups also retain external members added
+by literals, element stores, or `append` — including `GC` /
+`lib.GC`, `GS[i]`, and extracted external names. Reads and sends
+through any group member (including extracted aliases, range,
+select, and channel-call arguments) join `indirect_writes` and
+record the corresponding imported transfer; group merges and copies
+preserve that external marker.
+The honest closures mirror the bound case — `[][]chan` nests,
+`[]chan chan` non-scalar elements, comma-ok `d, ok := GM[k]`,
+and a `map[string]chan` variable key stay closed or unreachable
+(a `string` value is never producible).
 
 ### C07 scalar-element *nested* local containers
 
@@ -6066,17 +6156,17 @@ the anchor's) while `registry_authenticity` /
 `revocation_list_authenticity` stay not-performed — the eval fold
 binds signatures, never verifies them.
 
-Neither check name joins `_CHECK_PERFORMERS`: a verification doc's
-anchor outcomes are bound only to the signed record's digest — they
-do not pin WHICH anchor document was assessed, so a doc that
-authenticated a different registry would wrongly recover this
-record's anchor check. `registry_authenticity` /
-`revocation_list_authenticity` are therefore observable on the
-verify route but not composable through `recovery-eval` until the
-verification doc can pin the anchor bytes it assessed. The producer
-side needs no Core change: `mumei evidence sign` already accepts any
-record file — the registry is just a record. Revocation of the root
-keys themselves and rotation policy stay deferred.
+Both check names now join `_CHECK_PERFORMERS`: a verification doc
+emits `registry_digest`/`revocation_digest` whenever it assesses an
+anchor — pinning WHICH anchor document its outcome covered — and a
+new `shared:<field>` bind-path convention binds a performer to a
+record only when both docs declare the same anchor digest. A doc
+that authenticated a different registry can never recover this
+record's anchor check; the checks compose through `recovery-eval`
+while staying anchored to the exact bytes each fold assessed. The
+producer side needs no Core change: `mumei evidence sign` already
+accepts any record file — the registry is just a record. Revocation
+of the root keys themselves and rotation policy stay deferred.
 
 ### C11 declared unperformed-check recovery
 
@@ -6130,7 +6220,32 @@ and all five non-artifact checks — `file_identity`,
 `claim_truth` — ← an accepted `verify-attempt-report/v1`, whose
 attempt sequence is also the recorded execution lineage, so the
 same bound report performs `historical_execution` on the record its
-run produced. `producer_authenticity` also recovers through a
+run produced. The native accept routes' reports
+(`native-accept-report/v1`, `native-exit-status-accept-report/v1`,
+`native-stdout-accept-report/v1`, `native-stderr-accept-report/v1`)
+perform the same check through their own outcome surface — the
+string `acceptance: "accepted"` — since an accepted run's stdout is
+the acceptance descriptor itself and `normalized.stdout.sha256`
+binds the report's lineage to those bytes; a descriptor that kept
+`historical_execution` unperformed ("one run is an observation, not
+a history") recovers it through the route's published sequence. The
+exit-status/stdout/stderr accept reports also perform their matching
+`os_*_observation` check through the existing
+`normalized.stdout.sha256` binding. Each has a second
+`shared:expected_build_id` binding: an accepted Core run has authenticated
+that declared ID against the bundle record, so accepted sibling reports
+can perform their channel checks when both reports name the same ID.
+The ID is echoed by all six accept/recheck reports, including outcomes
+without an acceptance or reproduced result. Rechecks remain
+non-performers as evidence because their stdout is a fixed diagnostic
+line with no bound carrier. The accepted
+`native-observations-accept-report/v1` performs all three channel checks
+and `runtime_observation_semantics` through its bound stdout digest or
+shared expected build ID: one Core invocation has observed every
+channel. The raw `mumei.runtime-observation/v1` descriptor remains
+non-performing, and three single-channel reports never compose
+`runtime_observation_semantics`. `producer_authenticity` also
+recovers through a
 `mumei.signature-verification/v1` doc — the only multi-outcome
 performer: a verifying signature alone binds SOME key to the digest,
 so the doc must hold `signature_valid` AND `key_pinned` (the
@@ -6731,6 +6846,24 @@ Planning only: nothing is spawned, dispatched or accepted. Declared
 inputs join the path validation and error redaction applied to the
 other declared-path tools.
 
+
+### C10 runtime/ABI assurance — design memo
+
+The remaining research-level C10 item — the object/ABI/runtime/final-binary
+assurance chain — has a design memo:
+[`docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md).
+Core stage 2 has landed in mumei as `native-bundle
+recheck-observations`, which emits `mumei.runtime-observation/v1`.
+Agent-side `native-observations-accept` now accepts all pins from one
+invocation and is the first performer of
+`runtime_observation_semantics`; single-channel accept reports still
+perform only their own observation, and the agent recheck-observations
+route remains. The check describes one bounded invocation, never ABI,
+general runtime or process semantics. The named channel checks remain
+composable through `recovery-eval` when their Core-authenticated
+`expected_build_id` values match.
+Object-code translation validation (Option B) stays the deep endpoint.
+No grade or audit surface changes.
 
 ## Roadmap authority and vocabulary
 
@@ -7645,6 +7778,8 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
     - 提案は difficulty + 未充足依存数でランキングし先頭 3 件に priority を付与
   - `generate_specs_from_gaps(gaps, max_count)` — `propose.build_spec_from_proposal` を再利用して forge 互換 spec を生成
   - `check_blast_radius(mumei_client, repo_dir, new_file_path, code)` — 新規 `.mm` を `std/` に仮配置 → 既存 `std/*.mm` を全検証 → 仮ファイルを自動除去（例外時も cleanup）
+    - ✅ 深層レイヤー（cross-file dependencies）: token-level import scan が複数行・複数宣言を検出し、`agent/dependency_invalidation.py` が compiler と同じ importer-relative → std fallback の順で import を解決して暗黙の `std/prelude.mm` 依存 edge を加える。解決不能・malformed import はファイルとその推移的 dependents を fail-closed で `undetermined` に分類する。`mumei.std-dependency-invalidation/v1` 記述子には symlink / path alias を統合した依存関係を含め、`check_blast_radius` は各 broken_files エントリに `dependency_relation`（`re_derive` / `undetermined` / `unaffected`）を付記し、各 per-spec/per-member 結果および `summary.json` にも `dependency_invalidation` を保持する。検出のみで再検証・契約差分・シンボル解決・サイクル解析・外部 std path 解決は `checks_not_performed` に列挙（C07 stale_dependents と同じ「検出≠再計算」方針）。
+    - ✅ 依存チェック継承レイヤー: `mumei.std-dependency-checks/v1` は依存 closure（暗黙 prelude と real-path alias を含む）をたどり、report が未回収の `checks_not_performed` を依存キー付きで各 dependent record に継承する。report 欠落は `dependency_verification`、closure 内の unresolved import は `dependency_resolution` として fail-closed に追加し、出力 record はそのまま recovery-eval に渡せる。再検証・evidence binding・symbol resolution・external std path resolution は `checks_not_performed` に残す。
   - `attempt_heal(client, model, broken_info, mumei_client, max_retries=3)` — 既存 `fix_strategy.get_fix` を再利用し、壊れた既存ファイルを自動修復
   - `proliferate(mumei_repo_dir, max_proposals=3, dry_run=False)` — 全体オーケストレーター
     - 各提案を独立処理（1 件の失敗が他をブロックしない）
@@ -7660,6 +7795,8 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `analyze_gaps` の依存グラフ、trusted atom、TODO 検出、ランキング
   - `generate_specs_from_gaps` の `max_count` リスペクト + forge 互換性
   - `check_blast_radius` の broken_files 報告、例外時 cleanup
+  - `tests/test_dependency_invalidation.py` — 45 ケース: token-level import scan、compiler-mirrored resolution、symlink aliases、暗黙 prelude edge、unresolved / unreadable import の fail-closed 分類、blast-radius join（`dependency_relation` 分類 + 記述子同封）
+  - `tests/test_dependency_checks.py` — 依存 closure の未回収チェック継承、recovery report、alias / prelude / cycle、fail-closed marker と recovery-eval 接続
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
   - Lean fallback CLI フラグ伝搬と `summary.json` 内 `lean_fallback` 監査フィールドの保持を検証
@@ -8715,8 +8852,18 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    canonical な `artifact_paths` で参照し、`MUMEI_PROOF_CERTS` /
    `MUMEI_PROOF_BUNDLE` と `mumei verify-cert --strict` による distribution-only
    再検証手順を [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](VERIFICATION_WORKFLOW_GUIDE.md)
-   に同期した。agent 側に独立した bundle intake / `artifact_paths` 検査を追加した
-   ものではなく、consumer wiring の追加は未実装として残る。
+   に同期した。consumer wiring は `agent/proofcert.py` の
+   `artifact_paths_of` / `validate_artifact_paths` と
+   `ProofCertificate` の P5-A metadata accessors（`harness_contract` /
+   `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` /
+   `lean_provenance`）で実装し、`agent/publish.py` が `--proof-cert` で
+   生成した証明書ファイルから宣言された `artifact_paths` を収集し
+   `artifact_paths_status` として検証（verify --json レポートは
+   これらを持たないため証明書ファイルが正典ソース）、
+   `proliferate --output-json` の `proof_certificate_summary` /
+   `upgraded_cert_summary` が certificate の canonical keys をそのまま
+   参照する。独立した bundle intake や新しい artifact key / alias は
+   追加しない。
 4. **CI 常時化** — mumei の `.github/workflows/stdlib-proof-gate.yml` が
    certificate-derived baseline `scripts/std_proof_baseline.json` と shared
    `scripts/verify_packaged_certs.py` を使って証明書・bundle・metrics の gate を

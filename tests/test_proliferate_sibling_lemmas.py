@@ -929,10 +929,15 @@ def test_dry_run_group_reports_all_members_and_restores_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     specs, results = _group_inputs(tmp_path)
+    dependency_invalidation = {"changed": "std/root.mm"}
     monkeypatch.setattr(
         proliferate,
         "check_blast_radius",
-        lambda *args: {"all_passed": True, "broken_files": []},
+        lambda *args: {
+            "all_passed": True,
+            "broken_files": [],
+            "dependency_invalidation": dependency_invalidation,
+        },
     )
     monkeypatch.setattr(
         proliferate,
@@ -955,8 +960,45 @@ def test_dry_run_group_reports_all_members_and_restores_files(
     )
     assert all(result["publish_group"] == ["std/root.mm", "std/child.mm"] for result in grouped.values())
     assert all(result["dry_run"] is True for result in grouped.values())
+    assert all(
+        result["dependency_invalidation"] == dependency_invalidation
+        for result in grouped.values()
+    )
     assert not (tmp_path / "std" / "root.mm").exists()
     assert not (tmp_path / "std" / "child.mm").exists()
+
+
+def test_dry_run_group_failure_carries_dependency_invalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs, results = _group_inputs(tmp_path)
+    dependency_invalidation = {"changed": "std/root.mm"}
+    monkeypatch.setattr(
+        proliferate,
+        "check_blast_radius",
+        lambda *args: {
+            "all_passed": False,
+            "broken_files": [{"file": "std/legacy.mm", "error": "broken"}],
+            "dependency_invalidation": dependency_invalidation,
+        },
+    )
+    grouped = proliferate._publish_dependency_group(
+        [0, 1],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=MagicMock(),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=True,
+        enable_lean_fallback=False,
+    )
+    assert grouped[0]["reason"] == "blast_radius_broken_dry_run"
+    assert grouped[0]["dependency_invalidation"] == dependency_invalidation
 
 
 def _publish_fixture(tmp_path: Path):

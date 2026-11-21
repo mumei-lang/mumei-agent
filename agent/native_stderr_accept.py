@@ -67,14 +67,14 @@ correspond to the declared source's verified semantics under the
 recorded toolchain, the deepest layer the pipeline covers — and
 ``claim_truth`` — the fresh source postcondition was re-established
 within the declared profile — both at representation level. The
-stderr match itself is an OS-level *observation* bound by the
-record pin: it discharges no new check category, since no
-runtime/ABI/process-semantics claim exists in the vocabulary for it
-to discharge. The other four checks stay in ``checks_not_performed``
+stderr digest match itself is the named ``os_stderr_observation``
+check, bound by the record pin. The other runtime-observation checks
+stay in ``checks_not_performed``; the ``runtime_observation_semantics``
+conjunction awaits a Core descriptor. The remaining C02 checks
 (producer authenticity, freshness, file identity and semantic
-correspondence remain outside the profile; the raw link
+correspondence) remain outside the profile; the raw link
 argument-vector is recorded-but-not-reproduced inside Core and adds
-no claim here either).
+no claim here either.
 """
 
 from __future__ import annotations
@@ -86,6 +86,7 @@ import os
 import sys
 from pathlib import Path
 
+from agent.core_evidence import RUNTIME_CHECK_VOCABULARY
 from agent.native_bundle import (
     FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
     MAX_RECORD_BYTES,
@@ -402,6 +403,8 @@ def run_stderr_accept(args: argparse.Namespace) -> dict:
         "schema_version": NATIVE_STDERR_ACCEPT_REPORT_PROFILE,
         "sequence": published.to_dict(),
         "normalized": dispatch.run.normalized().to_dict(),
+        "expected_build_id": args.expected_build_id,
+        "checks_not_performed": sorted(CHECK_VOCABULARY | RUNTIME_CHECK_VOCABULARY),
     }
     if inputs_changed:
         # The run consumed bytes that no longer match the declared
@@ -411,9 +414,12 @@ def run_stderr_accept(args: argparse.Namespace) -> dict:
     elif exit_code in STDERR_ACCEPT_OUTCOMES:
         report["acceptance"] = STDERR_ACCEPT_OUTCOMES[exit_code]
         if report["acceptance"] == "accepted":
-            report["discharged_checks"] = sorted(DischargedChecks.ACCEPTED)
+            report["discharged_checks"] = sorted(
+                DischargedChecks.ACCEPTED | {"os_stderr_observation"}
+            )
             report["checks_not_performed"] = sorted(
-                CHECK_VOCABULARY - DischargedChecks.ACCEPTED
+                (CHECK_VOCABULARY - DischargedChecks.ACCEPTED)
+                | (RUNTIME_CHECK_VOCABULARY - {"os_stderr_observation"})
             )
     return report
 

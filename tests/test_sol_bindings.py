@@ -20,6 +20,7 @@ def build_sol_bindings(source):
     assert len(reference_keys) == len(set(reference_keys)), source
     call_spans = [call.span for call in report.calls]
     assert len(call_spans) == len(set(call_spans)), source
+    assert _load(report, source).to_json() == report.to_json()
     return report
 
 
@@ -196,6 +197,82 @@ contract C {
         assert field.type.type_id == declaration.id
 
 
+@pytest.mark.parametrize(
+    ("source", "declaration_marker", "kind", "expected_type", "expected_width"),
+    [
+        (
+            "struct T { uint file; } contract C { "
+            "struct T { address local; } T value; }",
+            "struct T { address local; }",
+            "struct",
+            "named",
+            0,
+        ),
+        (
+            "enum T { File } contract C { enum T { Local } T value; }",
+            "enum T { Local }",
+            "enum",
+            "named",
+            0,
+        ),
+        (
+            "type T is uint8; contract C { type T is uint16; T value; }",
+            "type T is uint16;",
+            "user_type",
+            "int",
+            16,
+        ),
+        (
+            "struct T { uint file; } "
+            "contract Base { struct T { address base; } } "
+            "contract C is Base { T value; }",
+            "struct T { address base; }",
+            "struct",
+            "named",
+            0,
+        ),
+        (
+            "struct T { uint file; } "
+            "contract Base { struct T { address base; } } "
+            "contract C is Base { struct T { bool derived; } T value; }",
+            "struct T { bool derived; }",
+            "struct",
+            "named",
+            0,
+        ),
+        (
+            "struct T { uint file; } contract C { T value; }",
+            "struct T { uint file; }",
+            "struct",
+            "named",
+            0,
+        ),
+    ],
+)
+def test_contract_and_base_types_precede_file_scope(
+    source, declaration_marker, kind, expected_type, expected_width
+):
+    report = build_sol_bindings(source)
+    declaration_start = source.index(declaration_marker)
+    name_start = source.index("T", declaration_start)
+    declaration = next(
+        binding
+        for binding in _bindings(report, "T", kind)
+        if binding.span.start == name_start
+    )
+    value = _bindings(report, "value", "state_variable")[0]
+    assert value.type.kind == expected_type
+    assert value.type.bit_width == expected_width
+    assert value.type.type_id == declaration.id
+    type_use_start = source.index("T value")
+    type_reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == type_use_start
+    )
+    assert type_reference.binding_id == declaration.id
+
+
 def test_file_level_constant_and_free_function_are_order_independent():
     source = """
 function useValue() pure returns (uint) { return helper(TOP); }
@@ -255,6 +332,32 @@ contract C {
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        "enum Status { Ready } contract C { Status value; }",
+        "contract C { enum Status { Ready } Status value; }",
+    ],
+)
+def test_file_and_contract_enums_are_type_names(source):
+    report = build_sol_bindings(source)
+    enum = _bindings(report, "Status", "enum")[0]
+    value = _bindings(report, "value", "state_variable")[0]
+    reference = _refs(report, source, "Status", "read")[0]
+    assert value.type.kind == "named"
+    assert value.type.type_id == enum.id
+    assert reference.binding_id == enum.id
+
+
+def test_unknown_enum_type_stays_unresolved():
+    source = "contract C { MissingStatus value; }"
+    report = build_sol_bindings(source)
+    value = _bindings(report, "value", "state_variable")[0]
+    assert value.type.kind == "unknown"
+    assert _unresolved(report, "MissingStatus", "unknown_name")
+    assert not _refs(report, source, "MissingStatus")
+
+
+@pytest.mark.parametrize(
     "type_name",
     [
         "string",
@@ -275,6 +378,41 @@ def test_dynamic_and_composite_type_facts_remain_unknown(type_name):
         None,
         "",
     )
+
+
+@pytest.mark.parametrize(
+    "type_name",
+    [
+        "T[]",
+        "T[2]",
+        "mapping(address => T)",
+        "mapping(address => T[])",
+        "mapping(address => mapping(uint => T))",
+    ],
+)
+def test_composite_user_types_are_unknown_but_keep_type_references(type_name):
+    source = f"struct T {{ uint field; }} contract C {{ {type_name} value; }}"
+    report = build_sol_bindings(source)
+    value = _bindings(report, "value", "state_variable")[0]
+    declaration = _bindings(report, "T", "struct")[0]
+    references = _refs(report, source, "T", "read")
+    assert (value.type.kind, value.type.bit_width, value.type.signed) == (
+        "unknown",
+        0,
+        None,
+    )
+    assert len(references) == 1
+    assert references[0].binding_id == declaration.id
+
+
+def test_plain_user_type_remains_named():
+    source = "struct T { uint field; } contract C { T value; }"
+    report = build_sol_bindings(source)
+    value = _bindings(report, "value", "state_variable")[0]
+    declaration = _bindings(report, "T", "struct")[0]
+    assert value.type.kind == "named"
+    assert value.type.type_id == declaration.id
+    assert _refs(report, source, "T", "read")[0].binding_id == declaration.id
 
 
 def test_imported_type_remains_unknown():
@@ -446,16 +584,111 @@ contract External is Remote { function g() public { absent(); } }
 """
     report = build_sol_bindings(source)
     chosen_call = next(call for call in report.calls if _text(source, call.span) == "chosen()")
-    b_function = next(
-        binding
-        for binding in _bindings(report, "chosen", "function")
-        if source.index("contract B") < binding.span.start < source.index("contract C")
-    )
-    assert chosen_call.target == b_function.id
+    assert chosen_call.kind == "opaque_overload"
+    assert chosen_call.target == ""
+    assert _unresolved(report, "chosen", "ambiguous_overload")
     assert _unresolved(report, "hidden", "private_base_member")
     assert _unresolved(report, "Remote", "unresolved_base")
     assert _unresolved(report, "absent", "unresolved_base")
     assert any(gap.reason == "unresolved_base" for gap in report.gaps)
+
+
+def test_private_inherited_state_is_distinguished_from_unknown_names():
+    source = """
+contract Base { uint private hidden; uint visible; }
+contract Derived is Base {
+    function f() public view returns (uint) {
+        return hidden + visible + missing;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    visible = _bindings(report, "visible", "state_variable")[0]
+    assert _unresolved(report, "hidden", "private_base_member")
+    assert not _unresolved(report, "hidden", "unknown_name")
+    assert any(
+        reference.binding_id == visible.id and reference.kind == "read"
+        for reference in report.references
+    )
+    assert _unresolved(report, "missing", "unknown_name")
+
+
+def test_inherited_overloads_collect_bases_and_remove_overridden_functions():
+    source = """
+contract Base {
+    function f(uint x) internal virtual {}
+}
+contract Derived is Base {
+    function f(uint x) internal override virtual {}
+    function selected(uint x) public { f(x); }
+}
+contract OtherBase {
+    function f(address x) internal {}
+}
+contract Ambiguous is OtherBase {
+    function f(uint x) internal {}
+    function unresolved(uint x) public { f(x); }
+}
+"""
+    report = build_sol_bindings(source)
+    derived = next(
+        binding
+        for binding in _bindings(report, "f", "function")
+        if source.index("contract Derived")
+        < binding.span.start
+        < source.index("contract OtherBase")
+    )
+    selected_call = next(
+        call for call in report.calls if call.span.start == source.index("f(x)")
+    )
+    assert selected_call.kind == "opaque_virtual"
+    assert selected_call.target == derived.id
+    ambiguous_start = source.rindex("f(x)")
+    ambiguous_call = next(
+        call for call in report.calls if call.span.start == ambiguous_start
+    )
+    assert ambiguous_call.kind == "opaque_overload"
+    assert ambiguous_call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
+
+
+def test_derived_implementation_replaces_bodyless_interface_function():
+    source = """
+interface I { function f(uint) external; }
+contract C is I {
+    function f(uint value) public {}
+    function caller() internal { f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    implementation = next(
+        binding
+        for binding in _bindings(report, "f", "function")
+        if source.index("contract C") < binding.span.start
+    )
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(1)"
+    )
+    assert call.target == implementation.id
+    assert call.kind in {"direct_local", "opaque_virtual"}
+    assert not _unresolved(report, "f", "ambiguous_overload")
+
+
+def test_different_arity_bodyless_base_function_remains_ambiguous():
+    source = """
+interface I { function f(uint) external; }
+abstract contract C is I {
+    function f(uint first, uint second) public {}
+    function caller() internal { f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(1)"
+    )
+    assert call.kind == "opaque_overload"
+    assert call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
 
 
 def test_overloads_and_virtual_dispatch_are_not_direct_local_calls():
@@ -665,6 +898,61 @@ contract C {
     assert _load(report, source).to_json() == report.to_json()
 
 
+def test_constructor_modifier_position_resolves_base_constructor():
+    source = """
+contract Base { constructor(uint value) {} }
+contract Derived is Base { constructor() Base(1) {} }
+"""
+    report = build_sol_bindings(source)
+    base = _bindings(report, "Base", "contract")[0]
+    call = next(call for call in report.calls if call.kind == "base_constructor")
+    assert call.target == base.id
+    reference = next(
+        item
+        for item in report.references
+        if item.span.start == source.index("Base(1)") and item.kind == "call"
+    )
+    assert reference.binding_id == base.id
+
+
+def test_constructor_modifier_name_outside_inheritance_chain_is_unresolved():
+    source = """
+contract Base {}
+contract Other {}
+contract Derived is Base { constructor() Other() {} }
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call
+        for call in report.calls
+        if call.span.start == source.index("Other()")
+    )
+    assert call.kind == "unresolved"
+    assert call.target == ""
+    assert _unresolved(report, "Other", "unknown_name")
+    assert not any(
+        item.span.start == source.index("Other()") and item.kind == "call"
+        for item in report.references
+    )
+
+
+def test_constructor_modifier_wins_over_same_named_base_contract():
+    source = """
+contract Base { constructor(uint value) {} }
+contract Derived is Base {
+    modifier Base(uint value) { _; }
+    constructor() Base(1) {}
+}
+"""
+    report = build_sol_bindings(source)
+    modifier = _bindings(report, "Base", "modifier")[0]
+    call = next(
+        call for call in report.calls if call.span.start == source.index("Base(1)")
+    )
+    assert call.kind == "modifier"
+    assert call.target == modifier.id
+
+
 def test_builtins_member_reads_and_qualified_imports_stay_conservative():
     source = """
 import * as Lib from "lib.sol";
@@ -729,8 +1017,13 @@ def test_parse_and_source_limits_fail_closed():
 def test_deep_expression_recursion_fails_closed():
     expression = "+".join("1" for _ in range(2000))
     source = f"contract C {{ function f() public {{ uint x = {expression}; }} }}"
-    with pytest.raises(LexicalReportError):
-        build_sol_bindings(source)
+    previous_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        with pytest.raises(LexicalReportError):
+            build_sol_bindings(source)
+    finally:
+        sys.setrecursionlimit(previous_limit)
 
 
 def test_cli_preserves_crlf_bytes_and_emits_loadable_report(tmp_path):
@@ -750,7 +1043,7 @@ def test_cli_preserves_crlf_bytes_and_emits_loadable_report(tmp_path):
         profile=PROFILE,
         target={},
     )
-    assert restored.source_sha256 == _build_sol_bindings(source).source_sha256
+    assert restored.source_sha256 == build_sol_bindings(source).source_sha256
 
 
 @pytest.mark.parametrize(

@@ -986,6 +986,10 @@ def _publish_dependency_group(
         except Exception:
             logger.exception("Blast-radius check failed for grouped target %s", target)
             return finish_failure("blast_radius_heal_failed")
+        if blast.get("dependency_invalidation") is not None:
+            members[index]["dependency_invalidation"] = blast[
+                "dependency_invalidation"
+            ]
         if not blast.get("all_passed", False):
             broken_files = blast.get("broken_files") or []
             if dry_run:
@@ -1143,6 +1147,8 @@ def _publish_dependency_group(
         dependent_publish_result = dict(pub_result)
         dependent_publish_result.pop("proof_certificate", None)
         dependent_publish_result.pop("certificate", None)
+        dependent_publish_result.pop("proof_certificate_file", None)
+        dependent_publish_result.pop("artifact_paths_status", None)
         report = extra_reports.get(str(specs[index].get("target_file", "")))
         if isinstance(report, dict):
             dependent_publish_result["proof_certificate"] = report
@@ -1727,6 +1733,8 @@ def _proliferate_inner(
         _log_step(4, 4, f"Blast-radius check for {target_file}")
         new_file_path = mumei_repo / target_file
         blast = check_blast_radius(mumei_client, mumei_repo, new_file_path, code)
+        if blast.get("dependency_invalidation") is not None:
+            spec_result["dependency_invalidation"] = blast["dependency_invalidation"]
         _log_info(
             f"Blast-radius result for {target_file}: "
             f"all_passed={blast['all_passed']}, "
