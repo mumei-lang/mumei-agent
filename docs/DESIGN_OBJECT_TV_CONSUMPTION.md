@@ -9,6 +9,16 @@ deep endpoint. This memo is a design record only — no production code. Core
 owns the producer side; every Core command and field name below that does not
 exist yet is a **hypothesis** the agent adopts verbatim from Core once it lands.
 
+## Status
+
+Core has landed `native-bundle recheck-object` and the
+`mumei.object-symbol-correspondence/v1` descriptor for bounded symbol-surface
+and direct-call-edge correspondence. The agent's `native-object-recheck`
+route consumes those two checks but is not a recovery performer.
+`accept-object`, full object translation validation, and the
+`object_translation_correspondence` performer remain deferred until Core
+provides that deeper acceptance route.
+
 ## Background
 
 What exists today (verified against mumei `develop` and this repo):

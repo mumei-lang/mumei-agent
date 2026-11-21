@@ -134,6 +134,8 @@ def test_accepted_run_selects_descriptor(tmp_path, capsys):
     assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
+        "object_call_edge_correspondence",
+        "object_symbol_correspondence",
         "object_translation_correspondence",
         "producer_authenticity",
         "semantic_correspondence",

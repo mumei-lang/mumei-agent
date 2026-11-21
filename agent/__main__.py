@@ -87,6 +87,7 @@ _SUBCOMMANDS = {
     "native-stderr-accept",
     "native-observations-accept",
     "native-observations-recheck",
+    "native-object-recheck",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -1226,6 +1227,24 @@ def main() -> None:
         native_or_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_or_main(args))
+    elif command == "native-object-recheck":
+        import argparse
+        from agent.native_object_recheck import (
+            build_object_recheck_parser as native_obj_build_parser,
+            main_object_recheck as native_obj_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-object-recheck",
+            description=(
+                "Run a declared Core native object correspondence recheck "
+                "as one attempt and emit the reconciled lineage plus the "
+                "declared outcome."
+            ),
+        )
+        native_obj_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_obj_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (

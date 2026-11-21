@@ -1548,11 +1548,15 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
     }
 )
 
-# The pinned program.o corresponds to program.ll within a declared
-# object-TV profile; reserved for a future Core object-stage TV accept
-# route, with no performer or linker, loader, ABI, or runtime claim.
+# Core's object-symbol and direct-call-edge checks are bounded
+# correspondences. object_translation_correspondence is the full object-TV
+# check; none has a performer or makes a linker, loader, ABI, or runtime claim.
 OBJECT_CHECK_VOCABULARY = frozenset(
-    {"object_translation_correspondence"}
+    {
+        "object_call_edge_correspondence",
+        "object_symbol_correspondence",
+        "object_translation_correspondence",
+    }
 )
 
 # Which emitted schema performs each check name, the outcome field and
