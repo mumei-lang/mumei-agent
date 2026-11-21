@@ -34008,6 +34008,176 @@ def test_defer_indirect_callee_arg_deps_reach_named_result(
     assert 0 in result.return_dependencies
 
 
+def test_defer_captured_closure_reads_function_exit_state(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { y := int64(0); "
+        "g := func() { r = y }; defer g(); y = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_closure_effects_feed_other_deferred_closures(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { "
+        "var y int64; "
+        "g := func() { y = x }; "
+        "g2 := func() { r = y }; "
+        "defer g2(); defer g(); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_captured_closure_reads_reassigned_parameter(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x, z int64) (r int64) { "
+        "g := func() { r = x }; defer g(); x = z; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 1 in result.return_dependencies
+
+
+def test_defer_pointer_arguments_read_exit_state(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func set(p, v *int64) { *p = *v }; "
+        "func F(x int64) (r int64) { y := int64(0); "
+        "defer set(&r, &y); y = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_captured_pointer_write_reaches_caller(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64, p *int64) { y := int64(0); "
+        "g := func() { *p = y }; defer g(); y = x }; "
+        "func H(x int64) int64 { var v int64; F(x, &v); return v }",
+    )
+    result = named(source, snapshot, summaries, "H")
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_pure_pointer_reader_does_not_touch_named_result(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func get(p *int64) int64 { return 1 }; "
+        "func F(x int64) (r int64) { y := x; defer get(&y); "
+        "return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_defer_closure_writing_only_local_does_not_touch_result(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var y int64; "
+        "g := func() { y = x }; defer g(); _ = y; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_defer_callee_value_is_snapshotted_before_reseat(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x, z int64) (r int64) { "
+        "g := func() { r = x }; defer g(); "
+        "g = func() { r = z }; return 0 }; "
+        "func G(x, z int64) (r int64) { "
+        "y := int64(0); g := func() { r = y }; defer g(); "
+        "g = func() { r = z }; y = x; return 0 }",
+    )
+    f_result = named(source, snapshot, summaries, "F")
+    g_result = named(source, snapshot, summaries, "G")
+    assert f_result.available and 0 in f_result.return_dependencies
+    assert g_result.available and 0 in g_result.return_dependencies
+
+
+def test_defer_inside_loop_folds_at_function_exit(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var y int64; "
+        "g := func() { r = y }; "
+        "for i := 0; i < 1; i++ { defer g() }; "
+        "y = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_inside_branch_folds_at_function_exit(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var y int64; "
+        "g := func() { r = y }; if x > 0 { defer g() }; "
+        "y = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_deferred_exit_fold_applies_to_multiple_returns(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(b bool, x, z int64) (r int64) { var y int64; "
+        "g := func() { r = y }; defer g(); "
+        "if b { y = x; return 0 }; y = z; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert {1, 2}.issubset(result.return_dependencies)
+
+
+def test_caller_receives_deferred_exit_result_dependencies(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) (r int64) { var y int64; "
+        "g := func() { r = y }; defer g(); y = x; return 0 }; "
+        "func H(x int64) int64 { return F(x) }",
+    )
+    result = named(source, snapshot, summaries, "H")
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_method_value_reads_exit_state_when_supported(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type T struct{}; "
+        "func (t *T) set(p, v *int64) { *p = *v }; "
+        "func F(x int64) (r int64) { var y int64; var t T; "
+        "defer t.set(&r, &y); y = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
 
 def test_call_result_field_read_admitted(go_types_helper):
     # `g(a).V` — a field of a call result carries the call's
