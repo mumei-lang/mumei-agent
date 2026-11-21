@@ -24377,6 +24377,182 @@ class _Builder:
             ).append((node, binding.id))
         return frozenset()
 
+    @staticmethod
+    def _strip_parens(node: Any) -> Any:
+        while node is not None and node.type == "parenthesized_expression":
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
+        return node
+
+    def _chan_only_operations(
+        self, chan_id: str, literal_node: Any
+    ) -> bool:
+        function_node = literal_node
+        while function_node is not None and function_node.type not in {
+            "function_declaration",
+            "method_declaration",
+        }:
+            function_node = function_node.parent
+        if function_node is None:
+            return False
+        body = function_node.child_by_field_name("body")
+        if body is None:
+            return False
+        stack = [body]
+        while stack:
+            cur = stack.pop()
+            if cur.type == "identifier":
+                ref = self.references.get(self.node_key(cur))
+                if ref is not None and ref.binding_id == chan_id:
+                    parent = cur.parent
+                    while (
+                        parent is not None
+                        and parent.type == "parenthesized_expression"
+                        and self._strip_parens(parent) == cur
+                    ):
+                        parent = parent.parent
+                    allowed = False
+                    if parent is not None and parent.type == "send_statement":
+                        allowed = (
+                            self._strip_parens(
+                                parent.child_by_field_name("channel")
+                            )
+                            == cur
+                        )
+                    elif parent is not None and parent.type == "unary_expression":
+                        operator = parent.child_by_field_name("operator")
+                        allowed = (
+                            operator is not None
+                            and operator.type == "<-"
+                            and self._strip_parens(
+                                parent.child_by_field_name("operand")
+                            )
+                            == cur
+                        )
+                    elif parent is not None and parent.type == "range_clause":
+                        allowed = (
+                            self._strip_parens(
+                                parent.child_by_field_name("right")
+                            )
+                            == cur
+                        )
+                    elif parent is not None and parent.type in {
+                        "argument_list",
+                        "arguments",
+                    }:
+                        call = parent.parent
+                        arguments = _children(parent)
+                        function = (
+                            self._strip_parens(
+                                call.child_by_field_name("function")
+                            )
+                            if call is not None
+                            and call.type == "call_expression"
+                            else None
+                        )
+                        function_ref = (
+                            self.references.get(self.node_key(function))
+                            if function is not None
+                            and function.type == "identifier"
+                            else None
+                        )
+                        allowed = (
+                            len(arguments) == 1
+                            and self._strip_parens(arguments[0]) == cur
+                            and function_ref is not None
+                            and function_ref.kind == "universe"
+                            and function.text in {b"close", b"len", b"cap"}
+                        )
+                    if not allowed:
+                        return False
+            stack.extend(_children(cur))
+        return True
+
+    def _literal_channel_has_local_origin(
+        self, chan_id: str, literal_node: Any
+    ) -> bool:
+        stack = [literal_node]
+        while stack:
+            cur = stack.pop()
+            if cur.type == "var_spec":
+                lefts = [
+                    child
+                    for index, child in enumerate(cur.children)
+                    if cur.field_name_for_child(index) == "name"
+                ]
+                values = [
+                    child
+                    for index, child in enumerate(cur.children)
+                    if cur.field_name_for_child(index) == "value"
+                ]
+                rights = [
+                    value_child
+                    for value in values
+                    for value_child in _children(value)
+                ]
+            elif cur.type in {
+                "short_var_declaration",
+                "assignment_statement",
+            }:
+                left = cur.child_by_field_name("left")
+                right = cur.child_by_field_name("right")
+                lefts = _children(left) if left is not None else []
+                rights = _children(right) if right is not None else []
+            else:
+                lefts = []
+                rights = []
+            if lefts:
+                for index, left in enumerate(lefts):
+                    if left.type != "identifier":
+                        continue
+                    binding = self.bindings_by_span.get(
+                        self.node_key(left)
+                    )
+                    ref = self.references.get(self.node_key(left))
+                    left_id = (
+                        binding.id
+                        if binding is not None
+                        else ref.binding_id
+                        if ref is not None
+                        else None
+                    )
+                    if left_id != chan_id or index >= len(rights):
+                        continue
+                    right = self._strip_parens(rights[index])
+                    if right is None:
+                        return False
+                    if right.type == "identifier":
+                        right_ref = self.references.get(
+                            self.node_key(right)
+                        )
+                        if (
+                            right_ref is not None
+                            and right_ref.kind == "universe"
+                            and right.text == b"nil"
+                        ):
+                            continue
+                    if right.type == "call_expression":
+                        callee = self._strip_parens(
+                            right.child_by_field_name("function")
+                        )
+                        callee_ref = (
+                            self.references.get(self.node_key(callee))
+                            if callee is not None
+                            and callee.type == "identifier"
+                            else None
+                        )
+                        if (
+                            callee_ref is not None
+                            and callee_ref.kind == "universe"
+                            and callee.text == b"make"
+                        ):
+                            continue
+                    return False
+            stack.extend(_children(cur))
+        return True
+
     def _func_literal_capture(
         self,
         node: Any,
@@ -24399,9 +24575,9 @@ class _Builder:
         body cannot sequence at bind time, so the call site models the
         invocation as an opaque effectful callee — the write targets
         (`x = e`, `p.V = e`, `*p = e`) and the inner-call flag ride
-        out in the returned record. A send, `go`, `defer` or `close`
-        still stays closed: the queue/concurrency effect has no
-        place to land."""
+        out in the returned record. A send to a literal-local channel
+        or a captured local scalar channel can fold at the call site;
+        other sends, `go` and `defer` stay closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -24575,14 +24751,89 @@ class _Builder:
                                     # or `*p` write can reach it.
                                     self.escaped.add(rref.binding_id)
 
+        literal_parameter_ids: set[str] = set()
+        literal_params = node.child_by_field_name("parameters")
+        if literal_params is not None:
+            for declaration in literal_params.named_children:
+                if declaration.type not in {
+                    "parameter_declaration",
+                    "variadic_parameter_declaration",
+                }:
+                    continue
+                for child in declaration.named_children:
+                    if child.type != "identifier":
+                        continue
+                    binding = self.bindings_by_span.get(
+                        self.node_key(child)
+                    )
+                    if binding is not None:
+                        literal_parameter_ids.add(binding.id)
+
         stack = [node]
         while stack:
             cur = stack.pop()
-            if cur.type in {
-                "send_statement",
-                "go_statement",
-                "defer_statement",
-            }:
+            if cur.type == "send_statement":
+                channel = self._strip_parens(
+                    cur.child_by_field_name("channel")
+                )
+                ref = (
+                    self.references.get(self.node_key(channel))
+                    if channel is not None and channel.type == "identifier"
+                    else None
+                )
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None and ref.binding_id
+                    else None
+                )
+                literal_internal = (
+                    binding is not None
+                    and ref is not None
+                    and binding.id not in literal_parameter_ids
+                    and getattr(binding.span, "file", self.current_file)
+                    == self.current_file
+                    and node.start_byte
+                    <= binding.span.start
+                    <= binding.span.end
+                    <= node.end_byte
+                    and binding.type is not None
+                    and binding.type.kind == "chan"
+                    and binding.type.elem is not None
+                    and binding.type.elem.kind in {"integer", "boolean"}
+                    and self._local_chan_chan_id(channel) is None
+                    and binding.id not in self.local_chan_chans
+                    and binding.id not in self.external_chan_locals
+                    and binding.id not in self.escaped
+                    and self._literal_channel_has_local_origin(
+                        binding.id, node
+                    )
+                    and self._chan_only_operations(binding.id, node)
+                )
+                elem = (
+                    binding.type.elem
+                    if binding is not None and binding.type is not None
+                    else None
+                )
+                captured_local_plain_channel = (
+                    binding is not None
+                    and ref is not None
+                    and ref.binding_id in locals_
+                    and ref.binding_id not in params
+                    and elem is not None
+                    and self._scalar_chan_binding(ref.binding_id)
+                    and self._local_chan_chan_id(channel) is None
+                    and ref.binding_id not in self.local_chan_chans
+                    and ref.binding_id not in self.external_chan_locals
+                    and ref.binding_id not in self.escaped
+                    and self._chan_only_operations(ref.binding_id, node)
+                )
+                if literal_internal:
+                    pass
+                elif captured_local_plain_channel:
+                    writes.add(ref.binding_id)
+                else:
+                    raise _Unsupported("unsupported_expression", _span(cur))
+            elif cur.type in {"go_statement", "defer_statement"}:
                 raise _Unsupported("unsupported_expression", _span(cur))
             if cur.type == "call_expression" or (
                 self._elem_call_conversion(cur)

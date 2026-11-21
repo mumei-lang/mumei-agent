@@ -15255,6 +15255,314 @@ def test_bound_closure_send_inside_stays_closed(go_types_helper):
     assert not result.available
 
 
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        (
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; g(); return <-c }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, y int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; g(); return <-c + y }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x int64) int64 { c := make(chan int64, 2); "
+            "g := func() { c <- x }; g(); g(); return <-c + <-c }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { select { case c <- x: default: } }; "
+            "g(); return <-c }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "_ = len(c); _ = cap((c)); "
+            "g := func() { (c) <- x }; g(); return <-(c) }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { "
+            "g := func() int64 { d := make(chan int64, 1); "
+            "d <- x; return <-d }; return g() }",
+            frozenset({0}),
+        ),
+        (
+            "func Run(f func()) { f() }\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; Run(g); return <-c }",
+            frozenset({0}),
+        ),
+        (
+            "func Run(f func()) { f() }\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "Run(func() { c <- x }); return <-c }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "fs := []func(){func() { c <- x }}; "
+            "fs[0](); return <-c }",
+            frozenset({0}),
+        ),
+    ],
+    ids=[
+        "direct-call",
+        "second-parameter",
+        "invoked-twice",
+        "select-send",
+        "parenthesized-channel-and-builtins",
+        "literal-internal-channel",
+        "local-run-named",
+        "local-run-literal",
+        "func-element",
+    ],
+)
+def test_bound_closure_local_channel_send_folds_dependencies(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+def test_bound_closure_local_channel_send_imported_callback(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { c := make(chan int64, 1); "
+        "lib.Run(func() { c <- x }); return <-c }\n"
+    }
+    imports = {
+        "lib": {
+            "lib.go": "package lib\nfunc Run(f func()) { f() }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize("invocation", ["go g()", "defer g()"])
+def test_bound_closure_local_channel_send_async_call_never_drops_deps(
+    go_types_helper, invocation
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; "
+            f"{invocation}; return <-c }}",
+        )
+    )
+    assert (
+        not result.available
+        or (
+            result.return_dependencies is not None
+            and 0 in result.return_dependencies
+        )
+    )
+
+
+def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "go func() { c <- x }(); return <-c }",
+        )
+    )
+    assert not result.available
+    assert any(gap.reason == "cfg_unavailable" for gap in result.gaps)
+
+
+@pytest.mark.parametrize(
+    "declarations, library",
+    [
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "d := c; g := func() { c <- x }; g(); _ = d; return <-c }",
+            None,
+            id="alias",
+        ),
+        pytest.param(
+            "func G(ch chan int64) {}\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; G(c); g(); return <-c }",
+            None,
+            id="local-call-argument",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; lib.G(c); g(); return <-c }",
+            "func G(ch chan int64) {}\n",
+            id="imported-call-argument",
+        ),
+        pytest.param(
+            "var GC chan int64\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; GC = c; g(); return <-c }",
+            None,
+            id="package-store",
+        ),
+        pytest.param(
+            "func F(x int64) chan int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; g(); return c }",
+            None,
+            id="return-channel",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { c <- x }; cc <- c; g(); return <-c }",
+            None,
+            id="channel-as-value",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; c = make(chan int64, 1); "
+            "g(); return <-c }",
+            None,
+            id="reassignment",
+        ),
+        pytest.param(
+            "func H(ch chan int64) {}\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { H(c); c <- x }; g(); return <-c }",
+            None,
+            id="literal-call-argument",
+        ),
+        pytest.param(
+            "func F(c chan int64, x int64) int64 { "
+            "g := func() { c <- x }; g(); return 0 }",
+            None,
+            id="parameter-channel",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "g := func(c chan int64) { c <- x }; "
+            "g(make(chan int64, 1)); return x }",
+            None,
+            id="literal-parameter-channel",
+        ),
+        pytest.param(
+            "func F(c chan int64, x int64) int64 { "
+            "g := func() { d := c; d <- x }; g(); return 0 }",
+            None,
+            id="literal-alias-to-parameter",
+        ),
+        pytest.param(
+            "var GC chan int64\n"
+            "func F(x int64) int64 { "
+            "g := func() { GC <- x }; g(); return 0 }",
+            None,
+            id="package-channel",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { p := &x; "
+            "c := make(chan *int64, 1); "
+            "g := func() { c <- p }; g(); return *p }",
+            None,
+            id="pointer-element",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := func() { s[0] <- x }; g(); return <-s[0] }",
+            None,
+            id="indexed-channel",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { cc <- c }; g(); return <-c + x }",
+            None,
+            id="channel-of-channel",
+        ),
+    ],
+)
+def test_bound_closure_local_channel_send_rejects_escaping_channels(
+    go_types_helper, declarations, library
+):
+    files = {
+        "a.go": "package p\n"
+        + ('import "lib"\n' if library is not None else "")
+        + declarations
+    }
+    if library is None:
+        snapshot = _snapshot_for(go_types_helper, files)
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+    else:
+        imports = {"lib": {"lib.go": "package lib\n" + library}}
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    "run_declaration",
+    [
+        pytest.param(
+            "func Run(f func()) {}",
+            id="body-change",
+        ),
+        pytest.param(
+            "func Run(f func()) int64 { f(); return 0 }",
+            id="signature-change",
+        ),
+    ],
+)
+def test_bound_closure_local_channel_send_flags_changed_callback_callee(
+    go_types_helper, run_declaration
+):
+    caller = (
+        "package p\nfunc F(x int64) int64 { c := make(chan int64, 1); "
+        "g := func() { c <- x }; Run(g); return <-c }\n"
+    )
+    old_files = {
+        "a.go": caller,
+        "b.go": "package p\nfunc Run(f func()) { f() }\n",
+    }
+    _, old_snapshot, old_summaries = package_unit(
+        go_types_helper, old_files
+    )
+    result = named_package(
+        old_files, old_snapshot, old_summaries, "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+    new_files = {
+        **old_files,
+        "b.go": "package p\n" + run_declaration + "\n",
+    }
+    _, new_snapshot, _ = package_unit(go_types_helper, new_files)
+    live = {binding.id for binding in new_snapshot.bindings}
+    assert result.binding_id in old_summaries.stale_dependents(live)
+
+
 def test_bound_closure_package_var_inside_closed(go_types_helper):
     # A package-level `var` read inside the literal is external
     # state the capture cannot pin — stays closed.

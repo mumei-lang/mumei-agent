@@ -3096,7 +3096,10 @@ written value's deps on that binding at the call site
 (conditional _store union semantics), and a declared
 function name inside the literal body (`return G(x)`)
 needs no capture — only the send/go/defer statements
-that target a shared queue stay closed. A function name
+that target a shared queue stay closed. A captured local plain
+integer/boolean channel admits a literal send only when every
+enclosing-function reference is a send-channel, receive, builtin
+`close`/`len`/`cap` argument, or range operand. A function name
 read in a call's argument list admits dep-free (the
 possible invocation folds through the call's own record); a
 func literal passed directly as an argument folds its
