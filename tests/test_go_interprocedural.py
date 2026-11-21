@@ -30995,6 +30995,58 @@ def test_struct_field_range_rejoins_body_writes(
     [
         "type S struct { A []int64 }\n"
         "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{1}}\n"
+        "\told := s.A\n"
+        "\tt := []int64{2}\n"
+        "\tvar b []int64\n"
+        "\ts.A, b = t, append(s.A, 0)\n"
+        "\tb[0] = x\n"
+        "\treturn old[0]\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(s S, t []int64) int64 {\n"
+        "\tvar b int64\n"
+        "\ts.A, b = t, s.A[0]\n"
+        "\treturn b\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(s, t S) int64 {\n"
+        "\tvar b int64\n"
+        "\ts, b = t, s.A[0]\n"
+        "\treturn b\n}\n",
+    ],
+)
+def test_struct_field_parallel_assignment_overlap_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_expression"
+
+
+def test_struct_field_parallel_assignment_nonoverlap_is_available(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{1}}\n"
+            "\tt := []int64{2}\n"
+            "\tu := []int64{3}\n"
+            "\tvar b []int64\n"
+            "\ts.A, b = t, append(u, 0)\n"
+            "\tb[0] = x\n"
+            "\treturn s.A[0]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
         "\ts := S{A: []int64{x}}\n"
         "\tp := &s\n"
         "\treturn p.A[0]\n}\n",

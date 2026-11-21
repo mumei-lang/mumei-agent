@@ -16395,6 +16395,46 @@ class _Builder:
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
+            if len(lefts) == len(rights):
+                assigned_root_ids: set[str] = set()
+                for lhs in lefts:
+                    if lhs.type != "identifier":
+                        continue
+                    lhs_ref = self.references.get(
+                        self.node_key(lhs)
+                    )
+                    if lhs_ref is not None:
+                        assigned_root_ids.add(lhs_ref.binding_id)
+                assigned_field_keys = {
+                    self._opaque_container_field_key(
+                        root_id, member_id
+                    )
+                    for root_id, member_id
+                    in field_container_reseats.values()
+                }
+                for rhs in rights:
+                    pending = [rhs]
+                    while pending:
+                        current = pending.pop()
+                        if current.type in {
+                            "selector_expression",
+                            "field_expression",
+                        }:
+                            field_target = (
+                                self._opaque_container_field_target(
+                                    current, params
+                                )
+                            )
+                            if field_target is not None and (
+                                field_target[1] in assigned_root_ids
+                                or field_target[0]
+                                in assigned_field_keys
+                            ):
+                                raise _Unsupported(
+                                    "unsupported_expression",
+                                    _span(node),
+                                )
+                        pending.extend(_children(current))
             # `s.F = v` reseats the field's share group onto the
             # RHS's own backing: a `a := s.F` bound before the store
             # keeps the OLD tokens (it still aliases the previous
