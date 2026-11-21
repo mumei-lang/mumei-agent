@@ -6102,6 +6102,13 @@ def test_interface_dispatch_field_receiver_pins_method_set(
         ),
         (
             "type I interface{ M(int64) int64 }\n"
+            "type B struct{ i I }\n"
+            "type WD B\n"
+            "func F(w WD, x int64) int64 { return w.i.M(x) }",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
             "var global I\n"
             "func F(x int64) int64 { return global.M(x) }",
             "unresolved_or_opaque_call",
@@ -6129,6 +6136,38 @@ def test_interface_dispatch_computed_receiver_shapes_stay_closed(
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
     assert any(gap.reason == reason for gap in result.gaps)
+
+
+def test_interface_dispatch_imported_struct_root_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "import \"lib\"\n"
+            "func F(w lib.W, x int64) int64 { return w.I.M(x) }\n"
+        )
+    }
+    imports = {
+        "lib": {
+            "w.go": (
+                "package lib\n"
+                "type I interface{ M(int64) int64 }\n"
+                "type W struct{ I I }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
 
 
 def test_interface_dispatch_local_interface_call_result_stays_closed(

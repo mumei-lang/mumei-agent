@@ -4923,6 +4923,7 @@ package-variable roots, pointer roots or crossings, element receivers,
 local call results and type assertions stay closed; method-value
 bindings on field chains stay closed too. Interface results,
 concrete-to-interface uses and promoted methods stay closed.
+Defined-from-struct and imported-struct roots stay closed.
 An interface method value (`f := i.M`) and a named interface method
 expression (`f := I.M`) may be directly called, and a plain function
 value copy preserves the record. Bound method values freeze receiver
