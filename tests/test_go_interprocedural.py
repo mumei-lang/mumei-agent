@@ -24037,6 +24037,18 @@ def test_chan_elem_container_param_stays_closed(
     assert not result.available
 
 
+def test_chan_elem_array_parameter_without_operations_stays_closed(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(a [1]chan int64) int64 { return 0 }",
+        )
+    )
+    assert not result.available
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [

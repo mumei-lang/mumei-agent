@@ -9911,7 +9911,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # like any element store does. An `[N]chan`
                         # parameter stays closed — admitted only
                         # for local binds.
-                        or self._chan_elem_collection(p.type)
+                        or (
+                            self._chan_elem_collection(p.type)
+                            and p.type.kind != "array"
+                        )
                         or self._chan_chan_elem_collection(p.type)
                     )
                 )
