@@ -9,6 +9,7 @@ CLI payloads and remain spawn-free.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import subprocess
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from agent import (
     binding_eval as binding_route,
@@ -1388,6 +1390,39 @@ class TestFreshnessEvalTool:
             )
         )
         assert payload["error"] == "max_age_seconds must be an int"
+
+    @pytest.mark.parametrize("max_age", [True, "3600"])
+    def test_dispatch_rejects_coerced_max_age_values(
+        self, tmp_path, max_age
+    ) -> None:
+        record = _fold_write_json(tmp_path / "record.json", {})
+        with pytest.raises(ToolError):
+            asyncio.run(
+                mcp_server.mcp.call_tool(
+                    "freshness_eval",
+                    {
+                        "record_path": str(record),
+                        "reference_time": "2026-11-18T01:00:00Z",
+                        "max_age_seconds": max_age,
+                    },
+                )
+            )
+
+    def test_dispatch_accepts_strict_integer_max_age(self, tmp_path) -> None:
+        record = _fold_write_json(tmp_path / "record.json", {})
+        content = asyncio.run(
+            mcp_server.mcp.call_tool(
+                "freshness_eval",
+                {
+                    "record_path": str(record),
+                    "reference_time": "2026-11-18T01:00:00Z",
+                    "max_age_seconds": 3600,
+                },
+            )
+        )
+        payload = _fold_payload(content[0].text)
+        assert payload["status"] == "ok"
+        assert payload["evaluation"]["freshness_claimed"] is False
 
     def test_bad_reference_time_is_an_error(self, tmp_path) -> None:
         record = _fold_write_json(tmp_path / "record.json", {})

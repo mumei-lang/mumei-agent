@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import StrictInt
 
 from agent import telemetry
 from agent.cross_spec_artifacts import (
@@ -2756,7 +2757,7 @@ def evidence_acceptance_eval(
 def freshness_eval(
     record_path: str,
     reference_time: str,
-    max_age_seconds: int,
+    max_age_seconds: StrictInt,
 ) -> str:
     """Fold a declared record's freshness claim against a declared clock.
 
