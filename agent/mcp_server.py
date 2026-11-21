@@ -2903,8 +2903,8 @@ def signature_eval(
     """Fold a declared producer-signature envelope and caller-declared pins.
 
     This is representation-level evaluation only: it does not verify the
-    envelope signature, run Core or spawn a subprocess. It preserves
-    `checks_not_performed` verbatim and adds no authority. This is not
+    envelope signature, run Core or spawn a subprocess. It returns the
+    route's `checks_not_performed` verbatim and adds no authority. This is not
     Evidence acceptance, a verdict, or grade promotion.
 
     Args:
@@ -2988,9 +2988,8 @@ def signature_verify(
     """Verify a declared envelope under caller-declared Ed25519 keys.
 
     This performs Ed25519 verification under the supplied public keys
-    without running Core or spawning a subprocess. Only
-    `signature_verification` can leave `checks_not_performed`, exactly as
-    in the CLI route; it adds no authority. This is not
+    without running Core or spawning a subprocess. It returns the route's
+    `checks_not_performed` verbatim and adds no authority. This is not
     Evidence acceptance, a verdict, or grade promotion.
 
     Args:
