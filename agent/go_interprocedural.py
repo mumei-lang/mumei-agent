@@ -11582,14 +11582,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # element send (`GS[j] <- x`) may deposit
                         # into it and a later `<-c` must observe
                         # those, so `c` promotes to the external
-                        # channel set like `cc <- ch` does.
-                        rhs_node = (
-                            rights[i]
+                        # channel set like `cc <- ch` does. The
+                        # pre-state alias snapshot resolves the RHS —
+                        # `e, GS[0] = c, c` stores the channel `c`
+                        # named BEFORE `e` reseated it.
+                        sent = (
+                            chan_alias_targets[i]
                             if len(lefts) == len(rights)
-                            else rights[0]
-                        )
-                        sent = self._chan_alias_target(
-                            rhs_node, locals_, params
+                            else self._chan_alias_target(
+                                rights[0], locals_, params
+                            )
                         )
                         if sent is not None:
                             self.external_chan_locals.add(sent.id)
