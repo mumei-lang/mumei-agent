@@ -398,6 +398,7 @@ def run_stdout_recheck(args: argparse.Namespace) -> dict:
         "schema_version": NATIVE_STDOUT_RECHECK_REPORT_PROFILE,
         "sequence": published.to_dict(),
         "normalized": dispatch.run.normalized().to_dict(),
+        "expected_build_id": args.expected_build_id,
         "checks_not_performed": sorted(CHECK_VOCABULARY | RUNTIME_CHECK_VOCABULARY),
     }
     if inputs_changed:

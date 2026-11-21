@@ -307,6 +307,8 @@ def _native_accept_report(
     record_digest,
     accepted=True,
     schema="mumei.native-accept-report/v1",
+    expected_build_id=None,
+    inputs_changed=False,
 ):
     """A minimal realistic native accept-route report.
 
@@ -316,7 +318,7 @@ def _native_accept_report(
     bytes — but surface the outcome as the string `acceptance:
     "accepted"` rather than an `acceptance.accepted` boolean.
     """
-    return _doc(
+    report = _doc(
         schema,
         sequence={
             "schema_version": "mumei.verifier-attempt-sequence/v1",
@@ -343,6 +345,12 @@ def _native_accept_report(
         },
         acceptance="accepted" if accepted else "inconclusive",
     )
+    if expected_build_id is not None:
+        report["expected_build_id"] = expected_build_id
+    if inputs_changed:
+        report.pop("acceptance")
+        report["inputs_changed"] = True
+    return report
 
 
 def test_native_accept_report_recovers_historical_execution():
@@ -460,6 +468,181 @@ def test_native_accept_reports_recover_only_bound_channel_observations():
         record_digest=digest,
     )
     assert evaluation["checks"]["os_exit_status_observation"] == "no_evidence"
+
+
+def test_native_accept_reports_recover_sibling_channels_by_shared_build_id():
+    build_id = "a" * 64
+    record = _native_accept_report(
+        "b" * 64,
+        schema="mumei.native-exit-status-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    record["checks_not_performed"] = [
+        "os_stderr_observation",
+        "os_stdout_observation",
+        "runtime_observation_semantics",
+    ]
+    evidence = [
+        _native_accept_report(
+            "c" * 64,
+            schema="mumei.native-stdout-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+        _native_accept_report(
+            "d" * 64,
+            schema="mumei.native-stderr-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+    ]
+    evaluation = evaluate_unperformed_check_recovery(
+        record, evidence, record_digest="e" * 64,
+    )
+    assert evaluation["checks"] == {
+        "os_stderr_observation": "recovered",
+        "os_stdout_observation": "recovered",
+        "runtime_observation_semantics": "no_evidence",
+    }
+
+
+def test_reproduced_recheck_record_recovers_from_accepted_siblings():
+    build_id = "a" * 64
+    record = _doc(
+        "mumei.native-stdout-recheck-report/v1",
+        expected_build_id=build_id,
+        stdout_recheck="reproduced",
+        normalized={"stdout": {"sha256": "b" * 64}},
+        checks_not_performed=[
+            "os_exit_status_observation",
+            "os_stderr_observation",
+            "runtime_observation_semantics",
+        ],
+    )
+    evidence = [
+        _native_accept_report(
+            "c" * 64,
+            schema="mumei.native-exit-status-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+        _native_accept_report(
+            "d" * 64,
+            schema="mumei.native-stderr-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+    ]
+    evaluation = evaluate_unperformed_check_recovery(
+        record, evidence, record_digest="e" * 64,
+    )
+    assert evaluation["checks"] == {
+        "os_exit_status_observation": "recovered",
+        "os_stderr_observation": "recovered",
+        "runtime_observation_semantics": "no_evidence",
+    }
+
+
+def test_shared_build_id_requires_matching_accepted_reports():
+    build_id = "a" * 64
+    record = _record("os_stdout_observation")
+    record["expected_build_id"] = build_id
+    record["normalized"] = {"stdout": {"sha256": "b" * 64}}
+
+    mismatched = _native_accept_report(
+        "c" * 64,
+        schema="mumei.native-stdout-accept-report/v1",
+        expected_build_id="d" * 64,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [mismatched], record_digest="e" * 64,
+    )
+    assert evaluation["checks"]["os_stdout_observation"] == "evidence_failed"
+
+    for report in (
+        _native_accept_report(
+            "c" * 64,
+            accepted=False,
+            schema="mumei.native-stdout-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+        _native_accept_report(
+            "c" * 64,
+            schema="mumei.native-stdout-accept-report/v1",
+            expected_build_id=build_id,
+            inputs_changed=True,
+        ),
+    ):
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [report], record_digest="e" * 64,
+        )
+        assert evaluation["checks"]["os_stdout_observation"] == (
+            "evidence_failed"
+        )
+
+    conflicting = [
+        _native_accept_report(
+            "c" * 64,
+            schema="mumei.native-stdout-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+        _native_accept_report(
+            "d" * 64,
+            accepted=False,
+            schema="mumei.native-stdout-accept-report/v1",
+            expected_build_id=build_id,
+        ),
+    ]
+    evaluation = evaluate_unperformed_check_recovery(
+        record, conflicting, record_digest="e" * 64,
+    )
+    assert evaluation["checks"]["os_stdout_observation"] == "evidence_failed"
+
+
+def test_shared_build_id_requires_valid_ids_on_record_and_evidence():
+    for record_build_id, evidence_build_id in (
+        ("a" * 64, None),
+        ("a" * 64, "not-a-fingerprint"),
+        (None, "a" * 64),
+        ("not-a-fingerprint", "a" * 64),
+    ):
+        record = _record("os_stdout_observation")
+        if record_build_id is not None:
+            record["expected_build_id"] = record_build_id
+        evidence = _native_accept_report(
+            "b" * 64,
+            schema="mumei.native-stdout-accept-report/v1",
+            expected_build_id=evidence_build_id,
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [evidence], record_digest="c" * 64,
+        )
+        assert evaluation["checks"]["os_stdout_observation"] == (
+            "evidence_failed"
+        )
+
+
+def test_recheck_evidence_and_records_without_build_id_do_not_recover():
+    recheck = _doc(
+        "mumei.native-stdout-recheck-report/v1",
+        expected_build_id="a" * 64,
+        stdout_recheck="reproduced",
+        normalized={"stdout": {"sha256": "b" * 64}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("os_stdout_observation"),
+        [recheck],
+        record_digest="c" * 64,
+    )
+    assert evaluation["checks"]["os_stdout_observation"] == "no_evidence"
+
+    accepted = _native_accept_report(
+        "b" * 64,
+        schema="mumei.native-stdout-accept-report/v1",
+        expected_build_id="a" * 64,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("os_stdout_observation"),
+        [accepted],
+        record_digest="c" * 64,
+    )
+    assert evaluation["checks"]["os_stdout_observation"] == "evidence_failed"
 
 
 def test_anchor_authenticity_recovers_through_shared_digest():
@@ -943,6 +1126,37 @@ def test_route_emits_recovery(tmp_path):
     parser = argparse.ArgumentParser()
     build_eval_parser(parser)
     assert main_eval(_args(parser, record, [evidence])) == 0
+
+
+def test_route_composes_native_accept_reports_by_shared_build_id(
+    tmp_path, capsys,
+):
+    build_id = "a" * 64
+    record_doc = _native_accept_report(
+        "b" * 64,
+        schema="mumei.native-exit-status-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    record_doc["checks_not_performed"] = [
+        "os_stdout_observation",
+        "runtime_observation_semantics",
+    ]
+    record = _write(tmp_path / "record.json", record_doc)
+    evidence_doc = _native_accept_report(
+        "c" * 64,
+        schema="mumei.native-stdout-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    evidence = _write(tmp_path / "stdout.json", evidence_doc)
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+
+    assert main_eval(_args(parser, record, [evidence])) == 0
+    evaluation = json.loads(capsys.readouterr().out)
+    assert evaluation["checks"] == {
+        "os_stdout_observation": "recovered",
+        "runtime_observation_semantics": "no_evidence",
+    }
 
 
 def test_route_static_failures(tmp_path):

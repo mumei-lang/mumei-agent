@@ -160,7 +160,7 @@ attestation) is absorbed into Option A's invocation envelope.
 
 ## Minimal first implementation slice
 
-Status: Slice 1 has landed agent-side; Core recheck-runtime and acceptance composition remain.
+Status: Agent-side channel checks and shared-build-ID recovery composition have landed; the Core runtime-observation descriptor and its `runtime_observation_semantics` performer remain.
 
 Slice 1 alone is self-contained and agent-side:
 

@@ -99,7 +99,8 @@ def _args(core: Path, bundle: Path, source: Path, extra=()):
     ]
 
 
-def _assert_check_partition(report):
+def _assert_check_partition(report, expected_build_id=BUILD_ID):
+    assert report["expected_build_id"] == expected_build_id
     discharged = set(report.get("discharged_checks", []))
     assert report["checks_not_performed"] == sorted(
         (CHECK_VOCABULARY | RUNTIME_CHECK_VOCABULARY) - discharged
@@ -178,6 +179,7 @@ def test_unknown_exit_code_omits_recheck_outcome(tmp_path, capsys):
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
+    assert report["expected_build_id"] == BUILD_ID
     assert "stderr_recheck" not in report
     assert report["normalized"]["exit_code"] == 2
 
@@ -436,12 +438,13 @@ def test_real_core_reproduces_stderr(tmp_path, capsys, real_core):
     assert code == 0, err
     report = json.loads(out)
     assert report["stderr_recheck"] == "reproduced"
+    assert report["expected_build_id"] == build_id
     assert report["discharged_checks"] == [
         "artifact_semantics",
         "claim_truth",
         "os_stderr_observation",
     ]
-    _assert_check_partition(report)
+    _assert_check_partition(report, build_id)
 
 
 @pytest.mark.integration
@@ -454,6 +457,7 @@ def test_real_core_rejects_wrong_build_id(tmp_path, capsys, real_core):
     code, out, _ = _run(capsys, argv)
     assert code == 0
     report = json.loads(out)
+    assert report["expected_build_id"] == "b" * 64
     assert "stderr_recheck" not in report
     assert report["normalized"]["exit_code"] == 1
     assert report["sequence"].get("selected_result") is None

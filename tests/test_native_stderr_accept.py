@@ -106,7 +106,8 @@ def _args(core: Path, bundle: Path, source: Path, extra=()):
     ]
 
 
-def _assert_check_partition(report):
+def _assert_check_partition(report, expected_build_id=BUILD_ID):
+    assert report["expected_build_id"] == expected_build_id
     discharged = set(report.get("discharged_checks", []))
     assert report["checks_not_performed"] == sorted(
         (CHECK_VOCABULARY | RUNTIME_CHECK_VOCABULARY) - discharged
@@ -182,6 +183,7 @@ def test_unknown_exit_code_omits_acceptance_outcome(tmp_path, capsys):
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
+    assert report["expected_build_id"] == BUILD_ID
     assert "acceptance" not in report
     assert report["normalized"]["exit_code"] == 2
 
@@ -519,6 +521,7 @@ def test_real_core_accepts_native_bundle(tmp_path, capsys, real_core):
     assert code == 0
     report = json.loads(out)
     assert report["acceptance"] == "accepted"
+    assert report["expected_build_id"] == build_id
     assert "candidate" not in report
 
 
@@ -541,6 +544,7 @@ def test_real_core_rejects_wrong_build_id(tmp_path, capsys, real_core):
     code, out, _ = _run(capsys, argv)
     assert code == 0
     report = json.loads(out)
+    assert report["expected_build_id"] == "b" * 64
     assert "acceptance" not in report
     assert report["normalized"]["exit_code"] == 1
     assert report["sequence"].get("selected_result") is None

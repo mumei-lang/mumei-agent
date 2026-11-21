@@ -800,7 +800,9 @@ than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_exit_status_recheck` MCP tool (same `run_exit_status_recheck`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; recheck reports remain non-performers. C02/C10 stay
+partial.
 
 ### C02/C10 declared native-exit-status-accept route (native-exit-status-accept)
 
@@ -830,7 +832,10 @@ run with `exit_code == 0` selects the produced
 design, so no `candidate` is emitted. The route is also the
 `native_exit_status_accept` MCP tool (same `run_exit_status_accept`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; accepted sibling reports sharing that
+Core-authenticated ID can recover one another's channel checks through
+`recovery-eval`. C02/C10 stay partial.
 
 ### C02/C10 declared native-stdout-recheck route (native-stdout-recheck)
 
@@ -859,7 +864,9 @@ than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stdout_recheck` MCP tool (same `run_stdout_recheck`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; recheck reports remain non-performers. C02/C10 stay
+partial.
 
 ### C02/C10 declared native-stdout-accept route (native-stdout-accept)
 
@@ -889,7 +896,10 @@ run with `exit_code == 0` selects the produced
 design, so no `candidate` is emitted. The route is also the
 `native_stdout_accept` MCP tool (same `run_stdout_accept`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; accepted sibling reports sharing that
+Core-authenticated ID can recover one another's channel checks through
+`recovery-eval`. C02/C10 stay partial.
 
 ### C02/C10 declared native-stderr-recheck route (native-stderr-recheck)
 
@@ -918,7 +928,9 @@ than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stderr_recheck` MCP tool (same `run_stderr_recheck`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; recheck reports remain non-performers. C02/C10 stay
+partial.
 
 ### C02/C10 declared native-stderr-accept route (native-stderr-accept)
 
@@ -948,7 +960,10 @@ run with `exit_code == 0` selects the produced
 design, so no `candidate` is emitted. The route is also the
 `native_stderr_accept` MCP tool (same `run_stderr_accept`
 report production, declared-path validation and basename redaction as
-the other spawn tools). C02/C10 stay partial.
+the other spawn tools). Every outcome echoes the trusted-channel
+`expected_build_id`; accepted sibling reports sharing that
+Core-authenticated ID can recover one another's channel checks through
+`recovery-eval`. C02/C10 stay partial.
 
 ### C02/C10 declared native-check route (native-check)
 
@@ -6096,11 +6111,18 @@ binds the report's lineage to those bytes; a descriptor that kept
 `historical_execution` unperformed ("one run is an observation, not
 a history") recovers it through the route's published sequence. The
 exit-status/stdout/stderr accept reports also perform their matching
-`os_*_observation` check, bound by `normalized.stdout.sha256`.
-Recheck reports are not performers: their stdout is a fixed diagnostic
+`os_*_observation` check through the existing
+`normalized.stdout.sha256` binding. Each has a second
+`shared:expected_build_id` binding: an accepted Core run has authenticated
+that declared ID against the bundle record, so accepted sibling reports
+can perform their channel checks when both reports name the same ID.
+The ID is echoed by all six accept/recheck reports, including outcomes
+without an acceptance or reproduced result. Rechecks remain
+non-performers as evidence because their stdout is a fixed diagnostic
 line with no bound carrier. `runtime_observation_semantics` remains
-`no_evidence` until the Core slice emits the reserved
-`mumei.runtime-observation/v1` descriptor. `producer_authenticity` also
+`no_evidence` until the Core slice emits a descriptor for one invocation
+observing all channels; it is deliberately not a conjunction of channel
+reports. `producer_authenticity` also
 recovers through a
 `mumei.signature-verification/v1` doc — the only multi-outcome
 performer: a verifying signature alone binds SOME key to the digest,
@@ -6711,11 +6733,14 @@ assurance chain — has a design memo:
 Option A slice 1 has landed agent-side: the exit-status/stdout/stderr
 recheck and accept routes name their OS observations with dedicated
 `RUNTIME_CHECK_VOCABULARY` checks, and accepted reports compose those
-checks through `recovery-eval`. The reserved
-`mumei.runtime-observation/v1` schema and
-`runtime_observation_semantics` await the Core recheck-runtime slice;
-acceptance composition in slices 2–3 remains. The named check describes
-bounded observed behavior, never ABI semantics of the program.
+checks through `recovery-eval`. Agent-side acceptance composition has
+also landed: sibling accepted reports recover their channel checks when
+their Core-authenticated `expected_build_id` values match. The reserved
+`mumei.runtime-observation/v1` descriptor and its
+`runtime_observation_semantics` performer await the Core runtime-
+observation slice; that check remains deliberately non-compositional.
+The named channel checks describe bounded observed behavior, never ABI
+semantics of the program.
 Object-code translation validation (Option B) stays the deep endpoint.
 No grade or audit surface changes.
 
