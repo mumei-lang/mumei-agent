@@ -6905,6 +6905,17 @@ authority, Evidence acceptance, verdict, or grade promotion. C11 stays
 partial; Core meaning and acceptance, C12's demand gate and grade
 promotion are unchanged.
 
+### C11 declared producer-signature folds as MCP tools
+
+The MCP `signature_eval` and `signature_verify` tools mirror the
+spawn-free `signature-eval` and `signature-verify` CLI routes over
+bounded declared inputs. Evaluation preserves `checks_not_performed`;
+verification performs Ed25519 under caller-declared public keys. Both
+make no Core command or subprocess call and add no authority, Evidence
+acceptance, verdict, or grade promotion. `signature-sign` remains
+CLI-only because it reads secret key material. C11 stays partial; Core
+meaning and acceptance, C12's demand gate and grade promotion are unchanged.
+
 ### C10 runtime/ABI assurance — design memo
 
 The remaining research-level C10 item — the object/ABI/runtime/final-binary

@@ -2888,6 +2888,183 @@ def recovery_eval(record_path: str, evidence_paths: list[str]) -> str:
     return _ok({"recovery": recovery})
 
 
+@mcp.tool()
+def signature_eval(
+    envelope_path: str,
+    expected_subject: str | None = None,
+    expected_producer_key: str | None = None,
+    revocation_list_path: str | None = None,
+    key_registry_path: str | None = None,
+    registry_signature_path: str | None = None,
+    revocation_signature_path: str | None = None,
+    reference_time: str | None = None,
+    max_age_seconds: StrictInt | None = None,
+) -> str:
+    """Fold a declared producer-signature envelope and caller-declared pins.
+
+    This is representation-level evaluation only: it does not verify the
+    envelope signature, run Core or spawn a subprocess. It preserves
+    `checks_not_performed` verbatim and adds no authority. This is not
+    Evidence acceptance, a verdict, or grade promotion.
+
+    Args:
+        envelope_path: Path to the declared producer-signature envelope.
+        expected_subject: Optional caller-declared subject digest.
+        expected_producer_key: Optional caller-declared producer key id.
+        revocation_list_path: Optional declared revocation-list path.
+        key_registry_path: Optional declared producer-key registry path.
+        registry_signature_path: Optional signature wrapper for the registry.
+        revocation_signature_path: Optional signature wrapper for the list.
+        reference_time: Optional caller-declared RFC3339 time.
+        max_age_seconds: Optional declared envelope freshness window.
+
+    Returns:
+        JSON with `evaluation` on success or a path-redacted `error`.
+    """
+    path_arguments = (
+        ("envelope_path", envelope_path, False),
+        ("revocation_list_path", revocation_list_path, True),
+        ("key_registry_path", key_registry_path, True),
+        ("registry_signature_path", registry_signature_path, True),
+        ("revocation_signature_path", revocation_signature_path, True),
+    )
+    declared_paths = []
+    for name, path, optional in path_arguments:
+        if path is None and optional:
+            continue
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+        declared_paths.append(path)
+    for name, value in (
+        ("expected_subject", expected_subject),
+        ("expected_producer_key", expected_producer_key),
+        ("reference_time", reference_time),
+    ):
+        if value is not None and not isinstance(value, str):
+            return _err(f"{name} must be a string")
+    if max_age_seconds is not None and (
+        not isinstance(max_age_seconds, int)
+        or isinstance(max_age_seconds, bool)
+    ):
+        return _err("max_age_seconds must be an integer")
+
+    from agent.signature_eval import run_eval
+
+    try:
+        evaluation = run_eval(
+            argparse.Namespace(
+                envelope=envelope_path,
+                expected_subject=expected_subject,
+                expected_producer_key=expected_producer_key,
+                revocation_list=revocation_list_path,
+                key_registry=key_registry_path,
+                registry_signature=registry_signature_path,
+                revocation_signature=revocation_signature_path,
+                reference_time=reference_time,
+                max_age_seconds=max_age_seconds,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"evaluation": evaluation})
+
+
+@mcp.tool()
+def signature_verify(
+    envelope_path: str,
+    producer_key: str,
+    expected_subject: str | None = None,
+    expected_producer_key: str | None = None,
+    revocation_list_path: str | None = None,
+    key_registry_path: str | None = None,
+    registry_signature_path: str | None = None,
+    revocation_signature_path: str | None = None,
+    reference_time: str | None = None,
+    max_age_seconds: StrictInt | None = None,
+    registry_key: str | None = None,
+    revocation_key: str | None = None,
+) -> str:
+    """Verify a declared envelope under caller-declared Ed25519 keys.
+
+    This performs Ed25519 verification under the supplied public keys
+    without running Core or spawning a subprocess. It preserves
+    `checks_not_performed` verbatim and adds no authority. This is not
+    Evidence acceptance, a verdict, or grade promotion.
+
+    Args:
+        envelope_path: Path to the declared producer-signature envelope.
+        producer_key: Caller-declared raw Ed25519 public key in hex.
+        expected_subject: Optional caller-declared subject digest.
+        expected_producer_key: Optional caller-declared producer key id.
+        revocation_list_path: Optional declared revocation-list path.
+        key_registry_path: Optional declared producer-key registry path.
+        registry_signature_path: Optional signature wrapper for the registry.
+        revocation_signature_path: Optional signature wrapper for the list.
+        reference_time: Optional caller-declared RFC3339 time.
+        max_age_seconds: Optional declared envelope freshness window.
+        registry_key: Optional caller-declared registry signer public key.
+        revocation_key: Optional caller-declared revocation signer public key.
+
+    Returns:
+        JSON with `verification` on success or a path-redacted `error`.
+    """
+    path_arguments = (
+        ("envelope_path", envelope_path, False),
+        ("revocation_list_path", revocation_list_path, True),
+        ("key_registry_path", key_registry_path, True),
+        ("registry_signature_path", registry_signature_path, True),
+        ("revocation_signature_path", revocation_signature_path, True),
+    )
+    declared_paths = []
+    for name, path, optional in path_arguments:
+        if path is None and optional:
+            continue
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+        declared_paths.append(path)
+    if not isinstance(producer_key, str):
+        return _err("producer_key must be a string")
+    for name, value in (
+        ("expected_subject", expected_subject),
+        ("expected_producer_key", expected_producer_key),
+        ("reference_time", reference_time),
+        ("registry_key", registry_key),
+        ("revocation_key", revocation_key),
+    ):
+        if value is not None and not isinstance(value, str):
+            return _err(f"{name} must be a string")
+    if max_age_seconds is not None and (
+        not isinstance(max_age_seconds, int)
+        or isinstance(max_age_seconds, bool)
+    ):
+        return _err("max_age_seconds must be an integer")
+
+    from agent.signature_verify import run_verify
+
+    try:
+        verification = run_verify(
+            argparse.Namespace(
+                envelope=envelope_path,
+                producer_key=producer_key,
+                expected_subject=expected_subject,
+                expected_producer_key=expected_producer_key,
+                revocation_list=revocation_list_path,
+                key_registry=key_registry_path,
+                registry_signature=registry_signature_path,
+                revocation_signature=revocation_signature_path,
+                reference_time=reference_time,
+                max_age_seconds=max_age_seconds,
+                registry_key=registry_key,
+                revocation_key=revocation_key,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"verification": verification})
+
+
 def _redact_declared_paths(text: str, declared: list[str]) -> str:
     # Failure text goes to a model: declared checkout-local paths
     # stay out of it — basenames only.

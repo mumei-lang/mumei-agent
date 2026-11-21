@@ -90,6 +90,8 @@ class TestGetAgentStatus:
             "freshness_eval",
             "binding_eval",
             "recovery_eval",
+            "signature_eval",
+            "signature_verify",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
@@ -166,6 +168,9 @@ class TestGetAgentStatus:
         assert "freshness_eval" in registered
         assert "binding_eval" in registered
         assert "recovery_eval" in registered
+        assert "signature_eval" in registered
+        assert "signature_verify" in registered
+        assert "signature_sign" not in registered
 
 
 # ---------------------------------------------------------------------------

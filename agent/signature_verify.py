@@ -213,91 +213,95 @@ def _read_declared_unique(path: str) -> dict:
     return _load_declared(path, unique=True)[1]
 
 
+def run_verify(args: argparse.Namespace) -> dict:
+    envelope = _read_declared(args.envelope)
+    output_path = getattr(args, "output", None)
+    if output_path is not None:
+        out_path = Path(output_path)
+        for declared_input in (
+            args.envelope,
+            getattr(args, "revocation_list", None),
+            getattr(args, "key_registry", None),
+            getattr(args, "registry_signature", None),
+            getattr(args, "revocation_signature", None),
+        ):
+            if declared_input is None:
+                continue
+            try:
+                if Path(declared_input).samefile(out_path):
+                    raise ValueError(
+                        "--output may not overwrite a declared"
+                        " input document"
+                    )
+            except FileNotFoundError:
+                pass
+    revoked_keys = None
+    revocation_digest = None
+    revocation_path = getattr(args, "revocation_list", None)
+    if revocation_path is not None:
+        raw, declared = _load_declared(revocation_path)
+        revoked_keys = revocation_key_set(declared)
+        revocation_digest = hashlib.sha256(raw).hexdigest()
+    key_registry = None
+    registry_digest = None
+    registry_path = getattr(args, "key_registry", None)
+    if registry_path is not None:
+        raw, declared = _load_declared(registry_path, unique=True)
+        key_registry = producer_key_registry(declared)
+        registry_digest = hashlib.sha256(raw).hexdigest()
+    registry_signature = None
+    registry_signature_path = getattr(args, "registry_signature", None)
+    if registry_signature_path is not None:
+        if registry_path is None:
+            raise ValueError(
+                "--registry-signature requires --key-registry"
+            )
+        registry_signature = _read_declared(registry_signature_path)
+    revocation_signature = None
+    revocation_signature_path = getattr(
+        args, "revocation_signature", None
+    )
+    if revocation_signature_path is not None:
+        if revocation_path is None:
+            raise ValueError(
+                "--revocation-signature requires --revocation-list"
+            )
+        revocation_signature = _read_declared(revocation_signature_path)
+    if getattr(args, "registry_key", None) is not None and (
+        registry_signature is None
+    ):
+        raise ValueError(
+            "--registry-key requires --registry-signature"
+        )
+    if getattr(args, "revocation_key", None) is not None and (
+        revocation_signature is None
+    ):
+        raise ValueError(
+            "--revocation-key requires --revocation-signature"
+        )
+    return verify_signature_envelope(
+        envelope,
+        args.producer_key,
+        getattr(args, "expected_subject", None),
+        getattr(args, "expected_producer_key", None),
+        revoked_keys,
+        key_registry,
+        getattr(args, "reference_time", None),
+        getattr(args, "max_age_seconds", None),
+        registry_signature,
+        getattr(args, "registry_key", None),
+        registry_digest,
+        revocation_signature,
+        getattr(args, "revocation_key", None),
+        revocation_digest,
+    )
+
+
 def main_verify(args: argparse.Namespace | None = None) -> int:
     try:
-        envelope = _read_declared(args.envelope)
+        assert args is not None
+        verification = run_verify(args)
         output_path = getattr(args, "output", None)
-        if output_path is not None:
-            out_path = Path(output_path)
-            for declared_input in (
-                args.envelope,
-                getattr(args, "revocation_list", None),
-                getattr(args, "key_registry", None),
-                getattr(args, "registry_signature", None),
-                getattr(args, "revocation_signature", None),
-            ):
-                if declared_input is None:
-                    continue
-                try:
-                    if Path(declared_input).samefile(out_path):
-                        raise ValueError(
-                            "--output may not overwrite a declared"
-                            " input document"
-                        )
-                except FileNotFoundError:
-                    pass
-        revoked_keys = None
-        revocation_digest = None
-        revocation_path = getattr(args, "revocation_list", None)
-        if revocation_path is not None:
-            raw, declared = _load_declared(revocation_path)
-            revoked_keys = revocation_key_set(declared)
-            revocation_digest = hashlib.sha256(raw).hexdigest()
-        key_registry = None
-        registry_digest = None
-        registry_path = getattr(args, "key_registry", None)
-        if registry_path is not None:
-            raw, declared = _load_declared(registry_path, unique=True)
-            key_registry = producer_key_registry(declared)
-            registry_digest = hashlib.sha256(raw).hexdigest()
-        registry_signature = None
-        registry_signature_path = getattr(args, "registry_signature", None)
-        if registry_signature_path is not None:
-            if registry_path is None:
-                raise ValueError(
-                    "--registry-signature requires --key-registry"
-                )
-            registry_signature = _read_declared(registry_signature_path)
-        revocation_signature = None
-        revocation_signature_path = getattr(
-            args, "revocation_signature", None
-        )
-        if revocation_signature_path is not None:
-            if revocation_path is None:
-                raise ValueError(
-                    "--revocation-signature requires --revocation-list"
-                )
-            revocation_signature = _read_declared(
-                revocation_signature_path
-            )
-        if getattr(args, "registry_key", None) is not None and (
-            registry_signature is None
-        ):
-            raise ValueError(
-                "--registry-key requires --registry-signature"
-            )
-        if getattr(args, "revocation_key", None) is not None and (
-            revocation_signature is None
-        ):
-            raise ValueError(
-                "--revocation-key requires --revocation-signature"
-            )
-        verification = verify_signature_envelope(
-            envelope,
-            args.producer_key,
-            getattr(args, "expected_subject", None),
-            getattr(args, "expected_producer_key", None),
-            revoked_keys,
-            key_registry,
-            getattr(args, "reference_time", None),
-            getattr(args, "max_age_seconds", None),
-            registry_signature,
-            getattr(args, "registry_key", None),
-            registry_digest,
-            revocation_signature,
-            getattr(args, "revocation_key", None),
-            revocation_digest,
-        )
         text = json.dumps(verification, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)
