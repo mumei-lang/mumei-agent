@@ -5303,6 +5303,16 @@ It adds no default route and changes no audit, Seal Grade, or Lean
 behavior. Rust (#1033) and Solidity (#1038) lexical reports are delivered;
 this PR adds TypeScript for this C06 lexical-report scope.
 
+### C06 first compiler-backed Solidity binding slice
+
+The pure reader consumes an operator-produced standard-JSON envelope from
+pinned `solc` 0.8.39+commit.ce47f2c8; the agent never launches the compiler
+and adds no CLI or MCP route. It reads single-file AST `Identifier` declaration spans
+and compares them with the same-source lexical report, returning metadata
+only. Exact source-content equality detects stale output, not compiler
+authenticity. Imports and inline assembly fail closed. This slice makes no
+trust, audit, Evidence acceptance, Seal Grade, ABI, runtime, or proof claim.
+
 ### C06 TypeScript lexical binding report (`ts-bindings`)
 
 `python -m agent ts-bindings <file>` emits

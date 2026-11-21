@@ -1,0 +1,271 @@
+{
+  "profile": "mumei.solc-standard-json-envelope/v1",
+  "solc_version_output": "solc, the solidity compiler commandline interface\nVersion: 0.8.39+commit.ce47f2c8.Linux.g++\n",
+  "input": {
+    "language": "Solidity",
+    "sources": {
+      "inheritance_override.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity 0.8.39;\n\ncontract Base {\n    function hook() internal virtual {}\n}\n\ncontract Child is Base {\n    function hook() internal override {}\n\n    function invoke() internal {\n        hook();\n    }\n}\n"
+      }
+    },
+    "settings": {
+      "outputSelection": {
+        "*": {
+          "*": [
+            "metadata"
+          ],
+          "": [
+            "ast"
+          ]
+        }
+      }
+    }
+  },
+  "output": {
+    "contracts": {
+      "inheritance_override.sol": {
+        "Base": {
+          "metadata": "{\"compiler\":{\"version\":\"0.8.39+commit.ce47f2c8\"},\"language\":\"Solidity\",\"output\":{\"abi\":[],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"inheritance_override.sol\":\"Base\"},\"evmVersion\":\"osaka\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":false,\"runs\":200},\"remappings\":[]},\"sources\":{\"inheritance_override.sol\":{\"keccak256\":\"0xa8352be3be92abdab021e06284038340534db5b182bc172abdf7096e1c4449f9\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://1a2af4ea19e2962d0e8e2f696582a313ba0a250ca5700b7e129e4dd7980d57c9\",\"dweb:/ipfs/QmPQmo36NScPrEYUBRSVd8DuTXhGDHRUYWeAd2Yfiyq42F\"]}},\"version\":1}"
+        },
+        "Child": {
+          "metadata": "{\"compiler\":{\"version\":\"0.8.39+commit.ce47f2c8\"},\"language\":\"Solidity\",\"output\":{\"abi\":[],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"inheritance_override.sol\":\"Child\"},\"evmVersion\":\"osaka\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":false,\"runs\":200},\"remappings\":[]},\"sources\":{\"inheritance_override.sol\":{\"keccak256\":\"0xa8352be3be92abdab021e06284038340534db5b182bc172abdf7096e1c4449f9\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://1a2af4ea19e2962d0e8e2f696582a313ba0a250ca5700b7e129e4dd7980d57c9\",\"dweb:/ipfs/QmPQmo36NScPrEYUBRSVd8DuTXhGDHRUYWeAd2Yfiyq42F\"]}},\"version\":1}"
+        }
+      }
+    },
+    "sources": {
+      "inheritance_override.sol": {
+        "ast": {
+          "absolutePath": "inheritance_override.sol",
+          "exportedSymbols": {
+            "Base": [
+              6
+            ],
+            "Child": [
+              21
+            ]
+          },
+          "id": 22,
+          "license": "MIT",
+          "nodeType": "SourceUnit",
+          "nodes": [
+            {
+              "id": 1,
+              "literals": [
+                "solidity",
+                "0.8",
+                ".39"
+              ],
+              "nodeType": "PragmaDirective",
+              "src": "32:23:0"
+            },
+            {
+              "abstract": false,
+              "baseContracts": [],
+              "canonicalName": "Base",
+              "contractDependencies": [],
+              "contractKind": "contract",
+              "fullyImplemented": true,
+              "id": 6,
+              "linearizedBaseContracts": [
+                6
+              ],
+              "name": "Base",
+              "nameLocation": "66:4:0",
+              "nodeType": "ContractDefinition",
+              "nodes": [
+                {
+                  "body": {
+                    "id": 4,
+                    "nodeType": "Block",
+                    "src": "110:2:0",
+                    "statements": []
+                  },
+                  "id": 5,
+                  "implemented": true,
+                  "kind": "function",
+                  "modifiers": [],
+                  "name": "hook",
+                  "nameLocation": "86:4:0",
+                  "nodeType": "FunctionDefinition",
+                  "parameters": {
+                    "id": 2,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "90:2:0"
+                  },
+                  "returnParameters": {
+                    "id": 3,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "110:0:0"
+                  },
+                  "scope": 6,
+                  "src": "77:35:0",
+                  "stateMutability": "nonpayable",
+                  "virtual": true,
+                  "visibility": "internal"
+                }
+              ],
+              "scope": 22,
+              "src": "57:57:0",
+              "usedErrors": [],
+              "usedEvents": []
+            },
+            {
+              "abstract": false,
+              "baseContracts": [
+                {
+                  "baseName": {
+                    "id": 7,
+                    "name": "Base",
+                    "nameLocations": [
+                      "134:4:0"
+                    ],
+                    "nodeType": "IdentifierPath",
+                    "referencedDeclaration": 6,
+                    "src": "134:4:0"
+                  },
+                  "id": 8,
+                  "nodeType": "InheritanceSpecifier",
+                  "src": "134:4:0"
+                }
+              ],
+              "canonicalName": "Child",
+              "contractDependencies": [],
+              "contractKind": "contract",
+              "fullyImplemented": true,
+              "id": 21,
+              "linearizedBaseContracts": [
+                21,
+                6
+              ],
+              "name": "Child",
+              "nameLocation": "125:5:0",
+              "nodeType": "ContractDefinition",
+              "nodes": [
+                {
+                  "baseFunctions": [
+                    5
+                  ],
+                  "body": {
+                    "id": 12,
+                    "nodeType": "Block",
+                    "src": "179:2:0",
+                    "statements": []
+                  },
+                  "id": 13,
+                  "implemented": true,
+                  "kind": "function",
+                  "modifiers": [],
+                  "name": "hook",
+                  "nameLocation": "154:4:0",
+                  "nodeType": "FunctionDefinition",
+                  "overrides": {
+                    "id": 10,
+                    "nodeType": "OverrideSpecifier",
+                    "overrides": [],
+                    "src": "170:8:0"
+                  },
+                  "parameters": {
+                    "id": 9,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "158:2:0"
+                  },
+                  "returnParameters": {
+                    "id": 11,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "179:0:0"
+                  },
+                  "scope": 21,
+                  "src": "145:36:0",
+                  "stateMutability": "nonpayable",
+                  "virtual": false,
+                  "visibility": "internal"
+                },
+                {
+                  "body": {
+                    "id": 19,
+                    "nodeType": "Block",
+                    "src": "214:23:0",
+                    "statements": [
+                      {
+                        "expression": {
+                          "arguments": [],
+                          "expression": {
+                            "argumentTypes": [],
+                            "id": 16,
+                            "name": "hook",
+                            "nodeType": "Identifier",
+                            "overloadedDeclarations": [
+                              13
+                            ],
+                            "referencedDeclaration": 13,
+                            "src": "224:4:0",
+                            "typeDescriptions": {
+                              "typeIdentifier": "t_function_internal_nonpayable$__$returns$__$",
+                              "typeString": "function ()"
+                            }
+                          },
+                          "id": 17,
+                          "isConstant": false,
+                          "isLValue": false,
+                          "isPure": false,
+                          "kind": "functionCall",
+                          "lValueRequested": false,
+                          "nameLocations": [],
+                          "names": [],
+                          "nodeType": "FunctionCall",
+                          "src": "224:6:0",
+                          "tryCall": false,
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_tuple$__$",
+                            "typeString": "tuple()"
+                          }
+                        },
+                        "id": 18,
+                        "nodeType": "ExpressionStatement",
+                        "src": "224:6:0"
+                      }
+                    ]
+                  },
+                  "id": 20,
+                  "implemented": true,
+                  "kind": "function",
+                  "modifiers": [],
+                  "name": "invoke",
+                  "nameLocation": "196:6:0",
+                  "nodeType": "FunctionDefinition",
+                  "parameters": {
+                    "id": 14,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "202:2:0"
+                  },
+                  "returnParameters": {
+                    "id": 15,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "214:0:0"
+                  },
+                  "scope": 21,
+                  "src": "187:50:0",
+                  "stateMutability": "nonpayable",
+                  "virtual": false,
+                  "visibility": "internal"
+                }
+              ],
+              "scope": 22,
+              "src": "116:123:0",
+              "usedErrors": [],
+              "usedEvents": []
+            }
+          ],
+          "src": "32:208:0"
+        },
+        "id": 0
+      }
+    }
+  }
+}

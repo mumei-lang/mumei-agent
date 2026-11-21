@@ -1,0 +1,236 @@
+{
+  "profile": "mumei.solc-standard-json-envelope/v1",
+  "solc_version_output": "solc, the solidity compiler commandline interface\nVersion: 0.8.39+commit.ce47f2c8.Linux.g++\n",
+  "input": {
+    "language": "Solidity",
+    "sources": {
+      "import_source.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity 0.8.39;\n\nimport \"Imported.sol\";\n\ncontract Consumer {}\n"
+      },
+      "Imported.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity 0.8.39;\n\nlibrary Imported {\n    function value() internal pure returns (uint256) {\n        return 7;\n    }\n}\n"
+      }
+    },
+    "settings": {
+      "outputSelection": {
+        "*": {
+          "*": [
+            "metadata"
+          ],
+          "": [
+            "ast"
+          ]
+        }
+      }
+    }
+  },
+  "output": {
+    "contracts": {
+      "Imported.sol": {
+        "Imported": {
+          "metadata": "{\"compiler\":{\"version\":\"0.8.39+commit.ce47f2c8\"},\"language\":\"Solidity\",\"output\":{\"abi\":[],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"Imported.sol\":\"Imported\"},\"evmVersion\":\"osaka\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":false,\"runs\":200},\"remappings\":[]},\"sources\":{\"Imported.sol\":{\"keccak256\":\"0x914ac7352018437475f47344c78865e4d7423ed7b4508b5bfc2ce91eda9db821\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://2549f540a8983c1d3ccc9795b9937098c6fbdf8184a99c8afcdf571c53ba36c2\",\"dweb:/ipfs/QmZVkvCZcD2eRpoxTumPEzamZLmMvurRHYEgJmGUi94HrZ\"]}},\"version\":1}"
+        }
+      },
+      "import_source.sol": {
+        "Consumer": {
+          "metadata": "{\"compiler\":{\"version\":\"0.8.39+commit.ce47f2c8\"},\"language\":\"Solidity\",\"output\":{\"abi\":[],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"import_source.sol\":\"Consumer\"},\"evmVersion\":\"osaka\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":false,\"runs\":200},\"remappings\":[]},\"sources\":{\"Imported.sol\":{\"keccak256\":\"0x914ac7352018437475f47344c78865e4d7423ed7b4508b5bfc2ce91eda9db821\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://2549f540a8983c1d3ccc9795b9937098c6fbdf8184a99c8afcdf571c53ba36c2\",\"dweb:/ipfs/QmZVkvCZcD2eRpoxTumPEzamZLmMvurRHYEgJmGUi94HrZ\"]},\"import_source.sol\":{\"keccak256\":\"0xb4182ffdc15aeb030e0dc91735712fc5ff2dd9bc28c224bea258338acf440664\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://2509bb2f8f0883f0d579f60427d4a1fbb16be0255a138ab2d2db44df5b5bbe7a\",\"dweb:/ipfs/QmYw169965ToqiGGNU434yJuHWj6zT8uRwYF2dBUbniFjh\"]}},\"version\":1}"
+        }
+      }
+    },
+    "sources": {
+      "Imported.sol": {
+        "ast": {
+          "absolutePath": "Imported.sol",
+          "exportedSymbols": {
+            "Imported": [
+              10
+            ]
+          },
+          "id": 11,
+          "license": "MIT",
+          "nodeType": "SourceUnit",
+          "nodes": [
+            {
+              "id": 1,
+              "literals": [
+                "solidity",
+                "0.8",
+                ".39"
+              ],
+              "nodeType": "PragmaDirective",
+              "src": "32:23:0"
+            },
+            {
+              "abstract": false,
+              "baseContracts": [],
+              "canonicalName": "Imported",
+              "contractDependencies": [],
+              "contractKind": "library",
+              "fullyImplemented": true,
+              "id": 10,
+              "linearizedBaseContracts": [
+                10
+              ],
+              "name": "Imported",
+              "nameLocation": "65:8:0",
+              "nodeType": "ContractDefinition",
+              "nodes": [
+                {
+                  "body": {
+                    "id": 8,
+                    "nodeType": "Block",
+                    "src": "129:25:0",
+                    "statements": [
+                      {
+                        "expression": {
+                          "hexValue": "37",
+                          "id": 6,
+                          "isConstant": false,
+                          "isLValue": false,
+                          "isPure": true,
+                          "kind": "number",
+                          "lValueRequested": false,
+                          "nodeType": "Literal",
+                          "src": "146:1:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_rational_7_by_1",
+                            "typeString": "int_const 7"
+                          },
+                          "value": "7"
+                        },
+                        "functionReturnParameters": 5,
+                        "id": 7,
+                        "nodeType": "Return",
+                        "src": "139:8:0"
+                      }
+                    ]
+                  },
+                  "id": 9,
+                  "implemented": true,
+                  "kind": "function",
+                  "modifiers": [],
+                  "name": "value",
+                  "nameLocation": "89:5:0",
+                  "nodeType": "FunctionDefinition",
+                  "parameters": {
+                    "id": 2,
+                    "nodeType": "ParameterList",
+                    "parameters": [],
+                    "src": "94:2:0"
+                  },
+                  "returnParameters": {
+                    "id": 5,
+                    "nodeType": "ParameterList",
+                    "parameters": [
+                      {
+                        "constant": false,
+                        "id": 4,
+                        "mutability": "mutable",
+                        "name": "",
+                        "nameLocation": "-1:-1:-1",
+                        "nodeType": "VariableDeclaration",
+                        "scope": 9,
+                        "src": "120:7:0",
+                        "stateVariable": false,
+                        "storageLocation": "default",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_uint256",
+                          "typeString": "uint256"
+                        },
+                        "typeName": {
+                          "id": 3,
+                          "name": "uint256",
+                          "nodeType": "ElementaryTypeName",
+                          "src": "120:7:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_uint256",
+                            "typeString": "uint256"
+                          }
+                        },
+                        "visibility": "internal"
+                      }
+                    ],
+                    "src": "119:9:0"
+                  },
+                  "scope": 10,
+                  "src": "80:74:0",
+                  "stateMutability": "pure",
+                  "virtual": false,
+                  "visibility": "internal"
+                }
+              ],
+              "scope": 11,
+              "src": "57:99:0",
+              "usedErrors": [],
+              "usedEvents": []
+            }
+          ],
+          "src": "32:125:0"
+        },
+        "id": 0
+      },
+      "import_source.sol": {
+        "ast": {
+          "absolutePath": "import_source.sol",
+          "exportedSymbols": {
+            "Consumer": [
+              14
+            ],
+            "Imported": [
+              10
+            ]
+          },
+          "id": 15,
+          "license": "MIT",
+          "nodeType": "SourceUnit",
+          "nodes": [
+            {
+              "id": 12,
+              "literals": [
+                "solidity",
+                "0.8",
+                ".39"
+              ],
+              "nodeType": "PragmaDirective",
+              "src": "32:23:1"
+            },
+            {
+              "absolutePath": "Imported.sol",
+              "file": "Imported.sol",
+              "id": 13,
+              "nameLocation": "-1:-1:-1",
+              "nodeType": "ImportDirective",
+              "scope": 15,
+              "sourceUnit": 11,
+              "src": "57:22:1",
+              "symbolAliases": [],
+              "unitAlias": ""
+            },
+            {
+              "abstract": false,
+              "baseContracts": [],
+              "canonicalName": "Consumer",
+              "contractDependencies": [],
+              "contractKind": "contract",
+              "fullyImplemented": true,
+              "id": 14,
+              "linearizedBaseContracts": [
+                14
+              ],
+              "name": "Consumer",
+              "nameLocation": "90:8:1",
+              "nodeType": "ContractDefinition",
+              "nodes": [],
+              "scope": 15,
+              "src": "81:20:1",
+              "usedErrors": [],
+              "usedEvents": []
+            }
+          ],
+          "src": "32:70:1"
+        },
+        "id": 1
+      }
+    }
+  }
+}
