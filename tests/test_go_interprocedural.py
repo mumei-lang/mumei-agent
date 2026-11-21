@@ -30145,6 +30145,241 @@ def test_struct_literal_collection_fields_share_with_donors(
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func mk(x int64) S { return S{A: []int64{x}} }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := mk(x)\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func mk(a []int64) S { return S{A: a} }\n"
+            "func F(x, y int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\ts := mk(a)\n"
+            "\tb := s.A\n"
+            "\tb[0] = y\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "type T struct{}\n"
+            "func (T) Mk(a []int64) S { return S{A: a} }\n"
+            "func F(x, y int64) int64 {\n"
+            "\ta := []int64{x}\n"
+            "\ts := T{}.Mk(a)\n"
+            "\tb := s.A\n"
+            "\tb[0] = y\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "type T struct { A []int64 }\n"
+            "func (t T) Mk() S { return S{A: t.A} }\n"
+            "func F(x int64) int64 {\n"
+            "\tt := T{A: []int64{x}}\n"
+            "\ts := t.Mk()\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "type W struct { Inner S }\n"
+            "func F(x int64) int64 {\n"
+            "\tw := W{Inner: S{A: []int64{x}}}\n"
+            "\ts := w.Inner\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "type W struct { Inner S }\n"
+            "func F(w W, x int64) int64 {\n"
+            "\ts := w.Inner\n"
+            "\tb := s.A\n"
+            "\tb[0] = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts, t := S{A: []int64{x}}, S{A: []int64{x + 1}}\n"
+            "\tb := s.A\n"
+            "\tc := t.A\n"
+            "\treturn b[0] + c[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\ts := S{A: a}\n"
+            "\tb := s.A\n"
+            "\tb[0] = x\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{x}}\n"
+            "\tt := S{A: []int64{x + 1}}\n"
+            "\ts, t = t, s\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_struct_collection_rhs_and_copy_parity(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+def test_imported_struct_call_result_shares_argument_backing(
+    go_types_helper,
+):
+    files = {
+        "main.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x, y int64) int64 {\n"
+        "\ta := []int64{x}\n"
+        "\ts := lib.Mk(a)\n"
+        "\tb := s.A\n"
+        "\tb[0] = y\n"
+        "\treturn a[0]\n}\n",
+    }
+    imported = {
+        "lib": {
+            "lib.go": "package lib\n"
+            "type S struct { A []int64; V int64 }\n"
+            "func Mk(a []int64) S { return S{A: a} }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imported),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+    value_files = {
+        "main.go": "package p\n"
+        "import \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar s = lib.Mk(x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+    }
+    value_import = {
+        "lib": {
+            "lib.go": "package lib\n"
+            "type S struct { A []int64; V int64 }\n"
+            "func Mk(x int64) S { return S{A: []int64{x}} }\n"
+        }
+    }
+    value_snapshot = load_go_package_snapshot(
+        package_report_imports(
+            go_types_helper, value_files, value_import
+        ),
+        value_files,
+        target_arch="amd64",
+    )
+    value_summaries = ip.summarize_go_package(
+        value_files, value_snapshot
+    )
+    value_result = named_package(
+        value_files, value_snapshot, value_summaries, "F"
+    )
+    assert value_result.available
+    assert value_result.return_dependencies == frozenset({0})
+
+
+def test_struct_field_slot_reseat_preserves_only_surviving_aliases(
+    go_types_helper,
+):
+    alias_reseat = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\tt := s\n"
+            "\ts = S{A: []int64{1}}\n"
+            "\tb := t.A\n"
+            "\tb[0] = x\n"
+            "\treturn t.V\n}\n",
+        )
+    )
+    assert alias_reseat.available
+    assert alias_reseat.return_dependencies == frozenset({0})
+
+    identifier_reseat = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\tt := s\n"
+            "\tu := S{A: []int64{1}}\n"
+            "\ts = u\n"
+            "\tb := t.A\n"
+            "\tb[0] = x\n"
+            "\treturn t.V\n}\n",
+        )
+    )
+    assert identifier_reseat.available
+    assert identifier_reseat.return_dependencies == frozenset({0})
+
+    detached_donor = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tc := []int64{0}\n"
+            "\ts := S{A: []int64{1}}\n"
+            "\tt := s\n"
+            "\ts = S{A: c}\n"
+            "\tb := t.A\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+        )
+    )
+    assert detached_donor.available
+    assert 0 not in detached_donor.return_dependencies
+
+    retained_donor = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tc := []int64{0}\n"
+            "\ts := S{A: c}\n"
+            "\tb := s.A\n"
+            "\tb[0] = x\n"
+            "\treturn c[0]\n}\n",
+        )
+    )
+    assert retained_donor.available
+    assert retained_donor.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
         # Writes through a local struct argument reach post-call extraction.
         (
             "type S struct { A []int64; V int64 }\n"
