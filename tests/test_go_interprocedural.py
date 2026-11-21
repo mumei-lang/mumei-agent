@@ -33315,6 +33315,194 @@ def test_func_arg_parenthesized_invocation_queued(go_types_helper):
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize(
+    "literal",
+    ["func() { y = x }", "(func() { y = x })"],
+    ids=["bare", "parenthesized"],
+)
+def test_func_arg_direct_literal_writes_back_local_callee(
+    go_types_helper, literal
+):
+    data = unit(
+        go_types_helper,
+        "func G(f func()) { f() }\n"
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        f"\tG({literal})\n"
+        "\treturn y\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_direct_literal_writes_back_func_parameter(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func F(g func(func()), x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tg(func() { y = x })\n"
+        "\treturn y\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_direct_literal_writes_back_imported_callee(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tlib.G(func() { y = x })\n"
+        "\treturn y\n"
+        "}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nfunc G(f func()) {}\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_two_direct_literals_write_back_independently(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func G(f, h func()) { f(); h() }\n"
+        "func F(x, y int64) int64 {\n"
+        "\ta, b := int64(0), int64(0)\n"
+        "\tG(func() { a = x }, func() { b = y })\n"
+        "\treturn a + b\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_direct_literal_star_write_folds_escaped(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func G(f func()) { f() }\n"
+        "func F(p *int64, x int64) int64 {\n"
+        "\tG(func() { *p = x })\n"
+        "\treturn *p\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_direct_literal_writes_back_inside_loop(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func G(f func()) { f() }\n"
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tfor i := 0; i < 1; i++ { G(func() { y = x }) }\n"
+        "\treturn y\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_func_arg_direct_literal_inner_call_writes_back(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func Leaf(x int64) int64 { return x }\n"
+        "func G(f func()) { f() }\n"
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tG(func() { y = Leaf(x) })\n"
+        "\treturn y\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        pytest.param(
+            "func F(x int64) int64 {\n"
+            "\ty := int64(0)\n"
+            "\tG(func() {})\n"
+            "\treturn y\n"
+            "}",
+            frozenset(),
+            id="empty-literal-no-write",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 {\n"
+            "\tG(func() { _ = x })\n"
+            "\treturn y\n"
+            "}",
+            frozenset({1}),
+            id="read-only-capture",
+        ),
+    ],
+)
+def test_func_arg_direct_literal_controls(
+    go_types_helper, declarations, expected
+):
+    data = unit(
+        go_types_helper,
+        "func G(f func()) { f() }\n"
+        + declarations,
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+def test_func_arg_direct_invocation_remains_unchanged(go_types_helper):
+    data = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tfunc() { y = x }()\n"
+        "\treturn y\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_func_arg_alias_resolves_like_function_name(go_types_helper):
     # `h := Id; P(h, x)` resolves identically to `P(Id, x)`: the
     # bounded pure callee keeps its own effects instead of the
