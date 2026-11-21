@@ -873,7 +873,7 @@ class _RustBindings:
         if pattern is None:
             return []
         if pattern.type in {"identifier", "self"}:
-        name = self._normalize_identifier(self.text(pattern))
+            name = self._normalize_identifier(self.text(pattern))
             found, _ = self._lookup_with_boundary(name, pattern.start_byte, "value")
             if found is not None and found.binding.kind in {
                 "const", "static", "struct",
