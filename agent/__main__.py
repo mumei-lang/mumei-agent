@@ -719,8 +719,10 @@ def main() -> None:
             prog="python -m agent evidence-check-adapter",
             description=(
                 "Check a declared adapter manifest's static representation "
-                "and consistency only; no execution, host policy, "
-                "resource enforcement or grade promotion is performed."
+                "and Core/local consistency only; declared argv/stdin stay "
+                "inert; no adapter execution, command safety, host policy, "
+                "resource enforcement, producer authenticity, Evidence "
+                "acceptance or grade promotion is performed."
             ),
         )
         evidence_check_adapter_build_parser(parser)

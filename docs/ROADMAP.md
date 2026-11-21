@@ -6839,12 +6839,15 @@ promotion.
 The `evidence-check-adapter` CLI route and `evidence_check_adapter`
 MCP tool consume Core's `evidence check-adapter --stdin --json`
 diagnostic over a declared `mumei.verifier-adapter/v1` manifest. The
-route selects only the exact static representation and manifest-
-consistency diagnostic. Declared argv/stdin remain inert; no adapter is
-executed, and command safety, host policy, resource enforcement,
-producer authenticity, Evidence acceptance, and grade promotion remain
-unperformed. Selection means only a manifest-declared-success exit;
-input drift suppresses selection.
+selection requires Core's exact closed diagnostic and local
+`AdapterDescriptor.from_manifest` agreement on attempt argv, stdin and
+verdict-marker count. These fields remain
+declarations only: argv/stdin need host opt-in, markers are self-report
+vocabulary, and `max_memory_mb` is a declared ceiling. This route does
+not execute adapters, assess command safety or host policy, enforce
+resources, claim producer authenticity, accept Evidence or promote
+grades. Selection means only a manifest-declared-success exit; input
+drift suppresses selection.
 
 C11 stays partial; this route adds no Evidence acceptance or grade
 promotion.

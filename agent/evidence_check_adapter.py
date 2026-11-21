@@ -1,15 +1,19 @@
-"""C11 evidence-check-adapter route: static adapter-manifest checking.
+"""C11 evidence-check-adapter route: static adapter-manifest representation.
 
-`python -m agent evidence-check-adapter` feeds a saved
-`mumei.verifier-adapter/v1` manifest to `<core> evidence check-adapter
---stdin --json` inside one C11 dispatch attempt. The request fingerprint binds
-the Core executable and exact manifest bytes; both declared inputs are
-re-hashed after the attempt and drift suppresses the diagnostic and selection.
+`python -m agent evidence-check-adapter` feeds a saved manifest's exact
+bytes to `<core> evidence check-adapter --stdin --json` inside the C11
+dispatch lifecycle. The request fingerprint binds the Core executable
+and manifest bytes; the route then re-hashes both declared inputs and
+publishes reconciled lineage compare-and-set.
 
-Core checks static representation and manifest consistency only. It does not
-execute adapters or assess command safety, host policy, resource enforcement,
-producer authenticity, Evidence acceptance, or grade promotion. Declared
-argv/stdin remain inert; selection is only a manifest-declared-success exit.
+Selection requires Core's exact representation-only diagnostic and a
+matching local `AdapterDescriptor.from_manifest` view of the declared
+attempt argv, stdin and verdict-marker count. Selection means only that
+Core validated the manifest representation: argv and stdin stay inert
+without host opt-in, markers are self-report vocabulary, and
+`max_memory_mb` is a declared ceiling. The route does not execute an
+adapter, assess command safety or host policy, enforce resources, claim
+producer authenticity, accept Evidence or promote a grade.
 """
 
 from __future__ import annotations
@@ -23,6 +27,10 @@ import sys
 from pathlib import Path
 
 from agent.core_evidence import MAX_CHECK_TIMEOUT_MS
+from agent.verification_planner import (
+    MAX_VERDICT_MARKERS,
+    AdapterDescriptor,
+)
 
 CHECK_REQUEST_PROFILE = "mumei.evidence-check-adapter-request/v1"
 CHECK_REPORT_PROFILE = "mumei.evidence-check-adapter-report/v1"
@@ -62,17 +70,17 @@ DIAGNOSTIC_KEYS = frozenset(
 )
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def _file_sha256(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
-def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
-    document: dict[str, object] = {}
-    for key, value in pairs:
-        if key in document:
-            raise ValueError("duplicate JSON object key")
-        document[key] = value
-    return document
 
 
 def _check_request(args: argparse.Namespace) -> None:
@@ -82,16 +90,15 @@ def _check_request(args: argparse.Namespace) -> None:
     for name, path in (("--core", args.core), ("--manifest", args.manifest)):
         if not os.path.isabs(path) or "\x00" in path:
             raise ValueError(f"{name} must be an absolute path")
+    if not 1 <= args.attempt_timeout <= MAX_CHECK_TIMEOUT_MS:
+        raise ValueError(f"--attempt-timeout must be 1..{MAX_CHECK_TIMEOUT_MS} ms")
+    for name, path in (("Core executable", args.core), ("manifest", args.manifest)):
         try:
             mode = Path(path).stat().st_mode
         except OSError as exc:
-            raise ValueError(f"cannot read declared {name[2:]}: {exc}") from exc
+            raise ValueError(f"cannot read declared {name}: {exc}") from exc
         if not stat.S_ISREG(mode):
-            raise ValueError(f"declared {name[2:]} must be a regular file")
-    if not 1 <= args.attempt_timeout <= MAX_CHECK_TIMEOUT_MS:
-        raise ValueError(
-            f"--attempt-timeout must be 1..{MAX_CHECK_TIMEOUT_MS} ms"
-        )
+            raise ValueError(f"declared {name} must be a regular file")
     try:
         size = os.path.getsize(args.manifest)
     except OSError as exc:
@@ -112,9 +119,7 @@ def _check_request(args: argparse.Namespace) -> None:
                 continue
 
 
-def _attempt_fingerprint(
-    args: argparse.Namespace, manifest_bytes: bytes
-) -> str:
+def _attempt_fingerprint(args: argparse.Namespace, manifest_bytes: bytes) -> str:
     """Bind Core bytes and the exact manifest bytes fed to the check."""
     request = {
         "schema_version": CHECK_REQUEST_PROFILE,
@@ -129,11 +134,23 @@ def _attempt_fingerprint(
     ).hexdigest()
 
 
-def _parse_diagnostic(captured: bytes) -> dict | None:
-    """Accept only the exact static diagnostic contract from Core."""
+def _decode_manifest(manifest_bytes: bytes) -> AdapterDescriptor | None:
     try:
         document = json.loads(
-            captured.decode("utf-8"), object_pairs_hook=_unique_json_object
+            manifest_bytes.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+        )
+        return AdapterDescriptor.from_manifest(document)
+    except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+        return None
+
+
+def _parse_diagnostic(captured: bytes, manifest_bytes: bytes) -> dict | None:
+    """Accept only Core's exact diagnostic and matching manifest declarations."""
+    try:
+        document = json.loads(
+            captured.decode("utf-8"),
+            object_pairs_hook=_unique_object,
         )
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None
@@ -151,19 +168,29 @@ def _parse_diagnostic(captured: bytes) -> dict | None:
     if any(document.get(key) != value for key, value in expected.items()):
         return None
     attempt_argv = document.get("attempt_argv")
-    if type(attempt_argv) is not str or attempt_argv not in (
-        "declared",
-        "absent",
-    ):
-        return None
     attempt_stdin = document.get("attempt_stdin")
-    if type(attempt_stdin) is not str or attempt_stdin not in (
-        "declared",
-        "absent",
-    ):
-        return None
     marker_count = document.get("verdict_marker_count")
-    if type(marker_count) is not int or marker_count < 0:
+    if type(attempt_argv) is not str or attempt_argv not in {"declared", "absent"}:
+        return None
+    if type(attempt_stdin) is not str or attempt_stdin not in {"declared", "absent"}:
+        return None
+    if type(marker_count) is not int or not 0 <= marker_count <= MAX_VERDICT_MARKERS:
+        return None
+
+    descriptor = _decode_manifest(manifest_bytes)
+    if descriptor is None:
+        return None
+    expected_attempt_argv = (
+        "declared" if descriptor.attempt_argv is not None else "absent"
+    )
+    expected_attempt_stdin = (
+        "declared" if descriptor.attempt_stdin is not None else "absent"
+    )
+    if (
+        attempt_argv != expected_attempt_argv
+        or attempt_stdin != expected_attempt_stdin
+        or marker_count != len(descriptor.verdict_markers)
+    ):
         return None
     return document
 
@@ -175,9 +202,9 @@ def build_check_adapter_parser(
         parser = argparse.ArgumentParser(prog="evidence-check-adapter")
     parser.description = (
         "Check a declared adapter manifest's static representation and "
-        "consistency only. No adapter execution, command safety, host policy, "
-        "resource enforcement, producer authenticity, Evidence acceptance, "
-        "or grade promotion is performed; declared argv/stdin remain inert."
+        "Core/local consistency only; declared argv/stdin stay inert; no "
+        "adapter execution, command safety, host policy, resource enforcement, "
+        "producer authenticity, Evidence acceptance or grade promotion."
     )
     parser.add_argument(
         "--core",
@@ -193,9 +220,9 @@ def build_check_adapter_parser(
         required=True,
         metavar="PATH",
         help=(
-            "Declared saved mumei.verifier-adapter/v1 manifest (absolute "
-            "regular-file path, at most 65536 bytes); argv/stdin declarations "
-            "remain inert."
+            "Declared saved mumei.verifier-adapter/v1 manifest "
+            "(absolute regular-file path, at most 65536 bytes); its bytes "
+            "are fed to the check on stdin and declared argv/stdin stay inert."
         ),
     )
     parser.add_argument(
@@ -223,47 +250,9 @@ def build_check_adapter_parser(
     return parser
 
 
-def _dispatch_adapter_check(
-    core: str,
-    manifest_bytes: bytes,
-    memory_bound_mb: int | None,
-    sequence,
-) -> tuple[dict, object]:
-    from agent.attempt_runner import dispatch_attempt
-
-    dispatch = dispatch_attempt(
-        sequence.begin_attempt(),
-        (core, "evidence", "check-adapter", "--stdin", "--json"),
-        memory_bound_mb=memory_bound_mb,
-        feed_bytes=manifest_bytes,
-    )
-    record = dispatch.run.record
-    exit_code = None
-    if record.state == "exited" and record.events:
-        exit_code = record.events[-1].exit_code
-    diagnostic = (
-        _parse_diagnostic(dispatch.run.stdout) if exit_code == 0 else None
-    )
-    report: dict[str, object] = {
-        "normalized": dispatch.run.normalized().to_dict(),
-    }
-    if diagnostic is not None:
-        for field in (
-            "representation",
-            "acceptance",
-            "attempt_argv",
-            "attempt_stdin",
-            "verdict_marker_count",
-            "declared_field_meaning",
-            "checks_performed",
-            "checks_not_performed",
-        ):
-            report[field] = diagnostic[field]
-    return report, dispatch
-
-
 def run_check_adapter(args: argparse.Namespace) -> dict:
     """Run one declared Core adapter-manifest check and return its report."""
+    from agent.attempt_runner import dispatch_attempt
     from agent.verification_attempt import (
         AttemptSequence,
         AttemptSequenceStore,
@@ -271,29 +260,46 @@ def run_check_adapter(args: argparse.Namespace) -> dict:
 
     _check_request(args)
     manifest_bytes = Path(args.manifest).read_bytes()
+    if len(manifest_bytes) > MAX_INPUT_BYTES:
+        raise ValueError(
+            f"--manifest exceeds the Core input bound ({MAX_INPUT_BYTES} bytes)"
+        )
     fingerprint = _attempt_fingerprint(args, manifest_bytes)
+    argv = (
+        args.core,
+        "evidence",
+        "check-adapter",
+        "--stdin",
+        "--json",
+    )
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
     store.publish(sequence)
     current = store.current
-    check, dispatch = _dispatch_adapter_check(
-        args.core,
-        manifest_bytes,
-        args.memory_bound_mb,
-        current,
+    dispatch = dispatch_attempt(
+        current.begin_attempt(),
+        argv,
+        memory_bound_mb=args.memory_bound_mb,
+        feed_bytes=manifest_bytes,
     )
     try:
+        current_manifest = Path(args.manifest).read_bytes()
         inputs_changed = (
-            _attempt_fingerprint(
-                args, Path(args.manifest).read_bytes()
-            )
-            != fingerprint
+            len(current_manifest) > MAX_INPUT_BYTES
+            or _attempt_fingerprint(args, current_manifest) != fingerprint
         )
     except OSError:
         inputs_changed = True
-    exit_code = check["normalized"].get("exit_code")
-    has_diagnostic = "representation" in check
-    if exit_code == 0 and not inputs_changed and has_diagnostic:
+    record = dispatch.run.record
+    exit_code = None
+    if record.state == "exited" and record.events:
+        exit_code = record.events[-1].exit_code
+    diagnostic = (
+        _parse_diagnostic(dispatch.run.stdout, manifest_bytes)
+        if exit_code == 0 and not inputs_changed
+        else None
+    )
+    if exit_code == 0 and not inputs_changed and diagnostic is not None:
         updated = dispatch.sequence.select_result(dispatch.captured_output())
     else:
         updated = dispatch.sequence
@@ -301,22 +307,20 @@ def run_check_adapter(args: argparse.Namespace) -> dict:
     report: dict[str, object] = {
         "schema_version": CHECK_REPORT_PROFILE,
         "sequence": published.to_dict(),
-        "normalized": check["normalized"],
+        "normalized": dispatch.run.normalized().to_dict(),
     }
     if inputs_changed:
         report["inputs_changed"] = True
-    elif has_diagnostic:
-        for field in (
-            "representation",
-            "acceptance",
-            "attempt_argv",
-            "attempt_stdin",
-            "verdict_marker_count",
-            "declared_field_meaning",
-            "checks_performed",
-            "checks_not_performed",
-        ):
-            report[field] = check[field]
+    elif diagnostic is not None:
+        report["manifest_schema_version"] = diagnostic["manifest_schema_version"]
+        report["representation"] = diagnostic["representation"]
+        report["acceptance"] = diagnostic["acceptance"]
+        report["attempt_argv"] = diagnostic["attempt_argv"]
+        report["attempt_stdin"] = diagnostic["attempt_stdin"]
+        report["verdict_marker_count"] = diagnostic["verdict_marker_count"]
+        report["declared_field_meaning"] = dict(diagnostic["declared_field_meaning"])
+        report["checks_performed"] = list(diagnostic["checks_performed"])
+        report["checks_not_performed"] = list(diagnostic["checks_not_performed"])
     if published.selected_result is not None:
         report["candidate"] = published.evidence_candidate().to_dict()
     return report
