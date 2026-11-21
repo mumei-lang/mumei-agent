@@ -1548,6 +1548,13 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
     }
 )
 
+# The pinned program.o corresponds to program.ll within a declared
+# object-TV profile; reserved for a future Core object-stage TV accept
+# route, with no performer or linker, loader, ABI, or runtime claim.
+OBJECT_CHECK_VOCABULARY = frozenset(
+    {"object_translation_correspondence"}
+)
+
 # Which emitted schema performs each check name, the outcome field and
 # the value it must hold for the check to count as recovered. A document
 # never gets to declare its own coverage — attribution is pinned to the

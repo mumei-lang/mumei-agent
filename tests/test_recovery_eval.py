@@ -8,11 +8,13 @@ import pytest
 
 from agent.core_evidence import (
     _CHECK_PERFORMERS,
+    OBJECT_CHECK_VOCABULARY,
     RUNTIME_CHECK_VOCABULARY,
     RUNTIME_OBSERVATION_SCHEMA,
     UNPERFORMED_CHECK_RECOVERY_SCHEMA,
     evaluate_unperformed_check_recovery,
 )
+from agent.native_accept import CHECK_VOCABULARY
 from agent.recovery_eval import build_eval_parser, main_eval
 
 
@@ -58,6 +60,68 @@ def test_recovery_statuses():
         "evidence_authenticity",
         "recovery_enforcement",
     ]
+
+
+def test_native_check_vocabularies_are_pairwise_disjoint():
+    assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)
+    assert CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
+    assert RUNTIME_CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
+
+
+def test_object_translation_correspondence_has_no_recovery_performer():
+    check = "object_translation_correspondence"
+    record = {
+        "schema_version": "mumei.native-accept-report/v1",
+        "checks_not_performed": [check],
+    }
+    evaluation = evaluate_unperformed_check_recovery(record, [])
+    assert evaluation["checks"] == {check: "no_evidence"}
+    assert evaluation["recovered"] == []
+    assert evaluation["unrecovered"] == [check]
+
+
+def test_foreign_self_report_cannot_recover_object_translation():
+    check = "object_translation_correspondence"
+    record = {
+        "schema_version": "mumei.native-accept-report/v1",
+        "checks_not_performed": [check],
+    }
+    evidence = _doc("mumei.foreign-report/v1", discharged_checks=[check])
+    evaluation = evaluate_unperformed_check_recovery(record, [evidence])
+    assert evaluation["checks"] == {check: "no_evidence"}
+    assert evaluation["recovered"] == []
+    assert evaluation["unrecovered"] == [check]
+
+
+@pytest.mark.parametrize(
+    ("schema", "outcome_field", "outcome"),
+    [
+        ("mumei.native-accept-report/v1", "acceptance", "accepted"),
+        (
+            "mumei.native-artifact-recheck-report/v1",
+            "artifact_recheck",
+            "reproduced",
+        ),
+    ],
+)
+def test_accepted_native_artifact_reports_do_not_recover_object_tv(
+    schema, outcome_field, outcome
+):
+    check = "object_translation_correspondence"
+    record = {
+        "schema_version": "mumei.native-accept-report/v1",
+        "checks_not_performed": [check],
+    }
+    evidence = _doc(
+        schema,
+        **{outcome_field: outcome},
+        discharged_checks=["artifact_semantics", "claim_truth"],
+        checks_not_performed=[check],
+    )
+    evaluation = evaluate_unperformed_check_recovery(record, [evidence])
+    assert evaluation["checks"] == {check: "no_evidence"}
+    assert evaluation["recovered"] == []
+    assert evaluation["unrecovered"] == [check]
 
 
 def test_multi_performer_check_accepts_either_schema():

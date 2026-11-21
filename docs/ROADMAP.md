@@ -746,7 +746,9 @@ level and reported in `discharged_checks` with the other four checks in
 `checks_not_performed` (producer authenticity, historical execution and
 runtime/OS semantics stay outside the profile; the link
 argument-vector is recorded-but-not-reproduced inside Core and adds no
-claim). The route is also the `native_accept` MCP tool (same
+claim). `object_translation_correspondence` stays in
+`checks_not_performed` until a Core object-stage TV accept route exists.
+The route is also the `native_accept` MCP tool (same
 `run_accept` report production, declared-path validation and basename
 redaction as the other spawn tools). C02/C10 stay partial.
 
@@ -769,6 +771,8 @@ reports `discharged_checks` — `artifact_semantics` and `claim_truth` —
 with the remaining checks in `checks_not_performed`. The command's
 stdout is a fixed diagnostic line rather than an evidence record, so
 no `candidate` is emitted and a successful run selects only lineage.
+`object_translation_correspondence` stays in `checks_not_performed`
+until a Core object-stage TV accept route exists.
 The route is also the `native_artifact_recheck` MCP tool (same
 `run_artifact_recheck` report production, declared-path validation and
 basename redaction as the other spawn tools). C02/C10 stay partial.

@@ -51,17 +51,20 @@ still enter the lineage through the selection itself.
 
 Emits ``mumei.native-accept-report/v1``: the canonical sequence, the
 normalized run-result descriptor, the declared acceptance outcome and
-the discharged-check partition on an accepted run. An ``accepted``
+the per-outcome check partition. An ``accepted``
 outcome discharges ``artifact_semantics`` — the bundle's user-body
 LLVM AND its pinned object/executable bytes correspond to the declared
 source's verified semantics under the recorded toolchain, the deepest
 layer the pipeline covers — and ``claim_truth`` — the fresh source
 postcondition was re-established within the declared profile — both at
-representation level. The other four checks stay in
+representation level. The other four C02 checks and
+``object_translation_correspondence`` stay in
 ``checks_not_performed`` (producer authenticity, historical execution
 and runtime/OS semantics remain outside the profile; the link
 argument-vector is recorded-but-not-reproduced inside Core and adds no
-claim here either).
+claim here either). Byte reproduction/acceptance of ``program.o`` is
+identity, not LLVM↔object correspondence;
+``object_translation_correspondence`` stays unperformed.
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ import os
 import sys
 from pathlib import Path
 
+from agent.core_evidence import OBJECT_CHECK_VOCABULARY
 from agent.native_bundle import (
     FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
     MAX_RECORD_BYTES,
@@ -327,7 +331,7 @@ def run_accept(args: argparse.Namespace) -> dict:
     the normalized run record, `inputs_changed` when declared bytes
     drifted mid-run (the claimed outcome is then suppressed), the
     mapped `acceptance` outcome for uniquely-mapped exit codes, and
-    the discharged-check partition on an accepted run. The produced
+    the per-outcome check partition. The produced
     descriptor is anonymous — no evidence candidate is emitted. Raises
     `OSError`/`ValueError`/`UnicodeDecodeError` on any declared-input
     failure; the caller treats those as static errors.
@@ -389,6 +393,9 @@ def run_accept(args: argparse.Namespace) -> dict:
         "schema_version": NATIVE_ACCEPT_REPORT_PROFILE,
         "sequence": published.to_dict(),
         "normalized": dispatch.run.normalized().to_dict(),
+        "checks_not_performed": sorted(
+            CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
+        ),
     }
     if inputs_changed:
         # The run consumed bytes that no longer match the declared
@@ -400,7 +407,8 @@ def run_accept(args: argparse.Namespace) -> dict:
         if report["acceptance"] == "accepted":
             report["discharged_checks"] = sorted(DischargedChecks.ACCEPTED)
             report["checks_not_performed"] = sorted(
-                CHECK_VOCABULARY - DischargedChecks.ACCEPTED
+                (CHECK_VOCABULARY - DischargedChecks.ACCEPTED)
+                | OBJECT_CHECK_VOCABULARY
             )
     return report
 

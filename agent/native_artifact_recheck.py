@@ -50,16 +50,19 @@ still enter the lineage through the selection itself.
 
 Emits ``mumei.native-artifact-recheck-report/v1``: the canonical
 sequence, the normalized run-result descriptor, the declared recheck
-outcome and the discharged-check partition on a reproduced run. A
+outcome and the per-outcome check partition. A
 ``reproduced`` outcome discharges ``artifact_semantics`` — the bundle's
 pinned object/executable bytes reproduce under the recorded toolchain
 from the pinned source's semantics — and ``claim_truth`` — the fresh
 source postcondition was re-established within the declared profile —
-both at representation level. The other four checks stay in
+both at representation level. The other four C02 checks and
+``object_translation_correspondence`` stay in
 ``checks_not_performed`` (producer authenticity, freshness, file
 identity and semantic correspondence remain outside the profile; the
 raw link argument-vector is recorded-but-not-reproduced inside Core
-and adds no claim here either).
+and adds no claim here either). Byte reproduction/acceptance of
+``program.o`` is identity, not LLVM↔object correspondence;
+``object_translation_correspondence`` stays unperformed.
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ import os
 import sys
 from pathlib import Path
 
+from agent.core_evidence import OBJECT_CHECK_VOCABULARY
 from agent.native_bundle import (
     FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
     MAX_RECORD_BYTES,
@@ -331,7 +335,7 @@ def run_artifact_recheck(args: argparse.Namespace) -> dict:
     lineage, the normalized run record, `inputs_changed` when declared
     bytes drifted mid-run (the claimed outcome is then suppressed), the
     mapped `artifact_recheck` outcome for uniquely-mapped exit codes,
-    and the discharged-check partition on a reproduced run. The produced
+    and the per-outcome check partition. The produced
     stdout is a fixed diagnostic line — no evidence candidate is
     emitted. Raises `OSError`/`ValueError`/`UnicodeDecodeError` on any
     declared-input failure; the caller treats those as static errors.
@@ -392,6 +396,9 @@ def run_artifact_recheck(args: argparse.Namespace) -> dict:
         "schema_version": NATIVE_ARTIFACT_RECHECK_REPORT_PROFILE,
         "sequence": published.to_dict(),
         "normalized": dispatch.run.normalized().to_dict(),
+        "checks_not_performed": sorted(
+            CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
+        ),
     }
     if inputs_changed:
         # The run consumed bytes that no longer match the declared
@@ -403,7 +410,8 @@ def run_artifact_recheck(args: argparse.Namespace) -> dict:
         if report["artifact_recheck"] == "reproduced":
             report["discharged_checks"] = sorted(DischargedChecks.REPRODUCED)
             report["checks_not_performed"] = sorted(
-                CHECK_VOCABULARY - DischargedChecks.REPRODUCED
+                (CHECK_VOCABULARY - DischargedChecks.REPRODUCED)
+                | OBJECT_CHECK_VOCABULARY
             )
     return report
 
