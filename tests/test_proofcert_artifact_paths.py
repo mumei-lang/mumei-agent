@@ -253,6 +253,42 @@ class TestPublishCertificateWiring:
         assert "proof_certificate_file" not in result
         assert "artifact_paths_status" not in result
 
+    def test_cert_outside_repo_reports_absolute_path(self, tmp_path):
+        # An absolute ``target_file`` places the generated module (and
+        # its certificate) outside the repo: the result keeps the
+        # absolute path instead of crashing in relative_to().
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        spec = {
+            "name": "test_mod",
+            "params": [{"name": "x", "type": "i64"}],
+            "target_file": str(outside / "test_mod.mm"),
+        }
+        (repo / "spec.json").write_text(json.dumps(spec))
+        client = self._client_writing_cert(_cert())
+        from agent.publish import publish
+
+        cfg = MagicMock()
+        cfg.mumei_bin = "mumei"
+        cfg.model = "m"
+        cfg.max_retries = 1
+        cfg.create_client.return_value = MagicMock()
+        with patch("agent.publish.AgentConfig", return_value=cfg), \
+             patch("agent.publish.create_mumei_client",
+                   return_value=client):
+            result = publish(
+                spec_path=str(repo / "spec.json"),
+                repo_dir=str(repo),
+                dry_run=True,
+                pre_generated_code=self._CODE,
+            )
+        assert result["success"] is True
+        assert result["proof_certificate_file"] == str(
+            outside / "test_mod.proof.json"
+        )
+
     def test_stale_cert_from_prior_run_is_not_consumed(self, tmp_path):
         # A certificate left by an earlier run must not be reported as
         # this run's — unlink happens before verify, so a client that
@@ -271,6 +307,11 @@ class TestPublishCertificateWiring:
         result = self._run_publish(tmp_path, client)
         assert result["success"] is True
         assert "artifact_paths_status" not in result
+        # ...and the previous certificate is restored, not lost, when
+        # this run produced none.
+        assert json.loads(
+            (tmp_path / "test_mod.proof.json").read_text()
+        )["artifact_paths"] == ["stale.json"]
 
     def test_mcp_verdict_governs_even_when_cli_cert_passes(
         self, tmp_path,

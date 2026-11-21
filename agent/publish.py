@@ -260,10 +260,17 @@ def publish(
     # report itself never carries those keys.
     certificate_path = generated_path.with_suffix(".proof.json")
     cert_args = ["--proof-cert", "--output", str(certificate_path)]
-    # Drop a certificate left by a previous run so the wiring below can
-    # only consume the file THIS verification produced — under the MCP
-    # path the verdict call and the cert-emitting call are separate,
-    # and a stale file would otherwise be reported as current.
+    # Keep aside a certificate left by a previous run so the wiring
+    # below can only consume the file THIS verification produced —
+    # under the MCP path the verdict call and the cert-emitting call
+    # are separate, and a stale file would otherwise be reported as
+    # current.  It is restored when this run produces no certificate,
+    # so a failing re-run never loses the earlier proof.
+    stale_cert = (
+        certificate_path.read_bytes()
+        if certificate_path.is_file()
+        else None
+    )
     certificate_path.unlink(missing_ok=True)
     # ``--proof-cert`` is a CLI-only flag — the MCP ``validate_logic``
     # tool cannot emit a certificate file — so on an MCP-routed client
@@ -350,6 +357,10 @@ def publish(
                     declared_paths, base_dir=cwd
                 )
             )
+    elif stale_cert is not None:
+        # This run produced no certificate — restore the previous one
+        # rather than leaving the module without its last proof.
+        certificate_path.write_bytes(stale_cert)
     result["spec_code_mapping"] = spec_code_mapping
 
     logger.info("Verification passed")
