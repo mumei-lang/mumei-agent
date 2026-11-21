@@ -1302,7 +1302,10 @@ class _RustBindings:
         blocked: str | None = None
         for scope in reversed(self.scopes):
             if scope.module_depth < self.module_depth and self.module_depth > 0:
-                if name in scope.bindings:
+                if any(
+                    self._in_namespace(record, namespace)
+                    for record in scope.bindings.get(name, ())
+                ):
                     blocked = "module_boundary"
                 continue
             records = scope.bindings.get(name, ())

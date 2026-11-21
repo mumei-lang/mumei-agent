@@ -1025,6 +1025,31 @@ fn glob_barrier() { use external::*; let _: Generic<Hidden>; }
     assert raw[vec_start : vec_start + len("Vec")] == b"Vec"
 
 
+def test_generic_argument_value_fallback_ignores_outer_module_value_names():
+    source = """
+const N: usize = 1;
+mod m {
+    const N: usize = 2;
+    struct S<const K: usize>;
+    fn f() { let _: S<N>; }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    local_n = next(
+        binding
+        for binding in _bindings(report, "N", "const")
+        if binding.span.start > source.index("mod m")
+    )
+    argument_start = source.index("S<N>") + len("S<")
+    reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == argument_start
+    )
+    assert reference.binding_id == local_n.id
+    assert not any(item.span.start == argument_start for item in report.unresolved)
+
+
 def test_bodyless_trait_const_generic_facts_finalize_after_item_predeclaration():
     source = """
 trait Tr {
