@@ -20,12 +20,20 @@ Callee-saved preservation is proved only for Equivalent functions within
 this profile. Direct callees and the cancellation poll are assumed to
 preserve callee-saved registers; external callees remain an assumption. The
 argument/result register convention is also assumed, not validated.
+Core's entry-wrapper check applies only when the object defines both `main`
+and `__mumei_user_main` and the latter has a supported source signature. It
+checks `main` as one unconditional call to `__mumei_user_main`, returning the
+low 32 bits of its result. `machine_code_entry_wrapper_tv` is discharged only
+when a matching descriptor lists it in `checks_performed`. This bounded
+wrapper check makes no CRT, loader, OS exit-status, ABI, or runtime claim;
+`os_exit_status_observation` remains a separate runtime-observation check and
+is not discharged here.
 Core's `machine_code_callee_saved_preservation_assumed_for_external_callees`
 marker remains not performed.
 Executions beyond the bound, cancellation/runtime semantics and other cyclic
 control flow remain outside the profile. This is not an ABI-correctness,
-runtime or full object-TV claim. The C `main` wrapper, CRT, loader and libc
-are outside the profile; `object_translation_correspondence` stays
+runtime or full object-TV claim. No broader C entry-wrapper, CRT, loader or
+libc behavior is covered; `object_translation_correspondence` stays
 unperformed. Function outcomes and callee-saved preservation are aggregated
 as counts without function names. This recheck report is never a recovery
 performer.
@@ -193,7 +201,14 @@ def build_machine_tv_recheck_parser(
         "cancellation poll are assumed to preserve callee-saved registers, "
         "and external callees remain an assumption; Core's external-callee "
         "`machine_code_callee_saved_preservation_assumed_for_external_callees` "
-        "marker remains not performed. The argument/result "
+        "marker remains not performed. Core's `machine_code_entry_wrapper_tv` "
+        "is consumed only when listed in `checks_performed`; when applicable "
+        "it checks that `main` makes one unconditional call to "
+        "`__mumei_user_main` and returns the low 32 bits of its result. The "
+        "object must define both symbols and the user-main source signature "
+        "must be supported. This makes no CRT, loader, OS exit-status, ABI or "
+        "runtime claim; `os_exit_status_observation` is a separate "
+        "runtime-observation check and is not discharged. The argument/result "
         "register convention is assumed, not validated; executions beyond "
         "the bound, cancellation/runtime semantics and other cyclic control "
         "flow stay outside; this is not an ABI-correctness, runtime or full "

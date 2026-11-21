@@ -38,9 +38,17 @@ control flow remain outside the profile. For `native-machine-tv-recheck`,
 `object_translation_correspondence` stays unperformed; that route is not an
 ABI, runtime or full object-TV claim and is not a recovery performer.
 The native-object-accept route does not promote a grade, emit reusable
-Evidence or a certificate. The C `main` wrapper, CRT, loader and libc remain
-outside the profile; ABI/runtime semantics, optimizer semantics, producer
-authenticity and historical execution also remain outside the claim.
+Evidence or a certificate. Core #1230 adds
+`machine_code_entry_wrapper_tv`, consumed by machine-TV recheck and object
+acceptance only when a matching valid descriptor lists it in
+`checks_performed`. It applies only when the object defines both `main` and
+`__mumei_user_main` and the user-main source signature is supported; it checks
+one unconditional call from `main` to `__mumei_user_main`, returning the low
+32 bits of its result. This does not cover broader C entry-wrapper, CRT,
+loader, ABI or runtime behavior. `os_exit_status_observation` remains a
+separate runtime-observation check and is not discharged by this check.
+ABI/runtime semantics, optimizer semantics, producer authenticity and
+historical execution also remain outside the claim.
 
 Core #1229 adds
 `machine_code_callee_saved_register_preservation`, consumed only when listed
@@ -54,6 +62,23 @@ callee-saved registers; external callees remain an assumption, and Core's
 remains not performed. The argument/result register convention is still
 assumed, not validated. This is not an ABI-correctness, runtime, or full
 object-TV claim.
+
+#### Core #1230 entry-wrapper machine-code TV
+
+`machine_code_entry_wrapper_tv` checks only Core's modeled C entry wrapper:
+when both object symbols exist and `__mumei_user_main` has a supported source
+signature, `main` makes one unconditional call to `__mumei_user_main` and
+returns the low 32 bits of its result. The agent consumes the check only when
+a valid matching descriptor lists it in `checks_performed`; the
+native-object-recheck route always leaves it unperformed. The aggregate
+function-outcome and callee-saved-preservation counts include the wrapper
+entry when Core reports it, without exposing function names.
+
+This does not establish CRT, loader, OS exit-status, ABI, or runtime
+semantics. `os_exit_status_observation` remains a separate
+runtime-observation check and is not discharged by entry-wrapper TV. Core's
+`object_entry_wrapper_semantics` not-performed marker is Core-only and is not
+added to the agent vocabulary.
 
 ## Background
 

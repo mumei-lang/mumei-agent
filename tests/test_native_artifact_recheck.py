@@ -135,6 +135,7 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
         "machine_code_callee_saved_register_preservation",
         "machine_code_conditional_call_function_tv",
         "machine_code_direct_call_site_tv",
+        "machine_code_entry_wrapper_tv",
         "machine_code_forward_branch_function_tv",
         "machine_code_leaf_function_tv",
         "object_call_edge_correspondence",

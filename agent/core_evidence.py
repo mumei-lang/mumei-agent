@@ -1561,9 +1561,14 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
 # only to Equivalent functions within this profile; direct callees and the
 # cancellation poll are assumed to preserve those registers, while external
 # callees remain an assumption. The argument/result register convention is
-# assumed, not validated. object_translation_correspondence is the full
-# object-TV check; none is a recovery performer or makes a linker, loader,
-# ABI, or runtime claim.
+# assumed, not validated. Core's entry-wrapper TV check applies only when the
+# object defines both main and __mumei_user_main and the latter has a supported
+# source signature. It checks main as one unconditional call to
+# __mumei_user_main, returning the low 32 bits of its result; it makes no CRT,
+# loader, OS exit-status, ABI, or runtime claim. os_exit_status_observation is
+# a separate runtime-observation check. object_translation_correspondence is
+# the full object-TV check; none is a recovery performer or makes a linker,
+# loader, ABI, or runtime claim.
 OBJECT_CHECK_VOCABULARY = frozenset(
     {
         "object_call_edge_correspondence",
@@ -1578,6 +1583,7 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_conditional_call_function_tv",
         "machine_code_callee_saved_register_preservation",
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
+        "machine_code_entry_wrapper_tv",
     }
 )
 

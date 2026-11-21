@@ -67,7 +67,9 @@ OBJECT_MACHINE_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_callee_saved_preservation_assumed_for_external_callees",
 }
 ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
-EXPECTED_CHECKED = BASE_DISCHARGED | OBJECT_MACHINE_CHECKS
+EXPECTED_CHECKED = BASE_DISCHARGED | (
+    set(DESCRIPTOR["checks_performed"]) & OBJECT_MACHINE_CHECKS
+)
 EXPECTED_LEAF_CHECKED = EXPECTED_CHECKED - {
     "machine_code_direct_call_site_tv",
     "machine_code_forward_branch_function_tv",
@@ -148,6 +150,12 @@ def _assert_partition(report, expected_discharged=frozenset()):
     )
 
 
+def _expected_discharged_checks(descriptor):
+    return BASE_DISCHARGED | (
+        set(descriptor["checks_performed"]) & OBJECT_MACHINE_CHECKS
+    )
+
+
 def test_checked_descriptor_discharges_listed_checks_and_reports_aggregates(
     tmp_path, capsys
 ):
@@ -171,8 +179,9 @@ def test_checked_descriptor_discharges_listed_checks_and_reports_aggregates(
         "outside_profile": 1,
     }
     assert "__mumei_user_main" not in out
-    assert "main" not in report
+    assert '"main"' not in out
     assert report["discharged_checks"] == sorted(EXPECTED_LEAF_CHECKED)
+    assert "machine_code_entry_wrapper_tv" in report["checks_not_performed"]
     assert "object_translation_correspondence" not in report["discharged_checks"]
     assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert report["sequence"]["selected_result"] is not None
@@ -198,18 +207,7 @@ def test_descriptor_without_equivalent_function_leaves_leaf_tv_unperformed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_leaf_function_tv",
-            "machine_code_direct_call_site_tv",
-            "machine_code_forward_branch_function_tv",
-            "machine_code_acyclic_branch_function_tv",
-            "machine_code_conditional_call_function_tv",
-            "machine_code_bounded_loop_function_tv",
-            "machine_code_callee_saved_register_preservation",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert report["machine_tv_recheck"] == "checked"
     assert report["function_outcomes"] == {
         "equivalent_within_profile": 0,
@@ -244,15 +242,7 @@ def test_direct_call_site_check_is_discharged_when_listed_as_performed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_forward_branch_function_tv",
-            "machine_code_acyclic_branch_function_tv",
-            "machine_code_conditional_call_function_tv",
-            "machine_code_bounded_loop_function_tv",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert "machine_code_direct_call_site_tv" in report["discharged_checks"]
     _assert_partition(report, expected)
 
@@ -284,17 +274,7 @@ def test_direct_call_and_leaf_checks_stay_unperformed_when_not_listed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_direct_call_site_tv",
-            "machine_code_leaf_function_tv",
-            "machine_code_forward_branch_function_tv",
-            "machine_code_acyclic_branch_function_tv",
-            "machine_code_conditional_call_function_tv",
-            "machine_code_bounded_loop_function_tv",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert "machine_code_forward_branch_function_tv" not in report["discharged_checks"]
     assert "machine_code_leaf_function_tv" not in report["discharged_checks"]
@@ -327,15 +307,7 @@ def test_forward_branch_check_is_discharged_when_listed_as_performed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_direct_call_site_tv",
-            "machine_code_acyclic_branch_function_tv",
-            "machine_code_conditional_call_function_tv",
-            "machine_code_bounded_loop_function_tv",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert "machine_code_forward_branch_function_tv" in report["discharged_checks"]
     assert "machine_code_forward_branch_function_tv" not in report["checks_not_performed"]
     _assert_partition(report, expected)
@@ -365,15 +337,7 @@ def test_acyclic_branch_check_is_discharged_when_listed_as_performed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_direct_call_site_tv",
-            "machine_code_forward_branch_function_tv",
-            "machine_code_conditional_call_function_tv",
-            "machine_code_bounded_loop_function_tv",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert "machine_code_acyclic_branch_function_tv" in report["discharged_checks"]
     assert "machine_code_acyclic_branch_function_tv" not in report["checks_not_performed"]
     _assert_partition(report, expected)
@@ -403,15 +367,7 @@ def test_conditional_call_check_is_discharged_when_listed_as_performed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_direct_call_site_tv",
-            "machine_code_forward_branch_function_tv",
-            "machine_code_acyclic_branch_function_tv",
-            "machine_code_bounded_loop_function_tv",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert "machine_code_conditional_call_function_tv" in report["discharged_checks"]
     assert "machine_code_conditional_call_function_tv" not in report["checks_not_performed"]
     _assert_partition(report, expected)
@@ -441,15 +397,7 @@ def test_bounded_loop_check_is_discharged_when_listed_as_performed(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
-    expected = BASE_DISCHARGED | (
-        OBJECT_MACHINE_CHECKS
-        - {
-            "machine_code_direct_call_site_tv",
-            "machine_code_forward_branch_function_tv",
-            "machine_code_acyclic_branch_function_tv",
-            "machine_code_conditional_call_function_tv",
-        }
-    )
+    expected = _expected_discharged_checks(descriptor)
     assert "machine_code_bounded_loop_function_tv" in report["discharged_checks"]
     assert "machine_code_bounded_loop_function_tv" not in report["checks_not_performed"]
     _assert_partition(report, expected)
@@ -505,6 +453,42 @@ def test_bounded_loop_check_stays_unperformed_when_not_listed(
     report = json.loads(out)
     assert "machine_code_bounded_loop_function_tv" in report["checks_not_performed"]
     assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_discharged"),
+    [("performed", True), ("not_performed", False), ("absent", False)],
+)
+def test_entry_wrapper_check_requires_performed_descriptor_list(
+    tmp_path, capsys, placement, expected_discharged
+):
+    check = "machine_code_entry_wrapper_tv"
+    performed = [
+        name for name in DESCRIPTOR["checks_performed"] if name != check
+    ]
+    not_performed = [
+        name for name in DESCRIPTOR["checks_not_performed"] if name != check
+    ]
+    if placement == "performed":
+        performed.append(check)
+    elif placement == "not_performed":
+        not_performed.append(check)
+    not_performed.append("object_entry_wrapper_semantics")
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": performed,
+        "checks_not_performed": not_performed,
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert (check in report["discharged_checks"]) is expected_discharged
+    assert (check in report["checks_not_performed"]) is not expected_discharged
+    assert "object_entry_wrapper_semantics" not in OBJECT_CHECK_VOCABULARY
+    assert "object_entry_wrapper_semantics" not in report["checks_not_performed"]
 
 
 @pytest.mark.parametrize(
@@ -640,6 +624,7 @@ def test_non_list_checks_performed_discharge_no_object_checks(
             "schema_version": OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA,
             "build_id": BUILD_ID,
             "checks_performed": [
+                "machine_code_entry_wrapper_tv",
                 "machine_code_leaf_function_tv",
                 "machine_code_bounded_loop_function_tv",
                 "machine_code_callee_saved_register_preservation",
@@ -651,6 +636,7 @@ def test_non_list_checks_performed_discharge_no_object_checks(
             "checks_performed": [
                 "machine_code_bounded_loop_function_tv",
                 "machine_code_callee_saved_register_preservation",
+                "machine_code_entry_wrapper_tv",
             ],
         },
         {
@@ -659,6 +645,7 @@ def test_non_list_checks_performed_discharge_no_object_checks(
             "checks_performed": [
                 "machine_code_bounded_loop_function_tv",
                 "machine_code_callee_saved_register_preservation",
+                "machine_code_entry_wrapper_tv",
             ],
         },
         "not-json",
@@ -682,6 +669,8 @@ def test_descriptor_schema_and_build_id_gate_machine_tv_fields(
     assert "callee_saved_preservation" not in report
     assert report["discharged_checks"] == sorted(BASE_DISCHARGED)
     assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
+    assert "machine_code_entry_wrapper_tv" not in report["discharged_checks"]
+    assert "machine_code_entry_wrapper_tv" in report["checks_not_performed"]
     assert (
         "machine_code_callee_saved_register_preservation"
         not in report["discharged_checks"]
@@ -742,7 +731,24 @@ def test_callee_saved_preservation_counts_valid_values_without_function_names(
 ):
     descriptor = {
         **DESCRIPTOR,
+        "checks_performed": [
+            *DESCRIPTOR["checks_performed"],
+            "machine_code_entry_wrapper_tv",
+        ],
+        "checks_not_performed": [
+            *DESCRIPTOR["checks_not_performed"],
+            "object_entry_wrapper_semantics",
+        ],
         "functions": {
+            "main": {
+                "role": "entry_wrapper",
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved",
+            },
+            "__mumei_user_main": {
+                "outcome": "equivalent_within_profile",
+                "callee_saved_preservation": "preserved",
+            },
             "preserved_function": {
                 "outcome": "equivalent_within_profile",
                 "callee_saved_preservation": "preserved",
@@ -766,13 +772,19 @@ def test_callee_saved_preservation_counts_valid_values_without_function_names(
     code, out, _ = _run(capsys, _args(core, bundle, source))
     assert code == 0
     report = json.loads(out)
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 5,
+        "outside_profile": 1,
+    }
     assert report["callee_saved_preservation"] == {
-        "preserved": 1,
+        "preserved": 3,
         "violated": 1,
         "unknown": 1,
     }
+    assert "machine_code_entry_wrapper_tv" in report["discharged_checks"]
+    assert "object_entry_wrapper_semantics" not in report["checks_not_performed"]
     for function_name in descriptor["functions"]:
-        assert function_name not in out
+        assert f'"{function_name}"' not in out
 
 
 def test_callee_saved_preservation_omitted_when_no_function_has_field(
@@ -857,7 +869,16 @@ def test_exit_mapping(tmp_path, capsys, exit_code, outcome):
 
 
 def test_wrong_build_id_has_no_outcome_or_discharges(tmp_path, capsys):
-    core = _write_core(tmp_path)
+    core = _write_core(
+        tmp_path,
+        stdout={
+            **DESCRIPTOR,
+            "checks_performed": [
+                *DESCRIPTOR["checks_performed"],
+                "machine_code_entry_wrapper_tv",
+            ],
+        },
+    )
     bundle = _write_bundle(tmp_path)
     source = _write_source(tmp_path)
     argv = _args(core, bundle, source)
@@ -871,6 +892,7 @@ def test_wrong_build_id_has_no_outcome_or_discharges(tmp_path, capsys):
     assert "discharged_checks" not in report
     assert report["normalized"]["exit_code"] == 1
     assert report["checks_not_performed"] == sorted(ALL_CHECKS)
+    assert "machine_code_entry_wrapper_tv" in report["checks_not_performed"]
 
 
 def test_inputs_changed_suppresses_machine_tv_outcome(
@@ -1010,6 +1032,16 @@ def _real_machine_tv_descriptor(
     return descriptor
 
 
+def _expected_function_outcomes(descriptor: dict) -> dict:
+    return {
+        outcome: sum(
+            isinstance(function, dict) and function.get("outcome") == outcome
+            for function in descriptor["functions"].values()
+        )
+        for outcome in ("equivalent_within_profile", "outside_profile")
+    }
+
+
 @pytest.mark.integration
 def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core):
     bundle, source = _build_real_bundle(tmp_path, real_core)
@@ -1023,12 +1055,20 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
         "machine_code_callee_saved_preservation_assumed_for_external_callees"
         in descriptor["checks_not_performed"]
     )
+    assert "machine_code_entry_wrapper_tv" in descriptor["checks_performed"]
+    assert "machine_code_entry_wrapper_tv" not in descriptor["checks_not_performed"]
     equivalent_functions = [
         function
         for function in descriptor["functions"].values()
         if isinstance(function, dict)
         and function.get("outcome") == "equivalent_within_profile"
     ]
+    wrapper_entry = next(
+        function
+        for function in descriptor["functions"].values()
+        if isinstance(function, dict) and function.get("role") == "entry_wrapper"
+    )
+    assert wrapper_entry["outcome"] == "equivalent_within_profile"
     assert equivalent_functions
     assert all(
         function.get("callee_saved_preservation") == "preserved"
@@ -1055,16 +1095,18 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
     assert report["register_convention_assumed"] == (
         "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
     )
-    assert report["function_outcomes"] == {
-        "equivalent_within_profile": 1,
-        "outside_profile": 1,
+    assert report["function_outcomes"] == _expected_function_outcomes(descriptor)
+    expected_preservation_counts = {
+        value: sum(
+            isinstance(function, dict)
+            and function.get("callee_saved_preservation") == value
+            for function in descriptor["functions"].values()
+        )
+        for value in ("preserved", "violated", "unknown")
     }
-    assert report["callee_saved_preservation"] == {
-        "preserved": 1,
-        "violated": 0,
-        "unknown": 0,
-    }
+    assert report["callee_saved_preservation"] == expected_preservation_counts
     assert "machine_code_leaf_function_tv" in report["discharged_checks"]
+    assert "machine_code_entry_wrapper_tv" in report["discharged_checks"]
     assert (
         "machine_code_callee_saved_register_preservation"
         in report["discharged_checks"]
@@ -1078,9 +1120,13 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
     assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
     assert "object_translation_correspondence" not in report["discharged_checks"]
     assert "machine_code_forward_branch_function_tv" not in report["discharged_checks"]
-    assert report["discharged_checks"] == sorted(EXPECTED_LEAF_CHECKED)
+    expected_discharged = EXPECTED_LEAF_CHECKED | {
+        "machine_code_entry_wrapper_tv",
+    }
+    assert report["discharged_checks"] == sorted(expected_discharged)
+    assert '"main"' not in out
     assert report["checks_not_performed"] == sorted(
-        ALL_CHECKS - EXPECTED_LEAF_CHECKED
+        ALL_CHECKS - expected_discharged
     )
 
 
@@ -1173,10 +1219,7 @@ def test_real_core_rechecks_machine_tv_direct_call_sites(
     assert code == 0, err
     report = json.loads(out)
     assert report["machine_tv_recheck"] == "checked"
-    assert report["function_outcomes"] == {
-        "equivalent_within_profile": 2,
-        "outside_profile": 1,
-    }
+    assert report["function_outcomes"] == _expected_function_outcomes(descriptor)
     assert "machine_code_direct_call_site_tv" in report["discharged_checks"]
     assert (
         "machine_code_conditional_call_function_tv"
@@ -1216,10 +1259,7 @@ def test_real_core_rechecks_machine_tv_forward_branch_functions(
     assert code == 0, err
     report = json.loads(out)
     assert report["machine_tv_recheck"] == "checked"
-    assert report["function_outcomes"] == {
-        "equivalent_within_profile": 4,
-        "outside_profile": 1,
-    }
+    assert report["function_outcomes"] == _expected_function_outcomes(descriptor)
     assert "absd" not in out
     assert "machine_code_forward_branch_function_tv" in report["discharged_checks"]
     assert (
@@ -1243,6 +1283,8 @@ def test_real_core_rechecks_machine_tv_bounded_loop(
         "machine_code_bounded_loop_function_tv"
         not in descriptor["checks_not_performed"]
     )
+    assert "machine_code_entry_wrapper_tv" in descriptor["checks_performed"]
+    assert "machine_code_entry_wrapper_tv" not in descriptor["checks_not_performed"]
     assert "_and_loops_exiting_within_bound_4" in descriptor["input_domain"]
     assert "machine_code_tv_loop_executions_beyond_bound" in descriptor[
         "checks_not_performed"
@@ -1263,15 +1305,9 @@ def test_real_core_rechecks_machine_tv_bounded_loop(
     assert report["machine_tv_recheck"] == "checked"
     assert report["input_domain"] == descriptor["input_domain"]
     assert "_and_loops_exiting_within_bound_4" in report["input_domain"]
-    expected_function_outcomes = {
-        outcome: sum(
-            isinstance(function, dict) and function.get("outcome") == outcome
-            for function in descriptor["functions"].values()
-        )
-        for outcome in ("equivalent_within_profile", "outside_profile")
-    }
-    assert report["function_outcomes"] == expected_function_outcomes
+    assert report["function_outcomes"] == _expected_function_outcomes(descriptor)
     assert "machine_code_bounded_loop_function_tv" in report["discharged_checks"]
+    assert "machine_code_entry_wrapper_tv" in report["discharged_checks"]
     assert report["discharged_checks"] == sorted(expected_discharged)
     assert report["checks_not_performed"] == sorted(ALL_CHECKS - expected_discharged)
     assert "object_translation_correspondence" not in report["discharged_checks"]
@@ -1303,20 +1339,9 @@ def test_real_core_rechecks_machine_tv_acyclic_backward_branch_functions(
     code, out, err = _run(capsys, argv)
     assert code == 0, err
     report = json.loads(out)
-    expected_discharged = BASE_DISCHARGED | {
-        "object_symbol_correspondence",
-        "object_call_edge_correspondence",
-        "object_link_correspondence",
-        "machine_code_direct_call_site_tv",
-        "machine_code_forward_branch_function_tv",
-        "machine_code_acyclic_branch_function_tv",
-        "machine_code_callee_saved_register_preservation",
-    }
+    expected_discharged = _expected_discharged_checks(descriptor)
     assert report["machine_tv_recheck"] == "checked"
-    assert report["function_outcomes"] == {
-        "equivalent_within_profile": 5,
-        "outside_profile": 1,
-    }
+    assert report["function_outcomes"] == _expected_function_outcomes(descriptor)
     assert report["discharged_checks"] == sorted(expected_discharged)
     assert report["checks_not_performed"] == sorted(ALL_CHECKS - expected_discharged)
     assert all(name not in out for name in ("absd", "clamp", "pick", "band"))
@@ -1364,10 +1389,7 @@ def test_real_core_rechecks_machine_tv_conditional_calls(
         set(descriptor["checks_performed"]) & OBJECT_MACHINE_CHECKS
     )
     assert report["machine_tv_recheck"] == "checked"
-    assert report["function_outcomes"] == {
-        "equivalent_within_profile": 5,
-        "outside_profile": 1,
-    }
+    assert report["function_outcomes"] == _expected_function_outcomes(descriptor)
     assert (
         "machine_code_conditional_call_function_tv"
         in report["discharged_checks"]
