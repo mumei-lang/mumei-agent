@@ -30931,6 +30931,66 @@ def test_struct_field_element_direct_index_is_supported(go_types_helper):
 
 
 @pytest.mark.parametrize(
+    ("direct", "extracted"),
+    [
+        (
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 2)}\n"
+            "\tr := int64(0)\n"
+            "\tfor i, v := range s.A {\n"
+            "\t\tr = v\n"
+            "\t\tif i == 0 { s.A[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 2)}\n"
+            "\ta := s.A\n"
+            "\tr := int64(0)\n"
+            "\tfor i, v := range a {\n"
+            "\t\tr = v\n"
+            "\t\tif i == 0 { a[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        ),
+        (
+            "type S struct { M map[int]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{M: map[int]int64{0: 0, 1: 0}}\n"
+            "\tr := int64(0)\n"
+            "\tfor k, v := range s.M {\n"
+            "\t\tr = v\n"
+            "\t\tif k == 0 { s.M[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            "type S struct { M map[int]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{M: map[int]int64{0: 0, 1: 0}}\n"
+            "\tm := s.M\n"
+            "\tr := int64(0)\n"
+            "\tfor k, v := range m {\n"
+            "\t\tr = v\n"
+            "\t\tif k == 0 { m[1] = x }\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+        ),
+    ],
+)
+def test_struct_field_range_rejoins_body_writes(
+    go_types_helper, direct, extracted
+):
+    direct_result = named(*unit(go_types_helper, direct))
+    extracted_result = named(*unit(go_types_helper, extracted))
+    assert direct_result.available, direct_result.gaps
+    assert extracted_result.available, extracted_result.gaps
+    assert direct_result.return_dependencies == (
+        extracted_result.return_dependencies
+    ) == frozenset({0})
+    assert direct_result.effects == extracted_result.effects
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         "type S struct { A []int64 }\n"
