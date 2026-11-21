@@ -485,10 +485,31 @@ function use(value: TypeOnly, second: TypeDefault) {
 def test_import_type_only_classification_uses_syntax_nodes(
     source, name, type_only
 ):
+    source = f"{source}\ntype TypeUse = {name};\nconst valueUse = {name};"
     report = build_ts_bindings(source)
     binding = _bindings(report, name, "import")[0]
-    assert binding.type_only is type_only
-    assert ("value" in binding.namespaces) is not type_only
+    type_reference = next(
+        reference
+        for reference in _refs(report, source, name)
+        if reference.span.start > source.index("type TypeUse")
+    )
+    assert type_reference.binding_id == binding.id
+    value_references = [
+        reference
+        for reference in _refs(report, source, name)
+        if reference.span.start > source.index("const valueUse")
+    ]
+    if type_only:
+        assert not value_references
+        assert any(
+            item.name == name
+            and item.reason == "unknown_name"
+            and item.span.start > source.index("const valueUse")
+            for item in _unresolved(report)
+        )
+    else:
+        assert len(value_references) == 1
+        assert value_references[0].binding_id == binding.id
 
 
 @pytest.mark.parametrize("prefix", ["export default", "export ="])
