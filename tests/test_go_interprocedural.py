@@ -32136,6 +32136,23 @@ def test_package_struct_field_root_scalar_element_keeps_existing_read(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_package_global_pointer_struct_field_array_read_keeps_existing_result(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type E struct { V int64 }\n"
+            "type In struct { A []E }\n"
+            "type Out struct { P *In; Q In }\n"
+            "var GS Out\n"
+            "func F(i int64) int64 { return GS.P.A[i].V }\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 @pytest.mark.parametrize(
     "body",
     [

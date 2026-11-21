@@ -24831,11 +24831,16 @@ class _Builder:
                 # additionally carries the indexes' own dependencies —
                 # a literal index carries none, like the read's own
                 # `lib.VM["k"]` rule.
-                scalar_field_elem = (
-                    self._opaque_container_struct_element_field_target(
-                        node, params
+                scalar_field_elem_error = None
+                try:
+                    scalar_field_elem = (
+                        self._opaque_container_struct_element_field_target(
+                            node, params
+                        )
                     )
-                )
+                except _Unsupported as exc:
+                    scalar_field_elem = None
+                    scalar_field_elem_error = exc
                 field_index_deps = frozenset()
                 field_index_nodes: set[Any] = set()
                 operand = node.child_by_field_name("operand")
@@ -25394,6 +25399,8 @@ class _Builder:
             # (`s[i].A.V`) escapes the pre-scan's index evaluation,
             # so any index the pre-scan never evaluated runs here.
             if member is None:
+                if scalar_field_elem_error is not None:
+                    raise scalar_field_elem_error
                 if scalar_field_elem is not None:
                     (
                         _root_ref, indexes, field_key,
