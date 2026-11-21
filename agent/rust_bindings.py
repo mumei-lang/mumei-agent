@@ -493,9 +493,18 @@ class _RustBindings:
                 namespace = "value"
             else:
                 continue
-            record, _boundary = self._lookup_with_boundary(
+            record, boundary = self._lookup_with_boundary(
                 self.text(candidate), candidate.start_byte, namespace
             )
+            if record is None and boundary == "item_boundary":
+                unresolved = Unresolved(
+                    self.span(candidate),
+                    self._normalize_identifier(self.text(candidate)),
+                    "item_boundary",
+                )
+                if unresolved not in self.unresolved:
+                    self.unresolved.append(unresolved)
+                continue
             if (
                 record is None
                 or record.binding.kind != "generic_parameter"
@@ -743,9 +752,13 @@ class _RustBindings:
         for outer_scope in self.scopes[:-1]:
             for records in outer_scope.bindings.values():
                 for generic in records:
-                    if (
-                        generic.binding.kind != "generic_parameter"
-                        or generic.binding.id in inherited_generics
+                if (
+                    generic.binding.kind != "generic_parameter"
+                    or (
+                        generic.owner_function
+                        and generic.owner_function != record.binding.id
+                    )
+                    or generic.binding.id in inherited_generics
                         or generic.binding.scope is None
                         or not (
                             generic.binding.scope.start

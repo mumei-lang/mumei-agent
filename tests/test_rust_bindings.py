@@ -629,6 +629,35 @@ def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     assert outside.type.type_id == alias.id
 
 
+def test_nested_function_items_do_not_inherit_outer_function_generics():
+    source = """
+fn outer<T, const N: usize>() {
+    fn shadows<T>(value: T) {}
+    fn inner(value: T) { let _ = N; }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inner_generic = next(
+        binding
+        for binding in _bindings(report, "T", "generic_parameter")
+        if binding.span.start > source.index("fn shadows")
+        and binding.span.start < source.index("fn inner")
+    )
+    shadow_reference = next(
+        reference
+        for reference in _refs(report, source, "T")
+        if source.index("fn shadows") < reference.span.start < source.index("fn inner")
+    )
+    assert shadow_reference.binding_id == inner_generic.id
+    boundary_references = [
+        unresolved
+        for unresolved in report.unresolved
+        if unresolved.reason == "item_boundary"
+        and unresolved.span.start > source.index("fn inner")
+    ]
+    assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
+
+
 def test_local_type_alias_precedes_primitive_type_facts():
     source = """
 type u8 = u16;
