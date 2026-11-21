@@ -6863,6 +6863,15 @@ record carries `evidence_check` / `evidence_acceptance`, matching the
 path to a regular file; a failed or cancelled check records its
 outcome with `accepted: false` — it never blocks the selection.
 
+With `--schedule-core`, audit also serializes each generated schedule in
+the same format as `verify-schedule` and records Core's
+`evidence check-schedule --stdin --json` diagnostic separately as
+`scheduled_verification_check`. This is an advisory representation and
+consistency diagnostic only; it is not a verdict or Evidence acceptance
+and does not change `verification_status` or `success`. It adds no
+Evidence acceptance or grade promotion. Like `scheduled_verification`,
+it remains outside the fixed MCP `audit_schema` finding vocabulary.
+
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
 remains open.

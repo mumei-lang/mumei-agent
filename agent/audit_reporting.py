@@ -898,6 +898,12 @@ def _build_report(result: AuditResult) -> str:
                 f"scheduled_verification: outcome={schedule.get('outcome')} "
                 f"attempts={len(schedule.get('attempts') or [])}"
             )
+    if result.scheduled_verification_check is not None:
+        check = result.scheduled_verification_check
+        line = f"scheduled_verification_check: status={check.get('status')}"
+        if check.get("status") == "valid":
+            line += f" outcome={check.get('schedule_outcome')}"
+        lines.append(line)
     if result.errors:
         lines.append(f"errors: {result.errors}")
     lines.append("migration_hints:")

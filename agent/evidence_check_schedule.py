@@ -198,9 +198,79 @@ def build_check_schedule_parser(
     return parser
 
 
+def _dispatch_schedule_check(
+    core: str,
+    schedule_bytes: bytes,
+    memory_bound_mb: int | None,
+    sequence,
+) -> tuple[dict, object]:
+    from agent.attempt_runner import dispatch_attempt
+
+    dispatch = dispatch_attempt(
+        sequence.begin_attempt(),
+        (core, "evidence", "check-schedule", "--stdin", "--json"),
+        memory_bound_mb=memory_bound_mb,
+        feed_bytes=schedule_bytes,
+    )
+    record = dispatch.run.record
+    exit_code = None
+    if record.state == "exited" and record.events:
+        exit_code = record.events[-1].exit_code
+    diagnostic = (
+        _parse_diagnostic(dispatch.run.stdout)
+        if exit_code == 0
+        else None
+    )
+    report: dict[str, object] = {
+        "normalized": dispatch.run.normalized().to_dict(),
+    }
+    if diagnostic is not None:
+        report["representation"] = diagnostic["representation"]
+        report["acceptance"] = diagnostic["acceptance"]
+        report["schedule_outcome"] = diagnostic["outcome"]
+        report["attempt_count"] = diagnostic["attempt_count"]
+        report["reported_outcome_meaning"] = diagnostic["reported_outcome_meaning"]
+        report["checks_performed"] = list(diagnostic["checks_performed"])
+        report["checks_not_performed"] = list(diagnostic["checks_not_performed"])
+    return report, dispatch
+
+
+def check_schedule_bytes(
+    core: str,
+    schedule_bytes: bytes,
+    attempt_timeout_ms: int,
+    memory_bound_mb: int | None,
+) -> dict:
+    """Check schedule bytes and return Core's normalized report fields.
+
+    Unlike the saved-file route, this helper does not fingerprint or re-read
+    declared files; callers own any surrounding input-drift policy.
+    """
+    from agent.verification_attempt import AttemptSequence
+
+    if type(core) is not str or not core:
+        raise ValueError("Core executable path is required")
+    if type(schedule_bytes) is not bytes:
+        raise ValueError("schedule check input must be bytes")
+    if (
+        type(attempt_timeout_ms) is not int
+        or not 1 <= attempt_timeout_ms <= MAX_CHECK_TIMEOUT_MS
+    ):
+        raise ValueError(f"attempt timeout must be 1..{MAX_CHECK_TIMEOUT_MS} ms")
+    fingerprint = hashlib.sha256(
+        core.encode("utf-8") + b"\0" + schedule_bytes
+    ).hexdigest()
+    report, _ = _dispatch_schedule_check(
+        core,
+        schedule_bytes,
+        memory_bound_mb,
+        AttemptSequence(fingerprint, attempt_timeout_ms),
+    )
+    return report
+
+
 def run_check_schedule(args: argparse.Namespace) -> dict:
     """Run one declared Core schedule check and return its report."""
-    from agent.attempt_runner import dispatch_attempt
     from agent.verification_attempt import (
         AttemptSequence,
         AttemptSequenceStore,
@@ -209,22 +279,15 @@ def run_check_schedule(args: argparse.Namespace) -> dict:
     _check_request(args)
     schedule_bytes = Path(args.schedule).read_bytes()
     fingerprint = _attempt_fingerprint(args, schedule_bytes)
-    argv = (
-        args.core,
-        "evidence",
-        "check-schedule",
-        "--stdin",
-        "--json",
-    )
     sequence = AttemptSequence(fingerprint, args.attempt_timeout)
     store = AttemptSequenceStore()
     store.publish(sequence)
     current = store.current
-    dispatch = dispatch_attempt(
-        current.begin_attempt(),
-        argv,
-        memory_bound_mb=args.memory_bound_mb,
-        feed_bytes=schedule_bytes,
+    check, dispatch = _dispatch_schedule_check(
+        args.core,
+        schedule_bytes,
+        args.memory_bound_mb,
+        current,
     )
     try:
         inputs_changed = (
@@ -232,16 +295,9 @@ def run_check_schedule(args: argparse.Namespace) -> dict:
         )
     except OSError:
         inputs_changed = True
-    record = dispatch.run.record
-    exit_code = None
-    if record.state == "exited" and record.events:
-        exit_code = record.events[-1].exit_code
-    diagnostic = (
-        _parse_diagnostic(dispatch.run.stdout)
-        if exit_code == 0 and not inputs_changed
-        else None
-    )
-    if exit_code == 0 and not inputs_changed and diagnostic is not None:
+    exit_code = check["normalized"].get("exit_code")
+    has_diagnostic = "representation" in check
+    if exit_code == 0 and not inputs_changed and has_diagnostic:
         updated = dispatch.sequence.select_result(dispatch.captured_output())
     else:
         updated = dispatch.sequence
@@ -249,18 +305,21 @@ def run_check_schedule(args: argparse.Namespace) -> dict:
     report: dict[str, object] = {
         "schema_version": CHECK_REPORT_PROFILE,
         "sequence": published.to_dict(),
-        "normalized": dispatch.run.normalized().to_dict(),
+        "normalized": check["normalized"],
     }
     if inputs_changed:
         report["inputs_changed"] = True
-    elif diagnostic is not None:
-        report["representation"] = diagnostic["representation"]
-        report["acceptance"] = diagnostic["acceptance"]
-        report["schedule_outcome"] = diagnostic["outcome"]
-        report["attempt_count"] = diagnostic["attempt_count"]
-        report["reported_outcome_meaning"] = diagnostic["reported_outcome_meaning"]
-        report["checks_performed"] = list(diagnostic["checks_performed"])
-        report["checks_not_performed"] = list(diagnostic["checks_not_performed"])
+    elif has_diagnostic:
+        for name in (
+            "representation",
+            "acceptance",
+            "schedule_outcome",
+            "attempt_count",
+            "reported_outcome_meaning",
+            "checks_performed",
+            "checks_not_performed",
+        ):
+            report[name] = check[name]
     if published.selected_result is not None:
         report["candidate"] = published.evidence_candidate().to_dict()
     return report
