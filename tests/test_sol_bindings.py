@@ -197,6 +197,82 @@ contract C {
         assert field.type.type_id == declaration.id
 
 
+@pytest.mark.parametrize(
+    ("source", "declaration_marker", "kind", "expected_type", "expected_width"),
+    [
+        (
+            "struct T { uint file; } contract C { "
+            "struct T { address local; } T value; }",
+            "struct T { address local; }",
+            "struct",
+            "named",
+            0,
+        ),
+        (
+            "enum T { File } contract C { enum T { Local } T value; }",
+            "enum T { Local }",
+            "enum",
+            "named",
+            0,
+        ),
+        (
+            "type T is uint8; contract C { type T is uint16; T value; }",
+            "type T is uint16;",
+            "user_type",
+            "int",
+            16,
+        ),
+        (
+            "struct T { uint file; } "
+            "contract Base { struct T { address base; } } "
+            "contract C is Base { T value; }",
+            "struct T { address base; }",
+            "struct",
+            "named",
+            0,
+        ),
+        (
+            "struct T { uint file; } "
+            "contract Base { struct T { address base; } } "
+            "contract C is Base { struct T { bool derived; } T value; }",
+            "struct T { bool derived; }",
+            "struct",
+            "named",
+            0,
+        ),
+        (
+            "struct T { uint file; } contract C { T value; }",
+            "struct T { uint file; }",
+            "struct",
+            "named",
+            0,
+        ),
+    ],
+)
+def test_contract_and_base_types_precede_file_scope(
+    source, declaration_marker, kind, expected_type, expected_width
+):
+    report = build_sol_bindings(source)
+    declaration_start = source.index(declaration_marker)
+    name_start = source.index("T", declaration_start)
+    declaration = next(
+        binding
+        for binding in _bindings(report, "T", kind)
+        if binding.span.start == name_start
+    )
+    value = _bindings(report, "value", "state_variable")[0]
+    assert value.type.kind == expected_type
+    assert value.type.bit_width == expected_width
+    assert value.type.type_id == declaration.id
+    type_use_start = source.index("T value")
+    type_reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == type_use_start
+    )
+    assert type_reference.binding_id == declaration.id
+
+
 def test_file_level_constant_and_free_function_are_order_independent():
     source = """
 function useValue() pure returns (uint) { return helper(TOP); }

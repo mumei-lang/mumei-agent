@@ -594,17 +594,16 @@ class _SolBindings:
     def _lookup_type_record(
         self, name: str, position: int, owner: _Contract | None
     ) -> _Record | None:
-        records = self.file_scope.records.get(name, [])
-        found = self._matching_records(records, position, "type")
-        record, ambiguous = self._choose(found)
-        if record is not None:
-            return record
         if owner is not None:
             inherited, _reason = self._lookup_contract(
                 name, owner, position, "type"
             )
-            return inherited
-        return None
+            if inherited is not None:
+                return inherited
+        records = self.file_scope.records.get(name, [])
+        found = self._matching_records(records, position, "type")
+        record, _ambiguous = self._choose(found)
+        return record
 
     def _lookup_contract(
         self,
