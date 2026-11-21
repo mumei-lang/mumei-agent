@@ -31211,6 +31211,13 @@ def test_struct_field_parallel_assignment_nonoverlap_is_available(
         "\treturn b[0]\n}\n",
         "type S struct { A []int64; B []int64 }\n"
         "func F(x int64) int64 {\n"
+        "\ts := S{A: []int64{0}, B: []int64{0}}\n"
+        "\ta := s.A\n"
+        "\ts.A, s.B = s.B, s.A\n"
+        "\ts.B[0] = x\n"
+        "\treturn a[0]\n}\n",
+        "type S struct { A []int64; B []int64 }\n"
+        "func F(x int64) int64 {\n"
         "\ts := S{A: []int64{x}, B: []int64{0}}\n"
         "\ts.A, s.B = s.B, s.A\n"
         "\tb := s.B\n"
@@ -31235,6 +31242,35 @@ def test_struct_field_parallel_assignment_swaps_use_snapshots(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct { A []int64 }\n"
+        "func F(x int64, t []int64) int64 {\n"
+        "\ts := S{A: []int64{0}}\n"
+        "\ta := s.A\n"
+        "\tvar b []int64\n"
+        "\ts.A, b = t, s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+        "type S struct { A []int64 }\n"
+        "func F(x int64, t []int64) int64 {\n"
+        "\tu := S{A: []int64{0}}\n"
+        "\ta := u.A\n"
+        "\tvar b []int64\n"
+        "\tu.A, b = t, u.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+    ],
+)
+def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert 0 in result.return_dependencies
 
 
 @pytest.mark.parametrize(

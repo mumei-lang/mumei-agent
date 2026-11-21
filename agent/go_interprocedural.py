@@ -16395,6 +16395,9 @@ class _Builder:
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
+            field_rhs_snapshots: dict[
+                int, tuple[frozenset, frozenset[int]]
+            ] = {}
             if len(lefts) == len(rights) and len(lefts) > 1:
                 assigned_root_ids: set[str] = set()
                 for lhs in lefts:
@@ -16412,7 +16415,7 @@ class _Builder:
                     for root_id, member_id
                     in field_container_reseats.values()
                 }
-                for rhs in rights:
+                for rhs_index, rhs in enumerate(rights):
                     bare_rhs = rhs
                     while (
                         bare_rhs is not None
@@ -16440,6 +16443,12 @@ class _Builder:
                         and bare_field[1] not in assigned_root_ids
                         and bare_field[0] in assigned_field_keys
                     ):
+                        field_rhs_snapshots[rhs_index] = (
+                            frozenset(bare_field[3]),
+                            self._opaque_container_deps(
+                                bare_field[0], locals_
+                            ),
+                        )
                         continue
                     pending = [rhs]
                     while pending:
@@ -16682,6 +16691,9 @@ class _Builder:
                     for rhs in rights
                 ]
             )
+            for rhs_index, (_, rhs_deps) in field_rhs_snapshots.items():
+                if rhs_index < len(values):
+                    values[rhs_index] |= rhs_deps
             # The stored map keys' deps join the external-write set
             # only now — the store lands after every RHS read.
             self.indirect_writes |= pending_map_key_deps
@@ -16806,6 +16818,14 @@ class _Builder:
             self._chan_detached.clear()
             self._chan_prestate_members = set()
             pre_container_toks: dict[int, Any] = {}
+            for rhs_index, (tokens, _) in field_rhs_snapshots.items():
+                current_tokens = self._opaque_container_bind(
+                    rights[rhs_index], params
+                )
+                pre_container_toks[rhs_index] = (
+                    frozenset(tokens)
+                    | frozenset(current_tokens or ())
+                )
             if len(lefts) == len(rights):
                 for pre_i in range(len(refs)):
                     pre_rhs = rights[pre_i]
