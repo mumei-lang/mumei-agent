@@ -20092,14 +20092,14 @@ def test_chan_elem_container_send_receive(
 @pytest.mark.parametrize(
     "declarations",
     [
-        # `[N]chan T` — the array copy detaches the names but the
-        # queues inside still share, which this slice does not
-        # track; it stays closed like a `chan chan` payload.
+        # `[N][M]chan T` — a nested chan-element array stays
+        # closed like `[][]chan`.
         "func F(x int64) int64 {\n"
         "\tc := make(chan int64, 1)\n"
-        "\ta := [1]chan int64{c}\n"
-        "\ta[0] <- x\n"
-        "\treturn <-a[0]\n}\n",
+        "\tvar a [1][1]chan int64\n"
+        "\ta[0][0] = c\n"
+        "\ta[0][0] <- x\n"
+        "\treturn <-a[0][0]\n}\n",
         # `[]chan chan T` — a channel value travelling the group
         # aliases under a second dep set, like `chan chan`.
         "func F(x int64) int64 {\n"
@@ -20114,13 +20114,6 @@ def test_chan_elem_container_send_receive(
         "\ts := [][]chan int64{{c}}\n"
         "\ts[0][0] <- x\n"
         "\treturn x\n}\n",
-        # A send through an element of a `[N]chan` array bound by
-        # `var` is refused like the `:=` form.
-        "func F(x int64) int64 {\n"
-        "\tc := make(chan int64, 1)\n"
-        "\tvar a [1]chan int64 = [1]chan int64{c}\n"
-        "\ta[0] <- x\n"
-        "\treturn <-a[0]\n}\n",
     ],
 )
 def test_chan_elem_container_unsupported_stays_closed(
@@ -20526,6 +20519,95 @@ def test_chan_elem_close_index_evaluates(go_types_helper):
         read.span.start == close_start and read.deps == frozenset({0})
         for read in result.statement_reads
     )
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `a[0] <- x` / `<-a[0]` on a `[N]chan` literal — the same
+        # conflated share group as the slice form.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ta := [1]chan int64{c}\n"
+            "\ta[0] <- x\n"
+            "\treturn <-a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var a [N]chan = ...` binds the same way.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\tvar a [1]chan int64 = [1]chan int64{c}\n"
+            "\tc <- x\n"
+            "\treturn <-a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `a[0] = c` element store on an empty `[N]chan` joins `c`'s
+        # queue into the group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\tvar a [1]chan int64\n"
+            "\ta[0] = c\n"
+            "\tc <- x\n"
+            "\treturn <-a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := a` copies the array descriptor — the channel values
+        # still name the same queues, so `b` shares `a`'s group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ta := [1]chan int64{c}\n"
+            "\tb := a\n"
+            "\ta[0] <- x\n"
+            "\treturn <-b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `d := a[i]` extraction on an array — same as the slice form.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ta := [1]chan int64{c}\n"
+            "\td := a[0]\n"
+            "\tc <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # `for v := range a[i]` on an array — the root-registered
+        # elem channel rejoin sees member sends.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ta := [1]chan int64{c}\n"
+            "\tc <- x\n"
+            "\tvar r int64\n"
+            "\tfor v := range a[0] {\n"
+            "\t\tr = v\n"
+            "\t\tbreak\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+        ),
+        # A `c = make(...)` reseat detaches the extracted member —
+        # `d <- x` lands on the parked queue, `<-c` stays clean.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ta := [1]chan int64{c}\n"
+            "\td := a[0]\n"
+            "\tc = make(chan int64, 4)\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset(),
+        ),
+    ],
+)
+def test_chan_elem_array(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
 
 
 @pytest.mark.parametrize(

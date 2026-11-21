@@ -4127,8 +4127,8 @@ and `c <- x` shows up in `<-s[j]`; `<-s[i]` reads the group's
 conflated union, FIFO order unmodelled like `<-ch`. `b := s`
 shares the group like any bound container copy. The honest
 closures stay: `[]chan chan T` stays closed (a channel value
-travelling the group would alias under a second dep set),
-`[N]chan` arrays stay opaque.
+travelling the group would alias under a second dep set), and
+`[N][M]chan` nests stay opaque.
 
 Extracting a bound channel element — `d := s[i]`,
 `var d chan T = s[i]` or a plain `d = s[i]` reseat, on a
@@ -4148,8 +4148,11 @@ mints the new membership, and `d = make(chan)` parks the old
 queue under a surrogate so `<-s[0]` keeps reading what `c`
 serves. The honest closures stay: `d := s[0][0]` on a
 `[][]chan` extracts nothing (the nested-element gate already
-declines it), `[]chan chan T` stays closed (a channel value
-travelling the group would alias under a second dep set).
+declines it), `[N]chan T` arrays admit the same way — the copy
+`b := a` still names the same queues, so it joins `a`'s share
+group like a slice copy. `[]chan chan T` stays closed (a
+channel value travelling the group would alias under a second
+dep set), and so do `[][]chan`/`[N][M]chan` nests.
 `close(s[i])` admits — an untracked synchronization fact on a
 local group, and a caller-visible effect recorded on each
 param/external member like `s[i] <- x`. `for v := range s[i]`
@@ -4157,8 +4160,7 @@ admits through the bound root: the element operand registers
 the root binding as the range's channel, so the per-pass
 rejoin unions the whole group's deps, and `select`
 alternatives on `s[i]` / `s[i] <- x` resolve through the same
-operand path. `[N]chan` arrays and `[][]chan` extraction stay
-opaque.
+operand path. `[][]chan` extraction stays opaque.
 
 A chan-element collection PARAMETER or RESULT admits like the
 scalar-element form — `func F(s []chan int64)`, `func G()
