@@ -84,5 +84,10 @@
 - TypeScript: 初回の compiler-backed slice は TypeScript 5.9.3 の operator helper と純粋リーダーで実装済み。
   境界は [`ROADMAP.md`](ROADMAP.md) の「C06 first compiler-backed TypeScript binding slice」を参照。
   TypeScript 7.0.2 には JavaScript compiler API がない。追加の型・project/import 解決は後続設計が必要。
-- Rust: 単一ファイルで閉じないため、プロジェクト単位の解決（C06 の「project/import resolution」）を
-  先に設計する必要がある。それまでは lexical report のまま。
+- Rust: rust-analyzer 1.100.0 の operator-produced LSIF を読む純粋な
+  compiler-backed slice を実装済み。単一の root package に限定し、
+  dependency、build script、proc-macro、root 以外の workspace member は拒否する。
+  local declaration span の lexical 比較は同一ファイル内に限り、
+  cross-file / external は metadata のみで lexical resolution を主張しない。
+  macro / cfg gap は fail closed。詳細は [`ROADMAP.md`](ROADMAP.md) の
+  「C06 first compiler-backed Rust binding slice」を参照。
