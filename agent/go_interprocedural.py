@@ -16456,6 +16456,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             binding = self._chan_binding(channel, locals_, params)
             local_chan_chan = self._local_chan_chan_id(channel)
             if local_chan_chan is not None:
+                received_chan_chan = self._local_chan_chan_receive(value)
+                if received_chan_chan is not None:
+                    for token in self._chan_group_members(
+                        received_chan_chan
+                    ):
+                        self._chan_group_join(token, local_chan_chan)
+                elif self._chan_chan_receive(value, params):
+                    raise _Unsupported(
+                        "binding_unavailable", _span(node)
+                    )
                 member_tokens = self._chan_group_value_tokens(value)
                 value_deps = self.expression(
                     value, fn, params, locals_, transfers, count, 0

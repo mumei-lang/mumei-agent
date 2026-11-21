@@ -15464,6 +15464,33 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             frozenset({0}),
             "none_in_supported_fragment",
         ),
+        (
+            "received channel group joins the destination queue",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc2 := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tcc2 <- <-cc\n"
+            "\td := <-cc2\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "scalar channel receive can be sent to another queue",
+            "func F(x int64) int64 {\n"
+            "\tin := make(chan int64, 1)\n"
+            "\tout := make(chan int64, 1)\n"
+            "\tin <- x\n"
+            "\tout <- <-in\n"
+            "\treturn <-out\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
     ],
 )
 def test_local_chan_chan_review_regressions(
@@ -15538,9 +15565,13 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\t_ = ccc\n"
         "\treturn 0\n}\n",
         "func F() int64 {\n"
-        "\tcc := make(chan chan int64)\n"
-        "\ts := []chan chan int64{cc}\n"
-        "\t_ = s\n"
+            "\tcc := make(chan chan int64)\n"
+            "\ts := []chan chan int64{cc}\n"
+            "\t_ = s\n"
+            "\treturn 0\n}\n",
+        "func F(cc chan chan int64) int64 {\n"
+        "\tlocal := make(chan chan int64, 1)\n"
+        "\tlocal <- <-cc\n"
         "\treturn 0\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
