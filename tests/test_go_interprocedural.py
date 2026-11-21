@@ -21034,6 +21034,57 @@ def test_chan_elem_external_close(go_types_helper):
             "\treturn <-GS[1]\n}\n",
             frozenset({0}),
         ),
+        # The extracted name retains selector deps for a later send.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\td <- 1\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An alias of an extracted name uses the same selector deps.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\te := d\n"
+            "\te <- 1\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Select-send arms broadcast the extracted selector deps.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\td := GS[i]\n"
+            "\tselect {\n"
+            "\tcase d <- 1:\n"
+            "\tcase c <- 1:\n"
+            "\t}\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Passing an extracted name to a sender preserves its selector.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64) { c <- 1 }\n"
+            "func F(i int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\tG(d)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Map selector deps also survive a send through the extracted name.
+        (
+            "var GM map[int64]chan int64\n"
+            "func F(k int64) int64 {\n"
+            "\td := GM[k]\n"
+            "\td <- 1\n"
+            "\treturn <-GM[0]\n}\n",
+            frozenset({0}),
+        ),
         # Parenthesized extraction.
         (
             "var GS []chan int64\n"
