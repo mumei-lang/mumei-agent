@@ -1962,6 +1962,22 @@ class _Builder:
         )
         return self._opaque_container_holders(toks) | {binding_id}
 
+    def _chan_elem_external_member(self, root_id: str) -> bool:
+        """Any queue inside `root_id`'s share group promoted to
+        caller-visible state (`GS[k] = c`, `GS = s`): sends into it
+        broadcast through `indirect_writes`, so group sends deposit
+        there and group reads union it."""
+        for holder_id in self._opaque_container_sharers(root_id):
+            for tok in self._opaque_container_tokens.get(
+                holder_id, frozenset()
+            ):
+                if (
+                    isinstance(tok, str)
+                    and tok in self.external_chan_locals
+                ):
+                    return True
+        return False
+
     def _opaque_container_deps(
         self, binding_id: str, locals_: dict[str, frozenset[int]]
     ) -> frozenset[int]:
@@ -5795,6 +5811,87 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return (member.id, member.type)
         return None
 
+    def _external_collection_operand(
+        self, node: Any
+    ) -> tuple[str, Any] | None:
+        """The (target_id, fact) for a container operand living in
+        external state — a package-level `var GS []T` / `map[K]T`
+        or an imported member `lib.GS` — or None."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None:
+            return None
+        if inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            if (
+                binding is not None
+                and binding.kind == "variable"
+                and self._package_level(binding)
+            ):
+                return (binding.id, binding.type)
+            member = self._imported_member_operand(inner)
+            if member is not None:
+                return (member.id, member.type)
+            return None
+        member = self._imported_member_operand(inner)
+        if member is not None:
+            return (member.id, member.type)
+        return None
+
+    def _external_chan_elem_index(
+        self, node: Any, params: dict
+    ) -> tuple[str, Any, Any] | None:
+        """`GS[i]` / `lib.GS[i]` naming an element queue of a
+        chan-element container in external state — (container
+        target id, the element's `chan` fact, index node or None),
+        or None. The element queues have no declared identity of
+        their own, so their operations record on the container's
+        own identity exactly like a `lib.VA[i] = v` member write —
+        and the element must be a scalar-payload channel, matching
+        the bound-container gate (`[]chan chan` stays closed)."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "index_expression":
+            return None
+        operand = inner.child_by_field_name("operand")
+        index = inner.child_by_field_name("index")
+        container = self._external_collection_operand(operand)
+        if container is None:
+            return None
+        fact = container[1]
+        elem = getattr(fact, "elem", None) if fact is not None else None
+        if (
+            fact is None
+            or fact.kind not in {"slice", "map", "array"}
+            or not self._scalar_chan_fact(elem)
+        ):
+            return None
+        # Pin the WHOLE container fact — the element pin alone leaves
+        # the named container type and a map's key type unpinned, so
+        # redeclaring either would leave summaries reporting current
+        # while the operand's shape changed under them.
+        self._pin_fact_identities(fact)
+        return container[0], elem, index
+
     def _scalar_chan_fact(self, fact: Any) -> bool:
         """The fact is a `chan` type whose element is scalar —
         the admit gate `_scalar_chan_binding` applies to bindings,
@@ -5901,7 +5998,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._package_level(binding)
                         or binding.scope is None
                     )
-                    and self._scalar_chan_fact(binding.type)
+                    and (
+                        self._scalar_chan_fact(binding.type)
+                        or self._chan_elem_collection(binding.type)
+                    )
                 )
             )
         ):
@@ -5910,6 +6010,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         return member is not None and (
             self._scalar_chan_fact(member.type)
             or self._chan_chan_fact(member.type)
+            or self._chan_elem_collection(member.type)
         )
 
     def _chan_chan_id(self, target_id: str) -> bool:
@@ -5925,6 +6026,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return True
         member = self.members.get(target_id)
         return member is not None and self._chan_chan_fact(member.type)
+
+    def _chan_elem_container_id(self, target_id: str) -> bool:
+        """A transfer target naming an external chan-element
+        container — `GS[i] <- x` / `<-GS[i]` records on the
+        container's package-var or imported-member identity, so a
+        callee's recorded op on it means it may have stored an
+        argument's queue into caller-visible state."""
+        binding = self.bindings.get(target_id)
+        if (
+            binding is not None
+            and binding.kind == "variable"
+            and binding.type is not None
+            and self._chan_elem_collection(binding.type)
+        ):
+            return True
+        member = self.members.get(target_id)
+        return (
+            member is not None
+            and member.type is not None
+            and self._chan_elem_collection(member.type)
+        )
 
     def _chan_call_args(self, node: Any) -> Any | None:
         """The call's `argument_list` node, unwrapping parens —
@@ -10440,6 +10562,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `(*p)[i]` store does. Ref indices collect here
             # because the RHS values evaluate after the LHS pass.
             external_write_targets: set[int] = set()
+            # `GS[i] = c` — a store through an external chan-element
+            # container hands `c`'s queue to caller-visible state
+            # like `cc <- ch` does: the slot records here so the
+            # store loop promotes the RHS channel once the store
+            # lands (RHS evaluation order keeps a `GS[i], c =
+            # c, make(chan T)` pre-state honest).
+            external_chan_elem_targets: set[int] = set()
+            # `GS = s` reseats an external chan-element container
+            # onto a bound collection: every element queue `s`
+            # carried now lives in caller-visible state, so the
+            # store loop promotes the RHS group's members like
+            # `GS[i] = c` promotes the single stored channel.
+            external_chan_container_writes: set[int] = set()
             # `p.C = ch` reseats which queue the field names: index →
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
@@ -10544,6 +10679,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if self._scalar_chan_binding(binding.id):
                                 chan_write_targets.add(len(refs))
+                            elif (
+                                binding.type is not None
+                                and self._chan_elem_collection(
+                                    binding.type
+                                )
+                            ):
+                                external_chan_container_writes.add(
+                                    len(refs)
+                                )
                             # The var's contents are external state
                             # like `VA[i] = v` — the stored value's
                             # deps broadcast so a later `VA`/`VA[i]`
@@ -10558,6 +10702,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if self._scalar_chan_fact(member.type):
                             chan_write_targets.add(len(refs))
+                        elif (
+                            member.type is not None
+                            and self._chan_elem_collection(member.type)
+                        ):
+                            external_chan_container_writes.add(
+                                len(refs)
+                            )
                         external_write_targets.add(len(refs))
                         refs.append(None)
                         continue
@@ -10657,6 +10808,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._scalar_chan_fact(member.type)
                     ):
                         chan_write_targets.add(len(refs) - 1)
+                    if (
+                        not saw_deref
+                        and self._external_chan_elem_index(lhs, params)
+                        is not None
+                    ):
+                        external_chan_elem_targets.add(len(refs) - 1)
+                    elif (
+                        not saw_deref
+                        and member.type is not None
+                        and self._chan_elem_collection(member.type)
+                    ):
+                        external_chan_container_writes.add(
+                            len(refs) - 1
+                        )
                     continue
                 # A package-level `var` — `G.V = v`, `G[i] = v`,
                 # `*GP = v` — mutates package state the same way: the
@@ -10679,6 +10844,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._scalar_chan_binding(binding.id)
                     ):
                         chan_write_targets.add(len(refs) - 1)
+                    if (
+                        not saw_deref
+                        and self._external_chan_elem_index(lhs, params)
+                        is not None
+                    ):
+                        external_chan_elem_targets.add(len(refs) - 1)
+                    elif (
+                        not saw_deref
+                        and binding.type is not None
+                        and self._chan_elem_collection(binding.type)
+                    ):
+                        external_chan_container_writes.add(
+                            len(refs) - 1
+                        )
                     continue
                 # `(*p)[i] = v` — a store through a bound pointer
                 # whose pointee is a container writes element memory
@@ -11397,6 +11576,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # emitted keeps `effects` honest about the
                         # untracked reseat itself.
                         self.indirect_writes |= value
+                    if i in external_chan_elem_targets:
+                        # `GS[i] = c` — the stored channel's queue
+                        # now lives in caller-visible state: any
+                        # element send (`GS[j] <- x`) may deposit
+                        # into it and a later `<-c` must observe
+                        # those, so `c` promotes to the external
+                        # channel set like `cc <- ch` does. The
+                        # pre-state alias snapshot resolves the RHS —
+                        # `e, GS[0] = c, c` stores the channel `c`
+                        # named BEFORE `e` reseated it.
+                        sent = (
+                            chan_alias_targets[i]
+                            if len(lefts) == len(rights)
+                            else self._chan_alias_target(
+                                rights[0], locals_, params
+                            )
+                        )
+                        if sent is not None:
+                            self.external_chan_locals.add(sent.id)
+                    if i in external_chan_container_writes:
+                        # `GS = s` — every element queue inside the
+                        # stored container now lives in caller-visible
+                        # state like a `GS[i] = c` store marks it:
+                        # sends through any member (`c <- x`) must
+                        # reach a `<-GS[j]` read's indirect_writes.
+                        rhs_node = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        )
+                        rhs_ref = (
+                            self.references.get(self.node_key(rhs_node))
+                            if rhs_node is not None
+                            else None
+                        )
+                        if rhs_ref is not None:
+                            for holder_id in (
+                                self._opaque_container_sharers(
+                                    rhs_ref.binding_id
+                                )
+                            ):
+                                for tok in self._opaque_container_tokens.get(
+                                    holder_id, frozenset()
+                                ):
+                                    if isinstance(tok, str):
+                                        self.external_chan_locals.add(
+                                            tok
+                                        )
                     continue
                 if ref is _ALIAS_FOLD:
                     # `*lib.PV = v` writes through a member that an
@@ -13748,6 +13975,56 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             chan = self.bindings.get(
                                 target_id
                             ) or self.members.get(target_id)
+                        elif chan is None and (
+                            ext_elem := (
+                                self._external_chan_elem_index(
+                                    right, params
+                                )
+                            )
+                        ) is not None:
+                            # `for v := range GS[i]` / `range
+                            # lib.GS[i]` — an element queue of a
+                            # chan-element container in external
+                            # state: elements re-join
+                            # `indirect_writes` through the `None`
+                            # arm like a package channel's, the
+                            # index's own deps join the read, and
+                            # the transfer records on the
+                            # container's identity.
+                            target_id, fact, index_node = ext_elem
+                            self._pin_fact_identities(fact)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        right.start_byte,
+                                        right.end_byte,
+                                    ),
+                                    target_id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            index_deps = (
+                                self.expression(
+                                    index_node, fn, params, scope,
+                                    transfers, count, 0,
+                                )
+                                if (
+                                    index_node is not None
+                                    and index_node.type
+                                    not in _INDEX_LITERALS
+                                )
+                                else frozenset()
+                            )
+                            rdeps = (
+                                self.indirect_writes | index_deps
+                            )
+                            chan = (
+                                self.bindings.get(target_id)
+                                or self.members.get(target_id)
+                            )
                         elif (
                             field_chan := self._bound_field_chan(
                                 right, scope, params
@@ -15158,14 +15435,61 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if external is None and field_chan is None
                     else None
                 )
+                ext_elem = (
+                    self._external_chan_elem_index(channel, params)
+                    if (
+                        external is None
+                        and field_chan is None
+                        and chan_elem is None
+                    )
+                    else None
+                )
                 if (
                     external is None
                     and field_chan is None
                     and chan_elem is None
+                    and ext_elem is None
                 ):
                     raise _Unsupported(
                         "unsupported_statement", _span(node)
                     )
+                if ext_elem is not None:
+                    # `GS[i] <- x` / `lib.GS[i] <- x` — a send into
+                    # an element queue of a chan-element container
+                    # in external state: the transfer records on
+                    # the container's own identity like a
+                    # `lib.VA[i] = v` write, and the sent deps (with
+                    # the index's own) broadcast into
+                    # `indirect_writes` so `<-GS[j]` reads them.
+                    target_id, fact, index_node = ext_elem
+                    value_deps = self.expression(
+                        value, fn, params, locals_, transfers,
+                        count, 0,
+                    )
+                    if (
+                        index_node is not None
+                        and index_node.type not in _INDEX_LITERALS
+                    ):
+                        value_deps |= self.expression(
+                            index_node, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    self._pin_fact_identities(fact)
+                    self.indirect_writes |= value_deps
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            target_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return
                 if chan_elem is not None:
                     # `s[i] <- x` on a bound chan-element container —
                     # the element queues conflate into the root's
@@ -16859,14 +17183,64 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if external is None and field_chan is None
                             else None
                         )
+                        ext_elem = (
+                            self._external_chan_elem_index(
+                                operand, params
+                            )
+                            if (
+                                external is None
+                                and field_chan is None
+                                and chan_elem is None
+                            )
+                            else None
+                        )
                         if (
                             external is None
                             and field_chan is None
                             and chan_elem is None
+                            and ext_elem is None
                         ):
                             raise _Unsupported(
                                 "non_parameter_reference", _span(node)
                             )
+                        if ext_elem is not None:
+                            # `<-GS[i]` / `<-lib.GS[i]` — pulling
+                            # an element queue out of a chan-element
+                            # container in external state: the
+                            # transfer records on the container's
+                            # identity, and the read returns
+                            # `indirect_writes` (whatever earlier
+                            # sends broadcast) plus the index's own
+                            # deps, like `<-GC`.
+                            target_id, fact, index_node = ext_elem
+                            self._pin_fact_identities(fact)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        node.start_byte,
+                                        node.end_byte,
+                                    ),
+                                    target_id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            base_deps = (
+                                self.expression(
+                                    index_node, fn, params,
+                                    locals_, transfers, count,
+                                    depth,
+                                )
+                                if (
+                                    index_node is not None
+                                    and index_node.type
+                                    not in _INDEX_LITERALS
+                                )
+                                else frozenset()
+                            )
+                            return self.indirect_writes | base_deps
                         if chan_elem is not None:
                             # `<-s[i]` reads the container's whole
                             # conflated group — every element queue's
@@ -16877,6 +17251,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             recv_deps = self._opaque_container_deps(
                                 root_id, locals_
                             )
+                            if self._chan_elem_external_member(root_id):
+                                # A member promoted external
+                                # (`GS[k] = c`, `GS = s`) receives
+                                # sends that land in
+                                # `indirect_writes` — the group read
+                                # observes them like `<-c` does.
+                                recv_deps |= self.indirect_writes
                             if (
                                 index_node is not None
                                 and index_node.type
@@ -17369,10 +17750,55 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 arguments[0]
                             )
                             if elem is None:
-                                raise _Unsupported(
-                                    "unresolved_or_opaque_call",
-                                    _span(node),
+                                ext_elem = (
+                                    self._external_chan_elem_index(
+                                        arguments[0], params
+                                    )
                                 )
+                                if ext_elem is None:
+                                    raise _Unsupported(
+                                        "unresolved_or_opaque_call",
+                                        _span(node),
+                                    )
+                                # `close(GS[i])` / `close(lib.GS[i])`
+                                # — closing an element queue of a
+                                # chan-element container in external
+                                # state: a caller-visible effect on
+                                # the container's own identity, like
+                                # `close(GC)`.
+                                target_id, fact, index_node = (
+                                    ext_elem
+                                )
+                                index_deps = (
+                                    self.expression(
+                                        index_node, fn, params,
+                                        locals_, transfers, count,
+                                        0,
+                                    )
+                                    if (
+                                        index_node is not None
+                                        and index_node.type
+                                        not in _INDEX_LITERALS
+                                    )
+                                    else frozenset()
+                                )
+                                self._pin_fact_identities(fact)
+                                transfers.append(
+                                    CallTransfer(
+                                        FileSpan(
+                                            self.current_file,
+                                            node.start_byte,
+                                            node.end_byte,
+                                        ),
+                                        target_id,
+                                        (),
+                                        frozenset(),
+                                        imported=True,
+                                    )
+                                )
+                                if index_deps:
+                                    self._record_read(index_deps)
+                                return frozenset()
                             # `close(s[i])` — closing a member's
                             # queue. A local group tracks no sync
                             # fact, so the close is a no-op like
@@ -18524,6 +18950,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # imported chan-result bind does, so sends a
                     # received channel performs stay connected
                     # to `<-q`.
+                    self._promote_chan_arg_roots(
+                        arguments, "", locals_, params
+                    )
+                if self._calls_touch_external_chan(
+                    callee.calls, self._chan_elem_container_id
+                ):
+                    # `GS[i] = c` inside the callee handed an
+                    # argument's queue to an external chan-element
+                    # container — the same promotion keeps later
+                    # `GS[j] <- x` sends observable on `<-c`.
                     self._promote_chan_arg_roots(
                         arguments, "", locals_, params
                     )
@@ -20556,6 +20992,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._promote_chan_arg_roots(
                         arguments, "", locals_, params
                     )
+                if self._calls_touch_external_chan(
+                    callee.calls, self._chan_elem_container_id
+                ):
+                    # `m.GS[i] = c` inside the method — the same
+                    # promotion the direct-call site applies.
+                    self._promote_chan_arg_roots(
+                        arguments, "", locals_, params
+                    )
         return result
 
     def _immediate_literal_call(
@@ -21003,6 +21447,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         declared.calls, self._chan_chan_id
                     ):
                         # `cc <- q` inside the declared callee —
+                        # the same argument-root promotion.
+                        self._promote_chan_arg_roots(
+                            arguments, "", locals_, params
+                        )
+                    if self._calls_touch_external_chan(
+                        declared.calls, self._chan_elem_container_id
+                    ):
+                        # `GS[i] = c` inside the declared callee —
                         # the same argument-root promotion.
                         self._promote_chan_arg_roots(
                             arguments, "", locals_, params

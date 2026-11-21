@@ -4172,6 +4172,22 @@ group and lands in `indirect_writes` — a callee's send through a
 v` does. A `[]chan` result binds like the local `s :=` form.
 `[N]chan` and `[]chan chan` signatures stay closed.
 
+The same conflation covers a chan-element container living in
+*external* state — a package-level `var GS []chan T` /
+`var GM map[K]chan T` / `var GA [N]chan T`, or an imported
+member `lib.GS[i]`. The element queues have no declared
+identity of their own, so `GS[i] <- x`, `<-GS[i]`,
+`close(GS[i])` and `for v := range GS[i]` record an imported
+CallTransfer on the *container's* identity exactly like a
+`lib.VA[i] = v` member write: the send's value ∪ index deps
+broadcast into `indirect_writes`, the read returns
+`indirect_writes` plus the index's own deps, and select
+alternatives resolve through the same send/receive operand
+paths. The honest closures mirror the bound case — `[][]chan`
+nests, `[]chan chan` non-scalar elements, and a `d := GS[i]`
+extraction all stay closed, and a `map[string]chan` variable
+key stays unreachable (a `string` value is never producible).
+
 ### C07 scalar-element *nested* local containers
 
 Exactly one level of nesting over a scalar-element collection

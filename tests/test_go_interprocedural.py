@@ -20613,6 +20613,245 @@ def test_chan_elem_array(go_types_helper, declarations, expected):
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
+        # `GS[i] <- x` then `<-GS[i]` — the element queues of a
+        # package-level chan-element container record on the
+        # container's own identity like a `lib.VA[i] = v` member
+        # write; the send broadcasts into `indirect_writes` so the
+        # receive returns it.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A variable index's own deps join the read like any other
+        # element read's.
+        (
+            "var GM map[int64]chan int64\n"
+            "func F(k int64) int64 {\n"
+            "\treturn <-GM[k]\n}\n",
+            frozenset({0}),
+        ),
+        # `[N]chan` package arrays admit the same element ops.
+        (
+            "var GA [4]chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGA[1] <- x\n"
+            "\treturn <-GA[1]\n}\n",
+            frozenset({0}),
+        ),
+        # `for v := range GS[i]` — elements re-join
+        # `indirect_writes` through the fixed-point pass like a
+        # package channel's; a variable index's deps join.
+        (
+            "var GS []chan int64\n"
+            "func F(i int64, x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\tvar r int64\n"
+            "\tfor v := range GS[i] {\n"
+            "\t\tr = v\n"
+            "\t\tbreak\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Select arms funnel through the send and receive paths —
+        # `case v := <-GS[i]` and `case GS[j] <- x` both resolve.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tselect {\n"
+            "\tcase v := <-GS[0]:\n"
+            "\t\treturn v\n"
+            "\tcase GS[1] <- x:\n"
+            "\t\treturn x\n"
+            "\t}\n"
+            "\treturn 0\n}\n",
+            frozenset({0}),
+        ),
+        # `GS[i] = c` stores already admitted through the imported
+        # member-write path; the send broadcast reaches both params.
+        (
+            "var GS []chan int64\n"
+            "func F(c chan int64, x int64) int64 {\n"
+            "\tGS[0] = c\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A callee's `GS[0] <- x` touches an external container's
+        # element queue — the caller's `<-GS[0]` observes the
+        # argument deps the callee broadcast.
+        (
+            "var GS []chan int64\n"
+            "func Put(x int64) {\n"
+            "\tGS[0] <- x\n"
+            "}\n"
+            "func F(p *int64) int64 {\n"
+            "\tPut(*p)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `GS[i] = c` hands `c`'s queue to caller-visible state —
+        # `c` promotes like `cc <- ch` does, so a later `<-c`
+        # observes the element send.
+        (
+            "var GS []chan int64\n"
+            "func F(p *int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tGS[0] = c\n"
+            "\tGS[0] <- *p\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # A promoted queue still deposits into a bound share group —
+        # `s := []chan{c}` keeps `<-s[0]` observing `c <- x` sends
+        # after `GS[0] = c` marks `c` external.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tGS[0] = c\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The mirrored direction observes too: `GS[0] <- x` lands in
+        # `indirect_writes`, which a `<-s[0]` read through a group
+        # holding the externalized `c` unions.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tGS[0] = c\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `GS[0] = c` inside a callee promotes the CALLER's argument —
+        # the callee's recorded element-container op promotes the
+        # chan arg roots like a `cc <- q` store does, so `<-c`
+        # observes the later external send.
+        (
+            "var GS []chan int64\n"
+            "func Put(c chan int64) {\n"
+            "\tGS[0] = c\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tPut(c)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # `GS = s` reseats the external container onto a bound
+        # collection — every member queue `s` carried promotes, so a
+        # member send reaches `<-GS[0]`'s indirect_writes read.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tGS = s\n"
+            "\tc <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `c, GS[0] = d, c` — the RHS channel resolves against the
+        # pre-state like `chan_alias_targets` snapshots it: `c`
+        # reseated `e` earlier, but the stored queue is still `c`.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\td := make(chan int64, 1)\n"
+            "\te := c\n"
+            "\tc, GS[0] = d, c\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert any(t.imported for t in result.calls)
+
+
+def test_chan_elem_external_pins_container_type(go_types_helper):
+    # The operand's WHOLE container fact pins — a named container
+    # type's redeclare churns its identity, so an unchanged-looking
+    # `GS[i]` op must flag the summary stale.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type CS []chan int64\n"
+        "var GS CS\n"
+        "func F(x int64) int64 {\n"
+        "\tGS[0] <- x\n"
+        "\treturn <-GS[0]\n}\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    _src2, snapshot2, _ = unit(
+        go_types_helper,
+        "type CS []chan string\n"
+        "var GS CS\n"
+        "func F(x int64) int64 {\n"
+        "\treturn x\n}\n",
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_chan_elem_external_close(go_types_helper):
+    # `close(GS[i])` records a caller-visible effect on the
+    # container's identity; the index itself evaluates for its
+    # deps.
+    result = named(
+        *unit(
+            go_types_helper,
+            "var GS []chan int64\n"
+            "func F(i int64) {\n"
+            "\tclose(GS[i])\n}\n",
+        )
+    )
+    assert result.available
+    assert any(t.imported for t in result.calls)
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `[][]chan` nests stay closed — the operand of the inner
+        # index is itself an index expression.
+        "var GS [][]chan int64\nfunc F(x int64) {\n\tGS[0][0] <- x\n}\n",
+        # `[]chan chan` non-scalar elements stay closed.
+        "var GS []chan chan int64\nfunc F(c chan int64) {\n\tGS[0] <- c\n}\n",
+        # `d := GS[i]` extraction stays closed — the element queue
+        # has no declared identity of its own.
+        "var GS []chan int64\nfunc F() int64 {\n\td := GS[0]\n\treturn <-d\n}\n",
+    ],
+)
+def test_chan_elem_external_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
         # `s.V = <-ch` — a field store on a local composite folds the
         # receive into the base binding like the plain assignment.
         (
