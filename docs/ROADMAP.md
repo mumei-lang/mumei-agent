@@ -2984,8 +2984,16 @@ temporary receive. Passing a received external channel
 as a value to another local queue (`dst <- <-src`) joins
 their share groups.
 
-Returning, storing, capturing, or taking the address of
-a local queue remains closed, as do `[]chan chan T`,
+Returning a local scalar-element queue through a matching
+`chan chan T` result is supported: the result dependencies
+include the readable contents of its share group, and the
+whole group becomes external at the return point so deferred
+work observes the caller-visible identity. Storing such a
+queue in a package or imported `chan chan T` variable also
+promotes its group and broadcasts its dependencies to later
+external reads. Storing into struct fields, slices, maps, or
+composite literals, capturing a local queue, or taking its
+address remains closed, as do `[]chan chan T`,
 `chan chan chan T` and deeper nesting, non-scalar inner
 elements, and unsupported converted/interface/method/
 variadic call forms. `select` continues to admit each communication
