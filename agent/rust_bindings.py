@@ -1082,6 +1082,32 @@ class _RustBindings:
             return None if not children else self._place_root(children[0])
         return None
 
+    def _visit_place_indices(self, node: Any) -> None:
+        if node.type == "parenthesized_expression":
+            children = node.named_children
+            if children:
+                self._visit_place_indices(children[0])
+            return
+        if node.type == "field_expression":
+            base = node.child_by_field_name("value")
+            if base is not None:
+                self._visit_place_indices(base)
+            return
+        if node.type == "index_expression":
+            children = node.named_children
+            if children:
+                self._visit_place_indices(children[0])
+                for index in children[1:]:
+                    self._expr(index)
+            return
+        if node.type == "unary_expression" and self.text(node).lstrip().startswith("*"):
+            operand = node.named_children[-1] if node.named_children else None
+            self._expr(operand)
+            return
+        if node.type in {"identifier", "self"}:
+            return
+        self._expr(node)
+
     def _assign_to_place(self, node: Any, compound: bool, assignment: Any) -> None:
         if node.type == "parenthesized_expression":
             children = node.named_children
@@ -1092,23 +1118,18 @@ class _RustBindings:
             self._assignment_reference(node, compound, assignment)
             return
         if node.type == "field_expression":
-            base = node.child_by_field_name("value")
-            root = None if base is None else self._place_root(base)
+            root = self._place_root(node)
+            self._visit_place_indices(node)
             if root is None:
-                self._expr(base)
+                return
             else:
                 self._assignment_reference(root, compound, assignment)
             return
         if node.type == "index_expression":
-            children = node.named_children
-            if children:
-                root = self._place_root(children[0])
-                if root is None:
-                    self._expr(children[0])
-                else:
-                    self._assignment_reference(root, compound, assignment)
-                for index in children[1:]:
-                    self._expr(index)
+            root = self._place_root(node)
+            self._visit_place_indices(node)
+            if root is not None:
+                self._assignment_reference(root, compound, assignment)
             return
         if node.type == "unary_expression" and self.text(node).lstrip().startswith("*"):
             operand = node.named_children[-1] if node.named_children else None

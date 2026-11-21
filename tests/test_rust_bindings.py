@@ -97,6 +97,8 @@ def test_dereference_compound_assignment_only_reads_the_pointer_binding():
         ("s.f.g", "s", ["write"], False, False),
         ("s.f", "s", ["read", "write"], False, True),
         ("a[i]", "a", ["read", "write"], True, True),
+        ("a[i].f", "a", ["write"], True, False),
+        ("a[i][j]", "a", ["read", "write"], True, True),
         ("(*p).f", "p", ["read"], False, False),
         ("p.as_mut().f", "p", ["read"], False, False),
     ],
@@ -108,7 +110,7 @@ def test_place_assignments_reference_the_binding_root(
     value = "1" if compound else "2"
     source = (
         "struct S { f: i32 } "
-        "fn f(mut s:S, mut a:[i32;4], mut p:&mut S, i:usize) { "
+        "fn f(mut s:S, mut a:[i32;4], mut p:&mut S, i:usize, j:usize) { "
         f"{place} {operator} {value}; }}"
     )
     report = build_rust_bindings(source, pointer_width=64)
@@ -116,6 +118,22 @@ def test_place_assignments_reference_the_binding_root(
     assert bool(_refs(report, source, "i")) is index_read
     if index_read:
         assert [ref.kind for ref in _refs(report, source, "i")] == ["read"]
+
+
+def test_nested_place_indexes_are_traversed_for_reads_and_calls():
+    source = (
+        "struct S { f: [i32;4] } fn index()->usize {0} "
+        "fn f(mut s:S) { s.f[index()] += 1; }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    assert [ref.kind for ref in _refs(report, source, "s")] == ["read", "write"]
+    assert _call(report, source, "index()").kind == "direct_local"
+
+
+def test_nested_place_index_names_remain_explicitly_unresolved():
+    source = "fn f(mut a:[i32;4]) { a[missing].field = 1; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, "missing", "unknown_name")
 
 
 def test_assignment_to_const_is_a_read_with_an_unsupported_gap():
