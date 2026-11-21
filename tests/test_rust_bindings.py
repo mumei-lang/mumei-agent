@@ -16,6 +16,13 @@ def build_rust_bindings(source, *, pointer_width):
     assert len(reference_keys) == len(set(reference_keys)), source
     call_spans = [call.span for call in report.calls]
     assert len(call_spans) == len(set(call_spans)), source
+    restored = load_lexical_report(
+        report.to_json(),
+        source,
+        profile=PROFILE,
+        target={"pointer_width": pointer_width},
+    )
+    assert restored.to_json() == report.to_json(), source
     return report
 
 
@@ -582,6 +589,73 @@ fn outside(x: T) {}
     assert outside.type.type_id == alias.id
 
 
+def test_const_generic_type_facts_follow_forward_aliases():
+    sources = (
+        "fn f<const N: Count>() {} type Count = u32;",
+        "type Count = u32; fn f<const N: Count>() {}",
+    )
+    for source in sources:
+        report = build_rust_bindings(source, pointer_width=64)
+        alias = _bindings(report, "Count", "type_alias")[0]
+        parameter = _bindings(report, "N", "generic_parameter")[0]
+        assert (
+            parameter.type.kind,
+            parameter.type.name,
+            parameter.type.bit_width,
+            parameter.type.signed,
+            parameter.type.type_id,
+        ) == ("int", "u32", 32, False, alias.id)
+
+    unresolved = build_rust_bindings(
+        "fn f<const N: Missing>() {}",
+        pointer_width=64,
+    )
+    assert _bindings(unresolved, "N", "generic_parameter")[0].type.kind == "unknown"
+
+    cyclic = build_rust_bindings(
+        "type A = B; type B = A; fn f<const N: A>() {}",
+        pointer_width=64,
+    )
+    assert _bindings(cyclic, "N", "generic_parameter")[0].type.kind == "unknown"
+
+
+def test_extern_functions_declare_generic_parameters_and_signature_references():
+    source = """
+extern "C" {
+    fn foreign<'a, T, const N: usize>(value: &'a T, values: [u8; N]) -> &'a T;
+    fn plain(value: Missing);
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    foreign = _bindings(report, "foreign", "function")[0]
+    foreign_function = next(
+        function for function in report.functions if function.binding_id == foreign.id
+    )
+    assert foreign_function.generic
+    assert foreign_function.body is None
+    for name in ("'a", "T", "N"):
+        generic = _bindings(report, name, "generic_parameter")
+        assert len(generic) == 1
+        references = [
+            reference
+            for reference in _refs(report, source, name)
+            if reference.binding_id == generic[0].id
+        ]
+        assert references
+    assert (
+        _bindings(report, "N", "generic_parameter")[0].type.bit_width,
+        _bindings(report, "N", "generic_parameter")[0].type.signed,
+    ) == (64, False)
+
+    plain = _bindings(report, "plain", "function")[0]
+    plain_function = next(
+        function for function in report.functions if function.binding_id == plain.id
+    )
+    assert not plain_function.generic
+    assert not _bindings(report, "Missing", "generic_parameter")
+    assert not _refs(report, source, "Missing")
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -620,6 +694,233 @@ def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     alias = _bindings(report, "T", "type_alias")[0]
     assert generic.scope is not None
     assert outside.type.type_id == alias.id
+
+
+def test_nested_function_items_do_not_inherit_outer_function_generics():
+    source = """
+fn outer<T, const N: usize>() {
+    fn shadows<T>(value: T) {}
+    fn inner(value: T) { let _ = N; }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inner_generic = next(
+        binding
+        for binding in _bindings(report, "T", "generic_parameter")
+        if binding.span.start > source.index("fn shadows")
+        and binding.span.start < source.index("fn inner")
+    )
+    shadow_reference = next(
+        reference
+        for reference in _refs(report, source, "T")
+        if source.index("fn shadows") < reference.span.start < source.index("fn inner")
+    )
+    assert shadow_reference.binding_id == inner_generic.id
+    boundary_references = [
+        unresolved
+        for unresolved in report.unresolved
+        if unresolved.reason == "item_boundary"
+        and unresolved.span.start > source.index("fn inner")
+    ]
+    assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
+
+
+def test_where_clauses_record_generic_parameters_without_binding_other_names():
+    source = """
+type Outside = u8;
+struct S;
+trait Bound<T> where T: Copy {}
+impl<U> Bound<U> for S where U: Copy {}
+fn bounded<T>() where T: Copy {}
+fn unrelated<T>() where Outside: Copy {}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    expected_positions = [
+        source.index("T: Copy"),
+        source.index("U: Copy"),
+        source.rindex("T: Copy"),
+    ]
+    for position in expected_positions:
+        reference = next(
+            reference
+            for reference in report.references
+            if reference.span.start == position
+        )
+        assert report.binding(reference.binding_id).kind == "generic_parameter"
+    assert not _refs(report, source, "Outside")
+
+
+def test_body_type_positions_record_generic_parameter_references():
+    source = """
+struct S<T>(T);
+fn make<T>(value: T) {}
+fn caller<T>(value: T) {
+    let local: T = value;
+    let cast = value as T;
+    let closure = |parameter: T| parameter;
+    make::<T>(value);
+    value.method::<T>();
+    let _ = S::<T>(value);
+    let _ = S::<T>{0: value};
+    let _: S<T>;
+}
+fn outside(value: Missing) {
+    let _: Missing = value;
+    let _ = value as Missing;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    caller_start = source.index("fn caller")
+    outside_start = source.index("fn outside")
+    caller_generic = next(
+        binding
+        for binding in _bindings(report, "T", "generic_parameter")
+        if binding.scope is not None
+        and binding.scope.start <= caller_start < binding.scope.end
+    )
+    caller_type_references = [
+        reference
+        for reference in _refs(report, source, "T")
+        if caller_start < reference.span.start < outside_start
+    ]
+    assert len(caller_type_references) == 9
+    assert all(
+        reference.binding_id == caller_generic.id
+        for reference in caller_type_references
+    )
+    assert not _refs(report, source, "Missing")
+
+
+def test_bare_generic_arguments_search_type_then_const_value_namespaces():
+    source = """
+type N = u8;
+const N: usize = 1;
+const K: usize = 2;
+struct TypeArg<T>(T);
+struct ConstArg<const M: usize>;
+fn take<const M: usize>() {}
+fn uses_type() { let _: TypeArg<N>; }
+fn uses_const<const M: usize>() {
+    let _: ConstArg<M>;
+    take::<M>();
+}
+fn uses_const_item() { let _: ConstArg<K>; }
+fn missing() { let _: TypeArg<Unknown>; }
+fn local_is_not_a_const_argument() {
+    let M = 1;
+    let _: ConstArg<M>;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    alias = _bindings(report, "N", "type_alias")[0]
+    type_argument_position = source.index("TypeArg<N>") + len("TypeArg<")
+    type_argument_reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == type_argument_position
+    )
+    assert type_argument_reference.binding_id == alias.id
+    const_generic = next(
+        binding
+        for binding in _bindings(report, "M", "generic_parameter")
+        if binding.scope is not None
+        and binding.scope.start <= source.index("fn uses_const") < binding.scope.end
+    )
+    for token in ("ConstArg<M>", "take::<M>"):
+        position = source.index(token) + token.index("M")
+        reference = next(
+            reference
+            for reference in report.references
+            if reference.span.start == position
+        )
+        assert reference.binding_id == const_generic.id
+    const_item = _bindings(report, "K", "const")[0]
+    const_item_position = source.index("ConstArg<K>") + len("ConstArg<")
+    const_item_reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == const_item_position
+    )
+    assert const_item_reference.binding_id == const_item.id
+    unknown_position = source.index("TypeArg<Unknown>") + len("TypeArg<")
+    unknown = next(
+        unresolved
+        for unresolved in report.unresolved
+        if unresolved.span.start == unknown_position
+    )
+    assert (unknown.name, unknown.reason) == ("Unknown", "unknown_name")
+    local_position = source.rindex("ConstArg<M>") + len("ConstArg<")
+    assert not any(
+        reference.span.start == local_position for reference in report.references
+    )
+    assert raw[unknown.span.start : unknown.span.end] == b"Unknown"
+
+
+def test_mutability_does_not_spread_into_nested_rust_patterns():
+    source = """
+struct S { f: Option<u8>, field: u8 }
+fn patterns(value: S) {
+    match value {
+        mut capture @ Some(inner) => {},
+        S { f: Some(mut x) } => {},
+        S { mut field } => {},
+        S { ref mut field } => {},
+        S { f: Some(plain) } => {},
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _bindings(report, "capture", "local")[0].mutable
+    assert not _bindings(report, "inner", "local")[0].mutable
+    assert _bindings(report, "x", "local")[0].mutable
+    assert [binding.mutable for binding in _bindings(report, "field", "local")] == [
+        True,
+        True,
+    ]
+    assert not _bindings(report, "plain", "local")[0].mutable
+
+
+def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
+    source = """
+type T = u8;
+const N: u8 = 1;
+fn plain(value: T) { let _ = N; }
+fn qualified() {
+    let _: crate::T;
+    let _: self::N;
+    let _: super::X;
+    let _: Self::T;
+    let _: <T as Tr>::X;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    alias = _bindings(report, "T", "type_alias")[0]
+    plain_parameter = _bindings(report, "value", "parameter")[0]
+    assert plain_parameter.type.type_id == alias.id
+    assert any(
+        reference.binding_id == _bindings(report, "N", "const")[0].id
+        for reference in report.references
+    )
+    qualified_paths = {
+        source.encode()[unresolved.span.start : unresolved.span.end].decode()
+        for unresolved in report.unresolved
+        if unresolved.reason == "qualified_path"
+    }
+    assert qualified_paths == {
+        "crate::T",
+        "self::N",
+        "super::X",
+        "Self::T",
+        "<T as Tr>::X",
+    }
+    assert not any(
+        reference.span
+        == unresolved.span
+        for reference in report.references
+        for unresolved in report.unresolved
+        if unresolved.reason == "qualified_path"
+    )
 
 
 def test_local_type_alias_precedes_primitive_type_facts():
@@ -675,6 +976,14 @@ fn missing_call() { r#missing(); }
     )
     assert report.resolve(missing.span) is None
     assert report.calls[-1].kind == "unresolved"
+
+
+def test_raw_identifier_function_item_lookup_round_trips():
+    source = "fn r#helper() {} fn f() { helper(); r#helper(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    helper = _bindings(report, "helper", "function")[0]
+    assert [call.target for call in report.calls] == [helper.id, helper.id]
+    assert [call.kind for call in report.calls] == ["direct_local", "direct_local"]
 
 
 def test_impl_trait_arguments_are_generic_and_turbofish_stays_on_the_callee():
@@ -912,11 +1221,16 @@ def test_static_mut_write_parse_limits_source_hash_and_determinism():
 def test_deep_expression_recursion_is_reported_as_a_source_limit_error():
     expression = " + ".join("1" for _ in range(2000))
     source = f"fn f() {{ let value = {expression}; }}"
-    with pytest.raises(
-        LexicalReportError,
-        match="Rust source nesting exceeds the lexical report limit",
-    ):
-        build_rust_bindings(source, pointer_width=64)
+    previous_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        with pytest.raises(
+            LexicalReportError,
+            match="Rust source nesting exceeds the lexical report limit",
+        ):
+            build_rust_bindings(source, pointer_width=64)
+    finally:
+        sys.setrecursionlimit(previous_limit)
 
 
 def test_explicit_function_const_static_and_unit_types_and_extern_calls():

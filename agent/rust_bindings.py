@@ -130,6 +130,7 @@ class _Record:
     extern: bool = False
     struct_constructor: bool = False
     generic_kind: str = ""
+    type_node: Any = None
 
 
 class _RustBindings:
@@ -242,6 +243,7 @@ class _RustBindings:
         struct_constructor: bool = False,
         name_override: str | None = None,
         generic_kind: str = "",
+        type_node: Any = None,
     ) -> _Record:
         name = self._normalize_identifier(
             self.text(name_node) if name_override is None else name_override
@@ -274,6 +276,7 @@ class _RustBindings:
             extern,
             struct_constructor,
             generic_kind,
+            type_node,
         )
         self.bindings.append(binding)
         self.records[identifier] = record
@@ -365,7 +368,7 @@ class _RustBindings:
                             scope.module_depth,
                             item=True,
                             body_node=function_node.child_by_field_name("body"),
-                            generic=function_node.child_by_field_name("type_parameters") is not None,
+                            generic=self._is_generic_function(function_node),
                             variadic=any(
                                 child.type == "variadic_parameter"
                                 for child in self._descendants(
@@ -376,10 +379,32 @@ class _RustBindings:
                         )
                         self._add_to_scope(scope, fn_record)
                         self._function_records[fn_record.binding.id] = fn_record
+                        self._add_generic_parameters(
+                            function_node,
+                            scope,
+                            owner_function=fn_record.binding.id,
+                        )
             elif node.type == "use_declaration":
                 self._predeclare_use(node, scope)
             elif node.type == "macro_definition":
                 self.gaps.append(Gap("macro_definition", self.span(node)))
+        self._finalize_generic_type_facts(scope)
+
+    def _finalize_generic_type_facts(self, scope: _Scope) -> None:
+        for records in scope.bindings.values():
+            for record in records:
+                if (
+                    record.binding.kind != "generic_parameter"
+                    or record.generic_kind != "const"
+                    or record.type_node is None
+                ):
+                    continue
+                type_fact = self._type_fact(record.type_node)
+                if type_fact == record.binding.type:
+                    continue
+                updated = replace(record.binding, type=type_fact)
+                self.bindings[self.bindings.index(record.binding)] = updated
+                record.binding = updated
 
     def _descendants(self, node: Any | None):
         if node is None:
@@ -455,7 +480,6 @@ class _RustBindings:
                 if generic_kind == "const"
                 else None
             )
-            type_fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
             record = self._make_record(
                 name_node,
                 "generic_parameter",
@@ -463,8 +487,8 @@ class _RustBindings:
                 scope.function_id if owner_function is None else owner_function,
                 scope.module_depth,
                 item=False,
-                type_fact=type_fact,
                 generic_kind=generic_kind,
+                type_node=annotation,
             )
             self._add_to_scope(scope, record)
 
@@ -484,6 +508,16 @@ class _RustBindings:
                 in {"function_item", "function_signature_item"}
             ):
                 continue
+            if candidate.type in {"scoped_identifier", "scoped_type_identifier"}:
+                self._record_qualified_path(candidate)
+                continue
+            if candidate.type == "type_arguments":
+                for child in reversed(self._children(candidate)):
+                    if child.type in {"identifier", "type_identifier"}:
+                        self._generic_argument_reference(child)
+                    else:
+                        stack.append(child)
+                continue
             candidates.append(candidate)
             stack.extend(reversed(self._children(candidate)))
         for candidate in candidates:
@@ -493,9 +527,18 @@ class _RustBindings:
                 namespace = "value"
             else:
                 continue
-            record, _boundary = self._lookup_with_boundary(
+            record, boundary = self._lookup_with_boundary(
                 self.text(candidate), candidate.start_byte, namespace
             )
+            if record is None and boundary == "item_boundary":
+                unresolved = Unresolved(
+                    self.span(candidate),
+                    self._normalize_identifier(self.text(candidate)),
+                    "item_boundary",
+                )
+                if unresolved not in self.unresolved:
+                    self.unresolved.append(unresolved)
+                continue
             if (
                 record is None
                 or record.binding.kind != "generic_parameter"
@@ -505,6 +548,37 @@ class _RustBindings:
             reference = Reference(self.span(candidate), record.binding.id, "read")
             if reference not in self.references:
                 self.references.append(reference)
+
+    def _generic_argument_reference(self, node: Any) -> None:
+        name = self._normalize_identifier(self.text(node))
+        type_record, type_boundary = self._lookup_with_boundary(
+            name, node.start_byte, "type"
+        )
+        if type_record is not None:
+            record = type_record
+        else:
+            value_record, value_boundary = self._lookup_with_boundary(
+                name, node.start_byte, "value"
+            )
+            if value_record is not None and (
+                value_record.binding.kind in {"const", "import"}
+                or (
+                    value_record.binding.kind == "generic_parameter"
+                    and value_record.generic_kind == "const"
+                )
+            ):
+                record = value_record
+            else:
+                reason = type_boundary or value_boundary or (
+                    "prelude_name" if name in _PRELUDE_NAMES else "unknown_name"
+                )
+                unresolved = Unresolved(self.span(node), name, reason)
+                if unresolved not in self.unresolved:
+                    self.unresolved.append(unresolved)
+                return
+        reference = Reference(self.span(node), record.binding.id, "read")
+        if reference not in self.references:
+            self.references.append(reference)
 
     def _record_macro_invocations(self, node: Any | None) -> None:
         for candidate in self._descendants(node):
@@ -610,7 +684,7 @@ class _RustBindings:
         if node.type in {"impl_item", "trait_item"}:
             body = node.child_by_field_name("body")
             self._generic_references(node.child_by_field_name("type_parameters"))
-            self._generic_references(node.child_by_field_name("where_clause"))
+            self._generic_references(self._where_clause(node))
             if node.type == "impl_item":
                 self._generic_references(node.child_by_field_name("type"))
             if body is not None:
@@ -640,9 +714,15 @@ class _RustBindings:
         name_node = self._item_name(node)
         if name_node is None:
             return None
-        name = self.text(name_node)
+        name = self._normalize_identifier(self.text(name_node))
         return next(
             (r for r in scope.bindings.get(name, ()) if r.binding.span == self.span(name_node)),
+            None,
+        )
+
+    def _where_clause(self, node: Any) -> Any | None:
+        return next(
+            (child for child in self._children(node) if child.type == "where_clause"),
             None,
         )
 
@@ -745,6 +825,10 @@ class _RustBindings:
                 for generic in records:
                     if (
                         generic.binding.kind != "generic_parameter"
+                        or (
+                            generic.owner_function
+                            and generic.owner_function != record.binding.id
+                        )
                         or generic.binding.id in inherited_generics
                         or generic.binding.scope is None
                         or not (
@@ -768,7 +852,7 @@ class _RustBindings:
             for parameter in self._children(parameters):
                 self._generic_references(parameter.child_by_field_name("type"))
         self._generic_references(node.child_by_field_name("return_type"))
-        self._generic_references(node.child_by_field_name("where_clause"))
+        self._generic_references(self._where_clause(node))
         if body is not None:
             parameter_scope = self.span(body)
             if parameters is not None:
@@ -823,6 +907,7 @@ class _RustBindings:
             return [record.binding.id]
         pattern = node.child_by_field_name("pattern")
         annotation = node.child_by_field_name("type")
+        self._generic_references(annotation)
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         identifiers = []
         names = self._pattern_names(pattern, scope)
@@ -849,6 +934,9 @@ class _RustBindings:
         self._record_macro_invocations(node)
         text = self.text(node).strip()
         if not text:
+            return _UNKNOWN
+        if node.type in {"scoped_identifier", "scoped_type_identifier"}:
+            self._record_qualified_path(node)
             return _UNKNOWN
         if text == "()":
             return TypeFact("unit", "()", 0, None, "")
@@ -955,11 +1043,33 @@ class _RustBindings:
             )
             return []
         if pattern.type == "mut_pattern":
-            mutable_bindings = []
-            for child in self._children(pattern):
-                if child.type != "mutable_specifier":
-                    mutable_bindings.extend(self._pattern_names(child, scope, True))
-            return mutable_bindings
+            inner = next(
+                (
+                    child
+                    for child in self._children(pattern)
+                    if child.type != "mutable_specifier"
+                ),
+                None,
+            )
+            if inner is None:
+                return []
+            names = self._pattern_names(inner, scope)
+            if inner.type in {"identifier", "self"}:
+                return [(name, True) for name, _mutable in names]
+            if inner.type == "captured_pattern":
+                capture = next(
+                    (
+                        child
+                        for child in self._children(inner)
+                        if child.type in {"identifier", "self"}
+                    ),
+                    None,
+                )
+                return [
+                    (name, name == capture or name_mutable)
+                    for name, name_mutable in names
+                ]
+            return names
         if pattern.type == "tuple_struct_pattern":
             tuple_struct_bindings: list[tuple[Any, bool]] = []
             constructor = pattern.child_by_field_name("type")
@@ -974,11 +1084,11 @@ class _RustBindings:
             return tuple_struct_bindings
         if pattern.type == "field_pattern":
             value = pattern.child_by_field_name("pattern")
-            field_mutable = mutable or any(
+            field_mutable = any(
                 child.type == "mutable_specifier" for child in self._children(pattern)
-            ) or _has_keyword(self.text(pattern), "mut")
+            )
             if value is not None:
-                return self._pattern_names(value, scope, field_mutable)
+                return self._pattern_names(value, scope)
             field = next(
                 (
                     node
@@ -1161,7 +1271,7 @@ class _RustBindings:
     def _reference(self, node: Any, kind: str = "read", namespace: str = "value") -> _Record | None:
         name = self._normalize_identifier(self.text(node))
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
-            self.unresolved.append(Unresolved(self.span(node), name, "qualified_path"))
+            self._record_qualified_path(node)
             return None
         record, boundary = self._lookup_with_boundary(name, node.start_byte, namespace)
         if record is not None:
@@ -1171,12 +1281,22 @@ class _RustBindings:
         self.unresolved.append(Unresolved(self.span(node), name, reason))
         return None
 
+    def _record_qualified_path(self, node: Any) -> None:
+        unresolved = Unresolved(
+            self.span(node),
+            self._normalize_identifier(self.text(node)),
+            "qualified_path",
+        )
+        if unresolved not in self.unresolved:
+            self.unresolved.append(unresolved)
+
     def _let(self, node: Any, scope: _Scope) -> None:
         pattern = node.child_by_field_name("pattern")
         value = node.child_by_field_name("value")
         annotation = node.child_by_field_name("type")
         if value is not None:
             self._expr(value)
+        self._generic_references(annotation)
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         alternative = node.child_by_field_name("alternative")
         if alternative is not None:
@@ -1215,7 +1335,11 @@ class _RustBindings:
             self._reference(node)
             return
         if kind in {"scoped_identifier", "scoped_type_identifier", "generic_function"}:
-            self.unresolved.append(Unresolved(self.span(node), self.text(node), "qualified_path"))
+            self._record_qualified_path(node)
+            return
+        if kind == "type_cast_expression":
+            self._expr(node.child_by_field_name("value"))
+            self._generic_references(node.child_by_field_name("type"))
             return
         if kind == "call_expression":
             self._call(node)
@@ -1231,7 +1355,14 @@ class _RustBindings:
         if kind == "struct_expression":
             name_node = node.child_by_field_name("name")
             if name_node is not None:
-                self._reference(name_node, "read", "type")
+                path_node = name_node
+                if name_node.type in {"generic_type", "generic_type_with_turbofish"}:
+                    self._generic_references(
+                        name_node.child_by_field_name("type_arguments")
+                    )
+                    path_node = name_node.child_by_field_name("type")
+                if path_node is not None:
+                    self._reference(path_node, "read", "type")
             fields = node.child_by_field_name("body")
             if fields is not None:
                 for initializer in self._children(fields):
@@ -1573,6 +1704,7 @@ class _RustBindings:
             self.unresolved.append(Unresolved(self.span(callee), self.text(callee), "qualified_path"))
             kind = "opaque_path"
         elif callee is not None and callee.type == "generic_function":
+            self._generic_references(callee.child_by_field_name("type_arguments"))
             inner = callee.child_by_field_name("function")
             if inner is not None and inner.type == "identifier":
                 record = self._reference(inner, "call")
@@ -1632,6 +1764,7 @@ class _RustBindings:
         self.calls.append(Call(span, args, self.call_owner, target, kind))
 
     def _method_call(self, node: Any) -> None:
+        self._generic_references(node.child_by_field_name("type_arguments"))
         receiver = node.child_by_field_name("receiver")
         if receiver is None:
             children = self._children(node)
