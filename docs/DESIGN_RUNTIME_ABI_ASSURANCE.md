@@ -159,6 +159,8 @@ attestation) is absorbed into Option A's invocation envelope.
 - An instruction-level lifter or machine-code TV profile becomes
   available → Option B replaces the observation layer as the honest
   `abi_runtime_semantics` claim.
+  The agent-side consumption design is in
+  [`DESIGN_OBJECT_TV_CONSUMPTION.md`](DESIGN_OBJECT_TV_CONSUMPTION.md).
 - Multiple pinned invocations (argv/env matrices) enter the record →
   `runtime_observation_semantics` splits into per-invocation checks.
 
