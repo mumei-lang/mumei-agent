@@ -4524,6 +4524,16 @@ an array (`a[i][j] = v` on `[N][M][]T` stays inline; a
 slice level anywhere in the chain leaves the conflated
 holder model).
 
+Local struct literals link tracked collection-valued fields
+to the same slots used by field extraction and assignment
+(`s := S{A: a}`, including positional and nested literals);
+copies of memory-sharing structs retain those slots. Writes
+through effectful call arguments, receivers, and collection
+field arguments flow to the slot holders and later field
+reads. Plain array fields and scalar-only structs remain
+value copies. Pointer-root or otherwise untracked field shapes
+stay closed rather than inventing a backing relationship.
+
 ### C07 per-statement read attribution
 
 `FunctionSummary` now also emits `statement_reads`: one

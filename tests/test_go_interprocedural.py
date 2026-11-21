@@ -30072,6 +30072,389 @@ def test_scalar_container_alias_field_slot(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Literal field initialization and extraction share one backing.
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\ts := S{A: a}\n"
+        "\tb := s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+        # Positional composite elements use the same field slot.
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\ts := S{a}\n"
+        "\tb := s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+        # `var s = S{...}` links the literal donor too.
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\tvar s = S{A: a}\n"
+        "\ta[0] = x\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+        # Reseating a local struct from a literal links its fields.
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\tvar s S\n"
+        "\ts = S{A: a}\n"
+        "\ta[0] = x\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+        # Nested struct literals link the leaf slot under the outer root.
+        "type W struct { A []int64 }\n"
+        "type S struct { W W }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\ts := S{W: W{A: a}}\n"
+        "\ta[0] = x\n"
+        "\tb := s.W.A\n"
+        "\treturn b[0]\n}\n",
+        # Both directions of the reported literal-alias probes.
+        "type S struct { A []int64; V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\ts := S{A: a}\n"
+        "\tb := s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a[0]\n}\n",
+        "type S struct { A []int64; V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta := make([]int64, 1)\n"
+        "\ts := S{A: a}\n"
+        "\ta[0] = x\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+    ],
+)
+def test_struct_literal_collection_fields_share_with_donors(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # Writes through a local struct argument reach post-call extraction.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\tG(s, x)\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A field extraction before the call remains a holder of the slot.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\tb := s.A\n"
+            "\tG(s, x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A donor linked by a literal sees writes through the struct.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 1)\n"
+            "\ts := S{A: a}\n"
+            "\tG(s, x)\n"
+            "\treturn a[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Value-receiver method arguments route through the same write fold.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func (s S) M(x int64) { a := s.A; a[0] = x }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\ts.M(x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The asynchronous call path also stores through the same backing.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\tgo G(s, x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Nested, nested-slice, and map fields use the same holder logic.
+        (
+            "type W struct { A []int64 }\n"
+            "type S struct { W W }\n"
+            "func G(s S, x int64) { a := s.W.A; a[0] = x }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{W: W{A: make([]int64, 1)}}\n"
+        "\tG(s, x)\n"
+        "\tb := s.W.A\n"
+        "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A [][]int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0][0] = x }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: [][]int64{{0}}}\n"
+        "\tG(s, x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { A [1][]int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0][0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: [1][]int64{make([]int64, 1)}}\n"
+            "\tG(s, x)\n"
+            "\tb := s.A\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "type S struct { M map[int]int64 }\n"
+            "func G(s S, x int64) { m := s.M; m[0] = x }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{M: map[int]int64{}}\n"
+        "\tG(s, x)\n"
+        "\tm := s.M\n"
+        "\treturn m[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A struct copy shares its collection-field backing.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\tt := s\n"
+        "\tG(t, x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Interface dispatch carries the struct value argument to the write fold.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "type I interface { M(S, int64) }\n"
+            "func F(i I, x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\ti.M(s, x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Preserved coarse precision for a scalar field after a shared-field write.
+        (
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\tG(s, x)\n"
+            "\treturn s.V\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_effectful_calls_store_through_struct_collection_fields(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+def test_struct_field_argument_writes_reach_field_holders(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func H(a []int64, x int64) { a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\tH(s.A, x)\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_collection_field_write_negatives_and_param_control(
+    go_types_helper,
+):
+    field_assignment = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 1)\n"
+            "\tvar s S\n"
+            "\ts.A = a\n"
+            "\ta[0] = x\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    assert field_assignment.available
+    assert field_assignment.return_dependencies == frozenset({0})
+
+    slice_of_struct = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func G(ss []S, x int64) { a := ss[0].A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 1)\n"
+            "\tss := []S{{A: a}}\n"
+            "\tG(ss, x)\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert slice_of_struct.available
+    assert slice_of_struct.return_dependencies == frozenset({0})
+
+    array_copy = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A [1]int64 }\n"
+            "func G(s S, x int64) { s.A[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{}\n"
+            "\tb := s.A\n"
+            "\tG(s, x)\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    if array_copy.available:
+        assert 0 not in array_copy.return_dependencies
+    else:
+        assert any(
+            gap.reason in {"callee_unsupported", "unsupported_expression"}
+            for gap in array_copy.gaps
+        )
+
+    scalar_only = named(
+        *unit(
+            go_types_helper,
+            "type S struct { V int64 }\n"
+            "func G(s S, x int64) { s.V = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{}\n"
+            "\tG(s, x)\n"
+            "\treturn s.V\n}\n",
+        )
+    )
+    assert scalar_only.available
+    assert 0 not in scalar_only.return_dependencies
+
+    reseated = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 1)\n"
+            "\ts := S{A: a}\n"
+            "\ts.A = make([]int64, 1)\n"
+            "\tb := s.A\n"
+            "\tb[0] = x\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert reseated.available
+    assert 0 not in reseated.return_dependencies
+
+    parameter_struct = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\tG(s, x)\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    assert parameter_struct.available
+    assert parameter_struct.return_dependencies == frozenset({0})
+
+    assigned_copy = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func G(s S, x int64) { a := s.A; a[0] = x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := S{A: make([]int64, 1)}\n"
+            "\tvar t S\n"
+            "\tt = s\n"
+            "\tG(t, x)\n"
+            "\tb := s.A\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    assert assigned_copy.available
+    assert assigned_copy.return_dependencies == frozenset({0})
+
+
+def test_imported_struct_and_field_arguments_store_collection_writes(
+    go_types_helper,
+):
+    files = {
+        "main.go": "package p\n"
+        "import \"lib\"\n"
+        "type S struct { A []int64; V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\tlib.G(s, x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n"
+        "func H(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\tlib.H(s.A, x)\n"
+        "\tb := s.A\n"
+        "\treturn b[0]\n}\n",
+    }
+    imported = {
+        "lib": {
+            "lib.go": "package lib\n"
+            "func G(s any, x int64) {}\n"
+            "func H(a []int64, x int64) {}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imported),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    for name in ("F", "H"):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+
+
 def test_scalar_container_literal_elem_operand(go_types_helper):
     # `s := []St{{F: v}}` — a field operand embedded in the element
     # literal shares `v`'s backing, so `v[0] = x` must reach the
