@@ -70,6 +70,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "object_symbol_correspondence",
             "object_translation_correspondence",
             "machine_code_leaf_function_tv",
+            "machine_code_direct_call_site_tv",
         }
     )
     assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)
@@ -685,7 +686,10 @@ def test_native_object_recheck_report_is_not_a_recovery_performer():
             "object_call_edge_correspondence",
             "object_link_correspondence",
         ],
-        checks_not_performed=["object_translation_correspondence"],
+        checks_not_performed=[
+            "machine_code_direct_call_site_tv",
+            "object_translation_correspondence",
+        ],
         normalized={"stdout": {"sha256": "b" * 64}},
     )
     evaluation = evaluate_unperformed_check_recovery(
@@ -715,7 +719,10 @@ def test_native_machine_tv_recheck_report_is_not_a_recovery_performer():
             "object_link_correspondence",
             "machine_code_leaf_function_tv",
         ],
-        checks_not_performed=["object_translation_correspondence"],
+        checks_not_performed=[
+            "machine_code_direct_call_site_tv",
+            "object_translation_correspondence",
+        ],
         function_outcomes={
             "equivalent_within_profile": 1,
             "outside_profile": 1,

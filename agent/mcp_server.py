@@ -4446,17 +4446,18 @@ def native_machine_tv_recheck(
     expected_build_id: str,
     attempt_timeout_ms: int = 60000,
 ) -> str:
-    """Check bounded leaf-function machine-code TV (C10).
+    """Check bounded straight-line machine-code TV, including direct calls.
 
     Runs `native-bundle recheck-machine-tv --json` as one declared attempt —
     the same wiring as the `native-machine-tv-recheck` CLI route. Core runs
     the object reproduction and correspondence pipeline, then checks
-    leaf straight-line functions against pure-i64 source models under an
-    assumed register convention. Only object checks listed in a matching
+    straight-line functions against pure-i64 source models under an assumed
+    register convention; direct calls are compared as uninterpreted sites.
+    Only object checks listed in a matching
     `mumei.machine-code-tv/v1` descriptor are discharged. The report counts
     function outcomes without exposing function names, and echoes convention
     and input-domain fields only when they are strings of at most 256
-    characters. Non-leaf functions, the C `main` wrapper, CRT, loader and
+    characters. Branching functions, the C `main` wrapper, CRT, loader and
     libc are outside the profile; this is not an ABI, runtime or full object
     translation claim, and `object_translation_correspondence` stays
     unperformed. The report is not a recovery performer.
