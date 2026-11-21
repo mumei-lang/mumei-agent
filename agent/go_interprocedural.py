@@ -5535,6 +5535,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         transfers: list[CallTransfer],
         count: list[int],
         conditional: bool,
+        preserve_chan_alias: bool,
     ) -> None:
         """Bind a select receive's LHS names inside the chosen case.
 
@@ -5777,7 +5778,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         binding,
                         local_chan_chan_root,
                         old_root
-                        if (conditional or self._may_skip > 0)
+                        if (preserve_chan_alias or self._may_skip > 0)
                         and old_root != binding.id
                         else None,
                     )
@@ -16403,7 +16404,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._select_receive_store(
                             lefts, recv, recv_deps, clause, fn,
                             params, branch, transfers, count,
-                            conditional or len(clauses) > 1,
+                            conditional,
+                            preserve_chan_alias=(
+                                conditional or len(clauses) > 1
+                            ),
                         )
                     body = next(
                         (

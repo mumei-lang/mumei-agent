@@ -18800,6 +18800,29 @@ def test_select_receive_binds_queue_deps(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_select_receive_strongly_updates_scalar_assignment(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(p, q int64) int64 {\n"
+            "\tch := make(chan int64, 1)\n"
+            "\tch <- q\n"
+            "\tv := p\n"
+            "\tselect {\n"
+            "\tcase v = <-ch:\n"
+            "\t\treturn v\n"
+            "\tdefault:\n"
+            "\t\treturn 0\n"
+            "\t}\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
 def test_select_comma_ok_and_assign_forms(go_types_helper):
     result = named(
         *unit(
