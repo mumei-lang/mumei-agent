@@ -2988,8 +2988,9 @@ def signature_verify(
     """Verify a declared envelope under caller-declared Ed25519 keys.
 
     This performs Ed25519 verification under the supplied public keys
-    without running Core or spawning a subprocess. It preserves
-    `checks_not_performed` verbatim and adds no authority. This is not
+    without running Core or spawning a subprocess. Only
+    `signature_verification` can leave `checks_not_performed`, exactly as
+    in the CLI route; it adds no authority. This is not
     Evidence acceptance, a verdict, or grade promotion.
 
     Args:
