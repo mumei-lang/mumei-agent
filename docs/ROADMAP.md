@@ -6994,6 +6994,24 @@ mid-run input drift claims no outcome. The report is deliberately not a
 register-allocation, general linker-semantics, ABI, runtime or
 historical-execution claim.
 
+### C10 Option B native-machine-tv-recheck route
+
+`python -m agent native-machine-tv-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` runs Core's
+`native-bundle recheck-machine-tv --expected-build-id <id> --json <bundle>
+<source>` in the C11 declared-attempt lifecycle. A `checked` result always
+discharges `artifact_semantics` and `claim_truth`; object checks are added
+only from `checks_performed` in a matching `mumei.machine-code-tv/v1`
+descriptor with the declared build ID. The agent exposes only aggregate
+function-outcome counts, plus `register_convention_assumed` and
+`input_domain` when they are bounded strings. The profile covers leaf
+straight-line pure-i64 functions under an assumed register convention, not
+ABI or runtime semantics. Non-leaf functions, the C `main` wrapper, CRT,
+loader and libc are outside its scope, so
+`object_translation_correspondence` stays unperformed. Other outcomes leave
+the full C02 and object-check vocabularies unperformed; mid-run input drift
+claims no outcome. The report is not a `recovery-eval` performer.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

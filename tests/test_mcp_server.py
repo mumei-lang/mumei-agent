@@ -163,6 +163,7 @@ class TestGetAgentStatus:
         assert "native_observations_accept" in registered
         assert "native_observations_recheck" in registered
         assert "native_object_recheck" in registered
+        assert "native_machine_tv_recheck" in registered
         assert "send_latent_message" in registered
         assert "verify_code_spec_traceability" in registered
         assert "evidence_acceptance_eval" in registered

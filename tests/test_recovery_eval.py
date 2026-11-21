@@ -69,6 +69,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "object_link_correspondence",
             "object_symbol_correspondence",
             "object_translation_correspondence",
+            "machine_code_leaf_function_tv",
         }
     )
     assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)
@@ -686,6 +687,39 @@ def test_native_object_recheck_report_is_not_a_recovery_performer():
         ],
         checks_not_performed=["object_translation_correspondence"],
         normalized={"stdout": {"sha256": "b" * 64}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [evidence], record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {
+        check: "no_evidence" for check in sorted(OBJECT_CHECK_VOCABULARY)
+    }
+    assert evaluation["recovered"] == []
+    assert evaluation["unrecovered"] == sorted(OBJECT_CHECK_VOCABULARY)
+
+
+def test_native_machine_tv_recheck_report_is_not_a_recovery_performer():
+    build_id = "a" * 64
+    record = _record(*sorted(OBJECT_CHECK_VOCABULARY))
+    record["expected_build_id"] = build_id
+    evidence = _doc(
+        "mumei.native-machine-tv-recheck-report/v1",
+        machine_tv_recheck="checked",
+        machine_tv_schema="mumei.machine-code-tv/v1",
+        expected_build_id=build_id,
+        discharged_checks=[
+            "artifact_semantics",
+            "claim_truth",
+            "object_symbol_correspondence",
+            "object_call_edge_correspondence",
+            "object_link_correspondence",
+            "machine_code_leaf_function_tv",
+        ],
+        checks_not_performed=["object_translation_correspondence"],
+        function_outcomes={
+            "equivalent_within_profile": 1,
+            "outside_profile": 1,
+        },
     )
     evaluation = evaluate_unperformed_check_recovery(
         record, [evidence], record_digest="c" * 64,

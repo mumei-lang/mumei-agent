@@ -57,7 +57,8 @@ SOURCE = "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };\
 
 BASE_DISCHARGED = frozenset({"artifact_semantics", "claim_truth"})
 BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
-    "object_translation_correspondence"
+    "machine_code_leaf_function_tv",
+    "object_translation_correspondence",
 }
 EXPECTED_DISCHARGED = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
 
@@ -170,6 +171,26 @@ def test_corresponding_run_selects_descriptor_and_bounded_checks(
     assert "historical_execution" not in report["discharged_checks"]
     assert "defined_functions" not in report
     _assert_check_partition(report)
+
+
+def test_machine_tv_check_is_not_discharged_by_object_descriptor(
+    tmp_path, capsys
+):
+    descriptor = dict(DESCRIPTOR)
+    descriptor["checks_performed"] = [
+        *DESCRIPTOR["checks_performed"],
+        "machine_code_leaf_function_tv",
+    ]
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    expected = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
+    assert report["discharged_checks"] == sorted(expected)
+    assert "machine_code_leaf_function_tv" not in report["discharged_checks"]
+    _assert_check_partition(report, expected_discharged=expected)
 
 
 @pytest.mark.parametrize(

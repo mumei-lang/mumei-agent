@@ -1,0 +1,488 @@
+"""Route tests for ``native-machine-tv-recheck`` through the C11 lifecycle."""
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
+from agent.native_machine_tv_recheck import (
+    CHECK_VOCABULARY,
+    MACHINE_TV_SCHEMA,
+    build_machine_tv_recheck_parser,
+    main_machine_tv_recheck,
+)
+from agent.native_object_recheck import OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA
+
+BUILD_ID = "a" * 64
+SOURCE = (
+    "atom main() -> i64 requires: true; ensures: result == 7; "
+    "body: { 7 };\n"
+)
+DESCRIPTOR = {
+    "schema_version": MACHINE_TV_SCHEMA,
+    "scope": "test",
+    "build_id": BUILD_ID,
+    "register_convention_assumed": (
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
+    ),
+    "input_domain": "pure_i64_inputs",
+    "functions": {
+        "__mumei_user_main": {"outcome": "equivalent_within_profile"},
+        "main": {"outcome": "outside_profile", "reason": "wrapper"},
+    },
+    "checks_performed": [
+        "toolchain_object_executable_reproduction",
+        "object_symbol_correspondence",
+        "object_call_edge_correspondence",
+        "object_link_correspondence",
+        "machine_code_leaf_function_tv",
+    ],
+    "checks_not_performed": [
+        "machine_code_tv_non_leaf_functions",
+        "object_translation_correspondence",
+    ],
+}
+RECORD = {
+    "schema": "mumei.native-bundle/v1",
+    "files": {key: {} for key in FILE_MEMBERS},
+}
+BASE_DISCHARGED = frozenset({"artifact_semantics", "claim_truth"})
+OBJECT_MACHINE_CHECKS = OBJECT_CHECK_VOCABULARY - {
+    "object_translation_correspondence"
+}
+ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
+EXPECTED_CHECKED = BASE_DISCHARGED | OBJECT_MACHINE_CHECKS
+
+
+def _write_core(tmp_path: Path, exit_code: int = 0, stdout=DESCRIPTOR) -> Path:
+    core = tmp_path / "mumei-stub"
+    output = stdout if isinstance(stdout, str) else json.dumps(stdout)
+    core.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "native-bundle" ] && [ "$2" = "recheck-machine-tv" ]; then\n'
+        '    if [ "$3" != "--expected-build-id" ]; then exit 2; fi\n'
+        f'    if [ "$4" != "{BUILD_ID}" ]; then exit 1; fi\n'
+        '    if [ "$5" != "--json" ]; then exit 2; fi\n'
+        f"    exit_code={exit_code}\n"
+        '    if [ "$exit_code" = "0" ]; then\n'
+        f"        printf '%s' '{output}'\n"
+        "    fi\n"
+        '    exit "$exit_code"\n'
+        "fi\n"
+        "exit 2\n"
+    )
+    core.chmod(0o755)
+    return core
+
+
+def _write_bundle(tmp_path: Path) -> Path:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / RECORD_FILE).write_text(json.dumps(RECORD))
+    for name in FILE_MEMBERS.values():
+        (bundle / name).write_text(f"bytes of {name}")
+    return bundle
+
+
+def _write_source(tmp_path: Path) -> Path:
+    source = tmp_path / "native-source.mm"
+    source.write_text(SOURCE)
+    return source
+
+
+def _args(core: Path, bundle: Path, source: Path, extra=()):
+    return [
+        "--core",
+        str(core),
+        "--bundle",
+        str(bundle),
+        "--source",
+        str(source),
+        "--expected-build-id",
+        BUILD_ID,
+        "--attempt-timeout",
+        "60000",
+        *extra,
+    ]
+
+
+def _run(capsys, argv):
+    try:
+        code = main_machine_tv_recheck(
+            build_machine_tv_recheck_parser().parse_args(argv)
+        )
+    except SystemExit as exc:
+        code = exc.code
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _assert_partition(report, expected_discharged=frozenset()):
+    assert report["expected_build_id"] == BUILD_ID
+    assert set(report.get("discharged_checks", [])) == set(expected_discharged)
+    assert report["checks_not_performed"] == sorted(
+        ALL_CHECKS - set(expected_discharged)
+    )
+
+
+def test_checked_descriptor_discharges_listed_checks_and_reports_aggregates(
+    tmp_path, capsys
+):
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["schema_version"] == (
+        "mumei.native-machine-tv-recheck-report/v1"
+    )
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["machine_tv_schema"] == MACHINE_TV_SCHEMA
+    assert report["register_convention_assumed"] == DESCRIPTOR[
+        "register_convention_assumed"
+    ]
+    assert report["input_domain"] == "pure_i64_inputs"
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 1,
+        "outside_profile": 1,
+    }
+    assert "__mumei_user_main" not in out
+    assert "main" not in report
+    assert report["discharged_checks"] == sorted(EXPECTED_CHECKED)
+    assert "object_translation_correspondence" not in report["discharged_checks"]
+    assert report["sequence"]["selected_result"] is not None
+    _assert_partition(report, EXPECTED_CHECKED)
+
+
+def test_descriptor_without_equivalent_function_leaves_leaf_tv_unperformed(
+    tmp_path, capsys
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "functions": {"main": {"outcome": "outside_profile"}},
+        "checks_performed": [
+            "toolchain_object_executable_reproduction",
+            "object_symbol_correspondence",
+            "object_call_edge_correspondence",
+            "object_link_correspondence",
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    expected = BASE_DISCHARGED | (
+        OBJECT_MACHINE_CHECKS - {"machine_code_leaf_function_tv"}
+    )
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 0,
+        "outside_profile": 1,
+    }
+    assert "machine_code_leaf_function_tv" not in report["discharged_checks"]
+    _assert_partition(report, expected)
+
+
+def test_descriptor_cannot_discharge_full_object_translation(tmp_path, capsys):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [
+            "machine_code_leaf_function_tv",
+            "object_translation_correspondence",
+            "unknown_check",
+            7,
+            None,
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    expected = BASE_DISCHARGED | {"machine_code_leaf_function_tv"}
+    assert report["discharged_checks"] == sorted(expected)
+    assert "object_translation_correspondence" not in report["discharged_checks"]
+    _assert_partition(report, expected)
+
+
+@pytest.mark.parametrize("checks_performed", [None, {"not": "a list"}])
+def test_non_list_checks_performed_discharge_no_object_checks(
+    tmp_path, capsys, checks_performed
+):
+    descriptor = {**DESCRIPTOR, "checks_performed": checks_performed}
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["machine_tv_schema"] == MACHINE_TV_SCHEMA
+    _assert_partition(report, BASE_DISCHARGED)
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        {
+            "schema_version": OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA,
+            "build_id": BUILD_ID,
+            "checks_performed": ["machine_code_leaf_function_tv"],
+        },
+        {"schema_version": "mumei.other/v1", "build_id": BUILD_ID},
+        {"schema_version": MACHINE_TV_SCHEMA, "build_id": "b" * 64},
+        "not-json",
+        ["not", "an", "object"],
+    ],
+)
+def test_descriptor_schema_and_build_id_gate_machine_tv_fields(
+    tmp_path, capsys, stdout
+):
+    core = _write_core(tmp_path, stdout=stdout)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["machine_tv_recheck"] == "checked"
+    assert "machine_tv_schema" not in report
+    assert "register_convention_assumed" not in report
+    assert "input_domain" not in report
+    assert "function_outcomes" not in report
+    assert report["discharged_checks"] == sorted(BASE_DISCHARGED)
+    _assert_partition(report, BASE_DISCHARGED)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("register_convention_assumed", "x" * 257),
+        ("register_convention_assumed", 7),
+        ("input_domain", "x" * 257),
+        ("input_domain", None),
+    ],
+)
+def test_descriptor_strings_are_echoed_only_when_bounded(
+    tmp_path, capsys, field, value
+):
+    descriptor = {**DESCRIPTOR, field: value}
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert field not in report
+    assert report["machine_tv_schema"] == MACHINE_TV_SCHEMA
+    _assert_partition(report, EXPECTED_CHECKED)
+
+
+def test_function_outcomes_ignore_malformed_entries(tmp_path, capsys):
+    descriptor = {
+        **DESCRIPTOR,
+        "functions": {
+            "eq": {"outcome": "equivalent_within_profile"},
+            "outside": {"outcome": "outside_profile"},
+            "list": [],
+            "malformed_outcome": {"outcome": []},
+            "other": {"outcome": "different"},
+        },
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 1,
+        "outside_profile": 1,
+    }
+    assert '"eq":' not in out and '"outside":' not in out
+
+
+def test_non_dict_functions_omits_aggregate_field(tmp_path, capsys):
+    descriptor = {**DESCRIPTOR, "functions": ["not", "a", "map"]}
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert "function_outcomes" not in report
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "outcome"),
+    [(3, "inconclusive"), (1, None), (2, None), (7, None)],
+)
+def test_exit_mapping(tmp_path, capsys, exit_code, outcome):
+    core = _write_core(tmp_path, exit_code=exit_code)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    if outcome is None:
+        assert "machine_tv_recheck" not in report
+    else:
+        assert report["machine_tv_recheck"] == outcome
+    assert "discharged_checks" not in report
+    assert report["normalized"]["exit_code"] == exit_code
+    _assert_partition(report)
+
+
+def test_wrong_build_id_has_no_outcome_or_discharges(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    argv = _args(core, bundle, source)
+    wrong_id = "b" * 64
+    argv[argv.index("--expected-build-id") + 1] = wrong_id
+    code, out, _ = _run(capsys, argv)
+    assert code == 0
+    report = json.loads(out)
+    assert report["expected_build_id"] == wrong_id
+    assert "machine_tv_recheck" not in report
+    assert "discharged_checks" not in report
+    assert report["normalized"]["exit_code"] == 1
+    assert report["checks_not_performed"] == sorted(ALL_CHECKS)
+
+
+def test_inputs_changed_suppresses_machine_tv_outcome(
+    tmp_path, capsys, monkeypatch
+):
+    from agent import native_machine_tv_recheck as route
+
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    original = route._attempt_fingerprint
+    calls = 0
+
+    def change_member(args, members):
+        nonlocal calls
+        if calls:
+            (bundle / next(iter(FILE_MEMBERS.values()))).write_text("changed")
+        calls += 1
+        return original(args, members)
+
+    monkeypatch.setattr(route, "_attempt_fingerprint", change_member)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "machine_tv_recheck" not in report
+    assert "discharged_checks" not in report
+    _assert_partition(report)
+
+
+def test_cli_dispatch(tmp_path):
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent",
+            "native-machine-tv-recheck",
+            "--core",
+            str(core),
+            "--bundle",
+            str(bundle),
+            "--source",
+            str(source),
+            "--expected-build-id",
+            BUILD_ID,
+            "--attempt-timeout",
+            "60000",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["machine_tv_schema"] == MACHINE_TV_SCHEMA
+
+
+def test_mcp_tool_dispatch(tmp_path):
+    from agent import mcp_server
+
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    result = json.loads(
+        mcp_server.native_machine_tv_recheck(
+            str(core), str(bundle), str(source), BUILD_ID
+        )
+    )
+    assert result["status"] == "ok"
+    assert result["report"]["machine_tv_recheck"] == "checked"
+
+
+@pytest.fixture
+def real_core():
+    path = os.environ.get("MUMEI_BIN")
+    if path and Path(path).is_absolute() and Path(path).is_file():
+        return path
+    found = shutil.which("mumei")
+    if found:
+        return found
+    pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+
+
+def _build_real_bundle(tmp_path: Path, real_core: str) -> tuple[Path, Path]:
+    source = _write_source(tmp_path)
+    bundle = tmp_path / "real-bundle"
+    built = subprocess.run(
+        [real_core, "native-bundle", "build", str(source), "-o", str(bundle)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if built.returncode != 0:
+        if "unsupported host for first native profile" in built.stderr:
+            pytest.skip("native-bundle build needs linux/x86_64")
+        pytest.fail(f"native-bundle build failed: {built.stderr}")
+    return bundle, source
+
+
+@pytest.mark.integration
+def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core):
+    bundle, source = _build_real_bundle(tmp_path, real_core)
+    build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
+    argv = _args(Path(real_core), bundle, source)
+    argv[argv.index("--expected-build-id") + 1] = build_id
+    code, out, err = _run(capsys, argv)
+    assert code == 0, err
+    report = json.loads(out)
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["expected_build_id"] == build_id
+    assert report["machine_tv_schema"] == MACHINE_TV_SCHEMA
+    assert report["register_convention_assumed"] == (
+        "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_result_rax"
+    )
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 1,
+        "outside_profile": 1,
+    }
+    assert "machine_code_leaf_function_tv" in report["discharged_checks"]
+    assert "object_translation_correspondence" not in report["discharged_checks"]
+    assert "machine_code_tv_non_leaf_functions" not in report["discharged_checks"]
+    assert report["discharged_checks"] == sorted(EXPECTED_CHECKED)
+    assert report["checks_not_performed"] == sorted(
+        ALL_CHECKS - EXPECTED_CHECKED
+    )
