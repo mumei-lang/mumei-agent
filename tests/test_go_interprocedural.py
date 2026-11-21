@@ -20680,6 +20680,31 @@ def test_chan_elem_array(go_types_helper, declarations, expected):
             "\treturn <-GS[0]\n}\n",
             frozenset({0, 1}),
         ),
+        # A callee's `GS[0] <- x` touches an external container's
+        # element queue — the caller's `<-GS[0]` observes the
+        # argument deps the callee broadcast.
+        (
+            "var GS []chan int64\n"
+            "func Put(x int64) {\n"
+            "\tGS[0] <- x\n"
+            "}\n"
+            "func F(p *int64) int64 {\n"
+            "\tPut(*p)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `GS[i] = c` hands `c`'s queue to caller-visible state —
+        # `c` promotes like `cc <- ch` does, so a later `<-c`
+        # observes the element send.
+        (
+            "var GS []chan int64\n"
+            "func F(p *int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tGS[0] = c\n"
+            "\tGS[0] <- *p\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_chan_elem_external(go_types_helper, declarations, expected):
@@ -20687,6 +20712,36 @@ def test_chan_elem_external(go_types_helper, declarations, expected):
     assert result.available
     assert result.return_dependencies == expected
     assert any(t.imported for t in result.calls)
+
+
+def test_chan_elem_external_pins_container_type(go_types_helper):
+    # The operand's WHOLE container fact pins — a named container
+    # type's redeclare churns its identity, so an unchanged-looking
+    # `GS[i]` op must flag the summary stale.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type CS []chan int64\n"
+        "var GS CS\n"
+        "func F(x int64) int64 {\n"
+        "\tGS[0] <- x\n"
+        "\treturn <-GS[0]\n}\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    _src2, snapshot2, _ = unit(
+        go_types_helper,
+        "type CS []chan string\n"
+        "var GS CS\n"
+        "func F(x int64) int64 {\n"
+        "\treturn x\n}\n",
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
 def test_chan_elem_external_close(go_types_helper):

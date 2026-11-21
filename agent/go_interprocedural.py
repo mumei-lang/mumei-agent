@@ -5869,6 +5869,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or not self._scalar_chan_fact(elem)
         ):
             return None
+        # Pin the WHOLE container fact — the element pin alone leaves
+        # the named container type and a map's key type unpinned, so
+        # redeclaring either would leave summaries reporting current
+        # while the operand's shape changed under them.
+        self._pin_fact_identities(fact)
         return container[0], elem, index
 
     def _scalar_chan_fact(self, fact: Any) -> bool:
