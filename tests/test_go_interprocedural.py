@@ -17467,6 +17467,58 @@ def test_external_chan_chan_container_extraction_and_range(
     assert ranged.effects == "unknown"
 
 
+@pytest.mark.parametrize("copy_kind", ["short_declaration", "assignment"])
+@pytest.mark.parametrize("send_through_copy", [False, True])
+@pytest.mark.parametrize(
+    ("container_type", "literal", "element"),
+    [
+        (
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "0",
+        ),
+        (
+            "[1]chan chan int64",
+            "[1]chan chan int64{q}",
+            "0",
+        ),
+        (
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "0",
+        ),
+    ],
+)
+def test_chan_chan_container_copy_shares_queue_group(
+    go_types_helper,
+    copy_kind,
+    send_through_copy,
+    container_type,
+    literal,
+    element,
+):
+    if copy_kind == "short_declaration":
+        copy = "\tt := s\n"
+    else:
+        copy = f"\tvar t {container_type}\n\tt = s\n"
+    sender = "t" if send_through_copy else "s"
+    receiver = "s" if send_through_copy else "t"
+    source = (
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tq := make(chan chan int64, 1)\n"
+        f"\ts := {literal}\n"
+        + copy
+        + f"\t{sender}[{element}] <- c\n"
+        + f"\treturn <-(<-{receiver}[{element}])\n"
+        + "}\n"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 @pytest.mark.parametrize(
     ("container_type", "index"),
     [
