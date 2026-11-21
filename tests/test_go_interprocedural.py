@@ -15389,6 +15389,33 @@ def test_local_chan_chan_group_keeps_imported_member_external(
     assert any(call.imported for call in result.calls)
 
 
+@pytest.mark.parametrize(
+    "case, src, expected, effects",
+    [
+        (
+            "multi-value var declaration keeps a callee result external",
+            "func G(p int64) (int64, chan chan int64) {\n"
+            "\treturn p, make(chan chan int64)\n"
+            "}\n"
+            "func F(p int64) int64 {\n"
+            "\tvar n, cc = G(p)\n"
+            "\t_ = cc\n"
+            "\treturn n\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+    ],
+)
+def test_local_chan_chan_review_regressions(
+    go_types_helper, case, src, expected, effects
+):
+    result = named(*unit(go_types_helper, src))
+    assert result.available, case
+    assert result.return_dependencies == expected, case
+    assert result.effects == effects, case
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
     # Local queues cannot escape the share-group model or become
     # caller-visible through deeper channel nesting.

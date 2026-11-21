@@ -10689,6 +10689,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     elif (
                         binding.type.kind == "chan"
                         and value_nodes
+                        and len(value_nodes) == len(names)
                         and not self._is_make_chan_call(value_nodes[i])
                     ):
                         chan_alias = self._chan_alias_target(
@@ -10792,8 +10793,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._chan_chan_fact(binding.type)
                         and (
                             not value_nodes
-                            or self._is_make_chan_call(
-                                value_nodes[i]
+                            or (
+                                len(value_nodes) == len(names)
+                                and self._is_make_chan_call(
+                                    value_nodes[i]
+                                )
                             )
                         )
                     ):
