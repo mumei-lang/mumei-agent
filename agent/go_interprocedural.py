@@ -5977,7 +5977,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._package_level(binding)
                         or binding.scope is None
                     )
-                    and self._scalar_chan_fact(binding.type)
+                    and (
+                        self._scalar_chan_fact(binding.type)
+                        or self._chan_elem_collection(binding.type)
+                    )
                 )
             )
         ):
@@ -5986,6 +5989,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         return member is not None and (
             self._scalar_chan_fact(member.type)
             or self._chan_chan_fact(member.type)
+            or self._chan_elem_collection(member.type)
         )
 
     def _chan_chan_id(self, target_id: str) -> bool:
