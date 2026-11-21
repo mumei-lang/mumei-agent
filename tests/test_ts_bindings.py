@@ -380,6 +380,98 @@ const flag: boolean = true;
     assert (flag.type.kind, flag.type.bit_width) == ("bool", 1)
 
 
+def test_type_facts_follow_lexical_scopes_and_enum_bindings():
+    source = """
+type Shadowed = number;
+interface Named {}
+enum Status { Outer }
+class Box {}
+namespace Inner {
+    type Shadowed = boolean;
+    interface Named {}
+    enum Status { Ready }
+    class Box {}
+    const namespaceAlias: Shadowed = true;
+    const namespaceInterface: Named = {} as Named;
+    const namespaceEnum: Status = Status.Ready;
+    const namespaceClass: Box = new Box();
+}
+function local() {
+    type Shadowed = bigint;
+    interface Named {}
+    enum Status { Local }
+    class Box {}
+    const functionAlias: Shadowed = 1n;
+    const functionInterface: Named = {} as Named;
+    const functionEnum: Status = Status.Local;
+    const functionClass: Box = new Box();
+}
+const outerAlias: Shadowed = 1;
+const outerInterface: Named = {} as Named;
+const outerEnum: Status = Status.Outer;
+const outerClass: Box = new Box();
+function localOnly() {
+    type LocalOnly = number;
+    const inside: LocalOnly = 1;
+}
+const outside: LocalOnly = 1;
+"""
+    report = build_ts_bindings(source)
+    aliases = _bindings(report, "Shadowed", "type_alias")
+    interfaces = _bindings(report, "Named", "interface")
+    enums = _bindings(report, "Status", "enum")
+    classes = _bindings(report, "Box", "class")
+    assert len(aliases) == len(interfaces) == len(enums) == len(classes) == 3
+    expected = {
+        "namespaceAlias": (aliases[1].id, "bool"),
+        "functionAlias": (aliases[2].id, "bigint"),
+        "outerAlias": (aliases[0].id, "float"),
+        "namespaceInterface": (interfaces[1].id, "named"),
+        "functionInterface": (interfaces[2].id, "named"),
+        "outerInterface": (interfaces[0].id, "named"),
+        "namespaceEnum": (enums[1].id, "named"),
+        "functionEnum": (enums[2].id, "named"),
+        "outerEnum": (enums[0].id, "named"),
+        "namespaceClass": (classes[1].id, "named"),
+        "functionClass": (classes[2].id, "named"),
+        "outerClass": (classes[0].id, "named"),
+    }
+    for name, (type_id, kind) in expected.items():
+        fact = _bindings(report, name, "local")[0].type
+        assert (fact.type_id, fact.kind) == (type_id, kind)
+    assert any(
+        item.name == "LocalOnly" and item.reason == "unknown_name"
+        for item in report.unresolved
+    )
+
+
+def test_composite_types_stay_unknown_and_keep_inner_type_references():
+    source = """
+type Atom = number;
+const array: Atom[] = [];
+const tuple: [Atom, number] = [1, 2];
+const union: Atom | string = 1;
+const generic: Array<Atom> = [];
+const object: { value: Atom } = { value: 1 };
+const callable: (input: Atom) => Atom = (input) => input;
+"""
+    report = build_ts_bindings(source)
+    atom = _bindings(report, "Atom", "type_alias")[0]
+    values = [
+        _bindings(report, name, "local")[0]
+        for name in ("array", "tuple", "union", "generic", "object", "callable")
+    ]
+    assert all(
+        (value.type.kind, value.type.bit_width, value.type.type_id)
+        == ("unknown", 0, "")
+        for value in values
+    )
+    atom_references = _refs(report, source, "Atom")
+    assert len(atom_references) == 7
+    assert all(reference.binding_id == atom.id for reference in atom_references)
+    assert all(reference.kind == "read" for reference in atom_references)
+
+
 def test_generic_parameters_shadow_outer_types_and_do_not_leak():
     source = """
 type T = number;
