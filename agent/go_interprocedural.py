@@ -24553,6 +24553,154 @@ class _Builder:
             stack.extend(_children(cur))
         return True
 
+    def _literal_invoked_synchronously(self, literal_node: Any) -> bool:
+        def synchronous_call(call: Any) -> bool:
+            parent = call.parent
+            while (
+                parent is not None
+                and parent.type == "parenthesized_expression"
+                and self._strip_parens(parent) == call
+            ):
+                parent = parent.parent
+            return parent is None or parent.type not in {
+                "go_statement",
+                "defer_statement",
+            }
+
+        parent = literal_node.parent
+        while (
+            parent is not None
+            and parent.type == "parenthesized_expression"
+            and self._strip_parens(parent) == literal_node
+        ):
+            parent = parent.parent
+        if parent is not None and parent.type == "call_expression":
+            function = self._strip_parens(
+                parent.child_by_field_name("function")
+            )
+            if function == literal_node and synchronous_call(parent):
+                return True
+
+        function_node = literal_node
+        while function_node is not None and function_node.type not in {
+            "function_declaration",
+            "method_declaration",
+        }:
+            function_node = function_node.parent
+        if function_node is None:
+            return False
+
+        binding_id = None
+        declaration = None
+        current = literal_node
+        while (
+            current is not None
+            and self.node_key(current) != self.node_key(function_node)
+        ):
+            parent = current.parent
+            if parent is None:
+                break
+            if parent.type == "short_var_declaration":
+                left = parent.child_by_field_name("left")
+                right = parent.child_by_field_name("right")
+                lefts = _children(left) if left is not None else []
+                rights = _children(right) if right is not None else []
+                if (
+                    len(lefts) == 1
+                    and lefts[0].type == "identifier"
+                    and len(rights) == 1
+                    and self._strip_parens(rights[0]) == literal_node
+                ):
+                    binding = self.bindings_by_span.get(
+                        self.node_key(lefts[0])
+                    )
+                    if binding is not None:
+                        binding_id = binding.id
+                        declaration = parent
+                        break
+            elif parent.type == "var_spec":
+                names = [
+                    child
+                    for index, child in enumerate(parent.children)
+                    if parent.field_name_for_child(index) == "name"
+                    and child.type == "identifier"
+                ]
+                values = [
+                    child
+                    for index, child in enumerate(parent.children)
+                    if parent.field_name_for_child(index) == "value"
+                ]
+                rights = [
+                    value_child
+                    for value in values
+                    for value_child in _children(value)
+                ]
+                if (
+                    len(names) == 1
+                    and len(rights) == 1
+                    and self._strip_parens(rights[0]) == literal_node
+                ):
+                    binding = self.bindings_by_span.get(
+                        self.node_key(names[0])
+                    )
+                    if binding is not None:
+                        binding_id = binding.id
+                        declaration = parent
+                        break
+            current = parent
+        if binding_id is None or declaration is None:
+            return False
+
+        function_key = self.node_key(function_node)
+        scope = declaration.parent
+        while scope is not None and self.node_key(scope) != function_key:
+            if scope.type == "func_literal":
+                return False
+            scope = scope.parent
+        if scope is None:
+            return False
+
+        body = function_node.child_by_field_name("body")
+        if body is None:
+            return False
+        seen_call = False
+        stack = [body]
+        while stack:
+            cur = stack.pop()
+            if cur.type == "identifier":
+                ref = self.references.get(self.node_key(cur))
+                if ref is not None and ref.binding_id == binding_id:
+                    scope = cur.parent
+                    while (
+                        scope is not None
+                        and self.node_key(scope) != function_key
+                    ):
+                        if scope.type == "func_literal":
+                            return False
+                        scope = scope.parent
+                    if scope is None:
+                        return False
+                    parent = cur.parent
+                    while (
+                        parent is not None
+                        and parent.type == "parenthesized_expression"
+                        and self._strip_parens(parent) == cur
+                    ):
+                        parent = parent.parent
+                    if (
+                        parent is None
+                        or parent.type != "call_expression"
+                        or self._strip_parens(
+                            parent.child_by_field_name("function")
+                        )
+                        != cur
+                        or not synchronous_call(parent)
+                    ):
+                        return False
+                    seen_call = True
+            stack.extend(_children(cur))
+        return seen_call
+
     def _func_literal_capture(
         self,
         node: Any,
@@ -24576,8 +24724,9 @@ class _Builder:
         invocation as an opaque effectful callee — the write targets
         (`x = e`, `p.V = e`, `*p = e`) and the inner-call flag ride
         out in the returned record. A send to a literal-local channel
-        or a captured local scalar channel can fold at the call site;
-        other sends, `go` and `defer` stay closed."""
+        can fold at the call site; a captured local scalar channel
+        can fold only when its literal is invoked synchronously.
+        Other sends, `go` and `defer` stay closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -24826,6 +24975,7 @@ class _Builder:
                     and ref.binding_id not in self.external_chan_locals
                     and ref.binding_id not in self.escaped
                     and self._chan_only_operations(ref.binding_id, node)
+                    and self._literal_invoked_synchronously(node)
                 )
                 if literal_internal:
                     pass
@@ -25145,16 +25295,26 @@ class _Builder:
                 for i, c in enumerate(parent.children)
                 if parent.field_name_for_child(i) == "value"
             ]
+            value_nodes = [
+                value_node
+                for value in values
+                for value_node in (
+                    _children(value)
+                    if value.type == "expression_list"
+                    else [value]
+                )
+            ]
             index = next(
-                (i for i, v in enumerate(values) if v == node), None
+                (i for i, value in enumerate(value_nodes) if value == node),
+                None,
             )
             if index is None and in_composite:
                 index = next(
                     (
                         i
-                        for i, v in enumerate(values)
-                        if v.start_byte <= node.start_byte
-                        and node.end_byte <= v.end_byte
+                        for i, value in enumerate(value_nodes)
+                        if value.start_byte <= node.start_byte
+                        and node.end_byte <= value.end_byte
                     ),
                     None,
                 )

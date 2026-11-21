@@ -15275,6 +15275,11 @@ def test_bound_closure_send_inside_stays_closed(go_types_helper):
         ),
         (
             "func F(x int64) int64 { c := make(chan int64, 1); "
+            "var g = func() { c <- x }; g(); return <-c }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { c := make(chan int64, 1); "
             "g := func() { select { case c <- x: default: } }; "
             "g(); return <-c }",
             frozenset({0}),
@@ -15291,35 +15296,15 @@ def test_bound_closure_send_inside_stays_closed(go_types_helper):
             "d <- x; return <-d }; return g() }",
             frozenset({0}),
         ),
-        (
-            "func Run(f func()) { f() }\n"
-            "func F(x int64) int64 { c := make(chan int64, 1); "
-            "g := func() { c <- x }; Run(g); return <-c }",
-            frozenset({0}),
-        ),
-        (
-            "func Run(f func()) { f() }\n"
-            "func F(x int64) int64 { c := make(chan int64, 1); "
-            "Run(func() { c <- x }); return <-c }",
-            frozenset({0}),
-        ),
-        (
-            "func F(x int64) int64 { c := make(chan int64, 1); "
-            "fs := []func(){func() { c <- x }}; "
-            "fs[0](); return <-c }",
-            frozenset({0}),
-        ),
     ],
     ids=[
         "direct-call",
         "second-parameter",
         "invoked-twice",
+        "var-bound-direct-call",
         "select-send",
         "parenthesized-channel-and-builtins",
         "literal-internal-channel",
-        "local-run-named",
-        "local-run-literal",
-        "func-element",
     ],
 )
 def test_bound_closure_local_channel_send_folds_dependencies(
@@ -15351,12 +15336,11 @@ def test_bound_closure_local_channel_send_imported_callback(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available
-    assert result.return_dependencies == frozenset({0})
+    assert not result.available
 
 
 @pytest.mark.parametrize("invocation", ["go g()", "defer g()"])
-def test_bound_closure_local_channel_send_async_call_never_drops_deps(
+def test_bound_closure_local_channel_send_async_call_stays_closed(
     go_types_helper, invocation
 ):
     result = named(
@@ -15367,13 +15351,21 @@ def test_bound_closure_local_channel_send_async_call_never_drops_deps(
             f"{invocation}; return <-c }}",
         )
     )
-    assert (
-        not result.available
-        or (
-            result.return_dependencies is not None
-            and 0 in result.return_dependencies
+    assert not result.available
+
+
+def test_bound_closure_local_channel_send_iife_folds_dependencies(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "func() { c <- x }(); return <-c }",
         )
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
@@ -15407,6 +15399,27 @@ def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
             id="local-call-argument",
         ),
         pytest.param(
+            "func Run(f func()) {}\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; Run(g); return <-c }",
+            None,
+            id="local-callback-bound-literal",
+        ),
+        pytest.param(
+            "func Run(f func()) {}\n"
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "Run(func() { c <- x }); return <-c }",
+            None,
+            id="local-callback-direct-literal",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "fs := []func(){func() { c <- x }}; "
+            "fs[0](); return <-c }",
+            None,
+            id="func-element-callback",
+        ),
+        pytest.param(
             "func F(x int64) int64 { c := make(chan int64, 1); "
             "g := func() { c <- x }; lib.G(c); g(); return <-c }",
             "func G(ch chan int64) {}\n",
@@ -15438,6 +15451,33 @@ def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
             "g(); return <-c }",
             None,
             id="reassignment",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; g = func() {}; g(); return <-c }",
+            None,
+            id="literal-reassignment",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { c <- x }; h := func() { g() }; "
+            "h(); return <-c }",
+            None,
+            id="nested-literal-call",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "c := make(chan int64, 1); d := make(chan int64, 1); "
+            "g := func() { d <- <-c }; go g(); c <- x; return <-d }",
+            None,
+            id="go-call-order",
+        ),
+        pytest.param(
+            "func F(x int64) (r int64) { c := make(chan int64, 1); "
+            "g := func() { c <- x }; g2 := func() { r = <-c }; "
+            "defer g2(); defer g(); return 0 }",
+            None,
+            id="defer-call-order",
         ),
         pytest.param(
             "func H(ch chan int64) {}\n"
@@ -15525,25 +15565,30 @@ def test_bound_closure_local_channel_send_rejects_escaping_channels(
     "run_declaration",
     [
         pytest.param(
-            "func Run(f func()) {}",
+            "func Run(f func() int64) {}",
             id="body-change",
         ),
         pytest.param(
-            "func Run(f func()) int64 { f(); return 0 }",
+            "func Run(f func() int64) int64 { return 0 }",
             id="signature-change",
         ),
     ],
 )
-def test_bound_closure_local_channel_send_flags_changed_callback_callee(
+def test_bound_closure_func_value_argument_flags_stale_callee(
     go_types_helper, run_declaration
 ):
     caller = (
-        "package p\nfunc F(x int64) int64 { c := make(chan int64, 1); "
-        "g := func() { c <- x }; Run(g); return <-c }\n"
+        "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tg := func() int64 { return x }\n"
+        "\tRun(g)\n"
+        "\treturn x\n"
+        "}\n"
     )
     old_files = {
         "a.go": caller,
-        "b.go": "package p\nfunc Run(f func()) { f() }\n",
+        "b.go": "package p\n"
+        "func Run(f func() int64) { _ = f() }\n",
     }
     _, old_snapshot, old_summaries = package_unit(
         go_types_helper, old_files

@@ -3099,7 +3099,10 @@ needs no capture — only the send/go/defer statements
 that target a shared queue stay closed. A captured local plain
 integer/boolean channel admits a literal send only when every
 enclosing-function reference is a send-channel, receive, builtin
-`close`/`len`/`cap` argument, or range operand. A function name
+`close`/`len`/`cap` argument, or range operand, and the literal is
+invoked synchronously as a direct call of its bound name or an
+immediately invoked literal; `go`, `defer`, and callback invocations
+stay closed. A function name
 read in a call's argument list admits dep-free (the
 possible invocation folds through the call's own record); a
 func literal passed directly as an argument folds its
