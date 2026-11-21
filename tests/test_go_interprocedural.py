@@ -20107,12 +20107,12 @@ def test_chan_elem_container_send_receive(
         "\ts := []chan chan int64{}\n"
         "\ts[0] <- q\n"
         "\treturn 0\n}\n",
-        # `close(s[i])` stays closed — the element queue's lifecycle
-        # is not tracked by the conflated group.
+        # `[][]chan` nested element — `s[0][0]` resolves to no group
+        # member, so a send through it stays closed.
         "func F(x int64) int64 {\n"
         "\tc := make(chan int64, 1)\n"
-        "\ts := []chan int64{c}\n"
-        "\tclose(s[0])\n"
+        "\ts := [][]chan int64{{c}}\n"
+        "\ts[0][0] <- x\n"
         "\treturn x\n}\n",
         # A send through an element of a `[N]chan` array bound by
         # `var` is refused like the `:=` form.
@@ -20416,6 +20416,73 @@ def test_chan_elem_detach_surrogate_never_stale(go_types_helper):
         b.id for b in snapshot.bindings
     }
     assert summaries.stale_dependents(own) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected", "imported_calls"),
+    [
+        # `close(s[i])` on a purely local group — an untracked
+        # synchronization fact, like `close(ch)` on a local channel.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tc <- x\n"
+            "\tclose(s[0])\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+            0,
+        ),
+        # `close(s[i])` on a group holding a param member — a
+        # caller-visible effect recorded on the param identity.
+        (
+            "func F(ch chan int64, x int64) int64 {\n"
+            "\ts := []chan int64{ch}\n"
+            "\ts[0] <- x\n"
+            "\tclose(s[0])\n"
+            "\treturn <-ch\n}\n",
+            frozenset({0, 1}),
+            2,
+        ),
+        # `close(s[i])` on an `external_chan_locals` queue bound
+        # through an alias — the surrogate carries the effect.
+        (
+            "func F(ch chan int64, x int64) int64 {\n"
+            "\td := ch\n"
+            "\ts := []chan int64{d}\n"
+            "\tclose(s[0])\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+            1,
+        ),
+    ],
+)
+def test_chan_elem_close(
+    go_types_helper, declarations, expected, imported_calls
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert sum(t.imported for t in result.calls) >= imported_calls
+
+
+def test_chan_elem_close_index_evaluates(go_types_helper):
+    # `close(s[idx(0)])` — the index operand still evaluates; a
+    # helper call inside it records its transfer.
+    result = named(
+        *unit(
+            go_types_helper,
+            "func idx(x int64) int64 { return x }\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tc <- x\n"
+            "\tclose(s[idx(0)])\n"
+            "\treturn <-s[0]\n}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(
