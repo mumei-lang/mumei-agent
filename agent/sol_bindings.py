@@ -519,6 +519,8 @@ class _SolBindings:
     ) -> TypeFact:
         if node is None:
             return _UNKNOWN
+        if any(child.type in {"mapping", "["} for child in self._walk(node)):
+            return _UNKNOWN
         name = self.text(node).strip()
         direct = name.replace(" ", "")
         if direct == "bool":

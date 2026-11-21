@@ -278,6 +278,41 @@ def test_dynamic_and_composite_type_facts_remain_unknown(type_name):
     )
 
 
+@pytest.mark.parametrize(
+    "type_name",
+    [
+        "T[]",
+        "T[2]",
+        "mapping(address => T)",
+        "mapping(address => T[])",
+        "mapping(address => mapping(uint => T))",
+    ],
+)
+def test_composite_user_types_are_unknown_but_keep_type_references(type_name):
+    source = f"struct T {{ uint field; }} contract C {{ {type_name} value; }}"
+    report = build_sol_bindings(source)
+    value = _bindings(report, "value", "state_variable")[0]
+    declaration = _bindings(report, "T", "struct")[0]
+    references = _refs(report, source, "T", "read")
+    assert (value.type.kind, value.type.bit_width, value.type.signed) == (
+        "unknown",
+        0,
+        None,
+    )
+    assert len(references) == 1
+    assert references[0].binding_id == declaration.id
+
+
+def test_plain_user_type_remains_named():
+    source = "struct T { uint field; } contract C { T value; }"
+    report = build_sol_bindings(source)
+    value = _bindings(report, "value", "state_variable")[0]
+    declaration = _bindings(report, "T", "struct")[0]
+    assert value.type.kind == "named"
+    assert value.type.type_id == declaration.id
+    assert _refs(report, source, "T", "read")[0].binding_id == declaration.id
+
+
 def test_imported_type_remains_unknown():
     source = 'import {ExternalType} from "x.sol"; contract C { ExternalType value; }'
     report = build_sol_bindings(source)
