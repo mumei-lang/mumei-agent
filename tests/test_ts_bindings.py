@@ -283,6 +283,34 @@ function f(first = 1, second = first, {item: renamed = second, plain, ...rest}: 
     assert any(item.name == "Shape" for item in _unresolved(report, "Shape"))
 
 
+def test_assignment_pattern_defaults_bind_names_and_scan_expressions():
+    source = """
+function known() {}
+const {x = known()} = {};
+let [y = missing()] = [];
+const f = ({a = known()}) => a;
+let assigned = 0;
+({ assigned = known() } = {});
+"""
+    report = build_ts_bindings(source)
+    x = _bindings(report, "x", "local")[0]
+    y = _bindings(report, "y", "local")[0]
+    a = _bindings(report, "a", "parameter")[0]
+    assigned = _bindings(report, "assigned", "local")[0]
+    assert len(_refs(report, source, "x")) == 0
+    assert any(reference.binding_id == a.id for reference in _refs(report, source, "a"))
+    assert _refs(report, source, "assigned", "write")[0].binding_id == assigned.id
+    known = _bindings(report, "known", "function")[0]
+    assert [
+        call.target for call in report.calls if call.target == known.id
+    ] == [known.id, known.id, known.id]
+    assert any(
+        item.name == "missing" and item.reason == "unknown_name"
+        for item in _unresolved(report)
+    )
+    assert y.name == "y" and x.name == "x"
+
+
 @pytest.mark.parametrize(
     ("declaration", "name", "mutable"),
     [

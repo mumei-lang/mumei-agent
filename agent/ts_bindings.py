@@ -299,6 +299,8 @@ class _TypeScriptBindings:
             return [node]
         if node.type == "pair_pattern":
             return self._pattern_names(node.child_by_field_name("value"))
+        if node.type == "object_assignment_pattern":
+            return self._pattern_names(node.child_by_field_name("left"))
         if node.type == "assignment_pattern":
             return self._pattern_names(node.child_by_field_name("left"))
         if node.type == "rest_pattern":
@@ -918,7 +920,7 @@ class _TypeScriptBindings:
     ) -> None:
         if pattern is None:
             return
-        if pattern.type == "assignment_pattern":
+        if pattern.type in {"assignment_pattern", "object_assignment_pattern"}:
             self._scan_pattern_defaults(
                 pattern.child_by_field_name("left"),
                 owner,
@@ -1136,7 +1138,7 @@ class _TypeScriptBindings:
                 assignment_node=assignment_node,
             )
             return
-        if node.type == "assignment_pattern":
+        if node.type in {"assignment_pattern", "object_assignment_pattern"}:
             self._scan_assignment_target(
                 node.child_by_field_name("left"),
                 owner,
