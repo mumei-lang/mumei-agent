@@ -682,6 +682,60 @@ def test_generic_const_references_are_emitted_once(source):
     assert n_references[0].kind == "read"
 
 
+def test_higher_ranked_lifetimes_are_scoped_to_their_binders():
+    source = """
+trait Bound {}
+fn outer<'a, T>(parameter: &'a u8)
+where
+    T: for<'b> Bound<&'b T>,
+    for<'a> &'a u8: Bound,
+{
+    let _: for<'c> fn(&'c u8) -> &'c u8;
+    let _: &'a u8;
+    let _: dyn for<'d> Bound<&'d u8>;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    a_bindings = _bindings(report, "'a", "generic_parameter")
+    outer_a = next(
+        binding
+        for binding in a_bindings
+        if binding.scope is not None
+        and binding.scope.start < source.index("where")
+    )
+    bound_a = next(binding for binding in a_bindings if binding.id != outer_a.id)
+
+    def lifetime_reference(token: str, after: int = 0):
+        start = source.index(token, after) + token.index("'")
+        return next(
+            reference
+            for reference in report.references
+            if reference.span.start == start
+        )
+
+    assert lifetime_reference("&'a u8").binding_id == outer_a.id
+    shadowed_a = lifetime_reference("&'a u8", source.index("for<'a>"))
+    assert shadowed_a.binding_id == bound_a.id
+    assert (
+        lifetime_reference("&'a u8", source.index("let _: &'a")).binding_id
+        == outer_a.id
+    )
+
+    for lifetime in ("b", "c", "d"):
+        name = f"'{lifetime}"
+        binding = _bindings(report, name, "generic_parameter")[0]
+        reference = lifetime_reference(f"&{name} ")
+        assert reference.binding_id == binding.id
+        assert binding.scope is not None
+        assert binding.scope.start <= reference.span.start < binding.scope.end
+    assert not any(
+        item.reason == "item_boundary"
+        and raw[item.span.start : item.span.end].startswith(b"'")
+        for item in report.unresolved
+    )
+
+
 def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     source = "type T=u8; fn generic<T>(x:T){} fn outside(x:T){}"
     report = build_rust_bindings(source, pointer_width=64)

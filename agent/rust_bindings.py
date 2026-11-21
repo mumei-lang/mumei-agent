@@ -158,7 +158,7 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
-        self.current_function = ""
+        self.current_function: str | None = ""
         self.call_owner = ""
         self.module_depth = 0
         self.in_extern = False
@@ -514,6 +514,54 @@ class _RustBindings:
             )
             self._add_to_scope(scope, record)
 
+    def _add_higher_ranked_lifetimes(self, node: Any) -> None:
+        if node.type == "higher_ranked_trait_bound":
+            parameters = node.child_by_field_name("type_parameters")
+            binder_scope = self.span(node)
+        elif node.type == "function_type":
+            parameters = next(
+                (
+                    child
+                    for child in self._children(node)
+                    if child.type == "for_lifetimes"
+                ),
+                None,
+            )
+            binder_scope = self.span(node)
+        else:
+            return
+        if parameters is None or not self.scopes:
+            return
+        scope = self.scopes[-1]
+        for parameter in self._children(parameters):
+            name_node = (
+                parameter.child_by_field_name("name")
+                if parameter.type == "lifetime_parameter"
+                else parameter
+                if parameter.type == "lifetime"
+                else None
+            )
+            if name_node is None:
+                continue
+            name = self._normalize_identifier(self.text(name_node))
+            if any(
+                record.binding.kind == "generic_parameter"
+                and record.binding.span == self.span(name_node)
+                and record.binding.scope == binder_scope
+                for record in scope.bindings.get(name, ())
+            ):
+                continue
+            record = self._make_record(
+                name_node,
+                "generic_parameter",
+                binder_scope,
+                self.current_function,
+                scope.module_depth,
+                item=False,
+                generic_kind="lifetime",
+            )
+            self._add_to_scope(scope, record)
+
     def _generic_references(
         self, node: Any | None, *, skip_nested_items: bool = False
     ) -> None:
@@ -530,6 +578,7 @@ class _RustBindings:
                 in {"function_item", "function_signature_item"}
             ):
                 continue
+            self._add_higher_ranked_lifetimes(candidate)
             if candidate.type in {"scoped_identifier", "scoped_type_identifier"}:
                 self._record_qualified_path(candidate)
                 continue
