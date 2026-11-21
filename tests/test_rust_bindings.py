@@ -688,7 +688,7 @@ trait Bound {}
 fn outer<'a, T>(parameter: &'a u8)
 where
     T: for<'b> Bound<&'b T>,
-    for<'a> &'a u8: Bound,
+    for<'e> &'e u8: Bound,
 {
     let _: for<'c> fn(&'c u8) -> &'c u8;
     let _: &'a u8;
@@ -704,7 +704,7 @@ where
         if binding.scope is not None
         and binding.scope.start < source.index("where")
     )
-    bound_a = next(binding for binding in a_bindings if binding.id != outer_a.id)
+    bound_e = _bindings(report, "'e", "generic_parameter")[0]
 
     def lifetime_reference(token: str, after: int = 0):
         start = source.index(token, after) + token.index("'")
@@ -715,14 +715,14 @@ where
         )
 
     assert lifetime_reference("&'a u8").binding_id == outer_a.id
-    shadowed_a = lifetime_reference("&'a u8", source.index("for<'a>"))
-    assert shadowed_a.binding_id == bound_a.id
+    bound_reference = lifetime_reference("&'e u8", source.index("for<'e>"))
+    assert bound_reference.binding_id == bound_e.id
     assert (
         lifetime_reference("&'a u8", source.index("let _: &'a")).binding_id
         == outer_a.id
     )
 
-    for lifetime in ("b", "c", "d"):
+    for lifetime in ("b", "c", "d", "e"):
         name = f"'{lifetime}"
         binding = _bindings(report, name, "generic_parameter")[0]
         reference = lifetime_reference(f"&{name} ")
@@ -734,6 +734,41 @@ where
         and raw[item.span.start : item.span.end].startswith(b"'")
         for item in report.unresolved
     )
+
+
+def test_higher_ranked_lifetimes_cover_their_complete_predicate_or_type():
+    source = """
+trait Tr<'a> {}
+fn f<'a, T, U, V, W>(
+    pointer: for<'d> fn(&'d T),
+    outside_pointer: &'d T,
+)
+where
+    for<'b> T: Tr<'b>,
+    U: Tr<'b>,
+    V: for<'c> Tr<'c>,
+    W: Tr<'c>,
+{
+    let _: &'a T;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for lifetime in ("'a", "'b", "'c", "'d"):
+        assert _bindings(report, lifetime, "generic_parameter")
+    assert len(_refs(report, source, "'b")) == 1
+    assert len(_refs(report, source, "'c")) == 1
+    assert len(_refs(report, source, "'d")) == 1
+    assert len(_refs(report, source, "'a")) == 1
+    for name, outside_marker in (
+        ("'b", "U: Tr<'b>"),
+        ("'c", "W: Tr<'c>"),
+        ("'d", "outside_pointer"),
+    ):
+        outside_position = source.index(outside_marker)
+        assert not any(
+            reference.span.start > outside_position
+            for reference in _refs(report, source, name)
+        )
 
 
 def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
@@ -988,6 +1023,31 @@ fn glob_barrier() { use external::*; let _: Generic<Hidden>; }
         for item in report.unresolved
     )
     assert raw[vec_start : vec_start + len("Vec")] == b"Vec"
+
+
+def test_generic_argument_value_fallback_ignores_outer_module_value_names():
+    source = """
+const N: usize = 1;
+mod m {
+    const N: usize = 2;
+    struct S<const K: usize>;
+    fn f() { let _: S<N>; }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    local_n = next(
+        binding
+        for binding in _bindings(report, "N", "const")
+        if binding.span.start > source.index("mod m")
+    )
+    argument_start = source.index("S<N>") + len("S<")
+    reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == argument_start
+    )
+    assert reference.binding_id == local_n.id
+    assert not any(item.span.start == argument_start for item in report.unresolved)
 
 
 def test_bodyless_trait_const_generic_facts_finalize_after_item_predeclaration():
