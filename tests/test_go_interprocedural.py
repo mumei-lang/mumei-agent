@@ -19710,7 +19710,7 @@ def test_container_builtin_dep_free_param_write_marks_effects(
     [
         # `delete(m, k)` on an UNBOUND map — no share group
         # exists, so the builtin stays opaque.
-        "func F(m map[int64]struct{}, x int64) int64 {\n"
+        "func F(m map[int64]chan int64, x int64) int64 {\n"
         "\tdelete(m, 1)\n"
         "\treturn x\n}\n",
         # `a = nil` drops the backing token — `a[0]` afterwards
