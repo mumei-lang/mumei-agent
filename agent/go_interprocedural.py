@@ -944,6 +944,9 @@ class _Builder:
         self.bound_method_values: dict[
             str, tuple[str, str | None, str | None]
         ] = {}
+        self.bound_interface_methods: dict[
+            str, tuple[str | None, str | None, str]
+        ] = {}
         # A method value COPIES the receiver at bind time — freeze
         # the receiver's dep set then, so a `s = …` reseat before
         # `f(args)` still resolves the ORIGINAL receiver's deps.
@@ -3474,6 +3477,7 @@ class _Builder:
         to a bare identifier; a computed operand (`g().M`) binds no
         stable receiver, so it stays closed.
         """
+        node = self._strip_parens(node)
         if node is None or node.type != "selector_expression":
             return None
         field = node.child_by_field_name("field")
@@ -3520,6 +3524,508 @@ class _Builder:
                 operand_binding.type.type_id,
             )
         return method_fn.binding_id, operand_ref.binding_id, None
+
+    def _binding_source_file(self, binding: Any) -> int:
+        span = getattr(binding, "span", None)
+        if isinstance(span, FileSpan):
+            return span.file
+        identity = getattr(binding, "id", "")
+        parts = identity.split(":")
+        if len(parts) == 6 and parts[0] == "sha256":
+            try:
+                return int(parts[2])
+            except ValueError:
+                pass
+        return 0
+
+    def _type_parameter_binding(self, binding: Any) -> bool:
+        span = getattr(binding, "span", None)
+        file_id = self._binding_source_file(binding)
+        raw = self.raws.get(file_id)
+        if span is None or raw is None:
+            return False
+        root = _syntax(raw)
+        if root is None:
+            return False
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            if current.type == "type_parameter_declaration":
+                name = current.child_by_field_name("name")
+                if (
+                    name is not None
+                    and name.start_byte == span.start
+                    and name.end_byte == span.end
+                ):
+                    return True
+            stack.extend(_children(current))
+        return False
+
+    def _interface_method_result_nodes(
+        self, method_binding: Any
+    ) -> tuple[tuple[Any, int], ...] | None:
+        span = getattr(method_binding, "span", None)
+        file_id = self._binding_source_file(method_binding)
+        raw = self.raws.get(file_id)
+        if span is None or raw is None:
+            return None
+        root = _syntax(raw)
+        if root is None:
+            return None
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            if current.type == "method_elem":
+                name = current.child_by_field_name("name")
+                if (
+                    name is not None
+                    and name.start_byte == span.start
+                    and name.end_byte == span.end
+                ):
+                    result = current.child_by_field_name("result")
+                    if result is None:
+                        return ()
+                    if result.type != "parameter_list":
+                        return ((result, file_id),)
+                    result_nodes: list[tuple[Any, int]] = []
+                    for declaration in result.named_children:
+                        if declaration.type != "parameter_declaration":
+                            return None
+                        result_type = declaration.child_by_field_name(
+                            "type"
+                        )
+                        if result_type is None:
+                            return None
+                        result_nodes.append((result_type, file_id))
+                    return tuple(result_nodes)
+            stack.extend(_children(current))
+        return None
+
+    def _interface_method_scalar_result(
+        self, node: Any, file_id: int
+    ) -> bool:
+        while node is not None and node.type == "parenthesized_type":
+            node = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if node is None:
+            return False
+        if node.type == "pointer_type":
+            return True
+        if node.type == "type_identifier":
+            ref = self.references.get(
+                (file_id, node.start_byte, node.end_byte)
+            )
+            if ref is None:
+                return False
+            if ref.kind == "universe":
+                return node.text in _SCALAR_BASIC_TYPES
+            binding = self.bindings.get(ref.binding_id)
+            if binding is not None and binding.kind == "type":
+                return binding.type.kind in {
+                    "integer",
+                    "boolean",
+                    "pointer",
+                }
+            member = self.members.get(ref.binding_id)
+            return (
+                member is not None
+                and member.kind == "type"
+                and member.type.kind
+                in {"integer", "boolean", "pointer"}
+            )
+        if node.type == "selector_expression":
+            field = node.child_by_field_name("field")
+            ref = (
+                self.references.get(
+                    (file_id, field.start_byte, field.end_byte)
+                )
+                if field is not None
+                else None
+            )
+            member = (
+                self.members.get(ref.binding_id)
+                if ref is not None and ref.kind == "import"
+                else None
+            )
+            return (
+                member is not None
+                and member.kind == "type"
+                and member.type.kind
+                in {"integer", "boolean", "pointer"}
+            )
+        if node.type == "qualified_type":
+            member = self._qualified_type_member(node)
+            return (
+                member is not None
+                and member.kind == "type"
+                and member.type.kind
+                in {"integer", "boolean", "pointer"}
+            )
+        return False
+
+    def _interface_method_result_types_admitted(
+        self, field_ref: Any
+    ) -> bool:
+        if field_ref.kind == "import":
+            member = self.members.get(field_ref.binding_id)
+            return (
+                member is not None
+                and member.kind == "function"
+                and all(
+                    result.kind in {"integer", "boolean", "pointer"}
+                    for result in member.result_types
+                )
+            )
+        method_binding = self.bindings.get(field_ref.binding_id)
+        if (
+            method_binding is None
+            or method_binding.kind != "function"
+        ):
+            return False
+        result_nodes = self._interface_method_result_nodes(
+            method_binding
+        )
+        return result_nodes is not None and all(
+            self._interface_method_scalar_result(node, file_id)
+            for node, file_id in result_nodes
+        )
+
+    def _interface_method_value_parts(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[str | None, str | None, str] | None:
+        node = self._strip_parens(node)
+        if node is None or node.type != "selector_expression":
+            return None
+        operand = self._strip_parens(
+            node.child_by_field_name("operand")
+        )
+        field = node.child_by_field_name("field")
+        if operand is None or field is None:
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        if (
+            field_ref is None
+            or not self._interface_method_result_types_admitted(
+                field_ref
+            )
+        ):
+            return None
+
+        receiver_id: str | None = None
+        interface_id: str | None = None
+        if operand.type == "identifier":
+            receiver_id = self._interface_value_binding(
+                operand, params, locals_
+            )
+            if receiver_id is not None:
+                receiver = self.bindings.get(receiver_id)
+                if receiver is None or receiver.type.has_type_args:
+                    return None
+                if self._type_parameter_binding(receiver):
+                    return None
+                self.pinned.update(receiver.signature_type_ids)
+                interface_id = receiver.type.type_id or None
+                interface_binding = (
+                    self.bindings.get(interface_id)
+                    if interface_id is not None
+                    else None
+                )
+                if (
+                    interface_binding is not None
+                    and self._type_parameter_binding(interface_binding)
+                ):
+                    return None
+                interface_member = (
+                    self.members.get(interface_id)
+                    if interface_id is not None
+                    else None
+                )
+                if (
+                    interface_member is not None
+                    and interface_member.type.has_type_args
+                ):
+                    return None
+            else:
+                type_ref = self.references.get(self.node_key(operand))
+                type_binding = (
+                    self.bindings.get(type_ref.binding_id)
+                    if type_ref is not None and type_ref.binding_id
+                    else None
+                )
+                if (
+                    type_binding is None
+                    or type_binding.kind != "type"
+                    or type_binding.type.kind != "interface"
+                    or type_binding.type.has_type_args
+                    or self._type_parameter_binding(type_binding)
+                ):
+                    return None
+                interface_id = (
+                    type_binding.type.type_id or type_binding.id
+                )
+        elif operand.type == "selector_expression":
+            interface_member = self._package_member(operand)
+            if (
+                interface_member is None
+                or interface_member.kind != "type"
+                or interface_member.type.kind != "interface"
+                or interface_member.type.has_type_args
+            ):
+                return None
+            interface_id = (
+                interface_member.type.type_id or interface_member.id
+            )
+        else:
+            return None
+
+        method_binding = (
+            self.bindings.get(field_ref.binding_id)
+            if field_ref.kind != "import"
+            else self.members.get(field_ref.binding_id)
+        )
+        if method_binding is not None:
+            self.pinned.update(
+                getattr(method_binding, "signature_type_ids", ())
+            )
+        if interface_id is not None:
+            self.pinned.add(interface_id)
+            interface_binding = self.bindings.get(interface_id)
+            if interface_binding is not None:
+                self.pinned.update(
+                    interface_binding.signature_type_ids
+                )
+            interface_member = self.members.get(interface_id)
+            if interface_member is not None:
+                self.pinned.update(
+                    interface_member.signature_type_ids
+                )
+        return receiver_id, interface_id, field.text.decode("utf-8")
+
+    def _func_value_rhs_deps(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+    ) -> frozenset[int]:
+        if not self._func_value_binding_target(node):
+            return self.expression(
+                node, fn, params, locals_, transfers, count, 0
+            )
+        method = self._interface_method_value_parts(
+            node, params, locals_
+        )
+        if method is None:
+            return self.expression(
+                node, fn, params, locals_, transfers, count, 0
+            )
+        receiver_id = method[0]
+        if receiver_id is None:
+            return frozenset()
+        return self.expression(
+            self._strip_parens(
+                node
+            ).child_by_field_name("operand"),
+            fn,
+            params,
+            locals_,
+            transfers,
+            count,
+            1,
+        )
+
+    def _func_value_binding_target(self, node: Any) -> bool:
+        value = self._strip_parens(node)
+        current = value
+        while (
+            current is not None
+            and current.parent is not None
+            and current.parent.type == "parenthesized_expression"
+        ):
+            current = current.parent
+        parent = current.parent if current is not None else None
+        if parent is None or parent.type != "expression_list":
+            return False
+        values = [
+            child
+            for child in parent.named_children
+            if child.type != "comment"
+        ]
+        index = next(
+            (
+                position
+                for position, candidate in enumerate(values)
+                if self.node_key(self._strip_parens(candidate))
+                == self.node_key(value)
+            ),
+            None,
+        )
+        statement = parent.parent
+        if index is None or statement is None:
+            return False
+        if statement.type in {
+            "short_var_declaration",
+            "assignment_statement",
+        }:
+            left = statement.child_by_field_name("left")
+        elif statement.type == "var_spec":
+            left = None
+        else:
+            return False
+        if statement.type == "var_spec":
+            targets = [
+                child
+                for child in statement.children_by_field_name("name")
+                if child.type != "comment"
+            ]
+        elif left is None:
+            return False
+        else:
+            targets = (
+                [
+                    child
+                    for child in left.named_children
+                    if child.type != "comment"
+                ]
+                if left.type == "expression_list"
+                else [left]
+            )
+        if index >= len(targets) or targets[index].type != "identifier":
+            return False
+        target = targets[index]
+        binding = self.bindings_by_span.get(self.node_key(target))
+        if binding is None:
+            ref = self.references.get(self.node_key(target))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "function"
+        )
+
+    def _record_bound_func_method(
+        self,
+        bid: str,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        receiver_deps: frozenset[int] | None = None,
+    ) -> None:
+        method = self._method_value_parts(node)
+        if method is not None:
+            self._record_bound_method(
+                bid, method, params, locals_
+            )
+            return
+        self._record_bound_interface_method(
+            bid,
+            self._interface_method_value_parts(
+                node, params, locals_
+            ),
+            params,
+            locals_,
+            receiver_deps,
+        )
+
+    def _plain_func_value_copy_source(
+        self, node: Any, binding_id: str
+    ) -> bool:
+        value = self._strip_parens(node)
+        if value is None or value.type != "identifier":
+            return False
+        current = value
+        parent = current.parent
+        while parent is not None and parent.type == "parenthesized_expression":
+            current = parent
+            parent = parent.parent
+        if parent is None or parent.type != "expression_list":
+            return False
+        values = [
+            child
+            for child in parent.named_children
+            if child.type != "comment"
+        ]
+        value_index = next(
+            (
+                index
+                for index, candidate in enumerate(values)
+                if self.node_key(self._strip_parens(candidate))
+                == self.node_key(value)
+            ),
+            None,
+        )
+        statement = parent.parent
+        if (
+            value_index is None
+            or statement is None
+            or statement.type
+            not in {
+                "short_var_declaration",
+                "assignment_statement",
+                "var_spec",
+            }
+        ):
+            return False
+        left = (
+            statement.child_by_field_name("left")
+            if statement.type
+            in {"short_var_declaration", "assignment_statement"}
+            else None
+        )
+        targets = (
+            (
+                [
+                    child
+                    for child in left.named_children
+                    if child.type != "comment"
+                ]
+                if left.type == "expression_list"
+                else [left]
+            )
+            if left is not None
+            else []
+        )
+        if statement.type == "var_spec":
+            targets = [
+                child
+                for child in statement.children_by_field_name("name")
+                if child.type != "comment"
+            ]
+        if value_index >= len(targets):
+            return False
+        target = targets[value_index]
+        if target.type != "identifier":
+            return False
+        target_binding = self.bindings_by_span.get(
+            self.node_key(target)
+        )
+        if target_binding is None:
+            ref = self.references.get(self.node_key(target))
+            target_binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+        return (
+            target_binding is not None
+            and target_binding.type is not None
+            and target_binding.type.kind == "function"
+        )
 
     def _local_composite_base(
         self, node: Any, locals_: dict[str, frozenset[int]]
@@ -8733,7 +9239,9 @@ class _Builder:
         elif call.kind == "direct_local":
             target_id = call.target
         elif call.kind == "indirect_or_selector":
-            if callee_id in self.bound_method_values:
+            if callee_id in self.bound_interface_methods:
+                star_or_external = True
+            elif callee_id in self.bound_method_values:
                 target_id = self.bound_method_values[callee_id][0]
             elif callee_id in self.func_aliases:
                 target_id = self.func_aliases[callee_id]
@@ -11892,8 +12400,8 @@ class _Builder:
                 # — `a, b := b, a` swaps — so all reads happen before any
                 # store.
                 values = [
-                    self.expression(
-                        rhs, fn, params, locals_, transfers, count, 0
+                    self._func_value_rhs_deps(
+                        rhs, fn, params, locals_, transfers, count
                     )
                     for rhs in rights
                 ]
@@ -11905,6 +12413,7 @@ class _Builder:
             aliases_before = dict(self.func_aliases)
             opaque_before = set(self.opaque_callees)
             mv_before = dict(self.bound_method_values)
+            imv_before = dict(self.bound_interface_methods)
             mv_deps_before = dict(self.bound_method_receiver_deps)
             writes_before = dict(self.closure_writes)
             star_before = set(self.closure_star_writes)
@@ -12611,8 +13120,29 @@ class _Builder:
                         if src_id is not None
                         else None
                     )
+                    src_imv = (
+                        imv_before.get(src_id)
+                        if src_id is not None
+                        else None
+                    )
                     if src_mv is not None:
                         self.bound_method_values[binding.id] = src_mv
+                        self.bound_interface_methods.pop(
+                            binding.id, None
+                        )
+                        if src_id in mv_deps_before:
+                            self.bound_method_receiver_deps[
+                                binding.id
+                            ] = mv_deps_before[src_id]
+                        else:
+                            self.bound_method_receiver_deps.pop(
+                                binding.id, None
+                            )
+                    elif src_imv is not None:
+                        self.bound_method_values.pop(binding.id, None)
+                        self.bound_interface_methods[
+                            binding.id
+                        ] = src_imv
                         if src_id in mv_deps_before:
                             self.bound_method_receiver_deps[
                                 binding.id
@@ -12682,15 +13212,17 @@ class _Builder:
                         self._func_elem_share(binding.id, src_id)
                 elif (
                     len(lefts) == len(rights)
-                    and rights[i].type == "selector_expression"
+                    and self._strip_parens(rights[i]).type
+                    == "selector_expression"
                 ):
                     # `f := s.M` — bind the method value's (method,
                     # receiver) pair under the fresh name; a
                     # non-method selector RHS clears it.
-                    self._record_bound_method(
+                    self._record_bound_func_method(
                         binding.id,
-                        self._method_value_parts(rights[i]),
+                        rights[i],
                         params, locals_,
+                        value,
                     )
                     # A method value carries no literal captures —
                     # an earlier literal's records drop too, or `f()`
@@ -12893,9 +13425,9 @@ class _Builder:
                     ] * len(names)
                 elif value_nodes:
                     values = [
-                        self.expression(
+                        self._func_value_rhs_deps(
                             rhs, fn, params, locals_, transfers,
-                            count, 0,
+                            count,
                         )
                         for rhs in value_nodes
                     ]
@@ -12909,6 +13441,7 @@ class _Builder:
                 aliases_before = dict(self.func_aliases)
                 opaque_before = set(self.opaque_callees)
                 mv_before = dict(self.bound_method_values)
+                imv_before = dict(self.bound_interface_methods)
                 mv_deps_before = dict(self.bound_method_receiver_deps)
                 writes_before = dict(self.closure_writes)
                 star_before = set(self.closure_star_writes)
@@ -13674,10 +14207,33 @@ class _Builder:
                             if src_id is not None
                             else None
                         )
+                        src_imv = (
+                            imv_before.get(src_id)
+                            if src_id is not None
+                            else None
+                        )
                         if src_mv is not None:
                             self.bound_method_values[binding.id] = (
                                 src_mv
                             )
+                            self.bound_interface_methods.pop(
+                                binding.id, None
+                            )
+                            if src_id in mv_deps_before:
+                                self.bound_method_receiver_deps[
+                                    binding.id
+                                ] = mv_deps_before[src_id]
+                            else:
+                                self.bound_method_receiver_deps.pop(
+                                    binding.id, None
+                                )
+                        elif src_imv is not None:
+                            self.bound_method_values.pop(
+                                binding.id, None
+                            )
+                            self.bound_interface_methods[
+                                binding.id
+                            ] = src_imv
                             if src_id in mv_deps_before:
                                 self.bound_method_receiver_deps[
                                     binding.id
@@ -13808,15 +14364,17 @@ class _Builder:
                         not multi
                         and value_nodes
                         and len(names) == len(value_nodes)
-                        and value_nodes[i].type
-                        == "selector_expression"
+                        and self._strip_parens(
+                            value_nodes[i]
+                        ).type == "selector_expression"
                     ):
                         # `var f = s.M` — bind the method value's
                         # (method, receiver) pair like `f := s.M`.
-                        self._record_bound_method(
+                        self._record_bound_func_method(
                             binding.id,
-                            self._method_value_parts(value_nodes[i]),
+                            value_nodes[i],
                             params, locals_,
+                            values[i],
                         )
                         # A method value carries no literal captures —
                         # earlier closure records drop like `f := s.M`.
@@ -15107,6 +15665,7 @@ class _Builder:
             aliases_before = dict(self.func_aliases)
             opaque_before = set(self.opaque_callees)
             mv_before = dict(self.bound_method_values)
+            imv_before = dict(self.bound_interface_methods)
             mv_deps_before = dict(self.bound_method_receiver_deps)
             writes_before = dict(self.closure_writes)
             star_before = set(self.closure_star_writes)
@@ -15120,8 +15679,8 @@ class _Builder:
                 * len(lefts)
                 if multi
                 else [
-                    self.expression(
-                        rhs, fn, params, locals_, transfers, count, 0
+                    self._func_value_rhs_deps(
+                        rhs, fn, params, locals_, transfers, count
                     )
                     for rhs in rights
                 ]
@@ -16867,6 +17426,18 @@ class _Builder:
                             # own alternatives described and mark the
                             # name so the external model covers both.
                             self.opaque_callees.add(ref.binding_id)
+                        src_interface_method = (
+                            imv_before.get(src_id)
+                            if src_id is not None
+                            else None
+                        )
+                        if (
+                            src_interface_method is not None
+                            and src_interface_method[0] is not None
+                        ):
+                            self.escaped.add(
+                                src_interface_method[0]
+                            )
                         # A maybe-skipped `h = g` may also hand h a
                         # bound method value — keep the resolved pair
                         # only when both candidates name the SAME
@@ -16893,6 +17464,23 @@ class _Builder:
                             ) | mv_deps_before[
                                 src_id
                             ]
+                        if imv_before.get(src_id) != (
+                            self.bound_interface_methods.get(
+                                ref.binding_id
+                            )
+                        ):
+                            self._drop_bound_method(
+                                ref.binding_id, True
+                            )
+                        elif (
+                            src_id is not None
+                            and src_id in mv_deps_before
+                        ):
+                            self.bound_method_receiver_deps[
+                                ref.binding_id
+                            ] = self.bound_method_receiver_deps.get(
+                                ref.binding_id, frozenset()
+                            ) | mv_deps_before[src_id]
                     else:
                         # A func-element container that stayed on
                         # its backing (a self-backing copy like
@@ -16940,10 +17528,33 @@ class _Builder:
                             if src_id is not None
                             else None
                         )
+                        src_imv = (
+                            imv_before.get(src_id)
+                            if src_id is not None
+                            else None
+                        )
                         if src_mv is not None:
                             self.bound_method_values[
                                 ref.binding_id
                             ] = src_mv
+                            self.bound_interface_methods.pop(
+                                ref.binding_id, None
+                            )
+                            if src_id in mv_deps_before:
+                                self.bound_method_receiver_deps[
+                                    ref.binding_id
+                                ] = mv_deps_before[src_id]
+                            else:
+                                self.bound_method_receiver_deps.pop(
+                                    ref.binding_id, None
+                                )
+                        elif src_imv is not None:
+                            self.bound_method_values.pop(
+                                ref.binding_id, None
+                            )
+                            self.bound_interface_methods[
+                                ref.binding_id
+                            ] = src_imv
                             if src_id in mv_deps_before:
                                 self.bound_method_receiver_deps[
                                     ref.binding_id
@@ -17093,7 +17704,8 @@ class _Builder:
                     not compound
                     and i not in func_elem_targets
                     and len(lefts) == len(rights)
-                    and rights[i].type == "selector_expression"
+                    and self._strip_parens(rights[i]).type
+                    == "selector_expression"
                     and ref is not None
                 ):
                     # `f = s.M` — rebind to a method value; a
@@ -17102,7 +17714,14 @@ class _Builder:
                     # name rebind — the adoption above already unioned
                     # the selector's records into the container's.
                     mv = self._method_value_parts(rights[i])
-                    if mv is not None and not (
+                    imv = (
+                        self._interface_method_value_parts(
+                            rights[i], params, locals_
+                        )
+                        if mv is None
+                        else None
+                    )
+                    if (mv is not None or imv is not None) and not (
                         conditional or self._may_skip > 0
                     ):
                         # A non-identifier RHS replaces whatever
@@ -17111,9 +17730,18 @@ class _Builder:
                         # alternative. Clear first, then record the
                         # new (method, receiver) pair.
                         self._drop_func_value_records(ref.binding_id)
-                        self._record_bound_method(
-                            ref.binding_id, mv, params, locals_,
-                        )
+                        if mv is not None:
+                            self._record_bound_method(
+                                ref.binding_id, mv, params, locals_,
+                            )
+                        else:
+                            self._record_bound_interface_method(
+                                ref.binding_id,
+                                imv,
+                                params,
+                                locals_,
+                                values[i],
+                            )
                     else:
                         # A conditional rebind keeps the untaken
                         # path's old callee live — the name resolves
@@ -21276,6 +21904,14 @@ class _Builder:
                 return frozenset()
         if kind in {"identifier", "true", "false", "iota"}:
             ref = self.references.get(self.node_key(node))
+            if (
+                ref is not None
+                and ref.binding_id in self.bound_interface_methods
+                and not self._plain_func_value_copy_source(
+                    node, ref.binding_id
+                )
+            ):
+                raise _Unsupported("unsupported_expression", _span(node))
             # Reassigned names (including parameters) resolve through
             # `locals_` first — their latest dependencies live there.
             if ref is not None and ref.binding_id in locals_:
@@ -24753,6 +25389,7 @@ class _Builder:
         if mv is None:
             self._drop_bound_method(bid)
             return
+        self.bound_interface_methods.pop(bid, None)
         self.bound_method_values[bid] = mv
         recv_id = mv[1]
         if recv_id is None:
@@ -24766,6 +25403,33 @@ class _Builder:
         else:
             self.bound_method_receiver_deps.pop(bid, None)
 
+    def _record_bound_interface_method(
+        self,
+        bid: str,
+        method: tuple[str | None, str | None, str] | None,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        receiver_deps: frozenset[int] | None = None,
+    ) -> None:
+        if method is None:
+            self._drop_bound_method(bid)
+            return
+        self.bound_method_values.pop(bid, None)
+        self.bound_interface_methods[bid] = method
+        receiver_id = method[0]
+        if receiver_id is None:
+            self.bound_method_receiver_deps.pop(bid, None)
+        elif receiver_deps is not None:
+            self.bound_method_receiver_deps[bid] = receiver_deps
+        elif receiver_id in locals_:
+            self.bound_method_receiver_deps[bid] = locals_[receiver_id]
+        elif receiver_id in params:
+            self.bound_method_receiver_deps[bid] = frozenset(
+                {params[receiver_id]}
+            )
+        else:
+            self.bound_method_receiver_deps.pop(bid, None)
+
     def _drop_bound_method(
         self, bid: str, conditional: bool = False
     ) -> None:
@@ -24774,9 +25438,16 @@ class _Builder:
         escaped so a later opaque call still folds the callee's
         possible writes back into it."""
         old = self.bound_method_values.pop(bid, None)
+        old_interface = self.bound_interface_methods.pop(bid, None)
         self.bound_method_receiver_deps.pop(bid, None)
         if conditional and old is not None and old[1] is not None:
             self.escaped.add(old[1])
+        if (
+            conditional
+            and old_interface is not None
+            and old_interface[0] is not None
+        ):
+            self.escaped.add(old_interface[0])
 
     def _drop_func_value_records(
         self, bid: str, conditional: bool = False
@@ -26244,6 +26915,10 @@ class _Builder:
                 if ref is not None and ref.kind != "universe":
                     bid = ref.binding_id
                     binding = self.bindings.get(bid)
+                    if bid in self.bound_interface_methods:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(cur)
+                        )
                     if (
                         binding is not None
                         and binding.type is not None
@@ -26875,6 +27550,35 @@ class _Builder:
                 frozen_recv=self.bound_method_receiver_deps.get(
                     ref.binding_id
                 ),
+            )
+        bound_interface_method = self.bound_interface_methods.get(
+            ref.binding_id
+        )
+        if bound_interface_method is not None:
+            parent = node.parent
+            while (
+                parent is not None
+                and parent.type == "parenthesized_expression"
+            ):
+                parent = parent.parent
+            if parent is not None and parent.type in {
+                "go_statement",
+                "defer_statement",
+            }:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            return self._bound_interface_method_call(
+                node,
+                arguments,
+                bound_interface_method,
+                fn,
+                params,
+                locals_,
+                transfers,
+                count,
+                depth,
+                self.bound_method_receiver_deps.get(ref.binding_id),
             )
         alias_target = self.func_aliases.get(ref.binding_id)
         if alias_target is not None:
@@ -27643,6 +28347,93 @@ class _Builder:
             count,
             depth + 1,
         )
+        return self._interface_dispatch_resolved(
+            node,
+            receiver_node,
+            receiver_deps,
+            value_arguments,
+            fn,
+            params,
+            locals_,
+            transfers,
+            count,
+            depth,
+            call.target,
+            call.target,
+            getattr(call, "type_arg_type_ids", ()),
+        )
+
+    def _bound_interface_method_call(
+        self,
+        node: Any,
+        arguments: list[Any],
+        bound_method: tuple[str | None, str | None, str],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+        frozen_receiver_deps: frozenset[int] | None,
+    ) -> frozenset[int]:
+        receiver_id, interface_id, _method_name = bound_method
+        if receiver_id is None:
+            if not arguments or interface_id is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            receiver_node = arguments[0]
+            receiver_deps = self.expression(
+                receiver_node,
+                fn,
+                params,
+                locals_,
+                transfers,
+                count,
+                depth + 1,
+            )
+            value_arguments = arguments[1:]
+            target_id = interface_id
+        else:
+            if frozen_receiver_deps is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            receiver_node = None
+            receiver_deps = frozen_receiver_deps | self.indirect_writes
+            value_arguments = arguments
+            target_id = receiver_id
+        return self._interface_dispatch_resolved(
+            node,
+            receiver_node,
+            receiver_deps,
+            value_arguments,
+            fn,
+            params,
+            locals_,
+            transfers,
+            count,
+            depth,
+            target_id,
+            interface_id,
+        )
+
+    def _interface_dispatch_resolved(
+        self,
+        node: Any,
+        receiver_node: Any | None,
+        receiver_deps: frozenset[int],
+        value_arguments: list[Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+        target_id: str | None,
+        pin_type_id: str | None,
+        pin_type_arg_ids: Iterable[str] = (),
+    ) -> frozenset[int]:
         actuals = [receiver_deps]
         arg_deps: frozenset[int] = frozenset()
         for arg in value_arguments:
@@ -27664,7 +28455,6 @@ class _Builder:
         deps |= self._promote_chan_call_args(
             node, "", locals_, params
         )
-        target_id = call.target
         if receiver_node is not None:
             root_ref = self._receiver_root_ref(receiver_node)
             if (
@@ -27676,12 +28466,9 @@ class _Builder:
             raise _Unsupported(
                 "unresolved_or_opaque_call", _span(node)
             )
-        if call.target:
-            self.pinned.add(call.target)
-        # `I[N].M(...)` — the named/alias identities the receiver's
-        # type arguments resolve to pin exactly like an instantiated
-        # callee's: `I` alone does not cover a redeclare of `N`.
-        self.pinned.update(getattr(call, "type_arg_type_ids", ()))
+        if pin_type_id:
+            self.pinned.add(pin_type_id)
+        self.pinned.update(pin_type_arg_ids)
         transfers.append(
             CallTransfer(
                 FileSpan(
@@ -27704,14 +28491,18 @@ class _Builder:
             self._store(
                 locals_, params, escaped_id, write_deps, True
             )
+        write_arguments = (
+            ([receiver_node] if receiver_node is not None else [])
+            + value_arguments
+        )
         self._store_call_writes(
-            [receiver_node, *value_arguments],
+            write_arguments,
             deps,
             locals_,
             params,
         )
         self._escape_interface_dispatch_containers(
-            [receiver_node, *value_arguments], params, locals_
+            write_arguments, params, locals_
         )
         return deps
 

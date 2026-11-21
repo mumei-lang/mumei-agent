@@ -4897,6 +4897,12 @@ Interface dispatch admits method expressions and method-value calls
 on interface-typed parameters and their plain copies with integer,
 boolean or pointer results; interface results, concrete-to-interface
 uses and promoted methods stay closed.
+An interface method value (`f := i.M`) and a named interface method
+expression (`f := I.M`) may be directly called, and a plain function
+value copy preserves the record. Bound method values freeze receiver
+dependencies at binding time; passing, returning, capturing, storing
+or comparing the value, and invoking it with `go` or `defer`, stay
+closed.
 
 ### C06 multi-valued imported results
 
