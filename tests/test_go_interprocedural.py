@@ -20791,10 +20791,9 @@ def test_chan_elem_external_pins_container_type(go_types_helper):
         go_types_helper,
         "type CS []chan int64\n"
         "var GS CS\n"
-        "func F(x int64) int64 {\n"
+        "func F() int64 {\n"
         "\td := GS[0]\n"
-        "\td <- x\n"
-        "\treturn <-GS[0]\n}\n",
+        "\treturn <-d\n}\n",
     )
     result = named(source, snapshot, summaries)
     assert result.available
