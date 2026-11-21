@@ -130,6 +130,7 @@ class _Record:
     extern: bool = False
     struct_constructor: bool = False
     generic_kind: str = ""
+    type_node: Any = None
 
 
 class _RustBindings:
@@ -242,6 +243,7 @@ class _RustBindings:
         struct_constructor: bool = False,
         name_override: str | None = None,
         generic_kind: str = "",
+        type_node: Any = None,
     ) -> _Record:
         name = self._normalize_identifier(
             self.text(name_node) if name_override is None else name_override
@@ -274,6 +276,7 @@ class _RustBindings:
             extern,
             struct_constructor,
             generic_kind,
+            type_node,
         )
         self.bindings.append(binding)
         self.records[identifier] = record
@@ -380,6 +383,23 @@ class _RustBindings:
                 self._predeclare_use(node, scope)
             elif node.type == "macro_definition":
                 self.gaps.append(Gap("macro_definition", self.span(node)))
+        self._finalize_generic_type_facts(scope)
+
+    def _finalize_generic_type_facts(self, scope: _Scope) -> None:
+        for records in scope.bindings.values():
+            for record in records:
+                if (
+                    record.binding.kind != "generic_parameter"
+                    or record.generic_kind != "const"
+                    or record.type_node is None
+                ):
+                    continue
+                type_fact = self._type_fact(record.type_node)
+                if type_fact == record.binding.type:
+                    continue
+                updated = replace(record.binding, type=type_fact)
+                self.bindings[self.bindings.index(record.binding)] = updated
+                record.binding = updated
 
     def _descendants(self, node: Any | None):
         if node is None:
@@ -455,7 +475,6 @@ class _RustBindings:
                 if generic_kind == "const"
                 else None
             )
-            type_fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
             record = self._make_record(
                 name_node,
                 "generic_parameter",
@@ -463,8 +482,8 @@ class _RustBindings:
                 scope.function_id if owner_function is None else owner_function,
                 scope.module_depth,
                 item=False,
-                type_fact=type_fact,
                 generic_kind=generic_kind,
+                type_node=annotation,
             )
             self._add_to_scope(scope, record)
 

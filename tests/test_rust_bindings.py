@@ -589,6 +589,36 @@ fn outside(x: T) {}
     assert outside.type.type_id == alias.id
 
 
+def test_const_generic_type_facts_follow_forward_aliases():
+    sources = (
+        "fn f<const N: Count>() {} type Count = u32;",
+        "type Count = u32; fn f<const N: Count>() {}",
+    )
+    for source in sources:
+        report = build_rust_bindings(source, pointer_width=64)
+        alias = _bindings(report, "Count", "type_alias")[0]
+        parameter = _bindings(report, "N", "generic_parameter")[0]
+        assert (
+            parameter.type.kind,
+            parameter.type.name,
+            parameter.type.bit_width,
+            parameter.type.signed,
+            parameter.type.type_id,
+        ) == ("int", "u32", 32, False, alias.id)
+
+    unresolved = build_rust_bindings(
+        "fn f<const N: Missing>() {}",
+        pointer_width=64,
+    )
+    assert _bindings(unresolved, "N", "generic_parameter")[0].type.kind == "unknown"
+
+    cyclic = build_rust_bindings(
+        "type A = B; type B = A; fn f<const N: A>() {}",
+        pointer_width=64,
+    )
+    assert _bindings(cyclic, "N", "generic_parameter")[0].type.kind == "unknown"
+
+
 @pytest.mark.parametrize(
     "source",
     [
