@@ -19,6 +19,7 @@ from agent.ts_compiler_snapshot import (
 FIXTURES = Path(__file__).parent / "fixtures" / "tsc"
 HELPER_DIR = Path(__file__).parents[1] / "tools" / "ts-bindings"
 FIXTURE_NAMES = (
+    "bom_source",
     "block_scope_shadowing",
     "builtin_math",
     "class_closure",
@@ -123,6 +124,20 @@ def test_math_is_reported_as_a_library_builtin():
     assert reference["status"] == "builtin"
     assert reference["library"] is True
     assert reference["declarations"] == []
+
+
+def test_bom_source_is_loaded_with_byte_offsets_including_the_bom():
+    source = _source("bom_source")
+    snapshot = load_ts_compiler_snapshot(
+        (FIXTURES / "bom_source.envelope.json").read_bytes(),
+        source,
+    )
+
+    q_reference = next(item for item in snapshot.references if item.name == "q")
+
+    assert q_reference.span.start == 26
+    comparison = compare_with_lexical(snapshot, build_ts_bindings(source))
+    assert [item["status"] for item in comparison["references"]] == ["agree"]
 
 
 def test_export_references_bind_to_the_local_declaration():

@@ -412,9 +412,10 @@ function main(arguments_) {
     return 2;
   }
   try {
-    const source = new TextDecoder("utf-8", { fatal: true }).decode(
-      fs.readFileSync(inputPath),
-    );
+    const source = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(fs.readFileSync(inputPath));
     const envelope = createEnvelope(source, extension);
     process.stdout.write(
       `${JSON.stringify(sortedJsonValue(envelope), null, 2)}\n`,

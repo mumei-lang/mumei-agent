@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 FIXTURE_NAMES = {
+    "bom_source": ".ts",
     "block_scope_shadowing": ".ts",
     "builtin_math": ".ts",
     "class_closure": ".ts",
