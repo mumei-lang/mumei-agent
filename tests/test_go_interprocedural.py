@@ -16537,6 +16537,50 @@ def test_chan_chan_call_valued_send_promotes_args(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_chan_chan_call_reseat_drops_externality_from_new_queue(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64, x int64) {\n"
+        "\td := <-cc\n\td <- x\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+        "\tG(cc, x)\n\tc = make(chan int64, 1)\n"
+        "\tc <- 1\n\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_call_reseat_keeps_detached_alias_external(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64, x int64) {\n"
+        "\td := <-cc\n\td <- x\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n\te := c\n"
+        "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+        "\tG(cc, x)\n\tc = make(chan int64, 1)\n"
+        "\tc <- 1\n\treturn <-e\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_chan_chan_captured_receive_records_external_effect(go_types_helper):
     # `h := func() { <-cc }` — a `chan chan` captured in a literal
     # is external state like a scalar `chan` param: calling `h`

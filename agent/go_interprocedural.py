@@ -6061,6 +6061,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.external_chan_locals.add(sur)
         if binding_id in self._external_chan_group_tokens:
             self._mark_external_chan_group_member(sur)
+            self._external_chan_group_tokens.discard(binding_id)
         # The reseated name's own member set still lists the sharers
         # the old queue carried (`d := s[0]` minted `d` into `c`'s
         # set). They belong to the parked queue, not the fresh one:
