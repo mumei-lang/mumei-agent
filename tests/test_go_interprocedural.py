@@ -21313,6 +21313,51 @@ def test_chan_elem_external_group_members(
 
 
 @pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(i int64, x int64) int64 {\n"
+            "\td := GS[i]\n"
+            "\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func G() chan int64 { return GS[0] }\n"
+            "func F(x int64) int64 {\n"
+            "\td := G()\n"
+            "\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external_alias_survives_make_reseat(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # `[][]chan` nests stay closed — the operand of the inner

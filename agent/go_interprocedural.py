@@ -12508,6 +12508,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         continue
                     elif fresh_make:
                         self.chan_aliases.pop(ref.binding_id, None)
+                        reseated_external = (
+                            ref.binding_id in self.external_chan_locals
+                        )
+                        reseated_selectors = (
+                            self.external_chan_selectors.get(
+                                ref.binding_id, frozenset()
+                            )
+                        )
                         # A `make` reseat leaves earlier aliases
                         # pointing at the OLD queue — it still
                         # exists for them (`ch = q; q = make(...)`).
@@ -12563,6 +12571,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             locals_[alias_id] = (
                                 alias_slot or frozenset()
                             ) | (old_queue or frozenset())
+                            if reseated_external:
+                                self.external_chan_locals.add(alias_id)
+                                self.external_chan_selectors[alias_id] = (
+                                    self.external_chan_selectors.get(
+                                        alias_id, frozenset()
+                                    )
+                                    | reseated_selectors
+                                )
                 if not compound and ref is not None:
                     bound = self.bindings.get(ref.binding_id)
                     if bound is not None and (
