@@ -4543,6 +4543,9 @@ rather than inventing a backing relationship.
 Direct operations on collection-valued fields are admitted as implicit
 extractions; plain array fields and pointer roots stay closed. Comma-ok
 map reads and select-receive targets on direct fields remain closed.
+Caller-visible container element reads observe pointer writes and opaque or
+dynamic call writes through shared backing tokens; imported calls remain out
+of scope.
 
 ### C07 per-statement read attribution
 

@@ -30178,6 +30178,225 @@ def test_container_param_write_reaches_caller(
 
 
 @pytest.mark.parametrize(
+    "declarations, required",
+    [
+        (
+            "func F(p *int64, b []int64, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn b[0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "func F(f func(int64), b []int64, x int64) int64 {\n"
+            "\tf(x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "type I interface { M(x int64) int64 }\n"
+            "type SI []int64\n"
+            "func (s SI) M(x int64) int64 { s[0] = x; return 0 }\n"
+            "func F(i I, b []int64, x int64) int64 {\n"
+            "\ti.M(x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "var GF func(int64)\n"
+            "func F(b []int64, x int64) int64 {\n"
+            "\tGF(x)\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(p *int64, m map[int64]int64, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn m[0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "func F(p *int64, b []int64, x int64) int64 {\n"
+            "\tc := b\n"
+            "\t*p = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "func F(p *int64, b [][]int64, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn b[0][0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "func mk(b []int64) []int64 { return b }\n"
+            "func F(p *int64, b []int64, x int64) int64 {\n"
+            "\ts := mk(b)\n"
+            "\t*p = x\n"
+            "\treturn s[0]\n}\n",
+            frozenset({2}),
+        ),
+        (
+            "type I interface { M(x int64) int64 }\n"
+            "type WA struct { i I; A []int64 }\n"
+            "func F(p *int64, w WA, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn w.A[0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "type I interface { M(x int64) int64 }\n"
+            "type WA struct { i I; A []int64 }\n"
+            "func F(w, v WA, x int64) int64 {\n"
+            "\tw.A[0] = x\n"
+            "\treturn v.A[0]\n}\n",
+            frozenset({1, 2}),
+        ),
+        (
+            "type I interface { M(x int64) int64 }\n"
+            "type WA struct { i I; A []int64 }\n"
+            "func F(w WA, b []int64, x int64) int64 {\n"
+            "\tb[0] = x\n"
+            "\treturn w.A[0]\n}\n",
+            frozenset({0, 2}),
+        ),
+        (
+            "var GS []int64\n"
+            "func F(p *int64, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn GS[0]\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "var GS [][]int64\n"
+            "func F(p *int64, i int64, j int64, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn GS[i][j]\n}\n",
+            frozenset({1, 2, 3}),
+        ),
+        (
+            "var GS []int64\n"
+            "func F(p *int64, x int64) int64 {\n"
+            "\tc := GS\n"
+            "\t*p = x\n"
+            "\treturn c[0]\n}\n",
+            frozenset({1}),
+        ),
+    ],
+)
+def test_external_container_reads_observe_indirect_writes(
+    go_types_helper, declarations, required
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert required <= result.return_dependencies
+
+
+def test_interface_field_call_writes_reach_container_field_read(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type I interface { M(x int64) int64 }\n"
+            "type SI []int64\n"
+            "func (s SI) M(x int64) int64 { s[0] = x; return 0 }\n"
+            "type WA struct { i I; A []int64 }\n"
+            "func F(w WA, x int64) int64 {\n"
+            "\tw.i.M(x)\n"
+            "\treturn w.A[0]\n}\n",
+        )
+    )
+    assert result.available
+    assert frozenset({0, 1}) <= result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    "declarations, x_ordinal, exact",
+    [
+        (
+            "func F(p *int64, x int64) int64 {\n"
+            "\ts := make([]int64, 1)\n"
+            "\t*p = x\n"
+            "\treturn s[0]\n}\n",
+            1,
+            frozenset(),
+        ),
+        (
+            "func F(p *int64, x int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\t*p = x\n"
+            "\treturn s[0]\n}\n",
+            1,
+            None,
+        ),
+        (
+            "func F(p *int64, x int64) int64 {\n"
+            "\tvar a [2]int64\n"
+            "\t*p = x\n"
+            "\treturn a[0]\n}\n",
+            1,
+            None,
+        ),
+        (
+            "func F(p *int64, a [2]int64, x int64) int64 {\n"
+            "\t*p = x\n"
+            "\treturn a[0]\n}\n",
+            2,
+            None,
+        ),
+    ],
+)
+def test_fresh_and_value_copy_containers_exclude_indirect_writes(
+    go_types_helper, declarations, x_ordinal, exact
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    if exact is not None:
+        assert result.return_dependencies == exact
+    assert x_ordinal not in result.return_dependencies
+
+
+def test_external_struct_field_and_extraction_reads_match(go_types_helper):
+    declarations = (
+        "type WA struct { A []int64 }\n"
+        "func Direct(p *int64, w WA, x int64) int64 {\n"
+        "\t*p = x\n"
+        "\treturn w.A[0]\n}\n"
+        "func Extract(p *int64, w WA, x int64) int64 {\n"
+        "\tb := w.A\n"
+        "\t*p = x\n"
+        "\treturn b[0]\n}\n"
+    )
+    data = unit(go_types_helper, declarations)
+    direct = named(*data, name="Direct")
+    extracted = named(*data, name="Extract")
+    assert direct.available and extracted.available
+    assert direct.return_dependencies == extracted.return_dependencies
+
+
+def test_imported_container_read_observes_indirect_writes(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p *int64, x int64) int64 {\n"
+        "\t*p = x\n"
+        "\treturn lib.VA[0]\n}\n"
+    }
+    imports = {"lib": {"a.go": "package lib\nvar VA []int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert frozenset({1}) <= result.return_dependencies
+
+
+@pytest.mark.parametrize(
     "declarations, expected",
     [
         # `copy(b, a)` lands `a`'s conflated element set on every
@@ -31189,7 +31408,7 @@ def test_struct_field_index_call_is_recorded_once_and_index_deps_remain(
             "\tG(s, x)\n"
             "\ta := s.A\n"
             "\treturn a[0]\n}\n",
-            frozenset({0}),
+            frozenset({0, 1}),
         ),
         (
             "type S struct { A []int64 }\n"
@@ -32012,7 +32231,7 @@ def test_struct_collection_field_write_negatives_and_param_control(
         )
     )
     assert parameter_struct.available
-    assert parameter_struct.return_dependencies == frozenset({0})
+    assert parameter_struct.return_dependencies == frozenset({0, 1})
 
     assigned_copy = named(
         *unit(
@@ -41075,7 +41294,7 @@ def test_opaque_composite_rebind_retargets(go_types_helper):
         "\treturn s2[j]\n}",
     )
     assert result.available
-    assert result.return_dependencies == frozenset({0, 2})
+    assert result.return_dependencies == frozenset({0, 1, 2})
 
 
 def test_opaque_composite_scalar_reseat_closes(go_types_helper):

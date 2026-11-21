@@ -902,6 +902,7 @@ class _Builder:
         self._opaque_container_tokens: dict[
             str, frozenset[tuple[int, int, int]]
         ] = {}
+        self._external_container_tokens: set[str] = set()
         self._external_chan_group_tokens: set[str] = set()
         self.bindings = {b.id: b for b in snapshot.bindings}
         # Package reports may declare the imported objects the unit
@@ -2063,6 +2064,64 @@ class _Builder:
         )
         return self._opaque_container_holders(toks) | {binding_id}
 
+    def _mark_external_container_tokens(self, tokens: Any) -> None:
+        self._external_container_tokens.update(
+            repr(token) for token in tokens
+        )
+
+    def _opaque_container_external(self, binding_id: str) -> bool:
+        return any(
+            repr(token) in self._external_container_tokens
+            for holder_id in self._opaque_container_sharers(binding_id)
+            for token in self._opaque_container_tokens.get(
+                holder_id, frozenset()
+            )
+        )
+
+    def _mark_external_struct_container_slots(
+        self, root_id: str, fact: Any, anchor: Any | None
+    ) -> None:
+        for member in self._struct_collection_members(fact, anchor):
+            if not self._param_container_shares_memory(member.type):
+                continue
+            field_key = self._opaque_container_field_key(
+                root_id, member.id
+            )
+            tokens = self._opaque_container_tokens.get(field_key)
+            if not tokens:
+                tokens = frozenset({field_key})
+                self._opaque_container_tokens[field_key] = tokens
+            self._mark_external_container_tokens(tokens)
+
+    def _opaque_container_external_var_bind(
+        self, binding_id: str, fact: Any, node: Any
+    ) -> frozenset | None:
+        if (
+            fact is None
+            or fact.kind not in {"slice", "array", "map"}
+            or not (
+                self._scalar_elem_collection(fact)
+                or self._scalar_elem_nested_collection(fact)
+            )
+        ):
+            return None
+        if fact.kind == "array":
+            tokens = {self.node_key(node)}
+            if self._type_embeds_collection(fact):
+                backing = self._opaque_container_tokens.get(
+                    binding_id, frozenset({binding_id})
+                )
+                self._opaque_container_tokens[binding_id] = backing
+                self._mark_external_container_tokens(backing)
+                tokens.update(backing)
+            return frozenset(tokens)
+        tokens = self._opaque_container_tokens.get(binding_id)
+        if not tokens:
+            tokens = frozenset({binding_id})
+            self._opaque_container_tokens[binding_id] = tokens
+        self._mark_external_container_tokens(tokens)
+        return tokens
+
     def _chan_elem_external_member(self, root_id: str) -> bool:
         """Whether `root_id`'s group contains a caller-visible queue."""
         return bool(self._chan_group_external_tokens(root_id))
@@ -2171,6 +2230,8 @@ class _Builder:
         deps = locals_.get(binding_id, frozenset())
         for member_id in self._opaque_container_sharers(binding_id):
             deps = deps | locals_.get(member_id, frozenset())
+        if self._opaque_container_external(binding_id):
+            deps |= self.indirect_writes
         return deps
 
     def _chan_group_read_deps(
@@ -3560,6 +3621,16 @@ class _Builder:
             self._chan_detached.get(tok, tok) for tok in toks
         )
 
+    def _opaque_container_imported_var_bind(
+        self, node: Any
+    ) -> frozenset | None:
+        member = self._package_member(node)
+        if member is None or member.kind != "var":
+            return None
+        return self._opaque_container_external_var_bind(
+            member.id, member.type, node
+        )
+
     def _opaque_container_bind(
         self, rhs: Any, params: dict | None = None
     ) -> frozenset[tuple[int, int, int]] | None:
@@ -3679,6 +3750,10 @@ class _Builder:
                                     arg_ref.binding_id, frozenset()
                                 )
                             )
+                if self._struct_collection_members(fact):
+                    self._mark_external_container_tokens(
+                        (self.node_key(rhs),)
+                    )
                 return frozenset(toks)
             if fact is None or fact.kind not in {
                 "slice",
@@ -3773,12 +3848,35 @@ class _Builder:
                         toks |= self._opaque_container_tokens.get(
                             arg_ref.binding_id, frozenset()
                         )
+            if self._param_container_shares_memory(fact):
+                self._mark_external_container_tokens(
+                    (self.node_key(rhs),)
+                )
             return frozenset(toks)
         if rhs.type == "identifier":
             ref = self.references.get(self.node_key(rhs))
             if ref is None or ref.binding_id is None:
                 return None
+            if ref.kind == "import":
+                member = self.members.get(ref.binding_id)
+                return (
+                    self._opaque_container_external_var_bind(
+                        member.id, member.type, rhs
+                    )
+                    if member is not None and member.kind == "var"
+                    else None
+                )
             binding = self.bindings.get(ref.binding_id)
+            if (
+                binding is not None
+                and binding.kind == "variable"
+                and self._package_level(binding)
+            ):
+                external = self._opaque_container_external_var_bind(
+                    binding.id, binding.type, rhs
+                )
+                if external is not None:
+                    return external
             if (
                 binding is not None
                 and binding.type is not None
@@ -3791,6 +3889,13 @@ class _Builder:
                     in self._opaque_container_tokens
                 )
             ):
+                if (
+                    binding.kind == "variable"
+                    and self._package_level(binding)
+                ):
+                    self._mark_external_struct_container_slots(
+                        binding.id, binding.type, binding
+                    )
                 tokens = self._opaque_container_tokens.get(
                     ref.binding_id
                 )
@@ -3873,6 +3978,9 @@ class _Builder:
             sharer = self._opaque_container_index_sharer_toks(rhs)
             return frozenset(sharer) if sharer else None
         if rhs.type in {"selector_expression", "field_expression"}:
+            imported = self._opaque_container_imported_var_bind(rhs)
+            if imported is not None:
+                return imported
             root_id, member = self._scalar_container_field(rhs)
             if root_id is None:
                 return None
@@ -12842,6 +12950,9 @@ class _Builder:
         saved_pinned = self.pinned
         saved_escaped = self.escaped
         saved_indirect = self.indirect_writes
+        saved_external_container_tokens = (
+            self._external_container_tokens
+        )
         saved_read_stack = self._read_stack
         saved_stmt_reads = self._stmt_reads
         saved_ptr_deps = self._ptr_deps
@@ -12878,6 +12989,7 @@ class _Builder:
         self.pinned = set()
         self.escaped = set()
         self.indirect_writes = frozenset()
+        self._external_container_tokens = set()
         self._read_stack = []
         self._stmt_reads = {}
         self._ptr_deps = {}
@@ -12899,6 +13011,21 @@ class _Builder:
         # flag dep-free writes on a caller-visible param — dep
         # growth cannot see a `clear(m)` or `delete(m, 1)` store.
         self._caller_visible_params = caller_visible_params
+        for p in sig_params:
+            if (
+                p.binding_id
+                and p.binding_id in self._opaque_container_tokens
+                and self._param_container_shares_memory(p.type)
+            ):
+                self._mark_external_container_tokens(
+                    self._opaque_container_tokens[p.binding_id]
+                )
+            if p.binding_id and p.type.kind == "struct":
+                self._mark_external_struct_container_slots(
+                    p.binding_id,
+                    p.type,
+                    self.bindings.get(p.binding_id),
+                )
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -12961,6 +13088,9 @@ class _Builder:
             self.pinned = saved_pinned
             self.escaped = saved_escaped
             self.indirect_writes = saved_indirect
+            self._external_container_tokens = (
+                saved_external_container_tokens
+            )
             self._read_stack = saved_read_stack
             self._stmt_reads = saved_stmt_reads
             self._ptr_deps = saved_ptr_deps
