@@ -788,6 +788,11 @@ fn outside(value: Missing) {
         reference.binding_id == caller_generic.id
         for reference in caller_type_references
     )
+    tuple_struct = _bindings(report, "S", "struct")[0]
+    tuple_constructor = next(
+        call for call in report.calls if call.target == tuple_struct.id
+    )
+    assert tuple_constructor.kind == "constructor"
     assert not _refs(report, source, "Missing")
 
 

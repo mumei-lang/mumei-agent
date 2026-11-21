@@ -1712,11 +1712,12 @@ class _RustBindings:
                     kind = "unresolved"
                 else:
                     target = record.binding.id
-                    kind = (
-                        "opaque_import"
-                        if record.binding.kind == "import"
-                        else "opaque_generic"
-                    )
+                    if record.binding.kind == "struct":
+                        kind = "constructor"
+                    elif record.binding.kind == "import":
+                        kind = "opaque_import"
+                    else:
+                        kind = "opaque_generic"
             elif inner is not None and inner.type == "field_expression":
                 receiver = inner.child_by_field_name("value")
                 if receiver is not None:
