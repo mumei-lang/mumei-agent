@@ -965,6 +965,31 @@ the other spawn tools). Every outcome echoes the trusted-channel
 Core-authenticated ID can recover one another's channel checks through
 `recovery-eval`. C02/C10 stay partial.
 
+### C02/C10 declared native-observations-accept route (native-observations-accept)
+
+`python -m agent native-observations-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares one invocation
+acceptance: `<core> native-bundle accept-observations
+--expected-build-id <id> --json <bundle> <source>` under a
+`mumei.native-observations-accept-request/v1` fingerprint binding the
+Core executable, the bundle record and every declared member, the
+source and the trusted-channel build ID. `acceptance` is claimed only
+for uniquely-mapped exit codes (`0 → accepted`, `3 → inconclusive`);
+exit 1 claims nothing, and mid-run drift reports `inputs_changed`
+without an outcome. Only exit 0 selects the anonymous
+`mumei.native-evidence-acceptance/v1` descriptor.
+
+An `accepted` run reports `artifact_semantics`, `claim_truth` and all
+four runtime checks in `discharged_checks`: the reproduced executable
+was observed once with its exit status, stdout and stderr matched to
+the pins. `runtime_observation_semantics` names that one bounded
+invocation; it is not an ABI, general runtime or process-semantics
+claim, and `historical_execution` remains unclaimed. The remaining C02
+checks stay in `checks_not_performed`. The route is also the
+`native_observations_accept` MCP tool (same report production,
+declared-path validation and basename redaction as the other spawn
+tools). C02/C10 stay partial.
+
 ### C02/C10 declared native-check route (native-check)
 
 `python -m agent native-check --core <path> --bundle <dir>
@@ -6195,10 +6220,13 @@ can perform their channel checks when both reports name the same ID.
 The ID is echoed by all six accept/recheck reports, including outcomes
 without an acceptance or reproduced result. Rechecks remain
 non-performers as evidence because their stdout is a fixed diagnostic
-line with no bound carrier. `runtime_observation_semantics` remains
-`no_evidence` until the Core slice emits a descriptor for one invocation
-observing all channels; it is deliberately not a conjunction of channel
-reports. `producer_authenticity` also
+line with no bound carrier. The accepted
+`native-observations-accept-report/v1` performs all three channel checks
+and `runtime_observation_semantics` through its bound stdout digest or
+shared expected build ID: one Core invocation has observed every
+channel. The raw `mumei.runtime-observation/v1` descriptor remains
+non-performing, and three single-channel reports never compose
+`runtime_observation_semantics`. `producer_authenticity` also
 recovers through a
 `mumei.signature-verification/v1` doc — the only multi-outcome
 performer: a verifying signature alone binds SOME key to the digest,
@@ -6806,17 +6834,16 @@ other declared-path tools.
 The remaining research-level C10 item — the object/ABI/runtime/final-binary
 assurance chain — has a design memo:
 [`docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md).
-Option A slice 1 has landed agent-side: the exit-status/stdout/stderr
-recheck and accept routes name their OS observations with dedicated
-`RUNTIME_CHECK_VOCABULARY` checks, and accepted reports compose those
-checks through `recovery-eval`. Agent-side acceptance composition has
-also landed: sibling accepted reports recover their channel checks when
-their Core-authenticated `expected_build_id` values match. The reserved
-`mumei.runtime-observation/v1` descriptor and its
-`runtime_observation_semantics` performer await the Core runtime-
-observation slice; that check remains deliberately non-compositional.
-The named channel checks describe bounded observed behavior, never ABI
-semantics of the program.
+Core stage 2 has landed in mumei as `native-bundle
+recheck-observations`, which emits `mumei.runtime-observation/v1`.
+Agent-side `native-observations-accept` now accepts all pins from one
+invocation and is the first performer of
+`runtime_observation_semantics`; single-channel accept reports still
+perform only their own observation, and the agent recheck-observations
+route remains. The check describes one bounded invocation, never ABI,
+general runtime or process semantics. The named channel checks remain
+composable through `recovery-eval` when their Core-authenticated
+`expected_build_id` values match.
 Object-code translation validation (Option B) stays the deep endpoint.
 No grade or audit surface changes.
 

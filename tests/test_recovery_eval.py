@@ -470,6 +470,113 @@ def test_native_accept_reports_recover_only_bound_channel_observations():
     assert evaluation["checks"]["os_exit_status_observation"] == "no_evidence"
 
 
+def test_native_observations_accept_recovers_all_runtime_observations():
+    build_id = "a" * 64
+    record = _native_accept_report(
+        "b" * 64,
+        schema="mumei.native-stdout-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    record["checks_not_performed"] = sorted(RUNTIME_CHECK_VOCABULARY)
+    evidence = _native_accept_report(
+        "c" * 64,
+        schema="mumei.native-observations-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [evidence], record_digest="d" * 64,
+    )
+    assert evaluation["checks"] == {
+        "os_exit_status_observation": "recovered",
+        "os_stderr_observation": "recovered",
+        "os_stdout_observation": "recovered",
+        "runtime_observation_semantics": "recovered",
+    }
+
+
+def test_native_observations_accept_requires_accepted_same_build():
+    build_id = "a" * 64
+    record = _native_accept_report(
+        "b" * 64,
+        schema="mumei.native-stdout-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    record["checks_not_performed"] = sorted(RUNTIME_CHECK_VOCABULARY)
+    mismatched = _native_accept_report(
+        "c" * 64,
+        schema="mumei.native-observations-accept-report/v1",
+        expected_build_id="d" * 64,
+    )
+    inconclusive = _native_accept_report(
+        "c" * 64,
+        accepted=False,
+        schema="mumei.native-observations-accept-report/v1",
+        expected_build_id=build_id,
+    )
+    for evidence in (mismatched, inconclusive):
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [evidence], record_digest="e" * 64,
+        )
+        assert evaluation["checks"] == {
+            check: "evidence_failed"
+            for check in sorted(RUNTIME_CHECK_VOCABULARY)
+        }
+
+
+def test_single_channel_accepts_do_not_compose_runtime_semantics_by_build_id():
+    build_id = "a" * 64
+    record = _record(*sorted(RUNTIME_CHECK_VOCABULARY))
+    record["expected_build_id"] = build_id
+    reports = [
+        _native_accept_report(
+            "b" * 64,
+            schema=schema,
+            expected_build_id=build_id,
+        )
+        for schema in (
+            "mumei.native-exit-status-accept-report/v1",
+            "mumei.native-stdout-accept-report/v1",
+            "mumei.native-stderr-accept-report/v1",
+        )
+    ]
+    evaluation = evaluate_unperformed_check_recovery(
+        record, reports, record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {
+        "os_exit_status_observation": "recovered",
+        "os_stderr_observation": "recovered",
+        "os_stdout_observation": "recovered",
+        "runtime_observation_semantics": "no_evidence",
+    }
+
+
+@pytest.mark.parametrize(
+    ("check", "schema"),
+    [
+        (
+            "os_exit_status_observation",
+            "mumei.native-exit-status-recheck-report/v1",
+        ),
+        ("os_stdout_observation", "mumei.native-stdout-recheck-report/v1"),
+        ("os_stderr_observation", "mumei.native-stderr-recheck-report/v1"),
+        ("runtime_observation_semantics", "mumei.runtime-observation/v1"),
+    ],
+)
+def test_recheck_and_raw_observation_documents_never_perform(check, schema):
+    build_id = "a" * 64
+    record = _record(check)
+    record["expected_build_id"] = build_id
+    evidence = _doc(
+        schema,
+        expected_build_id=build_id,
+        normalized={"stdout": {"sha256": "b" * 64}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [evidence], record_digest="c" * 64,
+    )
+    assert evaluation["checks"][check] == "no_evidence"
+
+
 def test_native_accept_reports_recover_sibling_channels_by_shared_build_id():
     build_id = "a" * 64
     record = _native_accept_report(

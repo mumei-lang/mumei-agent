@@ -57,15 +57,15 @@ give the existing pinned observations something honest to discharge:
     channel observations of a reproduced binary hold on one fresh,
     resource-bounded invocation. The name says what it is: semantics of
     the recorded observations, not of the program.
-- A sibling `mumei.runtime-observation/v1` record family, reserved for the
-  Core slice, that folds the
-  three existing `link_build` pins plus a declared invocation envelope
-  (argument vector, empty/stdin bytes, `resource_limit`, `timeout_ms`)
-  into one descriptor a consumer can recheck as a unit.
-  `runtime_observation_semantics` remains unperformed until this descriptor
-  exists. Slice 1 names each per-channel OS observation; accepted channel
-  reports recover only their matching check when their bound carrier agrees,
-  while fixed-diagnostic recheck reports are not performers.
+- A sibling `mumei.runtime-observation/v1` record family emitted by Core's
+  `recheck-observations`, which folds the three existing `link_build` pins
+  plus a declared invocation envelope (argument vector, empty/stdin bytes,
+  `resource_limit`, `timeout_ms`) into one descriptor a consumer can recheck
+  as a unit. The raw descriptor is not a performer: an accepted
+  `mumei.native-observations-accept-report/v1` performs
+  `runtime_observation_semantics` from its one invocation, while accepted
+  single-channel reports recover only their matching observation and
+  fixed-diagnostic recheck reports remain non-performers.
 
 Why this is honest: it claims *bounded observed behavior on one declared
 invocation*, which is exactly what the pins already verify. It upgrades
@@ -118,23 +118,24 @@ rejected as a separate track.
 
 Option A, staged:
 
-1. **Slice 1 (agent-side, docs + vocabulary + fold):** reserve
+1. **Slice 1 (agent-side, docs + vocabulary + fold; landed):** reserve
    `mumei.runtime-observation/v1`, define `RUNTIME_CHECK_VOCABULARY`, and
    register the three native accept reports as performers of their
    respective channel observations. Extend all six routes to name only
    their observed channel check on success, keeping the other runtime
-   checks unperformed. Do not register `runtime_observation_semantics`
-   until Core emits its descriptor.
-2. **Slice 2 (Core-side):** a `recheck-runtime` (or folded
-   `recheck-observations`) subcommand that runs the reproduced binary once
-   under the declared invocation envelope and emits the
-   `runtime_observation_semantics` verdict — spawn-fail / timeout /
-   signal / digested-overflow / pinless all honestly `inconclusive`,
-   matching the per-channel commands.
-3. **Slice 3 (composition):** acceptance descriptors move the observation
-   checks into `checks_performed` only when the same run performed the
-   observation — the symmetry rule the stdout/stderr slices already
-   follow — and `recovery-eval` composes the new descriptor.
+   checks unperformed. Keep `runtime_observation_semantics` unperformed by
+   the three separate channel reports.
+2. **Slice 2 (Core-side; landed in mumei):** `recheck-observations` runs
+   the reproduced binary once under the declared invocation envelope and
+   emits `mumei.runtime-observation/v1`; spawn-fail / timeout / signal /
+   digested-overflow / pinless are inconclusive, matching the per-channel
+   commands.
+3. **Slice 3 (agent-side acceptance; landed):** the
+   `native-observations-accept` route runs the one-invocation Core acceptance
+   and is the first performer of `runtime_observation_semantics`; accepted
+   reports move the observation checks into `discharged_checks` only when
+   that same run observed them. The agent-side `recheck-observations` route
+   remains to be added.
 
 What stays declared host duty forever: loader/libc/kernel/hardware
 correctness, temporal behavior beyond the declared bound, memory safety
@@ -160,17 +161,19 @@ attestation) is absorbed into Option A's invocation envelope.
 
 ## Minimal first implementation slice
 
-Status: Agent-side channel checks and shared-build-ID recovery composition have landed; the Core runtime-observation descriptor and its `runtime_observation_semantics` performer remain.
+Status: Core stage 2 (`recheck-observations`) has landed in mumei. The agent `native-observations-accept` route and its `runtime_observation_semantics` performer have landed; the agent recheck-observations route remains.
 
 Slice 1 alone is self-contained and agent-side:
 
-- `agent/core_evidence.py`: reserve the
-  `mumei.runtime-observation/v1` schema name for the later Core slice and
-  add `RUNTIME_CHECK_VOCABULARY` (`os_exit_status_observation`,
+- `agent/core_evidence.py`: retain the reserved
+  `mumei.runtime-observation/v1` schema name for Core's raw recheck
+  descriptor and define `RUNTIME_CHECK_VOCABULARY`
+  (`os_exit_status_observation`,
   `os_stdout_observation`, `os_stderr_observation`,
   `runtime_observation_semantics`). The three OS-observation checks are
-  bound to their native accept reports; `runtime_observation_semantics`
-  has no performer until Core emits its descriptor.
+  bound to their native accept reports; after Core stage 2 landed, the
+  one-invocation observations-accept report is also the performer for all
+  four runtime checks, including `runtime_observation_semantics`.
 - `agent/native_exit_status_recheck.py` and the five sibling
   observation routes: emit the observation check name in
   `discharged_checks` on `reproduced`/`accepted`, and list the rest of
