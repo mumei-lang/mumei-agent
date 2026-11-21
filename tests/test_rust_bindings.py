@@ -688,7 +688,7 @@ trait Bound {}
 fn outer<'a, T>(parameter: &'a u8)
 where
     T: for<'b> Bound<&'b T>,
-    for<'a> &'a u8: Bound,
+    for<'e> &'e u8: Bound,
 {
     let _: for<'c> fn(&'c u8) -> &'c u8;
     let _: &'a u8;
@@ -704,7 +704,7 @@ where
         if binding.scope is not None
         and binding.scope.start < source.index("where")
     )
-    bound_a = next(binding for binding in a_bindings if binding.id != outer_a.id)
+    bound_e = _bindings(report, "'e", "generic_parameter")[0]
 
     def lifetime_reference(token: str, after: int = 0):
         start = source.index(token, after) + token.index("'")
@@ -715,14 +715,14 @@ where
         )
 
     assert lifetime_reference("&'a u8").binding_id == outer_a.id
-    shadowed_a = lifetime_reference("&'a u8", source.index("for<'a>"))
-    assert shadowed_a.binding_id == bound_a.id
+    bound_reference = lifetime_reference("&'e u8", source.index("for<'e>"))
+    assert bound_reference.binding_id == bound_e.id
     assert (
         lifetime_reference("&'a u8", source.index("let _: &'a")).binding_id
         == outer_a.id
     )
 
-    for lifetime in ("b", "c", "d"):
+    for lifetime in ("b", "c", "d", "e"):
         name = f"'{lifetime}"
         binding = _bindings(report, name, "generic_parameter")[0]
         reference = lifetime_reference(f"&{name} ")
