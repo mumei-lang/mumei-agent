@@ -4540,6 +4540,8 @@ struct LHS of the same statement stays closed. Plain array
 fields and scalar-only structs remain value copies.
 Pointer-root or otherwise untracked field shapes stay closed
 rather than inventing a backing relationship.
+Direct operations on collection-valued fields are admitted as implicit
+extractions; plain array fields and pointer roots stay closed.
 
 ### C07 per-statement read attribution
 
