@@ -2493,6 +2493,80 @@ class _Builder:
             return False
         return False
 
+    def _opaque_container_field_index_path_supported(
+        self, sel: Any, root_binding: Any
+    ) -> bool:
+        fact = getattr(root_binding, "type", None)
+        if self._type_fact_has_type_args(fact):
+            return False
+        path = []
+        current = sel.child_by_field_name("operand")
+        while current is not None:
+            while current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if current is None:
+                break
+            if current.type in {
+                "selector_expression",
+                "field_expression",
+                "index_expression",
+            }:
+                path.append(current)
+                current = current.child_by_field_name("operand")
+                continue
+            break
+        for step in reversed(path):
+            if step.type in {
+                "selector_expression",
+                "field_expression",
+            }:
+                field = step.child_by_field_name("field")
+                field_ref = (
+                    self.references.get(self.node_key(field))
+                    if field is not None
+                    else None
+                )
+                member = self._field_identity(field_ref)
+                if member is None or member.type is None:
+                    return False
+                fact = member.type
+                struct_fact = self._struct_value_fact(fact)
+                if struct_fact is not None and (
+                    not struct_fact.type_id
+                    or self._type_fact_has_type_args(fact)
+                ):
+                    return False
+                continue
+            if (
+                fact is None
+                or fact.kind not in {"slice", "array", "map"}
+                or fact.elem is None
+            ):
+                return False
+            element = fact.elem
+            if element.kind == "pointer":
+                return False
+            struct_fact = self._struct_value_fact(element)
+            if struct_fact is not None:
+                if (
+                    fact.kind == "array"
+                    or not struct_fact.type_id
+                    or self._type_fact_has_type_args(element)
+                ):
+                    return False
+            elif element.kind == "struct":
+                return False
+            self._pin_fact_identities(fact)
+            fact = element
+        return True
+
     def _opaque_container_field_target(
         self, sel: Any, params: dict | None = None
     ) -> tuple[str, str, Any, frozenset, Any] | None:
@@ -2580,16 +2654,9 @@ class _Builder:
             )
             or (
                 indexed_struct_root
-                and root_binding.type is not None
-                and root_binding.type.kind == "struct"
-            )
-            or (
-                root_ref.binding_id in (params or {})
-                and root_binding.type is not None
-                and root_binding.type.kind
-                in {"slice", "array", "map"}
-                and getattr(root_binding.type, "elem", None) is not None
-                and root_binding.type.elem.kind == "struct"
+                and not self._opaque_container_field_index_path_supported(
+                    sel, root_binding
+                )
             )
             or not (scalar_collection or nested_scalar_collection)
             or (

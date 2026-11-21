@@ -4283,10 +4283,9 @@ extracts like `a := st.F` on a composite: `b := s[i].F` /
 `b = s[i].F` (and deeper `s[i].F.G`) binds the field's own
 share group — minted under the root container and joined to
 its group — so a store through one extraction reaches the
-others, while a direct `s[i].F[j]` index stays closed
-exactly like `st.F[j]` (the field slot is reachable only
-through extraction), and a pure array field still copies on
-extract.
+others, and direct `s[i].F[j]` reads and writes now match that
+extraction model; pointer crossings and pure array fields remain
+closed.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind
