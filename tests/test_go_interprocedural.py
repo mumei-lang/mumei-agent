@@ -16945,6 +16945,70 @@ def test_deep_chan_chan_local_receive_and_send_match_named_levels(
         assert direct.effects == "none_in_supported_fragment"
 
 
+def test_deep_chan_chan_received_queue_send_joins_local_group(
+    go_types_helper,
+):
+    source = (
+        "func F_direct(x int64) int64 {\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tccc <- cc\n"
+        "\tc := make(chan int64, 1)\n"
+        "\t(<-ccc) <- c\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-ccc))\n"
+        "}\n"
+        "func F_named(x int64) int64 {\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tccc <- cc\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq := <-ccc\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-ccc))\n"
+        "}\n"
+        "func F_select_direct(x int64) int64 {\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tccc <- cc\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tselect {\n"
+        "\tcase (<-ccc) <- c:\n"
+        "\tdefault:\n"
+        "\t}\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-ccc))\n"
+        "}\n"
+        "func F_select_named(x int64) int64 {\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tccc <- cc\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq := <-ccc\n"
+        "\tselect {\n"
+        "\tcase q <- c:\n"
+        "\tdefault:\n"
+        "\t}\n"
+        "\tc <- x\n"
+        "\treturn <-(<-(<-ccc))\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    for direct_name, named_name in [
+        ("F_direct", "F_named"),
+        ("F_select_direct", "F_select_named"),
+    ]:
+        direct = named(*data, direct_name)
+        named_levels = named(*data, named_name)
+        assert direct.available, direct.gaps
+        assert named_levels.available, named_levels.gaps
+        assert direct.return_dependencies == named_levels.return_dependencies
+        assert direct.return_dependencies == frozenset({0})
+        assert direct.effects == named_levels.effects
+        assert direct.effects == "none_in_supported_fragment"
+
+
 def test_deep_chan_chan_external_receive_and_send_match_named_levels(
     go_types_helper,
 ):

@@ -18651,6 +18651,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             )
             local_chan_chan = self._local_chan_chan_id(channel)
+            if (
+                local_chan_chan is None
+                and binding is not None
+                and binding.id in self.local_chan_chans
+            ):
+                local_chan_chan = binding.id
             if local_chan_chan is not None:
                 external_members = self._chan_group_external_tokens(
                     local_chan_chan
