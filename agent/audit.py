@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
-from agent import telemetry
+from agent import evidence_check_schedule, telemetry
 from agent.audit_models import (
     AuditDirectoryResult,
     AuditResult,
@@ -434,6 +434,15 @@ class AuditPipeline:
                 if scheduled_verification is not None and spec_path.is_file()
                 else None
             )
+            scheduled_check = (
+                _check_scheduled_verification(
+                    scheduled_verification,
+                    scheduled_document,
+                )
+                if scheduled_verification is not None
+                and scheduled_document is not None
+                else None
+            )
 
             # V1-A-2: with a domain hint the extracted spec is also checked
             # against the domain's required-condition checklist; missing
@@ -612,6 +621,7 @@ class AuditPipeline:
             body_ports=body_ports,
             native_replays=native_replays,
             scheduled_verification=scheduled_document,
+            scheduled_verification_check=scheduled_check,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
@@ -1319,8 +1329,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "selects an attempt, run the Core representation check on its "
             "captured output and record the "
             "mumei.evidence-check-acceptance/v1 descriptor on the "
-            "schedule record (use --json for the full record; text "
-            "output shows only the schedule outcome)."
+            "schedule record; also record Core's schedule representation "
+            "and consistency diagnostic under scheduled_verification_check "
+            "(advisory only, not a verdict or Evidence acceptance). Use "
+            "--json for the full record; text output shows the schedule "
+            "outcome and check status."
         ),
     )
     parser.add_argument(
@@ -1546,6 +1559,68 @@ def _run_scheduled_verification(
             "error": _redact_declared_paths(str(exc), context.declared),
         }
     return schedule.to_dict()
+
+
+def _check_scheduled_verification(
+    context: _ScheduledVerification,
+    schedule: dict,
+) -> dict | None:
+    """Record Core's advisory representation check of the schedule record."""
+    if context.core_executable is None or schedule.get("status") == "error":
+        return None
+
+    try:
+        schedule_bytes = (
+            json.dumps(schedule, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        if len(schedule_bytes) > evidence_check_schedule.MAX_INPUT_BYTES:
+            return {
+                "status": "skipped",
+                "reason": "schedule record exceeds the Core input bound",
+            }
+        attempt_timeout_ms = getattr(context.policy, "timeout_ms", None)
+        if attempt_timeout_ms is None:
+            attempt_timeout_ms = evidence_check_schedule.DEFAULT_ATTEMPT_TIMEOUT_MS
+        diagnostic = evidence_check_schedule.check_schedule_bytes(
+            context.core_executable,
+            schedule_bytes,
+            attempt_timeout_ms,
+            context.memory_bound_mb,
+        )
+    except (OSError, ValueError) as exc:
+        return {
+            "status": "error",
+            "error": _redact_declared_paths(str(exc), context.declared),
+        }
+
+    normalized = diagnostic.get("normalized")
+    if (
+        type(normalized) is not dict
+        or normalized.get("exit_code") != 0
+        or "representation" not in diagnostic
+    ):
+        return {"status": "invalid"}
+
+    schedule_outcome = diagnostic["schedule_outcome"]
+    attempt_count = diagnostic["attempt_count"]
+    attempts = schedule.get("attempts")
+    if (
+        schedule_outcome != schedule.get("outcome")
+        or type(attempts) is not list
+        or attempt_count != len(attempts)
+    ):
+        return {"status": "mismatch"}
+
+    return {
+        "status": "valid",
+        "representation": diagnostic["representation"],
+        "acceptance": diagnostic["acceptance"],
+        "schedule_outcome": schedule_outcome,
+        "attempt_count": attempt_count,
+        "reported_outcome_meaning": diagnostic["reported_outcome_meaning"],
+        "checks_performed": list(diagnostic["checks_performed"]),
+        "checks_not_performed": list(diagnostic["checks_not_performed"]),
+    }
 
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:

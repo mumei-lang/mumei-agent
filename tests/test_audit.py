@@ -1,6 +1,7 @@
 """Tests for integrated code audit pipeline."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -12,7 +13,8 @@ import pytest
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from agent import mcp_server
+from agent import audit as audit_module
+from agent import evidence_check_schedule, mcp_server
 from agent.audit import (
     AUDIT_EXTENSION_MAP,
     AUDIT_SCHEMA_KEYS,
@@ -4393,6 +4395,85 @@ def _scheduled_verification_ctx(
     return _load_scheduled_verification(args)
 
 
+def _schedule_check_record(
+    *,
+    outcome: str = "selected",
+    attempt_count: int = 2,
+) -> dict:
+    return {
+        "schema_version": "mumei.attempt-schedule/v1",
+        "outcome": outcome,
+        "selected_adapter_id": "beta" if outcome == "selected" else None,
+        "fallback_permitted": True,
+        "max_attempts": MAX_SCHEDULE_ATTEMPTS,
+        "attempts": [{} for _ in range(attempt_count)],
+        "evidence_check": None,
+        "evidence_acceptance": None,
+    }
+
+
+def _schedule_check_diagnostic(
+    *,
+    outcome: str = "selected",
+    attempt_count: int = 2,
+) -> dict:
+    return {
+        "schema_version": "mumei.attempt-schedule-check/v1",
+        "schedule_schema_version": "mumei.attempt-schedule/v1",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "outcome": outcome,
+        "attempt_count": attempt_count,
+        "reported_outcome_meaning": "adapter_self_report",
+        "checks_performed": ["representation_gate", "schedule_consistency"],
+        "checks_not_performed": [
+            "adapter_execution",
+            "reported_outcome_truth",
+            "evidence_acceptance",
+            "embedded_acceptance_validation",
+            "claim_truth",
+            "producer_authenticity",
+            "freshness",
+            "resource_enforcement",
+            "grade_promotion",
+        ],
+    }
+
+
+def _schedule_check_core(
+    tmp_path: Path,
+    schedule: dict,
+    *,
+    diagnostic: dict | None = None,
+    exit_code: int = 0,
+    sentinel: Path | None = None,
+) -> Path:
+    schedule_bytes = (
+        json.dumps(schedule, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    expected_sha256 = hashlib.sha256(schedule_bytes).hexdigest()
+    stdout = json.dumps(diagnostic or _schedule_check_diagnostic())
+    core = tmp_path / "mumei-schedule-check-stub"
+    script = (
+        f"#!{sys.executable}\n"
+        "import hashlib, sys\n"
+        f"if hashlib.sha256(sys.stdin.buffer.read()).hexdigest() != {expected_sha256!r}:\n"
+        "    sys.exit(2)\n"
+    )
+    if sentinel is not None:
+        script += (
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('invoked', encoding='utf-8')\n"
+        )
+    script += (
+        f"sys.stdout.write({stdout!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    core.write_text(script, encoding="utf-8")
+    core.chmod(0o755)
+    return core
+
+
 def _scheduled_audit_pipeline() -> AuditPipeline:
     extractor = MagicMock()
     extractor.extract_from_file.return_value = CodeToSpecResult(
@@ -4434,11 +4515,224 @@ def test_audit_scheduled_verification_records_selected(
     assert schedule["outcome"] == "selected"
     assert schedule["selected_adapter_id"] == "beta"
     assert [a["adapter_id"] for a in schedule["attempts"]] == ["alpha", "beta"]
+    assert result.scheduled_verification_check is None
     # Dispatch record only: the audit verdict is untouched.
     assert result.verification_status == "verified"
     assert "scheduled_verification: outcome=selected attempts=2" in result.report
     assert "FAKE_PRIVATE" not in json.dumps(schedule)
     assert "FAKE_PRIVATE" not in result.report
+
+
+def test_audit_records_valid_schedule_check_without_changing_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    schedule = _schedule_check_record()
+    original = copy.deepcopy(schedule)
+    core = _schedule_check_core(tmp_path, schedule)
+    context = _scheduled_verification_ctx(tmp_path, core=str(core))
+    monkeypatch.setattr(
+        audit_module,
+        "_run_scheduled_verification",
+        lambda _context, _source_path: schedule,
+    )
+
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=context,
+    )
+
+    assert result.scheduled_verification_check == {
+        "status": "valid",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "schedule_outcome": "selected",
+        "attempt_count": 2,
+        "reported_outcome_meaning": "adapter_self_report",
+        "checks_performed": ["representation_gate", "schedule_consistency"],
+        "checks_not_performed": _schedule_check_diagnostic()[
+            "checks_not_performed"
+        ],
+    }
+    assert schedule == original
+    assert json.loads(_format_result(result, "json"))[
+        "scheduled_verification_check"
+    ] == result.scheduled_verification_check
+    assert result.verification_status == "verified"
+    assert result.success is True
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "exit_code", "expected"),
+    [
+        (
+            _schedule_check_diagnostic(outcome="exhausted"),
+            0,
+            {"status": "mismatch"},
+        ),
+        (
+            _schedule_check_diagnostic(),
+            1,
+            {"status": "invalid"},
+        ),
+    ],
+)
+def test_audit_schedule_check_mismatch_or_nonzero_is_not_valid(
+    tmp_path: Path,
+    diagnostic: dict,
+    exit_code: int,
+    expected: dict,
+) -> None:
+    schedule = _schedule_check_record()
+    core = _schedule_check_core(
+        tmp_path,
+        schedule,
+        diagnostic=diagnostic,
+        exit_code=exit_code,
+    )
+    context = _scheduled_verification_ctx(tmp_path, core=str(core))
+
+    assert audit_module._check_scheduled_verification(context, schedule) == expected
+
+
+def test_audit_schedule_check_skips_oversize_record_without_core(
+    tmp_path: Path, monkeypatch
+) -> None:
+    schedule = _schedule_check_record()
+    sentinel = tmp_path / "core-was-invoked"
+    core = _schedule_check_core(tmp_path, schedule, sentinel=sentinel)
+    context = _scheduled_verification_ctx(tmp_path, core=str(core))
+    monkeypatch.setattr(evidence_check_schedule, "MAX_INPUT_BYTES", 1)
+
+    check = audit_module._check_scheduled_verification(context, schedule)
+
+    assert check == {
+        "status": "skipped",
+        "reason": "schedule record exceeds the Core input bound",
+    }
+    assert not sentinel.exists()
+
+
+def test_audit_schedule_check_skips_without_core_or_for_error_record(
+    tmp_path: Path,
+) -> None:
+    schedule = _schedule_check_record()
+    context_without_core = _scheduled_verification_ctx(tmp_path)
+    assert (
+        audit_module._check_scheduled_verification(context_without_core, schedule)
+        is None
+    )
+
+    sentinel = tmp_path / "core-was-invoked"
+    core = _schedule_check_core(tmp_path, schedule, sentinel=sentinel)
+    context_with_core = _scheduled_verification_ctx(tmp_path, core=str(core))
+    assert (
+        audit_module._check_scheduled_verification(
+            context_with_core,
+            {"status": "error", "error": "dispatch failed"},
+        )
+        is None
+    )
+    assert not sentinel.exists()
+
+
+def test_audit_schedule_check_error_redacts_declared_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    schedule = _schedule_check_record()
+    core = tmp_path / "FAKE_PRIVATE_mumei"
+    core.write_text("stub", encoding="utf-8")
+    context = _scheduled_verification_ctx(tmp_path, core=str(core))
+
+    def fail(*_args):
+        raise ValueError(f"failed to check {core}")
+
+    monkeypatch.setattr(evidence_check_schedule, "check_schedule_bytes", fail)
+    check = audit_module._check_scheduled_verification(context, schedule)
+
+    assert check == {
+        "status": "error",
+        "error": "failed to check <declared path>",
+    }
+    assert "FAKE_PRIVATE" not in check["error"]
+
+
+def test_audit_schedule_check_text_report_shows_status_and_outcome() -> None:
+    result = AuditResult(
+        success=True,
+        source_file="calc.py",
+        language="python",
+        spec_extracted=True,
+        scheduled_verification_check={
+            "status": "valid",
+            "schedule_outcome": "selected",
+        },
+    )
+
+    assert (
+        "scheduled_verification_check: status=valid outcome=selected"
+        in _build_report(result)
+    )
+
+
+def test_audit_error_schedule_record_has_no_schedule_check_field(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    core = tmp_path / "mumei-unused-stub"
+    core.write_text("not invoked", encoding="utf-8")
+    context = _scheduled_verification_ctx(tmp_path, core=str(core))
+    monkeypatch.setattr(
+        audit_module,
+        "_run_scheduled_verification",
+        lambda _context, _source_path: {
+            "status": "error",
+            "error": "dispatch failed",
+        },
+    )
+
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=context,
+    )
+
+    assert result.scheduled_verification_check is None
+
+
+@pytest.mark.integration
+def test_audit_schedule_check_accepts_real_scheduled_verification_record(
+    tmp_path: Path,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "source.mm"
+    source.write_text("atom audit_schedule_check() -> i64 ensures result == 0\n")
+    context = _scheduled_verification_ctx(tmp_path, core=core)
+
+    schedule = audit_module._run_scheduled_verification(context, source)
+    assert schedule.get("status") != "error", schedule
+    schedule_bytes = (
+        json.dumps(schedule, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    diagnostic = evidence_check_schedule.check_schedule_bytes(
+        core,
+        schedule_bytes,
+        context.policy.timeout_ms,
+        context.memory_bound_mb,
+    )
+    assert diagnostic["normalized"]["exit_code"] == 0, diagnostic
+
+    check = audit_module._check_scheduled_verification(context, schedule)
+
+    assert check is not None
+    assert check["status"] == "valid"
+    assert check["schedule_outcome"] == schedule["outcome"]
+    assert check["attempt_count"] == len(schedule["attempts"])
 
 
 def test_audit_scheduled_verification_exhausted_keeps_verdict(

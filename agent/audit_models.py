@@ -47,6 +47,10 @@ class AuditResult:
     # Evidence acceptance — so it does not alter ``verification_status`` or
     # ``success``.
     scheduled_verification: dict | None = None
+    # Advisory Core schedule representation/consistency diagnostic only,
+    # never a verdict or Evidence acceptance; it does not alter
+    # ``verification_status`` or ``success``.
+    scheduled_verification_check: dict | None = None
     # Findings per level: ``code`` (verification_violations: evidence against
     # the code), ``confirmed`` (the ``code`` findings reproduced on the native
     # code by native replay), ``spec`` (spec health and spec/code cross-check diagnostics:
