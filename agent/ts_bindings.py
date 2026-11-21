@@ -490,15 +490,20 @@ class _TypeScriptBindings:
     def _predeclare_parameters(self, node: Any) -> None:
         parameters = node.child_by_field_name("parameters")
         if parameters is None:
-            return
-        for parameter in self.children(parameters):
-            if parameter.type not in {
-                "required_parameter", "optional_parameter",
-            }:
+            parameter = node.child_by_field_name("parameter")
+            parameter_nodes = [] if parameter is None else [parameter]
+        else:
+            parameter_nodes = self.children(parameters)
+        for parameter in parameter_nodes:
+            if parameter.type in {"required_parameter", "optional_parameter"}:
+                pattern = parameter.child_by_field_name("pattern")
+                type_node = self._pattern_type_node(parameter, pattern)
+            elif node.type == "arrow_function":
+                pattern = parameter
+                type_node = None
+            else:
                 continue
-            pattern = parameter.child_by_field_name("pattern")
             names = self._pattern_names(pattern)
-            type_node = self._pattern_type_node(parameter, pattern)
             for name in names:
                 self.add_binding(
                     name,
@@ -925,6 +930,11 @@ class _TypeScriptBindings:
     ) -> None:
         parameters = node.child_by_field_name("parameters")
         if parameters is None:
+            parameter = node.child_by_field_name("parameter")
+            if parameter is not None:
+                self._scan_pattern_defaults(
+                    parameter, owner, function_context, with_scopes
+                )
             return
         for parameter in self.children(parameters):
             pattern = parameter.child_by_field_name("pattern")

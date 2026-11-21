@@ -86,6 +86,27 @@ function caller() {
     assert not any(gap.reason == "temporal_dead_zone" for gap in report.gaps)
 
 
+def test_unparenthesized_arrow_parameter_shadows_outer_binding():
+    source = """
+let x = 0;
+const f = x => x;
+const g = y => missing;
+"""
+    report = build_ts_bindings(source)
+    outer = _bindings(report, "x", "local")[0]
+    parameter = _bindings(report, "x", "parameter")[0]
+    body_reference = next(
+        reference for reference in _refs(report, source, "x")
+        if reference.span.start > source.index("=>")
+    )
+    assert body_reference.binding_id == parameter.id
+    assert body_reference.binding_id != outer.id
+    assert any(
+        item.name == "missing" and item.reason == "unknown_name"
+        for item in _unresolved(report)
+    )
+
+
 def test_temporal_dead_zone_is_reported_but_not_for_nested_closures():
     source = """
 function f() {
