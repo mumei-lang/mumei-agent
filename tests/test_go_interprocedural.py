@@ -15008,7 +15008,7 @@ def test_chan_chan_parameter_send_recv_chain(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -15612,16 +15612,57 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
     for src in (
         "func F(ccc chan chan chan int64) int64 {\n"
         "\treturn 0\n}\n",
-        "func G(cc chan chan int64) {}\n"
+        "func G(ccc chan chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tG(ccc)\n"
+        "\treturn 0\n"
+        "}\n",
+        "func G(ccs []chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tccs := []chan chan int64{cc}\n"
+        "\tG(ccs)\n"
+        "\treturn 0\n"
+        "}\n",
+        "func G(v any) {}\n"
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\tG(cc)\n"
-        "\treturn 0\n}\n",
+        "\treturn 0\n"
+        "}\n",
+        "func G(cc ...chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tG(cc)\n"
+        "\treturn 0\n"
+        "}\n",
         "func G(cc chan chan int64) {}\n"
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
-        "\tgo G(cc)\n"
-        "\treturn 0\n}\n",
+        "\tG((chan chan int64)(cc))\n"
+        "\treturn 0\n"
+        "}\n",
+        "type T struct{}\n"
+        "func (T) M(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\t(T{}).M(cc)\n"
+        "\treturn 0\n"
+        "}\n",
+        "type Q chan chan int64\n"
+        "func (Q) M() {}\n"
+        "func F() int64 {\n"
+        "\tvar cc Q\n"
+        "\tQ.M(cc)\n"
+        "\treturn 0\n"
+        "}\n",
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tf := func(q chan chan int64) {}\n"
+        "\tf(cc)\n"
+        "\treturn 0\n"
+        "}\n",
         "func F() chan chan int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\treturn cc\n}\n",
@@ -15688,6 +15729,331 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available, src
+
+
+@pytest.mark.parametrize(
+    ("case", "src", "expected", "effects"),
+    [
+        (
+            "sync-callee-receive-and-send",
+            "func G(cc chan chan int64, x int64) {\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tG(cc, x)\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "go-callee-receive-and-send",
+            "func G(cc chan chan int64, x int64) {\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tgo G(cc, x)\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "callee-sends-local-channel-to-queue",
+            "func G(cc chan chan int64, c2 chan int64) {\n"
+            "\tcc <- c2\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc2 := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tG(cc, c2)\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c2\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "callee-sends-new-channel-to-queue",
+            "func G(cc chan chan int64, x int64) {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc <- x\n"
+            "\tcc <- c\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tG(cc, x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "callee-returns-received-channel",
+            "func G(cc chan chan int64) chan int64 {\n"
+            "\treturn <-cc\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 2)\n"
+            "\tc <- 7\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\td := G(cc)\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "conditional-call-promotes-queue",
+            "func G(cc chan chan int64, x int64) {\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "}\n"
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tif b { G(cc, x) }\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "unrelated-local-channel-stays-precise",
+            "func G(cc chan chan int64, x int64) {\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tother := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tG(cc, x)\n"
+            "\tother <- 7\n"
+            "\treturn <-other\n"
+            "}\n",
+            frozenset(),
+            "unknown",
+        ),
+        (
+            "sticky-after-call-queue-send",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func H(x int64) { d := <-GCC; d <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tStash(cc)\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc <- c3\n"
+            "\tH(x)\n"
+            "\treturn <-c3\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "sticky-after-call-receive-and-rejoin",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func H(x int64) { d := <-GCC; d <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tStash(cc)\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc <- c3\n"
+            "\td := <-cc\n"
+            "\tcc <- d\n"
+            "\tH(x)\n"
+            "\treturn <-d\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "sticky-after-call-range-receive",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tStash(cc)\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc <- c3\n"
+            "\tfor d := range cc { d <- x; break }\n"
+            "\treturn <-c3\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "sticky-after-call-select-receive",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tStash(cc)\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc <- c3\n"
+            "\tselect { case d := <-cc: d <- x }\n"
+            "\treturn <-c3\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "sticky-alias-created-before-call",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func H(x int64) { d := <-GCC; d <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc2 := cc\n"
+            "\tStash(cc)\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc2 <- c3\n"
+            "\tH(x)\n"
+            "\treturn <-c3\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "sticky-alias-created-after-call",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func H(x int64) { d := <-GCC; d <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tStash(cc)\n"
+            "\tcc2 := cc\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc2 <- c3\n"
+            "\tH(x)\n"
+            "\treturn <-c3\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "sticky-new-group-member-after-queue-group-merge",
+            "var GCC chan chan int64\n"
+            "func Stash(cc chan chan int64) { GCC = cc }\n"
+            "func H(x int64) { d := <-GCC; d <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc2 := make(chan chan int64, 1)\n"
+            "\tStash(cc2)\n"
+            "\tc3 := make(chan int64, 1)\n"
+            "\tcc <- c3\n"
+            "\tcc2 <- <-cc\n"
+            "\tH(x)\n"
+            "\treturn <-c3\n"
+            "}\n",
+            frozenset({0}),
+            "unknown",
+        ),
+    ],
+)
+def test_local_chan_chan_call_args_promote_groups(
+    go_types_helper, case, src, expected, effects
+):
+    result = named(*unit(go_types_helper, src))
+    assert result.available, case
+    assert result.return_dependencies == expected, case
+    assert result.effects == effects, case
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "func G(v any) {}\n"
+        "func F() int64 { cc := make(chan chan int64, 1); G(cc); return 0 }\n",
+        "func G(cc ...chan chan int64) {}\n"
+        "func F() int64 { cc := make(chan chan int64, 1); G(cc); return 0 }\n",
+        "func G(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tG((chan chan int64)(cc))\n"
+        "\treturn 0\n"
+        "}\n",
+        "type T struct{}\n"
+        "func (T) M(cc chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\t(T{}).M(cc)\n"
+        "\treturn 0\n"
+        "}\n",
+        "type Q chan chan int64\n"
+        "func (Q) M() {}\n"
+        "func F() int64 { var cc Q; Q.M(cc); return 0 }\n",
+        "type I interface { M(chan chan int64) }\n"
+        "type T struct{}\n"
+        "func (T) M(chan chan int64) {}\n"
+        "func F() int64 {\n"
+        "\tvar i I = T{}\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\ti.M(cc)\n"
+        "\treturn 0\n"
+        "}\n",
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tf := func(q chan chan int64) {}\n"
+        "\tf(cc)\n"
+        "\treturn 0\n"
+        "}\n",
+    ],
+)
+def test_local_chan_chan_call_arg_boundaries_keep_unresolved_reason(
+    go_types_helper, src
+):
+    result = named(*unit(go_types_helper, src))
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
+
+
+def test_local_chan_chan_imported_call_arg_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "import \"lib\"\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tlib.G(cc)\n"
+        "\treturn 0\n"
+        "}\n"
+    }
+    imports = {
+        "lib": {
+            "g.go": "package lib\n"
+            "func G(cc chan chan int64) {}\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
 
 
 def test_chan_chan_assignment_rebind_admitted(go_types_helper):
@@ -15812,7 +16178,7 @@ def test_chan_chan_range_binds_external_elements(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -15835,7 +16201,7 @@ def test_chan_chan_range_element_send_broadcasts(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -15859,7 +16225,7 @@ def test_chan_chan_tuple_receive_binds_external(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -15881,7 +16247,7 @@ def test_chan_chan_assignment_receive_reseats(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -16019,6 +16385,46 @@ def test_chan_chan_package_var_send_carries_arg_deps(go_types_helper):
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize("builtin", ["len", "cap"])
+def test_chan_chan_len_cap_conversion_argument_stays_supported(
+    go_types_helper, builtin
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(n int64) int64 { return n }\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        f"\treturn G(int64({builtin}(cc)))\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_local_chan_chan_direct_conversion_argument_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type CC chan chan int64\n"
+        "func G(cc CC) {}\n"
+        "func F() {\n"
+        "\tcc := make(chan chan int64, 1)\n\tG(CC(cc))\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert [gap.reason for gap in result.gaps] == [
+        "unresolved_or_opaque_call"
+    ]
+
+
 def test_chan_chan_call_result_receive_carries_queue_deps(go_types_helper):
     # `cc := G(x, p)` — the received channel `c := <-cc` pulls from
     # the outer queue, so `c` carries the queue's own deps
@@ -16038,6 +16444,371 @@ def test_chan_chan_call_result_receive_carries_queue_deps(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({1})
+
+
+@pytest.mark.parametrize(
+    "callee,caller",
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\treturn <-d\n}\n",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n\tc <- x\n"
+            "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+            "\treturn G(cc)\n}\n",
+        ),
+        (
+            "func G(cc chan chan int64) chan int64 {\n"
+            "\treturn <-cc\n}\n",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n\tc <- x\n"
+            "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+            "\td := G(cc)\n\treturn <-d\n}\n",
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\tfor d := range cc { return <-d }\n\treturn 0\n}\n",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n\tc <- x\n"
+            "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+            "\treturn G(cc)\n}\n",
+        ),
+    ],
+)
+def test_local_chan_chan_call_maps_received_queue_dependencies(
+    go_types_helper, callee, caller
+):
+    files = {"a.go": "package p\n" + callee + caller}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    callee_summary = named_package(files, snapshot, summaries, "G")
+    result = named_package(files, snapshot, summaries, "F")
+    assert callee_summary.available and callee_summary.effects == "unknown"
+    assert callee_summary.return_dependencies == frozenset({0})
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "callee",
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tv := <-d\n\treturn v\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tvar v int64\n"
+            "\tselect { case v = <-d: }\n\treturn v\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) (r int64) {\n"
+            "\td := <-cc\n\tr = <-d\n\treturn\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tfor v := range d { return v }\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tv := <-d\n\treturn v + 1\n}\n"
+        ),
+    ],
+)
+def test_chan_chan_param_origins_flow_through_receive_values(
+    go_types_helper, callee
+):
+    files = {
+        "a.go": "package p\n"
+        + callee
+        + "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n\tc <- x\n\tclose(c)\n"
+        "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+        "\treturn G(cc)\n}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    callee_summary = named_package(files, snapshot, summaries, "G")
+    result = named_package(files, snapshot, summaries, "F")
+    assert callee_summary.available
+    assert callee_summary.return_dependencies == frozenset({0})
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("callee", "expected"),
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\td = make(chan int64, 1)\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc chan chan int64, b bool) int64 {\n"
+            "\td := <-cc\n\tif b { d = make(chan int64, 1) }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := make(chan int64, 1)\n\td = e\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\td = <-cc2\n\td <- 1\n\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "func Fresh() chan int64 { return make(chan int64, 1) }\n"
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\td = Fresh()\n\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := <-cc2\n"
+            "\tother := make(chan int64, 1)\n"
+            "\td, other = e, make(chan int64, 1)\n"
+            "\tother <- 2\n\td <- 1\n\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\td, _ = <-cc2\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n"
+            "\tlocal := make(chan chan int64, 1)\n"
+            "\tlocal <- make(chan int64, 1)\n\tclose(local)\n"
+            "\tselect { case d = <-local: }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset(),
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n"
+            "\tlocal := make(chan chan int64, 1)\n"
+            "\tlocal <- make(chan int64, 1)\n"
+            "\tselect { case d = <-local: default: }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func G(cc chan chan int64, q chan int64) int64 {\n"
+            "\td := <-cc\n"
+            "\tselect { case <-q: d = make(chan int64, 1); default: }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\tfor d = range cc2 { break }\n"
+            "\td <- 1\n\treturn <-d\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_chan_param_origins_follow_scalar_channel_reassignments(
+    go_types_helper, callee, expected
+):
+    files = {"a.go": "package p\n" + callee}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "G")
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "callee",
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := d\n"
+            "\td = make(chan int64, 1)\n"
+            "\treturn <-e\n}\n"
+        ),
+        (
+            "func G(cc, cc2 chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := d\n\td = <-cc2\n"
+            "\treturn <-e\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\te := d\n"
+            "\td, e = make(chan int64, 1), d\n"
+            "\treturn <-e\n}\n"
+        ),
+    ],
+)
+def test_chan_chan_param_origins_survive_reseating_an_alias(
+    go_types_helper, callee
+):
+    files = {"a.go": "package p\n" + callee}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "G")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "if b { d = <-cc2 } else { return <-d }\n"
+        ),
+        pytest.param(
+            (
+                "switch b {\n"
+                "case true: d = <-cc2\n"
+                "case false: return <-d\n"
+                "}\n"
+            ),
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="pre-existing switch default/fallthrough scope limitation",
+            ),
+        ),
+        (
+            "a := make(chan int64, 1)\n"
+            "select {\n"
+            "case x := <-a: d = <-cc2; _ = x\n"
+            "case v := <-d: _ = v; return <-d\n"
+            "}\n"
+        ),
+    ],
+)
+def test_chan_chan_param_origins_do_not_leak_between_branches(
+    go_types_helper, body
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc, cc2 chan chan int64, b bool) int64 {\n"
+        "\td := <-cc\n"
+        + body
+        + "return 0\n}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "G")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_switch_case_expression_writes_are_visible_in_case_body(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) bool { *p = x; return true }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tcase Set(&y, x): return y\n"
+        "\tdefault: return 0\n"
+        "\t}\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_switch_earlier_case_expression_writes_reach_later_case(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) int64 { *p = x; return 1 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tcase Set(&y, x) == 0: return 0\n"
+        "\tcase true: return y\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="pre-existing switch default/fallthrough scope limitation",
+)
+def test_switch_leading_default_observes_later_case_guard_writes(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) int64 { *p = x; return 1 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tdefault: return y\n"
+        "\tcase Set(&y, x) == 0: y = 0\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_switch_middle_case_fallthrough_keeps_direct_body_writes(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch x {\n"
+        "\tcase 0: return 0\n"
+        "\tcase 1:\n"
+        "\t\ty = x\n"
+        "\t\tfallthrough\n"
+        "\tcase 2: return y\n"
+        "\tdefault: return 0\n"
+        "\t}\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_switch_case_expression_writes_reach_no_match_path(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) bool { *p = x; return false }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tcase Set(&y, x): return 0\n"
+        "\t}\n"
+        "\treturn y\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
@@ -16090,6 +16861,50 @@ def test_chan_chan_call_valued_send_promotes_args(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_chan_chan_call_reseat_drops_externality_from_new_queue(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64, x int64) {\n"
+        "\td := <-cc\n\td <- x\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+        "\tG(cc, x)\n\tc = make(chan int64, 1)\n"
+        "\tc <- 1\n\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_chan_chan_call_reseat_keeps_detached_alias_external(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64, x int64) {\n"
+        "\td := <-cc\n\td <- x\n}\n"
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n\te := c\n"
+        "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+        "\tG(cc, x)\n\tc = make(chan int64, 1)\n"
+        "\tc <- 1\n\treturn <-e\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_chan_chan_captured_receive_records_external_effect(go_types_helper):
     # `h := func() { <-cc }` — a `chan chan` captured in a literal
     # is external state like a scalar `chan` param: calling `h`
@@ -16108,6 +16923,29 @@ def test_chan_chan_captured_receive_records_external_effect(go_types_helper):
     )
     assert result.available
     assert result.effects == "unknown"
+
+
+def test_defer_local_chan_chan_call_promotes_at_registration(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64, x int64) {\n"
+        "\td := <-cc\n\td <- x\n}\n"
+        "func F(c chan int64, x int64) {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tdefer G(cc, x)\n\tcc <- c\n}\n"
+        "func Caller(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n\tF(c, x)\n\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    f_result = named_package(files, snapshot, summaries, "F")
+    caller_result = named_package(files, snapshot, summaries, "Caller")
+    assert f_result.available and f_result.effects == "unknown"
+    assert caller_result.available
+    assert caller_result.return_dependencies == frozenset({0})
+    assert caller_result.effects == "unknown"
 
 
 def test_chan_parameter_send_recv_admitted(go_types_helper):

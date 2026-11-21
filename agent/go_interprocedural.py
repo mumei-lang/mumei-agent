@@ -996,6 +996,7 @@ class _Builder:
         # conflated-set model a `make(chan)` local uses.
         self.external_chan_locals: set[str] = set()
         self.local_chan_chans: set[str] = set()
+        self._chan_chan_param_origins: dict[str, frozenset[int]] = {}
         self.external_chan_selectors: dict[str, frozenset[int]] = {}
         self._external_chan_elem_index_deps: dict[
             tuple[int, int, int], frozenset[int]
@@ -2070,6 +2071,29 @@ class _Builder:
         to the OLD group's surviving sharers (found by intersecting
         the snapshot), not to the reseated `s`'s new set."""
         toks = self._opaque_container_tokens
+        chan_chan_group = (
+            member_id in self.local_chan_chans
+            or root_id in self.local_chan_chans
+        )
+        external_group = chan_chan_group and (
+            member_id in self.external_chan_locals
+            or member_id in self._external_chan_group_tokens
+            or root_id in self.external_chan_locals
+            or root_id in self._external_chan_group_tokens
+            or bool(self._chan_group_external_tokens(member_id))
+            or bool(self._chan_group_external_tokens(root_id))
+        )
+        if chan_chan_group and pre_root_set is not None:
+            external_group = external_group or any(
+                isinstance(token, str)
+                and (
+                    token in self.external_chan_locals
+                    or token in self._external_chan_group_tokens
+                )
+                for token in pre_root_set
+            )
+        if external_group:
+            self._mark_external_chan_group_member(member_id)
         if member_id not in self._external_chan_group_tokens:
             toks[member_id] = (
                 toks.get(member_id, frozenset())
@@ -5852,6 +5876,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
             elif entry[0] == "local_chan_group":
                 _, binding, chan_group, old_root = entry
+                origins = self._chan_chan_param_origin(recv, params)
+                strong_update = not (
+                    conditional
+                    or preserve_chan_alias
+                    or self._may_skip > 0
+                )
+                if (
+                    strong_update
+                    and self._chan_chan_param_origins.get(
+                        binding.id, frozenset()
+                    )
+                    != origins
+                ):
+                    self._detach_chan_aliases(
+                        binding.id, locals_, params
+                    )
                 if old_root is not None:
                     self._chan_group_join(old_root, chan_group)
                     self.chan_aliases[binding.id] = old_root
@@ -5862,6 +5902,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     locals_, params, binding.id, recv_deps, conditional
                 )
                 self._chan_group_join(binding.id, chan_group)
+                self._set_chan_chan_param_origins(
+                    binding.id,
+                    origins,
+                    not strong_update,
+                    locals_,
+                )
             else:
                 _, binding = entry
                 # `:=` binds fresh names (and a reused one keeps the
@@ -5974,6 +6020,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         descriptor). Park the group's membership under a surrogate
         queue token carrying the old contents: `<-s[i]` keeps the
         pre-reseat sends while `<-c` reads only the fresh queue."""
+        if binding_id in self._chan_detached:
+            return
         shared = False
         for hid, toks in self._opaque_container_tokens.items():
             if hid != binding_id and binding_id in toks:
@@ -5996,7 +6044,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # where they mean the OLD queue. Map it for the rest of this
         # statement; the FIRST detach in it is the pre-state queue.
         self._chan_detached.setdefault(binding_id, sur)
-        locals_[sur] = locals_.get(binding_id, frozenset())
+        old_origins = self._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        locals_[sur] = (
+            locals_.get(binding_id, frozenset()) | old_origins
+        )
+        if old_origins:
+            self._chan_chan_param_origins[sur] = old_origins
         if binding_id in params:
             locals_[sur] = locals_[sur] | frozenset(
                 {params[binding_id]}
@@ -6032,6 +6087,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.external_chan_locals.add(sur)
         if binding_id in self._external_chan_group_tokens:
             self._mark_external_chan_group_member(sur)
+            self._external_chan_group_tokens.discard(binding_id)
         # The reseated name's own member set still lists the sharers
         # the old queue carried (`d := s[0]` minted `d` into `c`'s
         # set). They belong to the parked queue, not the fresh one:
@@ -6048,6 +6104,64 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._opaque_container_tokens[binding_id] = frozenset(
             {binding_id}
         )
+
+    def _detach_chan_aliases(
+        self, binding_id: str, locals_: dict, params: dict
+    ) -> None:
+        aliases = [
+            alias_id
+            for alias_id, target in self.chan_aliases.items()
+            if target == binding_id
+        ]
+        if not aliases:
+            return
+        old_queue = locals_.get(binding_id)
+        if old_queue is None:
+            old_queue = (
+                frozenset({params[binding_id]})
+                if binding_id in params
+                else frozenset()
+            )
+        old_origins = self._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        old_queue |= old_origins
+        external = (
+            binding_id in self.external_chan_locals
+            or binding_id in params
+        )
+        selectors = self.external_chan_selectors.get(
+            binding_id, frozenset()
+        )
+        for alias_id in aliases:
+            self.chan_aliases.pop(alias_id, None)
+            alias_slot = locals_.get(alias_id)
+            if alias_slot is None:
+                alias_slot = (
+                    frozenset({params[alias_id]})
+                    if alias_id in params
+                    else frozenset()
+                )
+            locals_[alias_id] = alias_slot | old_queue
+            alias_origins = (
+                self._chan_chan_param_origins.get(
+                    alias_id, frozenset()
+                )
+                | old_origins
+            )
+            if alias_origins:
+                self._chan_chan_param_origins[alias_id] = (
+                    alias_origins
+                )
+            if external:
+                self.external_chan_locals.add(alias_id)
+                if selectors:
+                    self.external_chan_selectors[alias_id] = (
+                        self.external_chan_selectors.get(
+                            alias_id, frozenset()
+                        )
+                        | selectors
+                    )
 
     def _chan_alias_target(
         self, node: Any, locals_: dict, params: dict
@@ -6279,6 +6393,103 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
         return ext is not None and self._chan_chan_fact(ext[1])
 
+    def _chan_chan_param_origin(
+        self, node: Any, params: dict
+    ) -> frozenset[int]:
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is not None and inner.type == "receive_statement":
+            inner = next(
+                (
+                    child
+                    for child in _children(inner)
+                    if child.type == "unary_expression"
+                    and (
+                        operator := child.child_by_field_name(
+                            "operator"
+                        )
+                    )
+                    is not None
+                    and operator.type == "<-"
+                ),
+                None,
+            )
+        operand = None
+        if (
+            inner is not None
+            and inner.type == "unary_expression"
+            and (
+                operator := inner.child_by_field_name("operator")
+            ) is not None
+            and operator.type == "<-"
+        ):
+            operand = inner.child_by_field_name("operand")
+        elif inner is not None and inner.type == "identifier":
+            operand = inner
+        external = (
+            self._external_chan_operand(operand, params)
+            if operand is not None
+            else None
+        )
+        if (
+            external is not None
+            and external[0] in params
+            and self._chan_chan_fact(external[1])
+        ):
+            return frozenset({params[external[0]]})
+        if inner is not None and inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            if ref is not None and ref.binding_id:
+                return self._chan_chan_param_origins.get(
+                    ref.binding_id, frozenset()
+                )
+        return frozenset()
+
+    def _set_chan_chan_param_origins(
+        self,
+        binding_id: str,
+        origins: frozenset[int],
+        conditional: bool,
+        locals_: dict[str, frozenset[int]] | None = None,
+    ) -> None:
+        previous = self._chan_chan_param_origins.get(
+            binding_id, frozenset()
+        )
+        if conditional:
+            origins |= previous
+        elif locals_ is not None:
+            stale = previous - origins
+            if stale:
+                current = locals_.get(binding_id)
+                if current is not None:
+                    locals_[binding_id] = current - stale
+        if origins:
+            self._chan_chan_param_origins[binding_id] = origins
+        else:
+            self._chan_chan_param_origins.pop(binding_id, None)
+
+    def _merge_chan_chan_param_origin_states(
+        self, *states: dict[str, frozenset[int]]
+    ) -> dict[str, frozenset[int]]:
+        merged: dict[str, frozenset[int]] = {}
+        for state in states:
+            for binding_id, origins in state.items():
+                merged[binding_id] = (
+                    merged.get(binding_id, frozenset()) | origins
+                )
+        return {
+            binding_id: origins
+            for binding_id, origins in merged.items()
+            if origins
+        }
+
     def _local_chan_chan_id(self, node: Any) -> str | None:
         """The root identity of a local `chan chan T` queue operand."""
         inner = node
@@ -6307,6 +6518,75 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         return root
+
+    def _local_chan_chan_call_arg_roots(
+        self, call: Any, arguments: list[Any]
+    ) -> tuple[str, ...] | None:
+        roots = []
+        for argument in arguments:
+            root = self._local_chan_chan_id(argument)
+            if root is not None:
+                roots.append(root)
+                continue
+            nested_call = (
+                self.calls.get(self.node_key(argument))
+                if argument is not None
+                and argument.type
+                in {"call_expression", "type_conversion_expression"}
+                else None
+            )
+            if nested_call is None or nested_call.kind != "conversion":
+                continue
+            if argument.type == "type_conversion_expression":
+                operand = argument.child_by_field_name("operand")
+            else:
+                conversion_arguments = _children(
+                    argument.child_by_field_name("arguments")
+                )
+                operand = (
+                    conversion_arguments[0]
+                    if len(conversion_arguments) == 1
+                    else None
+                )
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = next(
+                    (
+                        child
+                        for child in operand.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if self._local_chan_chan_id(operand) is not None:
+                return None
+        roots = tuple(roots)
+        if not roots:
+            return ()
+        if (
+            call is None
+            or call.kind != "direct_local"
+            or call.method
+            or call.method_expr
+        ):
+            return None
+        target = self.functions.get(call.target)
+        if (
+            target is None
+            or target.method
+            or target.variadic
+            or len(arguments) != len(target.parameters)
+        ):
+            return None
+        if any(
+            self._local_chan_chan_id(argument) is not None
+            and not self._chan_chan_fact(target.parameters[index].type)
+            for index, argument in enumerate(arguments)
+        ):
+            return None
+        return roots
 
     def _local_chan_chan_receive(self, node: Any) -> str | None:
         """The local `chan chan T` root read by a `<-cc` expression."""
@@ -9069,6 +9349,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
         saved_local_chan_chans = self.local_chan_chans
+        saved_chan_chan_param_origins = (
+            self._chan_chan_param_origins
+        )
         saved_external_chan_selectors = self.external_chan_selectors
         saved_external_chan_elem_index_deps = (
             self._external_chan_elem_index_deps
@@ -9098,6 +9381,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self.field_chan_queues = {}
         self.external_chan_locals = set()
         self.local_chan_chans = set()
+        self._chan_chan_param_origins = {}
         self.external_chan_selectors = {}
         self._external_chan_elem_index_deps = {}
         self._defer_result_deps = frozenset()
@@ -9177,6 +9461,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
             self.local_chan_chans = saved_local_chan_chans
+            self._chan_chan_param_origins = (
+                saved_chan_chan_param_origins
+            )
             self.external_chan_selectors = (
                 saved_external_chan_selectors
             )
@@ -9856,6 +10143,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # None on it, so the name takes the external model.
                     else rights[0]
                 )
+                if self._scalar_chan_binding(binding.id):
+                    chan_origins = self._chan_chan_param_origin(
+                        chan_rhs, params
+                    )
+                    previous_origins = self._chan_chan_param_origins.get(
+                        binding.id, frozenset()
+                    )
+                    if (
+                        not (conditional or self._may_skip > 0)
+                        and previous_origins != chan_origins
+                    ):
+                        self._detach_chan_aliases(
+                            binding.id, locals_, params
+                        )
+                    self._set_chan_chan_param_origins(
+                        binding.id,
+                        chan_origins,
+                        conditional or self._may_skip > 0,
+                        locals_,
+                    )
                 if binding.type.kind == "chan" and not self._is_make_chan_call(
                     chan_rhs
                 ):
@@ -11223,21 +11530,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.expression(
                 condition, fn, params, scope, transfers, count, 0
             )
+            chan_origin_entry = dict(
+                self._chan_chan_param_origins
+            )
+            scope_entry = dict(scope)
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
             # Reassignments of existing names join back by union: the
             # branch may not execute.
-            branch = dict(scope)
+            branch = dict(scope_entry)
             ptr_branch = dict(self._ptr_deps)
             self._branch_sequence(
                 _children(consequence), fn, params, branch, transfers,
                 count, deps, saw_return, conditional,
             )
+            consequence_origins = dict(
+                self._chan_chan_param_origins
+            )
             self._join(scope, branch, params)
             self._join_ptr(ptr_branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
-                branch = dict(scope)
+                self._chan_chan_param_origins = dict(chan_origin_entry)
+                branch = dict(scope_entry)
                 ptr_branch = dict(self._ptr_deps)
                 if alternative.type == "if_statement":
                     self._branch_statement(
@@ -11249,8 +11564,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         _children(alternative), fn, params, branch,
                         transfers, count, deps, saw_return, conditional,
                     )
+                alternative_origins = dict(
+                    self._chan_chan_param_origins
+                )
                 self._join(scope, branch, params)
                 self._join_ptr(ptr_branch, params)
+            else:
+                alternative_origins = chan_origin_entry
+            self._chan_chan_param_origins = (
+                self._merge_chan_chan_param_origin_states(
+                    consequence_origins, alternative_origins
+                )
+            )
             if initializer is not None:
                 self._join(locals_, scope, params)
                 self._join_ptr(ptr_scope, params)
@@ -12341,6 +12666,57 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_prestate_members |= {
                         tok for tok in pre_set if isinstance(tok, str)
                     }
+            lhs_binding_ids = {
+                getattr(ref, "binding_id", None) for ref in refs
+            }
+            for i, alias_target in enumerate(chan_alias_targets):
+                source_id = (
+                    alias_target.id if alias_target is not None else None
+                )
+                target_id = getattr(refs[i], "binding_id", None)
+                if (
+                    source_id is not None
+                    and source_id in lhs_binding_ids
+                    and source_id != target_id
+                ):
+                    self._chan_prestate_members.add(source_id)
+            if not compound:
+                chan_origin_updates: dict[str, frozenset[int]] = {}
+                for i, ref in enumerate(refs):
+                    binding_id = getattr(ref, "binding_id", None)
+                    if (
+                        binding_id is None
+                        or not self._scalar_chan_binding(binding_id)
+                    ):
+                        continue
+                    rhs_node = (
+                        rights[i]
+                        if len(lefts) == len(rights)
+                        else rights[0]
+                    )
+                    chan_origin_updates[binding_id] = (
+                        self._chan_chan_param_origin(rhs_node, params)
+                    )
+                for binding_id, origins in chan_origin_updates.items():
+                    previous = self._chan_chan_param_origins.get(
+                        binding_id, frozenset()
+                    )
+                    if (
+                        not (conditional or self._may_skip > 0)
+                        and previous != origins
+                    ):
+                        self._chan_queue_detach(
+                            binding_id, locals_, params
+                        )
+                        self._detach_chan_aliases(
+                            binding_id, locals_, params
+                        )
+                    self._set_chan_chan_param_origins(
+                        binding_id,
+                        origins,
+                        conditional or self._may_skip > 0,
+                        locals_,
+                    )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -12889,7 +13265,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             continue
                     if chan_alias is not None:
-                        self.chan_aliases[ref.binding_id] = chan_alias.id
+                        self.chan_aliases[ref.binding_id] = (
+                            self._chan_detached.get(
+                                chan_alias.id, chan_alias.id
+                            )
+                        )
                         # A reseat redirects only the name — the
                         # `_store` below would overwrite
                         # `locals_[ref.binding_id]`, but that slot
@@ -12906,7 +13286,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         passthrough = call_result_targets[i]
                         if passthrough is not None:
                             self.chan_aliases[ref.binding_id] = (
-                                passthrough.id
+                                self._chan_detached.get(
+                                    passthrough.id, passthrough.id
+                                )
                             )
                         else:
                             self.chan_aliases.pop(
@@ -15186,6 +15568,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 right, fn, params, scope, transfers,
                                 count, 0,
                             )
+                            rdeps |= self._chan_chan_param_origin(
+                                right, params
+                            )
                             if chan is not None:
                                 # `for v := range d` — d may sit
                                 # inside a chan-element share group
@@ -15312,6 +15697,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self.external_chan_locals.add(
                                         binding.id
                                     )
+                                self._set_chan_chan_param_origins(
+                                    binding.id,
+                                    self._chan_chan_param_origin(
+                                        right, params
+                                    ),
+                                    False,
+                                    scope,
+                                )
                             if chan is not None:
                                 # `for v := range ch` — the element
                                 # name re-joins the queue's widened
@@ -15391,6 +15784,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self.external_chan_locals.add(
                                         ref.binding_id
                                     )
+                                self._set_chan_chan_param_origins(
+                                    ref.binding_id,
+                                    self._chan_chan_param_origin(
+                                        right, params
+                                    ),
+                                    True,
+                                    scope,
+                                )
                             if chan is not None:
                                 range_elem = (
                                     ref.binding_id,
@@ -15794,6 +16195,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if c.type in {"expression_case", "default_case"}
                 ]
                 branch: dict[str, frozenset[int]] | None = None
+                chan_origin_entry = dict(
+                    self._chan_chan_param_origins
+                )
+                chan_origin_exits: list[dict[str, frozenset[int]]] = []
+                branch_origins: dict[str, frozenset[int]] | None = None
                 for index, clause in enumerate(clauses):
                     body = next(
                         (
@@ -15821,6 +16227,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 "unsupported_fallthrough", _span(clause)
                             )
                         statements = statements[:-1]
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     for sub in clause.named_children:
                         if sub.type == "expression_list":
                             # Case guards are evaluated like the tag.
@@ -15833,6 +16242,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # Direct match, or the head of a new chain — the
                         # same fresh alternative doubles as the chain's
                         # first step when the clause falls through.
+                        self._chan_chan_param_origins = dict(
+                            chan_origin_entry
+                        )
                         frame["exited"] = False
                         branch = dict(scope)
                         ptr_branch = dict(self._ptr_deps)
@@ -15840,10 +16252,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             statements, fn, params, branch, transfers,
                             count, deps, saw_return, conditional,
                         )
+                        direct_origins = dict(
+                            self._chan_chan_param_origins
+                        )
                         if not falls:
+                            chan_origin_exits.append(direct_origins)
                             self._join(scope, branch, params)
                             self._join_ptr(ptr_branch, params)
                             branch = None
+                            branch_origins = None
+                        else:
+                            branch_origins = direct_origins
                         continue
                     # Fall-through target — the body runs twice: once in
                     # the carried chain scope (the fallthrough path, with
@@ -15851,9 +16270,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # fresh alternative (the direct-match path, which
                     # skips the preceding clause's writes).
                     clause_seen_labels = set(self._seen_labels)
+                    self._chan_chan_param_origins = dict(
+                        branch_origins or chan_origin_entry
+                    )
                     self._branch_sequence(
                         statements, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
+                    )
+                    chain_origins = dict(
+                        self._chan_chan_param_origins
                     )
                     chain_exited = frame["exited"]
                     frame["exited"] = False
@@ -15861,22 +16286,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # one recorded — a forward goto inside the clause is
                     # still forward.
                     self._seen_labels = clause_seen_labels
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     fresh = dict(scope)
                     ptr_fresh = dict(self._ptr_deps)
                     self._branch_sequence(
                         statements, fn, params, fresh, transfers,
                         count, deps, saw_return, conditional,
                     )
+                    fresh_origins = dict(
+                        self._chan_chan_param_origins
+                    )
                     self._join(scope, fresh, params)
                     self._join_ptr(ptr_fresh, params)
                     if falls:
                         frame["exited"] = chain_exited
+                        branch_origins = (
+                            self._merge_chan_chan_param_origin_states(
+                                chain_origins, fresh_origins
+                            )
+                        )
                     else:
+                        chan_origin_exits.extend(
+                            [chain_origins, fresh_origins]
+                        )
                         self._join(scope, branch, params)
                         self._join_ptr(ptr_branch, params)
                         branch = None
+                        branch_origins = None
             finally:
                 self.frames.pop()
+            if not any(
+                clause.type == "default_case" for clause in clauses
+            ):
+                chan_origin_exits.append(chan_origin_entry)
+            self._chan_chan_param_origins = (
+                self._merge_chan_chan_param_origin_states(
+                    *chan_origin_exits
+                )
+                if chan_origin_exits
+                else chan_origin_entry
+            )
             if initializer is not None:
                 self._join(locals_, scope, params)
                 self._join_ptr(ptr_scope, params)
@@ -16329,6 +16780,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             ]
             if not clauses:
                 raise _Unsupported("unsupported_statement", _span(node))
+            chan_origin_entry = dict(
+                self._chan_chan_param_origins
+            )
             frame = {
                 "kind": "switch",
                 "exited": False,
@@ -16351,6 +16805,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     tuple[list, Any, frozenset[int]] | None
                 ] = []
                 for clause in clauses:
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     receive = next(
                         (
                             s
@@ -16387,6 +16844,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 chan_external_entry = set(self.external_chan_locals)
                 clause_aliases: list[dict] = []
                 clause_externals: list[set] = []
+                clause_origins: list[dict[str, frozenset[int]]] = []
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
                     # `_branch_sequence` rewrites the shared
@@ -16399,6 +16857,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._ptr_deps = dict(ptr_entry)
                     self.chan_aliases = dict(chan_alias_entry)
                     self.external_chan_locals = set(chan_external_entry)
+                    self._chan_chan_param_origins = dict(
+                        chan_origin_entry
+                    )
                     if receive is not None:
                         lefts, recv, recv_deps = receive
                         self._select_receive_store(
@@ -16434,6 +16895,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     clause_externals.append(
                         set(self.external_chan_locals)
                     )
+                    clause_origins.append(
+                        dict(self._chan_chan_param_origins)
+                    )
+                self._chan_chan_param_origins = (
+                    self._merge_chan_chan_param_origin_states(
+                        *clause_origins
+                    )
+                    if clause_origins
+                    else chan_origin_entry
+                )
                 # Post-join a channel name keeps its alias only where
                 # every clause's map agrees; a disagreement means it
                 # may hold either queue — the same "either queue"
@@ -16457,6 +16928,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             v for v in alias_values if v is not None
                         }
                 self._join(locals_, joined, params)
+                if (
+                    len(clauses) == 1
+                    and clauses[0].type != "default_case"
+                    and not conditional
+                    and self._may_skip == 0
+                ):
+                    for bid in (
+                        set(chan_origin_entry)
+                        | set(self._chan_chan_param_origins)
+                    ):
+                        if (
+                            chan_origin_entry.get(bid, frozenset())
+                            != self._chan_chan_param_origins.get(
+                                bid, frozenset()
+                            )
+                            and bid in joined
+                        ):
+                            locals_[bid] = joined[bid]
                 # A maybe-detached name's slot also unions every
                 # queue it could still mean — a case that kept the
                 # old alias sees that queue's contents on a later
@@ -18468,15 +18957,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if external is not None:
                             target_id, fact = external
                             if self._chan_chan_fact(fact):
-                                # `<-cc` pulls a channel out of the
-                                # outer queue — the received name
-                                # carries the queue's own deps
-                                # (`cc := G(x)` hands `x` to
-                                # `c := <-cc`; a bare param slot has
-                                # no entry and stays dep-free).
+                                # A channel received from an outer
+                                # queue carries the queue parameter's
+                                # provenance through subsequent reads.
                                 base_deps = locals_.get(
                                     target_id, frozenset()
                                 )
+                                if target_id in params:
+                                    base_deps |= frozenset(
+                                        {params[target_id]}
+                                    )
                             else:
                                 base_deps = frozenset()
                         else:
@@ -18556,6 +19046,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             | self._chan_group_read_deps(
                                 binding.id, locals_
                             )
+                            | self._chan_chan_param_origins.get(
+                                binding.id, frozenset()
+                            )
                         )
                     group_external = (
                         self._chan_group_external_tokens(binding.id)
@@ -18577,6 +19070,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                     return self._chan_group_read_deps(
                         binding.id, locals_
+                    ) | self._chan_chan_param_origins.get(
+                        binding.id, frozenset()
                     )
                 raise _Unsupported("unsupported_operator", _span(node))
             if kind == "unary_expression" and operator.type == "&":
@@ -18736,17 +19231,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if function_node is not None
                 else b""
             )
-            if not (
+            builtin_chan_queue = (
                 call.kind == "builtin"
                 and builtin_name in {b"close", b"len", b"cap"}
+            )
+            method_receiver = (
+                function_node.child_by_field_name("operand")
+                if call.method
+                and function_node is not None
+                and function_node.type == "selector_expression"
+                else None
+            )
+            if not builtin_chan_queue and (
+                self._local_chan_chan_call_arg_roots(
+                    call, arguments
+                )
+                is None
+                or self._local_chan_chan_id(method_receiver) is not None
             ):
-                if any(
-                    self._local_chan_chan_id(argument) is not None
-                    for argument in arguments
-                ):
-                    raise _Unsupported(
-                        "unresolved_or_opaque_call", _span(node)
-                    )
+                raise _Unsupported(
+                    "unresolved_or_opaque_call", _span(node)
+                )
             if call.kind == "interface_dispatch":
                 return self._interface_dispatch_call(
                     node, call, arguments, fn, params, locals_,
@@ -20044,12 +20549,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if len(arguments) != arity:
             raise _Unsupported("callee_unavailable", _span(node), target_id)
         # Even unused arguments are evaluated and must have supported effects.
-        actual = tuple(
+        local_chan_chan_roots = (
+            self._local_chan_chan_call_arg_roots(call, arguments)
+        )
+        actual_values = [
             self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
             for arg in arguments
-        )
+        ]
+        if local_chan_chan_roots is not None:
+            for index, argument in enumerate(arguments):
+                root_id = self._local_chan_chan_id(argument)
+                if root_id is not None:
+                    actual_values[index] = self._chan_group_read_deps(
+                        root_id, locals_
+                    )
+        actual = tuple(actual_values)
         if receiver_deps is not None:
             actual = (receiver_deps, *actual)
         elif (
@@ -20076,6 +20592,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     actual[0] | self.indirect_writes,
                     *actual[1:],
                 )
+        for root_id in local_chan_chan_roots or ():
+            for token in self._chan_group_members(root_id):
+                self._mark_external_chan_group_member(token)
         callee = self.summarize(target_id)
         if not callee.available:
             reason = (

@@ -2942,9 +2942,18 @@ operations (`send`, `receive`, `close`, `len`, and
 identity. External members remain externally
 observable through the group: their reads and sends
 contribute indirect writes and imported transfers.
-Local queues stay closed when they escape through
-calls, returns, stores, or func-literal captures, and
-when reseated from a call result or parameter.
+Passing a local queue to a direct local function call,
+`go`, or `defer` is supported only when its parameter
+has the same scalar-element `chan chan T` shape. Its
+whole share group becomes external at the call or
+defer-registration boundary;
+later members joined by sends, receives, aliases, or
+group merges inherit that externality, so indirect
+writes reach subsequent group reads. Imported,
+indirect, method, variadic, and type-mismatched calls
+remain closed. Returns, stores, func-literal captures,
+and reseats from a call result or parameter remain
+closed too.
 Deeper nesting (`chan chan chan T`), `[]chan chan T`,
 and direct nested channel operations stay closed:
 passing a channel received from one local queue as a
