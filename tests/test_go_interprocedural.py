@@ -31056,6 +31056,70 @@ def test_struct_field_range_summary_stays_fresh(go_types_helper):
     assert direct_result.binding_id not in missing
 
 
+def test_struct_array_slice_field_store_keeps_backing_dependencies(
+    go_types_helper,
+):
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A [2][]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tn := []int64{0}\n"
+            "\ts := S{}\n"
+            "\ts.A[0] = n\n"
+            "\tn[0] = x\n"
+            "\treturn s.A[0][0]\n}\n",
+        )
+    )
+    extracted = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A [2][]int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tn := []int64{0}\n"
+            "\ts := S{}\n"
+            "\ta := s.A\n"
+            "\ta[0] = n\n"
+            "\tn[0] = x\n"
+            "\treturn a[0][0]\n}\n",
+        )
+    )
+    assert direct.available, direct.gaps
+    assert extracted.available, extracted.gaps
+    assert direct.return_dependencies == (
+        extracted.return_dependencies
+    ) == frozenset({0})
+
+
+def test_struct_field_comma_ok_map_read_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { M map[int]int64 }\n"
+            "func F(s S, k int) int64 {\n"
+            "\tv, ok := s.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+def test_struct_field_select_receive_target_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(s S, ch chan int64, i int) int64 {\n"
+            "\tselect { case s.A[i] = <-ch: }\n"
+            "\treturn s.A[i]\n}\n",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
