@@ -17373,7 +17373,6 @@ class _Builder:
                                 or src_id in calls_before
                                 or src_id in aliases_before
                                 or src_id in opaque_before
-                                or src_id in imv_before
                             )
                         )
                         if src_known:
@@ -17421,6 +17420,18 @@ class _Builder:
                             # own alternatives described and mark the
                             # name so the external model covers both.
                             self.opaque_callees.add(ref.binding_id)
+                        src_interface_method = (
+                            imv_before.get(src_id)
+                            if src_id is not None
+                            else None
+                        )
+                        if (
+                            src_interface_method is not None
+                            and src_interface_method[0] is not None
+                        ):
+                            self.escaped.add(
+                                src_interface_method[0]
+                            )
                         # A maybe-skipped `h = g` may also hand h a
                         # bound method value — keep the resolved pair
                         # only when both candidates name the SAME

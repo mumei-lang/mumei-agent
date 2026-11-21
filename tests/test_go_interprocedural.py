@@ -6152,6 +6152,61 @@ def test_interface_method_value_conditional_rebind_is_sound(
         assert {1, 2} <= result.return_dependencies
 
 
+def test_interface_method_value_conditional_copy_keeps_both_alternatives(
+    go_types_helper,
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, b bool, x int64) int64 { "
+            "f := func(y int64) int64 { return 0 }; "
+            "g := i.M; if b { f = g }; return f(x) }",
+        )
+    )
+    concrete = named(
+        *unit(
+            go_types_helper,
+            "type T struct{ V int64 }\n"
+            "func (t T) M(x int64) int64 { return t.V + x }\n"
+            "func F(i int64, b bool, x int64) int64 { "
+            "t := T{V: i}; "
+            "f := func(y int64) int64 { return 0 }; "
+            "g := t.M; if b { f = g }; return f(x) }",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, b bool, x int64) int64 { "
+            "if b { return i.M(x) }; return 0 }",
+        )
+    )
+    assert value.available, value.gaps
+    assert concrete.available, concrete.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == concrete.return_dependencies
+    assert value.return_dependencies == direct.return_dependencies
+    assert {0, 2} <= value.return_dependencies
+
+
+def test_interface_method_value_conditional_copy_in_loop_keeps_both(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := func(y int64) int64 { return 0 }; g := i.M; "
+            "for n := 0; n < 1; n++ { f = g }; return f(x) }",
+        )
+    )
+    assert result.available, result.gaps
+    assert {0, 1} <= result.return_dependencies
+
+
 def test_interface_method_value_caller_propagation_matches_direct(
     go_types_helper,
 ):
