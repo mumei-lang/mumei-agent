@@ -2890,15 +2890,25 @@ def recovery_eval(record_path: str, evidence_paths: list[str]) -> str:
 def _redact_declared_paths(text: str, declared: list[str]) -> str:
     # Failure text goes to a model: declared checkout-local paths
     # stay out of it — basenames only.
+    replacements = []
     for p in declared:
         if not p:
             continue
         base = os.path.basename(p) or "<path>"
+        candidates = [p]
         try:
-            text = text.replace(str(Path(p).resolve()), base)
+            candidates.append(str(Path(p).resolve()))
         except (OSError, RuntimeError):
             pass
-        text = text.replace(p, base)
+        for candidate in candidates:
+            replacements.append((candidate, base))
+            escaped = repr(candidate)[1:-1]
+            if escaped != candidate:
+                replacements.append((escaped, base))
+    for candidate, base in sorted(
+        replacements, key=lambda replacement: len(replacement[0]), reverse=True
+    ):
+        text = text.replace(candidate, base)
     return text
 
 

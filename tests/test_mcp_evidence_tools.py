@@ -1353,13 +1353,14 @@ class TestFreshnessEvalTool:
         )
 
     def test_missing_record_path_is_redacted(self, tmp_path) -> None:
-        missing = tmp_path / "missing-record.json"
+        missing = tmp_path / "a\\b.json"
         payload = _fold_assert_error(
             mcp_server.freshness_eval(
                 str(missing), "2026-11-18T01:00:00Z", 1
             )
         )
         assert str(tmp_path) not in payload["error"]
+        assert repr(str(missing))[1:-1] not in payload["error"]
 
     @pytest.mark.parametrize(
         "body",
@@ -1445,11 +1446,12 @@ class TestBindingEvalTool:
         evidence = _fold_write_json(
             tmp_path / "evidence.json", _fold_binding_document("a" * 64)
         )
-        missing = tmp_path / "missing-record.bin"
+        missing = tmp_path / "a\\b.json"
         payload = _fold_assert_error(
             mcp_server.binding_eval(str(missing), str(evidence))
         )
         assert str(tmp_path) not in payload["error"]
+        assert repr(str(missing))[1:-1] not in payload["error"]
 
     @pytest.mark.parametrize(
         "body",
