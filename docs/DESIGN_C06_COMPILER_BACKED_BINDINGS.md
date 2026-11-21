@@ -32,8 +32,8 @@
 | TypeScript | TypeScript compiler API（type checker のシンボル解決） | `lib.d.ts` 等の標準ライブラリ宣言が必要 | Node と `typescript` パッケージの同梱が必要 | パッケージのバージョンごとに固定 |
 | Rust | rust-analyzer の SCIP 出力など | Cargo プロジェクトが前提。単一ファイルで閉じない | rustup のコンポーネント | rust-analyzer の内部表現に依存し、安定した契約がない |
 
-（表の producer の能力は各ツールの公開ドキュメントに基づく見立てであり、本メモの時点では
-mumei-agent の環境で実出力を採取していない。実装スライスの最初の作業として fixture を採取して確認する。）
+（表の producer の能力は各ツールの公開ドキュメントに基づく見立て。Solidity は
+`solc` 0.8.39+commit.ce47f2c8 の実出力 fixture を採取済み。TypeScript / Rust は未採取。）
 
 ## 3. 推奨: 最初のスライスは Solidity
 
@@ -73,10 +73,10 @@ mumei-agent の環境で実出力を採取していない。実装スライス�
    見えても dynamic として trusted-safe にしない。
 4. 既存の `sol-bindings` の出力と、audit / CLI / MCP のルートは変わらない。
 
-### 3.3 前提条件（実装前に必要なもの）
+### 3.3 前提条件と実装状況
 
-- 固定バージョンの `solc` の provisioning。現在の開発環境には `solc` がなく（`forge` のみ）、
-  fixture 採取にはネットワーク経由の取得か blueprint への追加が必要。
+- 状態: `solc` 0.8.39+commit.ce47f2c8 の fixture 採取済み。最初の実装範囲と境界は
+  `docs/ROADMAP.md` の「C06 first compiler-backed Solidity binding slice」を参照。
 - 実際の standard-JSON 出力の fixture（AST 形式はバージョンで変わるため、許可リストのバージョンごと）。
 
 ## 4. 後続（このメモでは実装しない）

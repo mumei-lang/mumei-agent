@@ -1,0 +1,42 @@
+{
+  "profile": "mumei.solc-standard-json-envelope/v1",
+  "solc_version_output": "solc, the solidity compiler commandline interface\nVersion: 0.8.39+commit.ce47f2c8.Linux.g++\n",
+  "input": {
+    "language": "Solidity",
+    "sources": {
+      "compile_error.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity 0.8.39;\n\ncontract Broken {\n    function read() internal pure returns (uint256) {\n        return missing;\n    }\n}\n"
+      }
+    },
+    "settings": {
+      "outputSelection": {
+        "*": {
+          "*": [
+            "metadata"
+          ],
+          "": [
+            "ast"
+          ]
+        }
+      }
+    }
+  },
+  "output": {
+    "errors": [
+      {
+        "component": "general",
+        "errorCode": "7576",
+        "formattedMessage": "DeclarationError: Undeclared identifier.\n --> compile_error.sol:6:16:\n  |\n6 |         return missing;\n  |                ^^^^^^^\n\n",
+        "message": "Undeclared identifier.",
+        "severity": "error",
+        "sourceLocation": {
+          "end": 151,
+          "file": "compile_error.sol",
+          "start": 144
+        },
+        "type": "DeclarationError"
+      }
+    ],
+    "sources": {}
+  }
+}
