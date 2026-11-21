@@ -129,6 +129,7 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
     assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
+        "machine_code_acyclic_branch_function_tv",
         "machine_code_direct_call_site_tv",
         "machine_code_forward_branch_function_tv",
         "machine_code_leaf_function_tv",

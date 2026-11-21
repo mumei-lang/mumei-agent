@@ -7112,11 +7112,13 @@ function-outcome counts, plus `register_convention_assumed` and
 `machine_code_direct_call_site_tv`, consumed only when listed in
 `checks_performed`; direct calls are compared as uninterpreted call sites.
 Core #1206 adds `machine_code_forward_branch_function_tv`, consumed only when
-listed in `checks_performed`. The profile covers leaf straight-line functions,
-direct calls as uninterpreted call sites, and bounded forward-branch
-functions under an assumed register convention. Backward branches and loops
+listed in `checks_performed`. Core #1209 adds
+`machine_code_acyclic_branch_function_tv`, also consumed only when listed in
+`checks_performed`. The profile covers leaf straight-line functions, direct
+calls as uninterpreted call sites, and bounded forward and acyclic backward
+branches under an assumed register convention. Cyclic control flow and loops
 remain outside the profile (Core lists
-`machine_code_tv_backward_branch_functions` as not performed). The C `main`
+`machine_code_tv_cyclic_control_flow_functions` as not performed). The C `main`
 wrapper, CRT, loader and libc also remain outside its scope, so
 `object_translation_correspondence` stays unperformed. Other outcomes leave
 the full C02 and object-check vocabularies unperformed; mid-run input drift

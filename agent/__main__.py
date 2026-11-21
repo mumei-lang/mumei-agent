@@ -1337,10 +1337,10 @@ def main() -> None:
         parser = argparse.ArgumentParser(
             prog="python -m agent native-machine-tv-recheck",
             description=(
-                "Run Core's bounded leaf straight-line and forward-branch "
-                "machine-code TV recheck; direct calls are uninterpreted "
-                "sites; backward branches, loops, ABI/runtime semantics and "
-                "full object TV stay outside."
+                "Run Core's bounded leaf straight-line, forward-branch and "
+                "acyclic backward-branch machine-code TV recheck; direct "
+                "calls are uninterpreted sites; cyclic control flow, loops, "
+                "ABI/runtime semantics and full object TV stay outside."
             ),
         )
         machine_tv_build_parser(parser)
