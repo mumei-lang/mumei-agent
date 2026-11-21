@@ -30576,6 +30576,28 @@ def test_reseating_shared_struct_field_preserves_copied_headers(
     assert strong_update.return_dependencies == frozenset()
 
 
+def test_pointer_crossing_struct_field_read_stays_closed(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct { A []int64 }\n"
+            "type Q struct { P *P }\n"
+            "func F(x int64) int64 {\n"
+            "\tp := &P{}\n"
+            "\tq := Q{P: p}\n"
+            "\tp.A = []int64{x}\n"
+            "\tb := q.P.A\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    assert not result.available
+    assert "non_parameter_reference" in {
+        gap.reason for gap in result.gaps
+    }
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [

@@ -23328,10 +23328,54 @@ class _Builder:
                     field_deps = locals_.get(
                         field_root, frozenset()
                     )
+                    field_deps |= field_index_deps
                     field_operand = node.child_by_field_name(
                         "operand"
                     )
                     index_nodes = []
+                    pointer_crossed = False
+
+                    def operand_type(value):
+                        value = self._strip_parens(value)
+                        if value is None:
+                            return None
+                        if value.type == "identifier":
+                            ref = self.references.get(
+                                self.node_key(value)
+                            )
+                            binding = (
+                                self.bindings.get(ref.binding_id)
+                                if ref is not None
+                                else None
+                            )
+                            return getattr(binding, "type", None)
+                        if value.type in {
+                            "selector_expression",
+                            "field_expression",
+                        }:
+                            field = value.child_by_field_name("field")
+                            field_ref = (
+                                self.references.get(
+                                    self.node_key(field)
+                                )
+                                if field is not None
+                                else None
+                            )
+                            return getattr(
+                                self._field_identity(field_ref),
+                                "type",
+                                None,
+                            )
+                        if value.type in {
+                            "index_expression",
+                            "dereference_expression",
+                        }:
+                            base_type = operand_type(
+                                value.child_by_field_name("operand")
+                            )
+                            return getattr(base_type, "elem", None)
+                        return None
+
                     while field_operand is not None:
                         while (
                             field_operand is not None
@@ -23348,6 +23392,12 @@ class _Builder:
                             )
                         if field_operand is None:
                             break
+                        operand_fact = operand_type(field_operand)
+                        if (
+                            operand_fact is not None
+                            and operand_fact.kind == "pointer"
+                        ):
+                            pointer_crossed = True
                         if field_operand.type == "selector_expression":
                             field_operand = (
                                 field_operand.child_by_field_name(
@@ -23361,6 +23411,8 @@ class _Builder:
                             if (
                                 index is not None
                                 and index.type not in _INDEX_LITERALS
+                                and self.node_key(index)
+                                not in field_index_nodes
                             ):
                                 index_nodes.append(index)
                             field_operand = (
@@ -23368,10 +23420,14 @@ class _Builder:
                                     "operand"
                                 )
                             )
-                        elif field_operand.type in {
-                            "field_expression",
-                            "dereference_expression",
-                        }:
+                        elif field_operand.type == "dereference_expression":
+                            pointer_crossed = True
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        elif field_operand.type == "field_expression":
                             field_operand = (
                                 field_operand.child_by_field_name(
                                     "operand"
@@ -23379,6 +23435,10 @@ class _Builder:
                             )
                         else:
                             break
+                    if pointer_crossed:
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
                     for index in reversed(index_nodes):
                         field_deps |= self.expression(
                             index,
