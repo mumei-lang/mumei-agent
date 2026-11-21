@@ -15565,10 +15565,10 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\t_ = ccc\n"
         "\treturn 0\n}\n",
         "func F() int64 {\n"
-            "\tcc := make(chan chan int64)\n"
-            "\ts := []chan chan int64{cc}\n"
-            "\t_ = s\n"
-            "\treturn 0\n}\n",
+        "\tcc := make(chan chan int64)\n"
+        "\ts := []chan chan int64{cc}\n"
+        "\t_ = s\n"
+        "\treturn 0\n}\n",
         "func F(cc chan chan int64) int64 {\n"
         "\tlocal := make(chan chan int64, 1)\n"
         "\tlocal <- <-cc\n"
