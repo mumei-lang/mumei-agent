@@ -19,7 +19,9 @@ or historical-execution claim. `machine_code_leaf_function_tv`,
 `machine_code_forward_branch_function_tv`,
 `machine_code_acyclic_branch_function_tv`,
 `machine_code_conditional_call_function_tv`,
-`machine_code_bounded_loop_function_tv` and
+`machine_code_bounded_loop_function_tv`,
+`machine_code_callee_saved_register_preservation`,
+`machine_code_callee_saved_preservation_assumed_for_external_callees` and
 `object_translation_correspondence` stay unperformed. This recheck report is
 never a recovery performer.
 """
@@ -55,6 +57,8 @@ OBJECT_RECHECK_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_acyclic_branch_function_tv",
     "machine_code_conditional_call_function_tv",
     "machine_code_bounded_loop_function_tv",
+    "machine_code_callee_saved_register_preservation",
+    "machine_code_callee_saved_preservation_assumed_for_external_callees",
     "object_translation_correspondence",
 }
 

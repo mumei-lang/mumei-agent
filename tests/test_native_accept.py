@@ -136,6 +136,8 @@ def test_accepted_run_selects_descriptor(tmp_path, capsys):
         "freshness",
         "machine_code_acyclic_branch_function_tv",
         "machine_code_bounded_loop_function_tv",
+        "machine_code_callee_saved_preservation_assumed_for_external_callees",
+        "machine_code_callee_saved_register_preservation",
         "machine_code_conditional_call_function_tv",
         "machine_code_direct_call_site_tv",
         "machine_code_forward_branch_function_tv",

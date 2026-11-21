@@ -4736,15 +4736,21 @@ def native_machine_tv_recheck(
     uninterpreted sites; conditional-call functions use per-path guarded call
     matching. Only object checks listed in a matching
     `mumei.machine-code-tv/v1` descriptor are discharged. Bounded loops use
-    the `_and_loops_exiting_within_bound_4` input-domain suffix; executions
-    beyond the bound, cancellation/runtime semantics, and other cyclic
-    control flow stay outside the profile. The report counts
-    function outcomes without exposing function names, and echoes convention
-    and input-domain fields only when they are strings of at most 256
-    characters. The C `main` wrapper, CRT, loader and libc are outside the
-    profile; this is not an ABI, runtime or full object translation claim,
-    and `object_translation_correspondence` stays unperformed. The report
-    is not a recovery performer.
+    the `_and_loops_exiting_within_bound_4` input-domain suffix. Callee-saved
+    preservation is proved only for Equivalent functions within the profile.
+    Direct callees and the cancellation poll are assumed to preserve
+    callee-saved registers; external callees remain an assumption, and Core's
+    `machine_code_callee_saved_preservation_assumed_for_external_callees`
+    marker remains not performed. The
+    argument/result register convention is assumed, not validated.
+    Executions beyond the bound, cancellation/runtime semantics and other
+    cyclic control flow stay outside the profile. The report counts function
+    outcomes and callee-saved preservation without exposing function names,
+    and echoes convention and input-domain fields only when they are strings
+    of at most 256 characters. The C `main` wrapper, CRT, loader and libc are
+    outside the profile; this is not an ABI-correctness, runtime or full
+    object-TV claim, and `object_translation_correspondence` stays
+    unperformed. The report is not a recovery performer.
     `machine_tv_recheck` is claimed only for uniquely-mapped exit codes
     (0 `checked`, 3 `inconclusive`); mid-run drift reports `inputs_changed`
     with no claimed outcome. Every outcome echoes `expected_build_id`.
