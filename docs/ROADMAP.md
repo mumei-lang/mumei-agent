@@ -4127,8 +4127,8 @@ and `c <- x` shows up in `<-s[j]`; `<-s[i]` reads the group's
 conflated union, FIFO order unmodelled like `<-ch`. `b := s`
 shares the group like any bound container copy. The honest
 closures stay: `[]chan chan T` stays closed (a channel value
-travelling the group would alias under a second dep set),
-`[N]chan` arrays stay opaque.
+travelling the group would alias under a second dep set), and
+`[N][M]chan` nests stay opaque.
 
 Extracting a bound channel element — `d := s[i]`,
 `var d chan T = s[i]` or a plain `d = s[i]` reseat, on a
