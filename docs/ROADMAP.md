@@ -4128,7 +4128,7 @@ conflated union, FIFO order unmodelled like `<-ch`. `b := s`
 shares the group like any bound container copy. The honest
 closures stay: `[]chan chan T` stays closed (a channel value
 travelling the group would alias under a second dep set),
-`close(s[i])`, `for range` and `select` stay opaque.
+`[N]chan` arrays stay opaque.
 
 Extracting a bound channel element — `d := s[i]`,
 `var d chan T = s[i]` or a plain `d = s[i]` reseat, on a
@@ -4149,10 +4149,16 @@ queue under a surrogate so `<-s[0]` keeps reading what `c`
 serves. The honest closures stay: `d := s[0][0]` on a
 `[][]chan` extracts nothing (the nested-element gate already
 declines it), `[]chan chan T` stays closed (a channel value
-travelling the group would alias under a second dep set), and
-`close(s[i])`, a bare `for range s[i]` and `select` stay
-opaque — though `close(d)` on the bound member admits like
-any local channel operand.
+travelling the group would alias under a second dep set).
+`close(s[i])` admits — an untracked synchronization fact on a
+local group, and a caller-visible effect recorded on each
+param/external member like `s[i] <- x`. `for v := range s[i]`
+admits through the bound root: the element operand registers
+the root binding as the range's channel, so the per-pass
+rejoin unions the whole group's deps, and `select`
+alternatives on `s[i]` / `s[i] <- x` resolve through the same
+operand path. `[N]chan` arrays and `[][]chan` extraction stay
+opaque.
 
 A chan-element collection PARAMETER or RESULT admits like the
 scalar-element form — `func F(s []chan int64)`, `func G()

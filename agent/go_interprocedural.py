@@ -5657,7 +5657,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         owner = self.bindings.get(binding_id)
         if owner is not None:
             self.bindings.setdefault(sur, replace(owner, id=sur))
-        if binding_id in self.external_chan_locals:
+        if (
+            binding_id in self.external_chan_locals
+            or binding_id in params
+        ):
+            # A caller-owned queue parks caller-owned: a parameter's
+            # parked surrogate inherits the external marker too, so
+            # an op through a container member (`close(s[i])` on
+            # `s := []chan{ch}` after `ch = make`, or `d <- x`)
+            # still records the caller-visible effect.
             self.external_chan_locals.add(sur)
         # The reseated name's own member set still lists the sharers
         # the old queue carried (`d := s[0]` minted `d` into `c`'s
@@ -17333,9 +17341,62 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             else None
                         )
                         if external is None and field_chan is None:
-                            raise _Unsupported(
-                                "unresolved_or_opaque_call", _span(node)
+                            elem = self._chan_elem_index_target(
+                                arguments[0]
                             )
+                            if elem is None:
+                                raise _Unsupported(
+                                    "unresolved_or_opaque_call",
+                                    _span(node),
+                                )
+                            # `close(s[i])` — closing a member's
+                            # queue. A local group tracks no sync
+                            # fact, so the close is a no-op like
+                            # `close(ch)`; a group holding a
+                            # param/external member makes it a
+                            # caller-visible effect recorded on
+                            # each external member, like `s[i] <- x`.
+                            index_deps = (
+                                self.expression(
+                                    elem[1], fn, params, locals_,
+                                    transfers, count, 0,
+                                )
+                                if elem[1] is not None
+                                and elem[1].type not in _INDEX_LITERALS
+                                else frozenset()
+                            )
+                            close_external = {
+                                token
+                                for hid in self._opaque_container_holders(
+                                    self._opaque_container_tokens.get(
+                                        elem[0], frozenset()
+                                    )
+                                )
+                                for token in (
+                                    self._opaque_container_tokens.get(
+                                        hid, frozenset()
+                                    )
+                                )
+                                if token in params
+                                or token in self.external_chan_locals
+                            }
+                            for token in sorted(close_external):
+                                transfers.append(
+                                    CallTransfer(
+                                        FileSpan(
+                                            self.current_file,
+                                            node.start_byte,
+                                            node.end_byte,
+                                        ),
+                                        token,
+                                        (),
+                                        frozenset(),
+                                        imported=True,
+                                    )
+                                )
+                            if index_deps:
+                                self._record_read(index_deps)
+                            return frozenset()
                         if external is not None:
                             target_id, fact = external
                         else:
