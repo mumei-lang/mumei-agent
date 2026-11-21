@@ -15405,6 +15405,21 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             frozenset({0}),
             "none_in_supported_fragment",
         ),
+        (
+            "parallel chan chan assignment resolves pre-state groups",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ta := make(chan chan int64, 1)\n"
+            "\tb := make(chan chan int64, 1)\n"
+            "\ta <- c\n"
+            "\ta, b = b, a\n"
+            "\td := <-b\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
     ],
 )
 def test_local_chan_chan_review_regressions(

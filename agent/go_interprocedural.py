@@ -12187,6 +12187,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(refs))
             ]
+            local_chan_chan_targets = [
+                self._local_chan_chan_id(
+                    rights[i]
+                    if len(lefts) == len(rights)
+                    else rights[0]
+                )
+                for i in range(len(refs))
+            ]
             # `s, d = t, s[0]` — a `d = s[i]` element reseat joins
             # the group `s` named at eval time, not the group an
             # earlier slot's store reseated `s` onto: snapshot each
@@ -12499,9 +12507,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if len(lefts) == len(rights)
                         else rights[0]
                     )
-                    local_chan_chan_target = (
-                        self._local_chan_chan_id(rhs_node)
-                    )
+                    local_chan_chan_target = local_chan_chan_targets[i]
                     if local_chan_chan_lhs:
                         if fresh_make:
                             self._local_chan_chan_make_reseat(
