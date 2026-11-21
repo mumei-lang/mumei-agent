@@ -7238,6 +7238,17 @@ runtime-observation check and is not discharged by entry-wrapper TV. Core's
 `object_entry_wrapper_semantics` not-performed marker is Core-only and is not
 added to the agent vocabulary.
 
+#### Core #1233 scalar-f64 machine-code TV
+
+The agent consumes `machine_code_f64_scalar_function_tv` only when a valid
+matching descriptor lists it in `checks_performed`, and only for Core's
+scalar-f64 profile. XMM argument/result registers are assumed, not validated.
+MXCSR RNE, masked exceptions, FTZ/DAZ-off assumptions and NaN payload bits
+remain unestablished and not performed; the agent never discharges
+`machine_code_tv_mxcsr_control_state` or `machine_code_tv_nan_payload_bits`.
+Direct calls with f64 arguments fail closed in Core. This is not an
+IEEE-754-conformance, ABI, runtime, or full object-TV claim.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

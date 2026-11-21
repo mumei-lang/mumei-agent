@@ -80,6 +80,20 @@ runtime-observation check and is not discharged by entry-wrapper TV. Core's
 `object_entry_wrapper_semantics` not-performed marker is Core-only and is not
 added to the agent vocabulary.
 
+#### Core #1233 scalar-f64 machine-code TV
+
+`machine_code_f64_scalar_function_tv` is consumed by machine-TV recheck and
+object acceptance only when a valid matching descriptor lists it in
+`checks_performed`. It covers scalar-f64 functions only under Core's f64
+profile, with XMM argument/result registers assumed rather than validated.
+MXCSR RNE, masked exceptions, FTZ/DAZ-off assumptions and NaN payload bits
+remain unestablished and not performed; the agent never discharges
+`machine_code_tv_mxcsr_control_state` or `machine_code_tv_nan_payload_bits`,
+even if a descriptor lists them as performed. Direct calls with f64 arguments
+fail closed in Core. Native-object-recheck never discharges machine-TV checks.
+This establishes no IEEE-754 conformance, ABI, runtime, or full object-TV
+claim.
+
 ## Background
 
 What exists today (verified against mumei `develop` and this repo):

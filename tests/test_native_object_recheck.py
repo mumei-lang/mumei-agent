@@ -66,6 +66,9 @@ BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_callee_saved_register_preservation",
     "machine_code_callee_saved_preservation_assumed_for_external_callees",
     "machine_code_entry_wrapper_tv",
+    "machine_code_f64_scalar_function_tv",
+    "machine_code_tv_mxcsr_control_state",
+    "machine_code_tv_nan_payload_bits",
     "object_translation_correspondence",
 }
 EXPECTED_DISCHARGED = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
@@ -196,6 +199,9 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
         "machine_code_callee_saved_register_preservation",
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
         "machine_code_entry_wrapper_tv",
+        "machine_code_f64_scalar_function_tv",
+        "machine_code_tv_mxcsr_control_state",
+        "machine_code_tv_nan_payload_bits",
     ]
     core = _write_core(tmp_path, stdout=descriptor)
     bundle = _write_bundle(tmp_path)
@@ -221,6 +227,13 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
     )
     assert "machine_code_entry_wrapper_tv" not in report["discharged_checks"]
     assert "machine_code_entry_wrapper_tv" in report["checks_not_performed"]
+    for check in (
+        "machine_code_f64_scalar_function_tv",
+        "machine_code_tv_mxcsr_control_state",
+        "machine_code_tv_nan_payload_bits",
+    ):
+        assert check not in report["discharged_checks"]
+        assert check in report["checks_not_performed"]
     _assert_check_partition(report, expected_discharged=expected)
 
 

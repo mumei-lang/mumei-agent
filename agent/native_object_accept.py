@@ -28,6 +28,14 @@ CRT, loader, OS exit-status, ABI, or runtime claim;
 is not discharged here. Broader C entry-wrapper behavior, CRT, loader/libc,
 ABI/runtime semantics, optimizer semantics, producer authenticity, and
 historical execution remain outside the claim.
+Core #1233's scalar-f64 function check is consumed only when listed in
+`checks_performed`; it is limited to Core's f64 profile with XMM
+argument/result registers assumed, not validated. MXCSR RNE, masked
+exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain unestablished
+and not performed; the agent never discharges the external-callee, MXCSR, or
+NaN-payload assumption markers even if a descriptor lists them as performed.
+Direct calls with f64 arguments fail closed in Core. This is not an IEEE-754
+conformance, ABI, runtime, or full object-TV claim.
 """
 
 from __future__ import annotations
@@ -39,7 +47,10 @@ import os
 import sys
 from pathlib import Path
 
-from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.core_evidence import (
+    MACHINE_TV_ASSUMPTION_MARKERS,
+    OBJECT_CHECK_VOCABULARY,
+)
 from agent.native_accept import CHECK_VOCABULARY, DischargedChecks
 from agent.native_bundle import (
     MAX_RECORD_BYTES,
@@ -58,6 +69,11 @@ from agent.native_machine_tv_recheck import (
 NATIVE_OBJECT_ACCEPT_REQUEST_PROFILE = "mumei.native-object-accept-request/v1"
 NATIVE_OBJECT_ACCEPT_REPORT_PROFILE = "mumei.native-object-accept-report/v1"
 NATIVE_EVIDENCE_ACCEPTANCE_SCHEMA = "mumei.native-evidence-acceptance/v1"
+OBJECT_ACCEPT_CHECKS = (
+    OBJECT_CHECK_VOCABULARY
+    - {"object_translation_correspondence"}
+    - MACHINE_TV_ASSUMPTION_MARKERS
+)
 OBJECT_ACCEPT_OUTCOMES = {0: "accepted", 3: "inconclusive"}
 OBJECT_ACCEPT_WITH_LINK_SCOPE = (
     "native_bundle_object_machine_code_translation_correspondence"
@@ -253,7 +269,16 @@ def build_object_accept_parser(
         "historical execution remain outside the profile. "
         "object_translation_correspondence here is only profile-bounded "
         "source-to-object machine-code correspondence, not universal object "
-        "TV."
+        "TV. Core's machine_code_f64_scalar_function_tv is consumed only "
+        "when listed in checks_performed and is limited to Core's f64 profile "
+        "with XMM argument/result registers assumed, not validated. MXCSR "
+        "RNE, masked exceptions, FTZ/DAZ-off assumptions and NaN payload bits "
+        "remain unestablished and not performed; the agent never discharges "
+        "the external-callee, MXCSR or NaN-payload assumption markers even "
+        "if a descriptor lists them as performed. Direct calls with f64 "
+        "arguments fail closed in Core. "
+        "This makes no IEEE-754 conformance, "
+        "ABI, runtime or full object-TV claim."
     )
     parser.add_argument(
         "--core",
@@ -394,10 +419,7 @@ def run_object_accept(args: argparse.Namespace) -> dict:
                 report["function_outcomes"] = outcomes
             checks_performed = set(descriptor["checks_performed"])
             discharged = set(DischargedChecks.ACCEPTED)
-            discharged.update(
-                checks_performed
-                & (OBJECT_CHECK_VOCABULARY - {"object_translation_correspondence"})
-            )
+            discharged.update(checks_performed & OBJECT_ACCEPT_CHECKS)
             discharged.add("object_translation_correspondence")
             report["discharged_checks"] = sorted(discharged)
             report["checks_not_performed"] = sorted(

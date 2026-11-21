@@ -30,6 +30,14 @@ wrapper check makes no CRT, loader, OS exit-status, ABI, or runtime claim;
 is not discharged here.
 Core's `machine_code_callee_saved_preservation_assumed_for_external_callees`
 marker remains not performed.
+Core #1233's scalar-f64 function check is consumed only when listed in a
+matching descriptor's `checks_performed`; it applies only under Core's f64
+profile with XMM argument/result registers assumed, not validated. MXCSR RNE,
+masked exceptions, FTZ/DAZ-off assumptions, and NaN payload bits remain
+unestablished and not performed; the agent never discharges the MXCSR or
+NaN-payload markers even if a descriptor lists them as performed. Direct
+calls with f64 arguments fail closed in Core. This makes no IEEE-754
+conformance, ABI, runtime, or full object-TV claim.
 Executions beyond the bound, cancellation/runtime semantics and other cyclic
 control flow remain outside the profile. This is not an ABI-correctness,
 runtime or full object-TV claim. No broader C entry-wrapper, CRT, loader or
@@ -48,7 +56,10 @@ import os
 import sys
 from pathlib import Path
 
-from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.core_evidence import (
+    MACHINE_TV_ASSUMPTION_MARKERS,
+    OBJECT_CHECK_VOCABULARY,
+)
 from agent.native_bundle import (
     FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
     MAX_RECORD_BYTES,
@@ -77,9 +88,11 @@ CHECK_VOCABULARY = frozenset(
         "artifact_semantics",
     }
 )
-MACHINE_TV_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
-    "object_translation_correspondence"
-}
+MACHINE_TV_OBJECT_CHECKS = (
+    OBJECT_CHECK_VOCABULARY
+    - {"object_translation_correspondence"}
+    - MACHINE_TV_ASSUMPTION_MARKERS
+)
 ALWAYS_DISCHARGED = frozenset({"artifact_semantics", "claim_truth"})
 MAX_DESCRIPTOR_STRING_LENGTH = 256
 DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000
@@ -211,8 +224,15 @@ def build_machine_tv_recheck_parser(
         "runtime-observation check and is not discharged. The argument/result "
         "register convention is assumed, not validated; executions beyond "
         "the bound, cancellation/runtime semantics and other cyclic control "
-        "flow stay outside; this is not an ABI-correctness, runtime or full "
-        "object-TV claim."
+        "flow stay outside. Core's `machine_code_f64_scalar_function_tv` is "
+        "consumed only when listed in `checks_performed`; it applies only "
+        "under Core's f64 profile with XMM argument/result registers assumed, "
+        "not validated. MXCSR RNE, masked exceptions, FTZ/DAZ-off assumptions "
+        "and NaN payload bits remain unestablished and not performed; the "
+        "agent never discharges the MXCSR or NaN-payload markers even if a "
+        "descriptor lists them as performed. Direct calls with f64 "
+        "arguments fail closed in Core. This makes no "
+        "IEEE-754 conformance, ABI, runtime or full object-TV claim."
     )
     parser.add_argument(
         "--core",

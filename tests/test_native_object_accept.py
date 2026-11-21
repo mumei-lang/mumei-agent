@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.core_evidence import (
+    MACHINE_TV_ASSUMPTION_MARKERS,
+    OBJECT_CHECK_VOCABULARY,
+)
 from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
 from agent.native_object_accept import (
     CHECK_VOCABULARY,
@@ -24,6 +27,19 @@ from agent.native_object_accept import (
 BUILD_ID = "a" * 64
 ALL_CHECKS = CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY
 ENTRY_WRAPPER_CHECK = "machine_code_entry_wrapper_tv"
+F64_REGISTER_CONVENTION = (
+    "sysv_x86_64_integer_args_rdi_rsi_rdx_rcx_r8_r9_f64_args_"
+    "xmm0_7_result_rax_or_xmm0"
+)
+F64_SOURCE = (
+    "atom fadd(x: f64, y: f64) -> f64 requires: true; ensures: true; "
+    "body: { x * y + x };\n"
+    "atom feq(x: f64, y: f64) -> bool requires: true; "
+    "ensures: result == (x == y); body: { x == y };\n"
+    "atom mixed(x: i64, y: f64) -> f64 requires: true; ensures: true; "
+    "body: { y };\n"
+    "atom main() -> i64 requires: true; ensures: true; body: { 0 };\n"
+)
 BASE_DISCHARGED = frozenset(
     {
         "artifact_semantics",
@@ -292,7 +308,89 @@ def test_entry_wrapper_check_requires_performed_descriptor_list(
     assert "os_exit_status_observation" not in OBJECT_CHECK_VOCABULARY
     expected = BASE_DISCHARGED | (
         set(performed)
-        & (OBJECT_CHECK_VOCABULARY - {"object_translation_correspondence"})
+        & (
+            OBJECT_CHECK_VOCABULARY
+            - {"object_translation_correspondence"}
+            - MACHINE_TV_ASSUMPTION_MARKERS
+        )
+    )
+    _assert_partition(report, expected)
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_discharged"),
+    [("performed", True), ("not_performed", False), ("absent", False)],
+)
+def test_f64_check_requires_performed_descriptor_list(
+    tmp_path, capsys, placement, expected_discharged
+):
+    check = "machine_code_f64_scalar_function_tv"
+    performed = [
+        name for name in DESCRIPTOR["checks_performed"] if name != check
+    ]
+    not_performed = [
+        name for name in DESCRIPTOR["checks_not_performed"] if name != check
+    ]
+    if placement == "performed":
+        performed.append(check)
+    elif placement == "not_performed":
+        not_performed.append(check)
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": performed,
+        "checks_not_performed": not_performed,
+        "register_convention_assumed": F64_REGISTER_CONVENTION,
+    }
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"] == "accepted"
+    assert (check in report["discharged_checks"]) is expected_discharged
+    assert (check in report["checks_not_performed"]) is not expected_discharged
+    assert report["register_convention_assumed"] == F64_REGISTER_CONVENTION
+    expected = BASE_DISCHARGED | (
+        set(performed)
+        & (
+            OBJECT_CHECK_VOCABULARY
+            - {"object_translation_correspondence"}
+            - MACHINE_TV_ASSUMPTION_MARKERS
+        )
+    )
+    _assert_partition(report, expected)
+
+
+@pytest.mark.parametrize("marker", sorted(MACHINE_TV_ASSUMPTION_MARKERS))
+def test_assumption_markers_never_discharge_when_forged(
+    tmp_path, capsys, marker
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [*DESCRIPTOR["checks_performed"], marker],
+        "checks_not_performed": [
+            check
+            for check in DESCRIPTOR["checks_not_performed"]
+            if check != marker
+        ],
+    }
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"] == "accepted"
+    assert marker not in report["discharged_checks"]
+    assert marker in report["checks_not_performed"]
+    expected = BASE_DISCHARGED | (
+        set(descriptor["checks_performed"])
+        & (
+            OBJECT_CHECK_VOCABULARY
+            - {"object_translation_correspondence"}
+            - MACHINE_TV_ASSUMPTION_MARKERS
+        )
     )
     _assert_partition(report, expected)
 
@@ -643,8 +741,8 @@ def _require_bundle(built: subprocess.CompletedProcess) -> None:
 @pytest.mark.integration
 @pytest.mark.parametrize(
     "source_text",
-    [SOURCE, BOUNDED_LOOP_SOURCE],
-    ids=("simple-atom", "bounded-loop"),
+    [SOURCE, BOUNDED_LOOP_SOURCE, F64_SOURCE],
+    ids=("simple-atom", "bounded-loop", "scalar-f64"),
 )
 def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_text):
     source = _write_source(tmp_path, source_text)
@@ -717,6 +815,16 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
     if source_text == BOUNDED_LOOP_SOURCE:
         assert "machine_code_bounded_loop_function_tv" in report["discharged_checks"]
         assert report["input_domain"].endswith("_and_loops_exiting_within_bound_4")
+    elif source_text == F64_SOURCE:
+        f64_check = "machine_code_f64_scalar_function_tv"
+        assert f64_check in descriptor["checks_performed"]
+        assert f64_check in report["discharged_checks"]
+        assert descriptor["register_convention_assumed"] == F64_REGISTER_CONVENTION
+        assert report["register_convention_assumed"] == F64_REGISTER_CONVENTION
+        for marker in MACHINE_TV_ASSUMPTION_MARKERS:
+            assert marker in descriptor["checks_not_performed"]
+            assert marker in report["checks_not_performed"]
+            assert marker not in report["discharged_checks"]
     else:
         assert (
             "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
