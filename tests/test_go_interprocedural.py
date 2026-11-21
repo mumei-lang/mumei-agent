@@ -6242,6 +6242,48 @@ def test_interface_method_alias_rhs_pins_stale_dependents(
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
+def test_local_interface_copy_pins_embedded_contract_stale_dependents(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(i I, x int64) int64 {\n"
+            "\tvar j J = i\n"
+            "\treturn j.M(x)\n"
+            "}\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+        "j.go": "package p\ntype J interface{ K }\n",
+        "k.go": "package p\ntype K interface{ M(int64) int64 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    embedded_id = next(
+        b.id for b in snapshot.bindings if b.name == "K" and b.kind == "type"
+    )
+    assert embedded_id in result.pinned
+
+    files2 = {
+        "a.go": files["a.go"],
+        "i.go": files["i.go"],
+        "j.go": files["j.go"],
+        "k.go": "package p\n",
+        "k2.go": "package p\ntype K interface{ M(int64) int64 }\n",
+    }
+    snapshot2 = _snapshot_for(go_types_helper, files2)
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert embedded_id not in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
 def test_alias_receiver_method_is_admitted(go_types_helper):
     # `type A = T` — an alias-typed parameter's method selection
     # resolves through the alias to the named receiver, exactly like a

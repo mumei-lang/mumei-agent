@@ -11298,6 +11298,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     is None
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
+                if binding.type.kind == "interface":
+                    self.pinned.update(binding.signature_type_ids)
                 if binding.type.kind == "chan" and not (
                     (
                         self._scalar_chan_binding(binding.id)
@@ -12013,6 +12015,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
                             )
+                        self.pinned.update(binding.signature_type_ids)
                     # `var s = lib.G(a)` — a bare composite binding
                     # admits only a backed source like `s := lib.G(a)`:
                     # a container-returning call (fresh backing) or
@@ -13232,6 +13235,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 raise _Unsupported(
                                     "unsupported_statement", _span(node)
                                 )
+                            self.pinned.update(
+                                target_binding.signature_type_ids
+                            )
                     if lhs.type == "identifier":
                         lhs_ref = self.references.get(
                             self.node_key(lhs)
