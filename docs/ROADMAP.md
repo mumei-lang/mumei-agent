@@ -2303,7 +2303,12 @@ A `go`/`defer` statement now admits like an expression-statement call:
 Go evaluates the callee and its arguments at the statement itself, so
 the call folds normally while its result is discarded — a `defer`d
 call runs before the function returns and a goroutine's effects may
-happen, and the union model covers both orderings. Unsupported
+happen, and the union model covers both orderings. For supported
+deferred calls, the registration-time fold remains a conservative
+over-approximation, with an additional exit-time fixed-point fold over
+captured bindings and escaped writes; records are joined by defer site
+and retained across branches and loop iterations, so a textually earlier
+return may conservatively include a later defer. Unsupported
 switch/select, heuristic termination, labels/goto and other
 statements return explicit source-mapped gaps **without** a partial
 graph. Parse/parser unavailability also produces a gap. More language/type

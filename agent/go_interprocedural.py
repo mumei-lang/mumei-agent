@@ -300,6 +300,16 @@ class CallTransfer:
 
 
 @dataclass(frozen=True)
+class _DeferredExit:
+    span: FileSpan
+    captured: frozenset[str]
+    writes: frozenset[str]
+    roots: frozenset[str]
+    star_or_external: bool
+    arg_deps: frozenset[int]
+
+
+@dataclass(frozen=True)
 class StatementRead:
     """The parameter ordinals one statement's evaluation read.
 
@@ -1116,6 +1126,7 @@ class _Builder:
         # evaluate, so it can still change a named result: every
         # later `return` unions this set.
         self._defer_result_deps: frozenset[int] = frozenset()
+        self._deferred_exits: list[_DeferredExit] = []
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits. A frame
@@ -8417,6 +8428,324 @@ class _Builder:
                 resolved |= self._dead_local_deps[root]
         return resolved
 
+    def _deferred_expression_type(self, node: Any) -> Any | None:
+        node = self._strip_parens(node)
+        if node is None:
+            return None
+        if node.type == "identifier":
+            ref = self.references.get(self.node_key(node))
+            if ref is None or not ref.binding_id:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            if binding is not None:
+                return binding.type
+            member = self.members.get(ref.binding_id)
+            return member.type if member is not None else None
+        if node.type == "selector_expression":
+            member = self._field_member(node) or self._package_member(node)
+            return member.type if member is not None else None
+        if node.type == "index_expression":
+            container = self._deferred_expression_type(
+                node.child_by_field_name("operand")
+            )
+            return container.elem if container is not None else None
+        if node.type in {
+            "call_expression",
+            "type_conversion_expression",
+        }:
+            result_type = self._call_result_type(node)
+            if result_type is not None:
+                return result_type
+            call = self.calls.get(self.node_key(node))
+            if call is not None and call.kind == "conversion":
+                binding = self.bindings.get(call.target)
+                if binding is not None:
+                    return binding.type
+                member = self.members.get(call.target)
+                return member.type if member is not None else None
+            return None
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is not None and operator.type == "*":
+                operand_type = self._deferred_expression_type(
+                    node.child_by_field_name("operand")
+                )
+                if (
+                    operand_type is not None
+                    and operand_type.kind == "pointer"
+                ):
+                    return operand_type.elem
+        return None
+
+    def _deferred_argument_is_pointer(self, node: Any) -> bool:
+        node = self._strip_parens(node)
+        if node is None:
+            return False
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is not None and operator.type == "&":
+                return True
+        if node.type == "type_conversion_expression":
+            type_node = node.child_by_field_name("type")
+            while (
+                type_node is not None
+                and type_node.type == "parenthesized_type"
+            ):
+                type_node = next(iter(type_node.named_children), None)
+            if type_node is not None and type_node.type == "pointer_type":
+                return True
+        if node.type == "call_expression":
+            function_node = self._strip_parens(
+                node.child_by_field_name("function")
+            )
+            call = self.calls.get(self.node_key(node))
+            if (
+                call is not None
+                and call.kind == "builtin"
+                and function_node is not None
+                and function_node.type == "identifier"
+                and function_node.text == b"new"
+            ):
+                return True
+        fact = self._deferred_expression_type(node)
+        return fact is not None and fact.kind == "pointer"
+
+    def _deferred_root_binding(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> str | None:
+        node = self._strip_parens(node)
+        if node is None:
+            return None
+        if node.type == "identifier":
+            ref = self.references.get(self.node_key(node))
+            if (
+                ref is not None
+                and ref.binding_id
+                and (
+                    ref.binding_id in params
+                    or ref.binding_id in locals_
+                )
+            ):
+                return ref.binding_id
+            return None
+        if node.type in {"selector_expression", "index_expression"}:
+            return self._deferred_root_binding(
+                node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is None or operator.text not in {b"&", b"*"}:
+                return None
+            return self._deferred_root_binding(
+                node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+        if node.type == "type_conversion_expression":
+            return self._deferred_root_binding(
+                node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+        return None
+
+    def _deferred_exit_shape(
+        self,
+        node: Any,
+        call: Any | None,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[
+        frozenset[str], frozenset[str], frozenset[str], bool
+    ]:
+        function_node = self._strip_parens(
+            node.child_by_field_name("function")
+        )
+        callee_id = None
+        if function_node is not None and function_node.type == "identifier":
+            ref = self.references.get(self.node_key(function_node))
+            callee_id = ref.binding_id if ref is not None else None
+        captured = frozenset(
+            self.closure_captures.get(callee_id, frozenset())
+        )
+        writes = frozenset(
+            self.closure_writes.get(callee_id, frozenset())
+        )
+        roots: set[str] = set()
+        if (
+            function_node is not None
+            and function_node.type == "selector_expression"
+        ):
+            receiver_id = self._deferred_root_binding(
+                function_node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+            if receiver_id is not None:
+                roots.add(receiver_id)
+        star_or_external = (
+            callee_id in self.closure_star_writes
+            or callee_id in self.closure_inner_calls
+            or callee_id in self.pointee_closures
+            or callee_id in self.opaque_callees
+            or callee_id in params
+        )
+        target_id = None
+        if call is None:
+            star_or_external = True
+        elif call.kind == "direct_local":
+            target_id = call.target
+        elif call.kind == "indirect_or_selector":
+            if callee_id in self.bound_method_values:
+                target_id = self.bound_method_values[callee_id][0]
+            elif callee_id in self.func_aliases:
+                target_id = self.func_aliases[callee_id]
+            elif callee_id not in self.closure_captures:
+                star_or_external = True
+        elif call.kind in {
+            "direct_import",
+            "interface_dispatch",
+            "external_or_bodyless",
+        }:
+            star_or_external = True
+        elif call.kind != "builtin":
+            star_or_external = True
+        if target_id is not None:
+            callee = (
+                self.summarize(target_id)
+                if target_id in self.functions
+                else None
+            )
+            if (
+                callee is None
+                or not callee.available
+                or callee.effects != "none_in_supported_fragment"
+            ):
+                star_or_external = True
+            target = self.functions.get(target_id)
+            if (
+                call is not None
+                and (call.method or call.method_expr)
+                and target is not None
+                and target.receiver is not None
+                and target.receiver.type.kind == "pointer"
+            ):
+                star_or_external = True
+        arguments = node.child_by_field_name("arguments")
+        if arguments is not None:
+            for argument in _children(arguments):
+                if self._deferred_argument_is_pointer(argument):
+                    star_or_external = True
+                    root_id = self._deferred_root_binding(
+                        argument, params, locals_
+                    )
+                    if root_id is not None:
+                        roots.add(root_id)
+        return captured, writes, frozenset(roots), star_or_external
+
+    def _record_deferred_exit(self, record: _DeferredExit) -> None:
+        for index, existing in enumerate(self._deferred_exits):
+            if existing.span != record.span:
+                continue
+            self._deferred_exits[index] = _DeferredExit(
+                record.span,
+                existing.captured | record.captured,
+                existing.writes | record.writes,
+                existing.roots | record.roots,
+                existing.star_or_external or record.star_or_external,
+                existing.arg_deps | record.arg_deps,
+            )
+            return
+        self._deferred_exits.append(record)
+
+    def _fold_deferred_exits(
+        self,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        if not self._deferred_exits:
+            return frozenset()
+        scratch = dict(locals_)
+        named_results = {
+            result.binding_id
+            for result in fn.results
+            if result.binding_id
+        }
+        result_deps: frozenset[int] = frozenset()
+        while True:
+            changed = False
+            indirect_before = self.indirect_writes
+            for record in self._deferred_exits:
+                rec_deps = record.arg_deps
+                if record.captured:
+                    rec_deps |= self._captured_current_deps(
+                        record.captured, params, scratch
+                    )
+                if record.star_or_external:
+                    for root_id in record.roots:
+                        if root_id in scratch:
+                            rec_deps |= scratch[root_id]
+                        elif root_id in params:
+                            rec_deps |= frozenset({params[root_id]})
+                        binding = self.bindings.get(root_id)
+                        if (
+                            binding is not None
+                            and binding.type.kind == "pointer"
+                        ):
+                            # Bound struct-field reads observe both the
+                            # root's folded pointee deps and indirect
+                            # stores, which are the model's remaining
+                            # approximation of pointer contents.
+                            rec_deps |= self.indirect_writes
+                    for escaped_id in self.escaped:
+                        if escaped_id in scratch:
+                            rec_deps |= scratch[escaped_id]
+                        elif escaped_id in params:
+                            rec_deps |= frozenset(
+                                {params[escaped_id]}
+                            )
+                    self.indirect_writes |= rec_deps
+                    for escaped_id in self.escaped:
+                        target_deps = scratch.get(
+                            escaped_id,
+                            frozenset({params[escaped_id]})
+                            if escaped_id in params
+                            else frozenset(),
+                        )
+                        updated = target_deps | rec_deps
+                        if updated != target_deps:
+                            scratch[escaped_id] = updated
+                            changed = True
+                for target_id in record.writes:
+                    target_deps = scratch.get(
+                        target_id,
+                        frozenset({params[target_id]})
+                        if target_id in params
+                        else frozenset(),
+                    )
+                    updated = target_deps | rec_deps
+                    if updated != target_deps:
+                        scratch[target_id] = updated
+                        changed = True
+                if (
+                    record.writes & named_results
+                    or (
+                        record.star_or_external
+                        and named_results & self.escaped
+                    )
+                ):
+                    result_deps |= rec_deps
+            if self.indirect_writes != indirect_before:
+                changed = True
+            if not changed:
+                return result_deps
+
     def _return_expr_deps(
         self,
         expr: Any,
@@ -11006,6 +11335,7 @@ class _Builder:
             self._chan_chan_container_call_deps
         )
         saved_defer_result_deps = self._defer_result_deps
+        saved_deferred_exits = self._deferred_exits
         saved_func_args = self._func_arg_invocations
         saved_call_arg_deps = self._call_arg_deps
         saved_pending_labels = self._pending_labels
@@ -11035,6 +11365,7 @@ class _Builder:
         self._external_chan_elem_index_deps = {}
         self._chan_chan_container_call_deps = {}
         self._defer_result_deps = frozenset()
+        self._deferred_exits = []
         self._func_arg_invocations = {}
         self._call_arg_deps = {}
         # Mutating builtins (`copy`/`delete`/`clear`) consult it to
@@ -11064,6 +11395,7 @@ class _Builder:
                 statements, fn, params, locals_, transfers, count, deps,
                 saw_return, False,
             )
+            self._fold_deferred_exits(fn, params, locals_)
             # A param's dep set grown past its seed means a store
             # landed on memory the caller still reads (`s[i] = x` on
             # a shared-group container, `s.V = x` on a struct). Record
@@ -11125,6 +11457,7 @@ class _Builder:
             )
             self._caller_visible_params = saved_caller_visible
             self._defer_result_deps = saved_defer_result_deps
+            self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
             self._call_arg_deps = saved_call_arg_deps
             self._pending_labels = saved_pending_labels
@@ -11288,6 +11621,11 @@ class _Builder:
                 # expressions evaluate — a deferred may-write call
                 # can still change them, bounded by its arguments.
                 deps[0] |= self._defer_result_deps
+            deferred_deps = self._fold_deferred_exits(
+                fn, params, locals_
+            )
+            if deferred_deps and any(r.binding_id for r in fn.results):
+                deps[0] |= deferred_deps
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
@@ -19343,6 +19681,18 @@ class _Builder:
             inner = _children(node)
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
+            defer_call = (
+                self.calls.get(self.node_key(inner[0]))
+                if kind == "defer_statement"
+                else None
+            )
+            deferred_shape = (
+                self._deferred_exit_shape(
+                    inner[0], defer_call, params, locals_
+                )
+                if kind == "defer_statement"
+                else None
+            )
             mark = len(transfers)
             ret = self.expression(
                 inner[0], fn, params, locals_, transfers, count, 0
@@ -19377,12 +19727,33 @@ class _Builder:
                     )
                     if arg_list is not None and _children(arg_list):
                         defer_arg_deps = ret
+                if deferred_shape is not None:
+                    (
+                        captured,
+                        writes,
+                        roots,
+                        star_or_external,
+                    ) = deferred_shape
+                    self._record_deferred_exit(
+                        _DeferredExit(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            captured,
+                            writes,
+                            roots,
+                            star_or_external,
+                            defer_arg_deps,
+                        )
+                    )
                 if not defer_arg_deps:
                     return
-                call = self.calls.get(self.node_key(inner[0]))
                 callee = (
-                    self.summarize(call.target)
-                    if call is not None and call.target in self.functions
+                    self.summarize(defer_call.target)
+                    if defer_call is not None
+                    and defer_call.target in self.functions
                     else None
                 )
                 if (
