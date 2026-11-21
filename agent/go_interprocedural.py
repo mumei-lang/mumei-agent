@@ -24302,6 +24302,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # the NEW backing the name is about to receive, so its
         # records must not reach the old backing's sharers.
         into_backing = False
+        via_args = False
         while parent is not None and parent.type in {
             "expression_list",
             "literal_value",
@@ -24309,9 +24310,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             "keyed_element",
             "composite_literal",
             "argument_list",
+            "parenthesized_expression",
         }:
             if parent.type == "composite_literal":
                 in_composite = True
+            if parent.type == "argument_list":
+                via_args = True
             parent = parent.parent
         name_node = None
         if parent is not None and parent.type in {
@@ -24369,6 +24373,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if index is not None and index < len(names):
                 name_node = names[index]
         bound_id: str | None = None
+        func_arg_id: str | None = None
         if name_node is not None and name_node.type == "identifier":
             binding = self.bindings_by_span.get(
                 self.node_key(name_node)
@@ -24446,6 +24451,36 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if bound_id is not None:
                 in_composite = True
                 into_backing = True
+            elif via_args:
+                function_node = parent.child_by_field_name("function")
+                is_callee = (
+                    function_node is not None
+                    and function_node.start_byte <= node.start_byte
+                    and node.end_byte <= function_node.end_byte
+                )
+                if not is_callee:
+                    func_arg_id = (
+                        f"{self.current_file}:{node.start_byte}:"
+                        f"{node.end_byte}/func_lit_arg"
+                    )
+        if func_arg_id is not None:
+            self.closure_captures[func_arg_id] = frozenset(captured)
+            self.closure_writes[func_arg_id] = frozenset(writes)
+            if star_write:
+                self.closure_star_writes.add(func_arg_id)
+            else:
+                self.closure_star_writes.discard(func_arg_id)
+            if has_call:
+                self.closure_inner_calls.add(func_arg_id)
+            else:
+                self.closure_inner_calls.discard(func_arg_id)
+            if captures_pointer:
+                self.pointee_closures.add(func_arg_id)
+            else:
+                self.pointee_closures.discard(func_arg_id)
+            self._func_arg_invocations.setdefault(
+                self.node_key(parent), []
+            ).append((node, func_arg_id))
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
             if in_composite:
