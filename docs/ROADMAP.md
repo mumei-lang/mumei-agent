@@ -6678,6 +6678,22 @@ inputs join the path validation and error redaction applied to the
 other declared-path tools.
 
 
+### C10 runtime/ABI assurance — design memo
+
+The remaining research-level C10 item — the object/ABI/runtime/final-binary
+assurance chain — now has a design memo:
+[`docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md).
+The exit-status/stdout/stderr recheck and accept routes currently discharge
+no check category for their OS-level observations because the vocabulary has
+no runtime/ABI/process-semantics claim; the memo evaluates four options and
+recommends an observation-vocabulary extension (Option A): a
+`mumei.runtime-observation/v1` descriptor family plus a dedicated
+`RUNTIME_CHECK_VOCABULARY` whose `runtime_observation_semantics` names
+exactly what the pinned invocation verifies — bounded observed behavior,
+never ABI semantics of the program. Object-code translation validation
+(Option B) stays the named deep endpoint. No route, grade or audit surface
+changes.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
