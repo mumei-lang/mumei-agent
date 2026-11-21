@@ -5,9 +5,8 @@ Part of the cross-project roadmap tracked in
 (C09/C10 deeper assurance layer). Companion to
 [`DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md), which
 kept Option B (object-code translation validation, "object TV") as the named
-deep endpoint. This memo is a design record only — no production code. Core
-owns the producer side; every Core command and field name below that does not
-exist yet is a **hypothesis** the agent adopts verbatim from Core once it lands.
+deep endpoint. This memo records the agent-side consumption boundary for
+landed Core commands and reports; Core owns the producer side.
 
 ## Status
 
@@ -17,10 +16,11 @@ direct-call-edge and object-to-executable linked-placement correspondence.
 The agent's `native-object-recheck` route discharges only bounded checks
 listed in a descriptor with the matching schema and build ID; it does not
 infer `object_link_correspondence` from an older Core's exit code. The route
-is not a recovery performer.
-`accept-object`, full object translation validation, and the
-`object_translation_correspondence` performer remain deferred until Core
-provides that deeper acceptance route.
+is not a recovery performer. Core #1228 added `native-bundle accept-object`;
+the agent's `native-object-accept` route validates its acceptance descriptor
+and maps Core's `object_source_machine_code_correspondence` to the
+agent-owned `object_translation_correspondence`. The route is the acceptance
+route for this bounded check, but is not a recovery performer.
 
 Core has also landed `native-bundle recheck-machine-tv` and its
 `mumei.machine-code-tv/v1` descriptor. The agent's
@@ -34,12 +34,13 @@ Core #1227 adds `machine_code_bounded_loop_function_tv`; both are consumed
 only when listed in `checks_performed`. Core uses `LOOP_BOUND=4` for bounded
 loops, with `_and_loops_exiting_within_bound_4` in the input-domain string.
 Executions beyond the bound, cancellation/runtime semantics and other cyclic
-control flow remain outside the profile. `object_translation_correspondence`
-stays unperformed; the route is not an ABI, runtime or full object-TV claim
-and is not a recovery performer.
-The C `main` wrapper, CRT, loader and libc remain outside the profile, so the
-`object_translation_correspondence` performer and `accept-object` route
-remain deferred.
+control flow remain outside the profile. For `native-machine-tv-recheck`,
+`object_translation_correspondence` stays unperformed; that route is not an
+ABI, runtime or full object-TV claim and is not a recovery performer.
+The native-object-accept route does not promote a grade, emit reusable
+Evidence or a certificate. The C `main` wrapper, CRT, loader and libc remain
+outside the profile; ABI/runtime semantics, optimizer semantics, producer
+authenticity and historical execution also remain outside the claim.
 
 ## Background
 
@@ -114,10 +115,10 @@ link time, the loader, or the ABI.
 
 Consumption surface (mirrors the Option A split between accept and recheck):
 
-| Agent route (future) | Core command (hypothesis) | Report schema | Performer? |
+| Agent route | Core command | Report schema | Acceptance route? |
 |---|---|---|---|
 | `native-object-recheck` | `native-bundle recheck-object --json` | `mumei.native-object-recheck-report/v1` | No — recheck reports never perform |
-| `native-object-accept` | `native-bundle accept-object --json` | `mumei.native-object-accept-report/v1` | Yes — `object_translation_correspondence` |
+| `native-object-accept` | `native-bundle accept-object --expected-build-id <id> --json` | `mumei.native-object-accept-report/v1` | Yes — maps Core's source/object check to `object_translation_correspondence`; not a recovery performer |
 
 Both routes run inside the existing C11 dispatch lifecycle (declared request
 fingerprint over Core bytes + declared bundle members + source + trusted-channel
@@ -126,29 +127,21 @@ exit-code map `{0: equivalent/accepted, 3: inconclusive}`, leave exit 1
 unclaimed, re-hash inputs after the run and report `inputs_changed` on drift —
 exactly as `native-recheck` / `native-observations-accept` do today.
 
-Expected Core descriptor: the existing `mumei.translation-validation-report/v1`
-family with `checked_stage: "object"`, an object-level `profile`, and an added
-`object_sha256` beside `llvm_sha256`. The agent keys on
-`(schema_version, checked_stage, profile)` — never on `checked_stage` alone —
-and treats any other combination as foreign. If Core instead introduces a new
-schema name, the agent adopts it; no agent-invented schema is ever registered
-as a performer.
+Core's `accept-object --json` emits the
+`mumei.native-evidence-acceptance/v1` descriptor. The agent requires the
+evaluated/accepted outcome, expected build ID, one of the two object acceptance
+scopes, Core's source/object correspondence check, scope-consistent link
+correspondence, disjoint performed/not-performed lists, and lowercase
+SHA-256 digests for both LLVM and object bytes.
+`object_translation_correspondence` is discharged only from Core's
+`object_source_machine_code_correspondence`; the agent-owned name in Core
+output is not sufficient.
 
-`recovery-eval` registration (only once `native-object-accept` exists):
-
-```python
-"object_translation_correspondence": [
-    ("mumei.native-object-accept-report/v1", "acceptance", "accepted",
-     "normalized.stdout.sha256"),
-    ("mumei.native-object-accept-report/v1", "acceptance", "accepted",
-     "shared:expected_build_id"),
-],
-```
-
-The `shared:expected_build_id` carrier lets a sibling native report for the
-same bundle recover the object check, exactly like the channel observations.
-Hash binding (`llvm_sha256` / `object_sha256` against the bundle pins) is Core's
-job inside the accept command; the agent never parses object files.
+`object_translation_correspondence` is intentionally not registered in
+`agent.core_evidence._CHECK_PERFORMERS`: this anonymous acceptance report is
+not a recovery performer and cannot recover sibling checks. The route reports
+bounded descriptor strings and aggregate function-outcome counts only; it
+never parses object files or exposes function names.
 
 ### Option 3 — one end-to-end `final_binary_semantics` check
 
@@ -186,10 +179,12 @@ Option 2, staged:
 2. **Slice 2 (Core, other session):** object-stage TV in Core and the
    `recheck-object` / `accept-object` commands. Deferred on the agent side
    until it lands.
-3. **Slice 3 (agent, after slice 2):** the two routes above, CLI + MCP, the
-   performer registration, and a mumei-demo scenario including a C13 negative
-   control (source↔LLVM accept + artifact reproduction never recover
-   `object_translation_correspondence`).
+3. **Slice 3 (agent, after slice 2):** the two routes above, CLI + MCP, and a
+   mumei-demo scenario including a C13 negative control (source↔LLVM accept +
+   artifact reproduction never recover `object_translation_correspondence`).
+   As landed, `native-object-accept` discharges the check in its own report
+   but is **not** registered as a recovery performer (see Option 2 above);
+   the earlier plan to register it in `_CHECK_PERFORMERS` was superseded.
 
 What stays host duty forever: linker and relocation semantics at link time,
 loader/libc/kernel/hardware, the ABI, and anything outside the object-TV
@@ -213,10 +208,11 @@ profile.
 - `artifact_semantics` の流用（Option 1）は、既存の source↔LLVM の主張と
   LLVM↔object の主張が区別できなくなるため却下。新しい独立語彙
   `object_translation_correspondence` を置く。
-- accept/recheck の分担は Option A と同じ。回収（performer）できるのは accept
-  レポートだけで、recheck は回収しない。
+- accept/recheck の分担は Option A と同じ。ただし着地した `native-object-accept`
+  は自分のレポートでチェックを discharge するだけで、回収（performer）としては
+  登録しない（当初の performer 登録案は撤回）。recheck も回収しない。
 - 段階ごとの別レポートを合成して end-to-end の主張を作ることはしない
   （`runtime_observation_semantics` と同じ理由: 1回の実行で観測されたものだけが主張になる）。
-- Core 側のコマンド名・スキーマ名は仮説扱い。Core が実装したら、その名前をそのまま採用する。
-- 今すぐ agent 側でできるのはスライス1（語彙の予約と、境界ルートでの「未実施」明示）だけ。
-  performer 登録は Core の実装後。
+- Core #1228 が `accept-object` と `mumei.native-evidence-acceptance/v1` を出し、
+  agent はその名前をそのまま採用した（スライス3着地）。
+- スライス1（語彙の予約と、境界ルートでの「未実施」明示）は先行して着地済み。

@@ -4109,6 +4109,84 @@ def native_accept(
 
 
 @mcp.tool()
+def native_object_accept(
+    core_path: str,
+    bundle_dir: str,
+    source_path: str,
+    expected_build_id: str,
+    attempt_timeout_ms: int = 60000,
+) -> str:
+    """Accept bounded object-stage machine-code correspondence (C10).
+
+    Runs `native-bundle accept-object --expected-build-id <id> --json` as
+    one declared attempt —
+    the same wiring as the `native-object-accept` CLI route. Acceptance
+    is claimed only for a validated `mumei.native-evidence-acceptance/v1`
+    descriptor on exit 0 with unchanged inputs; exit 3 is inconclusive and
+    exit 1 claims no outcome. The agent-owned
+    `object_translation_correspondence` check is discharged only through
+    Core's `object_source_machine_code_correspondence`.
+
+    This is bounded object-stage machine-code acceptance under an assumed,
+    not validated, register convention and the stated input domain. It emits
+    no evidence candidate, is not reusable Evidence or a certificate, does not
+    promote a grade, and is not a recovery performer. Here
+    `object_translation_correspondence`
+    means only profile-bounded source-to-object machine-code correspondence,
+    not universal object TV. The C `main` wrapper, CRT, loader/libc,
+    ABI/runtime semantics, optimizer semantics, producer authenticity and
+    historical execution remain outside the claim.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        bundle_dir: Absolute path to the declared native-bundle directory
+            and its declared members.
+        source_path: Absolute path to the declared .mm source file.
+        expected_build_id: SHA-256 of native-bundle.json obtained through
+            a separately trusted channel (64 lowercase hex).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.native-object-accept-report/v1` document — on success, or
+        `error` on a declared failure.
+    """
+    try:
+        from agent.native_object_accept import run_object_accept
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("bundle_dir", bundle_dir),
+        ("source_path", source_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        bundle=bundle_dir,
+        source=source_path,
+        expected_build_id=expected_build_id,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_object_accept(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc), [core_path, bundle_dir, source_path]
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def native_artifact_recheck(
     core_path: str,
     bundle_dir: str,
